@@ -7,9 +7,7 @@ edition = "2021"
 anyhow = "1.0.86"
 async-trait = "0.1.80"
 bitcode = { version = "0.6.0", features = ["serde"] }
-candle-core = { version = "0.6.0", features = ["metal", "accelerate"] }
-candle-nn = { version = "0.6.0", features = ["metal", "accelerate"] }
-candle-transformers = { version = "0.6.0", features = ["metal", "accelerate"] }
+
 clap = { version = "4.5.8", features = ["derive"] }
 env_logger = "0.11.3"
 human_bytes = "0.4.3"
@@ -20,3 +18,15 @@ serde = { version = "1.0.203", features = ["derive"] }
 serde_json = "1.0.120"
 tokenizers = { version = "0.19.1", features = ["onig"] }
 tokio = { version = "1.38.0", features = ["full"] }
+
+# use Metal accelleration on macOS.
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { version = "0.6.0", features = ["metal", "accelerate"] }
+candle-nn = { version = "0.6.0", features = ["metal", "accelerate"] }
+candle-transformers = { version = "0.6.0", features = ["metal", "accelerate"] }
+
+# use CUDA on everything else.
+[target.'cfg(not(target_os = "mac"))'.dependencies]
+candle-core = { version = "0.6.0", features = ["cuda"] }
+candle-nn = { version = "0.6.0", features = ["cuda"] }
+candle-transformers = { version = "0.6.0", features = ["cuda"] }
