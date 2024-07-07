@@ -7,13 +7,13 @@ The idea is to shard the transformer blocks to multiple devices in order to be a
 Run a worker node:
 
 ```bash
-llama3-cake --model /path/to/Meta-Llama-3-8B --mode worker --name worker0 --topology topology.yml --address 0.0.0.0:10128
+cake-cli --model /path/to/Meta-Llama-3-8B --mode worker --name worker0 --topology topology.yml --address 0.0.0.0:10128
 ```
 
 Run a master node:
 
 ```bash
-llama3-cake --model /path/to/Meta-Llama-3-8B --topology topology.yml
+cake-cli --model /path/to/Meta-Llama-3-8B --topology topology.yml
 ```
 
 Where `topology.yaml` determines which layers are served by whom:
