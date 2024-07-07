@@ -15,9 +15,7 @@ Run a master node:
 llama3-cake --model /path/to/Meta-Llama-3-8B --topology master-topology.json --address 0.0.0.0:10128
 ```
 
-Where:
-
-`worker-topology.json`
+Where `worker-topology.json` determines which layers the worker node will load and execute:
 
 ```json
 {
@@ -40,7 +38,7 @@ Where:
 }
 ```
 
-`master-topology.json`
+and `master-topology.json` is a `layer => worker:port` mapping for the master:
 
 ```json
 {
