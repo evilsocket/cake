@@ -15,6 +15,9 @@ mod utils;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
+    /// GPU device index.
+    #[arg(long, default_value_t = 0)]
+    device: usize,
     /// Mode.
     #[arg(long, default_value_t, value_enum)]
     mode: Mode,

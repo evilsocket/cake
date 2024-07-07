@@ -52,7 +52,7 @@ impl Context {
             None => DType::F16,
         };
 
-        let device = utils::device(args.cpu)?;
+        let device = utils::get_inference_device(args.cpu, args.device)?;
 
         log::info!(
             "[{:?}] dtype={:?} device={:?} mem={}",

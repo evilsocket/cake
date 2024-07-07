@@ -11,13 +11,13 @@ mod token_output_stream;
 
 pub use token_output_stream::*;
 
-pub fn device(force_cpu: bool) -> Result<Device> {
+pub fn get_inference_device(force_cpu: bool, ordinal: usize) -> Result<Device> {
     if force_cpu {
         Ok(Device::Cpu)
     } else if cuda_is_available() {
-        Ok(Device::new_cuda(0)?)
+        Ok(Device::new_cuda(ordinal)?)
     } else if metal_is_available() {
-        Ok(Device::new_metal(0)?)
+        Ok(Device::new_metal(ordinal)?)
     } else {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
