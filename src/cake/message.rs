@@ -6,6 +6,11 @@ use safetensors::View;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+const PROTO_MAGIC: u32 = 0x104F4C7;
+
+// does more than this even make sense?
+const MESSAGE_MAX_SIZE: u32 = 512 * 1024 * 1024;
+
 #[derive(Serialize, Debug, Deserialize)]
 pub struct RawTensor {
     pub data: Vec<u8>,
@@ -66,14 +71,6 @@ impl Message {
         }
     }
 
-    pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        bitcode::serialize(self).map_err(|e| anyhow!(e))
-    }
-
-    pub fn from_bytes(raw: &[u8]) -> Result<Self> {
-        bitcode::deserialize(raw).map_err(|e| anyhow!(e))
-    }
-
     pub fn from_tensor(x: &Tensor) -> Self {
         Self::Tensor(RawTensor::from_tensor(x))
     }
@@ -85,11 +82,30 @@ impl Message {
         }
     }
 
+    // Yes, I could use GRPC, but this is simpler and faster.
+    // Check bitcode benchmarks ;)
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bitcode::serialize(self).map_err(|e| anyhow!(e))
+    }
+
+    pub fn from_bytes(raw: &[u8]) -> Result<Self> {
+        bitcode::deserialize(raw).map_err(|e| anyhow!(e))
+    }
+
     pub async fn from_reader<R>(reader: &mut R) -> Result<Self>
     where
         R: AsyncReadExt + Unpin,
     {
-        let req_size = reader.read_u64().await?;
+        let magic = reader.read_u32().await?;
+        if magic != PROTO_MAGIC {
+            return Err(anyhow!("invalid magic value: {magic}"));
+        }
+
+        let req_size = reader.read_u32().await?;
+        if req_size > MESSAGE_MAX_SIZE {
+            return Err(anyhow!("request size {req_size} > MESSAGE_MAX_SIZE"));
+        }
+
         let mut req = vec![0_u8; req_size as usize];
 
         reader.read_exact(&mut req).await?;
@@ -102,9 +118,13 @@ impl Message {
         W: AsyncWriteExt + Unpin,
     {
         let req = self.to_bytes()?;
-        let req_size = req.len() as u64;
+        let req_size = req.len() as u32;
+        if req_size > MESSAGE_MAX_SIZE {
+            return Err(anyhow!("request size {req_size} > MESSAGE_MAX_SIZE"));
+        }
 
-        writer.write_u64(req_size).await?;
+        writer.write_u32(PROTO_MAGIC).await?;
+        writer.write_u32(req_size).await?;
         writer.write_all(&req).await?;
 
         Ok(())
