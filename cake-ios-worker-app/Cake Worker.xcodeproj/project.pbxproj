@@ -1,0 +1,396 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		8830A1182C3B019800BA42B5 /* Cake_WorkerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8830A1172C3B019800BA42B5 /* Cake_WorkerApp.swift */; };
+		8830A11A2C3B019800BA42B5 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8830A1192C3B019800BA42B5 /* ContentView.swift */; };
+		8830A11C2C3B019900BA42B5 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8830A11B2C3B019900BA42B5 /* Assets.xcassets */; };
+		8830A11F2C3B019900BA42B5 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8830A11E2C3B019900BA42B5 /* Preview Assets.xcassets */; };
+		8876468D2C3B0261007A32E0 /* Cake.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8876468C2C3B0261007A32E0 /* Cake.swift */; };
+		8876468F2C3B05DB007A32E0 /* Cake.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8876468E2C3B05DB007A32E0 /* Cake.xcframework */; };
+		887646922C3B078F007A32E0 /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 887646912C3B078F007A32E0 /* Accelerate.framework */; };
+		887646942C3B07A7007A32E0 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 887646932C3B07A7007A32E0 /* Metal.framework */; };
+		887646972C3B08B3007A32E0 /* MetalPerformanceShadersGraph.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 887646952C3B08B3007A32E0 /* MetalPerformanceShadersGraph.framework */; };
+		887646982C3B08B3007A32E0 /* MetalPerformanceShaders.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 887646962C3B08B3007A32E0 /* MetalPerformanceShaders.framework */; };
+		887647092C3B14C1007A32E0 /* topology.yml in Resources */ = {isa = PBXBuildFile; fileRef = 887647082C3B14C1007A32E0 /* topology.yml */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		8830A1142C3B019800BA42B5 /* Cake Worker.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Cake Worker.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		8830A1172C3B019800BA42B5 /* Cake_WorkerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Cake_WorkerApp.swift; sourceTree = "<group>"; };
+		8830A1192C3B019800BA42B5 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		8830A11B2C3B019900BA42B5 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		8830A11E2C3B019900BA42B5 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
+		8876468C2C3B0261007A32E0 /* Cake.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = Cake.swift; sourceTree = "<group>"; };
+		8876468E2C3B05DB007A32E0 /* Cake.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = Cake.xcframework; sourceTree = SOURCE_ROOT; };
+		887646912C3B078F007A32E0 /* Accelerate.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Accelerate.framework; path = System/Library/Frameworks/Accelerate.framework; sourceTree = SDKROOT; };
+		887646932C3B07A7007A32E0 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		887646952C3B08B3007A32E0 /* MetalPerformanceShadersGraph.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalPerformanceShadersGraph.framework; path = System/Library/Frameworks/MetalPerformanceShadersGraph.framework; sourceTree = SDKROOT; };
+		887646962C3B08B3007A32E0 /* MetalPerformanceShaders.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalPerformanceShaders.framework; path = System/Library/Frameworks/MetalPerformanceShaders.framework; sourceTree = SDKROOT; };
+		887647082C3B14C1007A32E0 /* topology.yml */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.yaml; name = topology.yml; path = ../../data/topology.yml; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		8830A1112C3B019800BA42B5 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				887646982C3B08B3007A32E0 /* MetalPerformanceShaders.framework in Frameworks */,
+				8876468F2C3B05DB007A32E0 /* Cake.xcframework in Frameworks */,
+				887646942C3B07A7007A32E0 /* Metal.framework in Frameworks */,
+				887646922C3B078F007A32E0 /* Accelerate.framework in Frameworks */,
+				887646972C3B08B3007A32E0 /* MetalPerformanceShadersGraph.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		8830A10B2C3B019800BA42B5 = {
+			isa = PBXGroup;
+			children = (
+				8830A1162C3B019800BA42B5 /* Cake Worker */,
+				8830A1152C3B019800BA42B5 /* Products */,
+				887646902C3B078E007A32E0 /* Frameworks */,
+			);
+			sourceTree = "<group>";
+		};
+		8830A1152C3B019800BA42B5 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				8830A1142C3B019800BA42B5 /* Cake Worker.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		8830A1162C3B019800BA42B5 /* Cake Worker */ = {
+			isa = PBXGroup;
+			children = (
+				8876470A2C3B14CD007A32E0 /* Meta-Llama-3-8B */,
+				887647082C3B14C1007A32E0 /* topology.yml */,
+				8876468E2C3B05DB007A32E0 /* Cake.xcframework */,
+				8830A1172C3B019800BA42B5 /* Cake_WorkerApp.swift */,
+				8876468C2C3B0261007A32E0 /* Cake.swift */,
+				8830A1192C3B019800BA42B5 /* ContentView.swift */,
+				8830A11B2C3B019900BA42B5 /* Assets.xcassets */,
+				8830A11D2C3B019900BA42B5 /* Preview Content */,
+			);
+			path = "Cake Worker";
+			sourceTree = "<group>";
+		};
+		8830A11D2C3B019900BA42B5 /* Preview Content */ = {
+			isa = PBXGroup;
+			children = (
+				8830A11E2C3B019900BA42B5 /* Preview Assets.xcassets */,
+			);
+			path = "Preview Content";
+			sourceTree = "<group>";
+		};
+		887646902C3B078E007A32E0 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				887646962C3B08B3007A32E0 /* MetalPerformanceShaders.framework */,
+				887646952C3B08B3007A32E0 /* MetalPerformanceShadersGraph.framework */,
+				887646932C3B07A7007A32E0 /* Metal.framework */,
+				887646912C3B078F007A32E0 /* Accelerate.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		8876470A2C3B14CD007A32E0 /* Meta-Llama-3-8B */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = "Meta-Llama-3-8B";
+			path = "../../Meta-Llama-3-8B";
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		8830A1132C3B019800BA42B5 /* Cake Worker */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8830A1222C3B019900BA42B5 /* Build configuration list for PBXNativeTarget "Cake Worker" */;
+			buildPhases = (
+				8830A1102C3B019800BA42B5 /* Sources */,
+				8830A1112C3B019800BA42B5 /* Frameworks */,
+				8830A1122C3B019800BA42B5 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Cake Worker";
+			productName = "Cake Worker";
+			productReference = 8830A1142C3B019800BA42B5 /* Cake Worker.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		8830A10C2C3B019800BA42B5 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1540;
+				LastUpgradeCheck = 1540;
+				TargetAttributes = {
+					8830A1132C3B019800BA42B5 = {
+						CreatedOnToolsVersion = 15.4;
+					};
+				};
+			};
+			buildConfigurationList = 8830A10F2C3B019800BA42B5 /* Build configuration list for PBXProject "Cake Worker" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 8830A10B2C3B019800BA42B5;
+			productRefGroup = 8830A1152C3B019800BA42B5 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				8830A1132C3B019800BA42B5 /* Cake Worker */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		8830A1122C3B019800BA42B5 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8830A11F2C3B019900BA42B5 /* Preview Assets.xcassets in Resources */,
+				8830A11C2C3B019900BA42B5 /* Assets.xcassets in Resources */,
+				887647092C3B14C1007A32E0 /* topology.yml in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		8830A1102C3B019800BA42B5 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8830A11A2C3B019800BA42B5 /* ContentView.swift in Sources */,
+				8876468D2C3B0261007A32E0 /* Cake.swift in Sources */,
+				8830A1182C3B019800BA42B5 /* Cake_WorkerApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		8830A1202C3B019900BA42B5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.5;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				OTHER_LDFLAGS = "-lc++";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		8830A1212C3B019900BA42B5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.5;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				OTHER_LDFLAGS = "-lc++";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		8830A1232C3B019900BA42B5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"Cake Worker/Preview Content\"";
+				DEVELOPMENT_TEAM = XKB2P2J9BH;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "llama3-cake.Cake-Worker";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		8830A1242C3B019900BA42B5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"Cake Worker/Preview Content\"";
+				DEVELOPMENT_TEAM = XKB2P2J9BH;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "llama3-cake.Cake-Worker";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		8830A10F2C3B019800BA42B5 /* Build configuration list for PBXProject "Cake Worker" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8830A1202C3B019900BA42B5 /* Debug */,
+				8830A1212C3B019900BA42B5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		8830A1222C3B019900BA42B5 /* Build configuration list for PBXNativeTarget "Cake Worker" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8830A1232C3B019900BA42B5 /* Debug */,
+				8830A1242C3B019900BA42B5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 8830A10C2C3B019800BA42B5 /* Project object */;
+}
