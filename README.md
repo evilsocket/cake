@@ -1,6 +1,8 @@
-This is a Rust implementation of the llama3 model distributed inference. The idea is to shard the transformer blocks to multiple devices in order to be able to run the inference on models that wouldn't normally fit in the GPU memory of a single device. Inferences over contiguous block on the same worker are batched in order to minimize latency due to data transfer.
+`llama3-cake` is a pure Rust implementation of the llama3 LLM distributed inference based on [Candle](https://github.com/huggingface/candle).
 
-This is **experimental code**.
+**This is experimental code**.
+
+The idea is to shard the transformer blocks to multiple devices in order to be able to run the inference on models that wouldn't normally fit in the GPU memory of a single device. Inferences over contiguous transformer blocks on the same worker are batched in order to minimize latency due to data transfer.
 
 Run a worker node:
 
