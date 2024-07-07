@@ -30,7 +30,7 @@ struct Args {
     /// Llama3 model data path.
     #[arg(long, default_value = "./data/Meta-Llama-3-8B/")]
     model: String,
-    /// Topology JSON file.
+    /// Topology file.
     #[arg(long, default_value = "./data/topology.yml")]
     topology: String,
     /// The initial prompt.
