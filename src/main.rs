@@ -23,10 +23,10 @@ struct Args {
     address: String,
     /// Llama3 model data path.
     #[arg(long, default_value = "./data/Meta-Llama-3-8B/")]
-    model_path: String,
+    model: String,
     /// Topology JSON file.
     #[arg(long, default_value = "./data/topology.json")]
-    topology_path: String,
+    topology: String,
     /// The initial prompt.
     #[arg(long, default_value = "Hi! I am ")]
     prompt: String,

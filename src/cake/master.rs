@@ -59,10 +59,10 @@ impl Master {
     }
 
     pub async fn new(ctx: Context) -> Result<Self> {
-        log::info!("loading master topology from {}", &ctx.args.topology_path);
+        log::info!("loading master topology from {}", &ctx.args.topology);
 
         let topology: Topology =
-            serde_json::from_str(&std::fs::read_to_string(&ctx.args.topology_path)?)?;
+            serde_json::from_str(&std::fs::read_to_string(&ctx.args.topology)?)?;
 
         log::debug!("topology={:?}", &topology);
 

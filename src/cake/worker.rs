@@ -20,10 +20,9 @@ pub struct Worker {
 
 impl Worker {
     pub async fn new(ctx: Context) -> Result<Self> {
-        log::info!("loading worker topology from {}", &ctx.args.topology_path);
+        log::info!("loading worker topology from {}", &ctx.args.topology);
 
-        let topology: Topology =
-            serde_json::from_str(&fs::read_to_string(&ctx.args.topology_path)?)?;
+        let topology: Topology = serde_json::from_str(&fs::read_to_string(&ctx.args.topology)?)?;
 
         let mut blocks = HashMap::new();
 
