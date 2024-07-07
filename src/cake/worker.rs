@@ -5,15 +5,12 @@ use crate::model::{Block, Cache};
 
 use anyhow::Result;
 use candle_core::Device;
-use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::Mutex,
-};
+use tokio::net::{TcpListener, TcpStream};
 
 pub struct Worker {
     listener: TcpListener,
 
-    cache: Arc<Mutex<Cache>>,
+    cache: Cache,
     blocks: Arc<HashMap<String, Block>>,
     device: Device,
 }
@@ -48,7 +45,7 @@ impl Worker {
             human_bytes::human_bytes(memory_stats::memory_stats().unwrap().physical_mem as f64)
         );
 
-        let cache = Arc::new(Mutex::new(ctx.cache));
+        let cache = ctx.cache;
         let device = ctx.device;
 
         Ok(Self {
@@ -64,7 +61,7 @@ impl Worker {
         client: SocketAddr,
         blocks: Arc<HashMap<String, Block>>,
         device: Device,
-        cache: Arc<Mutex<Cache>>,
+        mut cache: Cache,
     ) -> Result<()> {
         // read and validate Hello
         let hello = Message::from_reader(&mut socket).await;
@@ -120,13 +117,10 @@ impl Worker {
                 if let Some(block) = blocks.get(&layer_name) {
                     // log::info!("  x = {}.forward(x, {index_pos}, {block_idx})", &layer_name);
                     // run forward pass
-                    x = {
-                        let mut guard = cache.lock().await;
-                        block
-                            .forward_imm(&x, index_pos, block_idx, &mut guard)
-                            .await
-                            .unwrap()
-                    };
+                    x = block
+                        .forward_imm(&x, index_pos, block_idx, &mut cache)
+                        .await
+                        .unwrap()
                 } else {
                     return Err(anyhow!("could not find layer {}", &layer_name));
                 }
@@ -149,9 +143,10 @@ impl Worker {
         while let Ok((socket, client)) = self.listener.accept().await {
             log::info!("{} connected", &client);
 
+            // each client loop gets a new cache
+            let cache = self.cache.as_new();
             let blocks = self.blocks.clone();
             let device = self.device.clone();
-            let cache = self.cache.clone();
 
             tokio::spawn(async move {
                 if let Err(e) = Self::handle_client(socket, client, blocks, device, cache).await {

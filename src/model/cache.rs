@@ -53,4 +53,13 @@ impl Cache {
             Ok(mask)
         }
     }
+
+    pub fn as_new(&self) -> Self {
+        let mut copy = self.clone();
+
+        copy.masks.clear();
+        copy.kvs = vec![None; self.kvs.len()];
+
+        copy
+    }
 }
