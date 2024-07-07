@@ -1,0 +1,4 @@
+
+# https://github.com/huggingface/candle/issues/1625
+[target.'cfg(any(target_arch = "arm", target_arch = "aarch64"))']
+rustflags = ["-C", "target-feature=+fp16"]
