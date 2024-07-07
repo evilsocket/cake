@@ -7,67 +7,59 @@ The idea is to shard the transformer blocks to multiple devices in order to be a
 Run a worker node:
 
 ```
-llama3-cake --model /path/to/Meta-Llama-3-8B --mode worker --topology worker-topology.json --address 0.0.0.0:10128
+llama3-cake --model /path/to/Meta-Llama-3-8B --mode worker --name worker0 --topology topology.yaml --address 0.0.0.0:10128
 ```
 
 Run a master node:
 
-
 ```
-llama3-cake --model /path/to/Meta-Llama-3-8B --topology master-topology.json --address 0.0.0.0:10128
-```
-
-Where `worker-topology.json` determines which layers the worker node will load and execute:
-
-```json
-{
-    "model.layers.16": "localhost:10128",
-    "model.layers.17": "localhost:10128",
-    "model.layers.18": "localhost:10128",
-    "model.layers.19": "localhost:10128",
-    "model.layers.20": "localhost:10128",
-    "model.layers.21": "localhost:10128",
-    "model.layers.22": "localhost:10128",
-    "model.layers.23": "localhost:10128",
-    "model.layers.24": "localhost:10128",
-    "model.layers.25": "localhost:10128",
-    "model.layers.26": "localhost:10128",
-    "model.layers.27": "localhost:10128",
-    "model.layers.28": "localhost:10128",
-    "model.layers.29": "localhost:10128",
-    "model.layers.30": "localhost:10128",
-    "model.layers.31": "localhost:10128"
-}
+llama3-cake --model /path/to/Meta-Llama-3-8B --topology topology.yml
 ```
 
-and `master-topology.json` is a `layer => worker:port` mapping for the master:
+Where `topology.yaml` determines which layers are served by whom:
 
-```json
-{
-    "model.layers.0": "worker1-hostname:10128",
-    "model.layers.1": "worker1-hostname:10128",
-    "model.layers.2": "worker1-hostname:10128",
-    "model.layers.3": "worker1-hostname:10128",
-    "model.layers.4": "worker1-hostname:10128",
-    "model.layers.5": "worker1-hostname:10128",
-    "model.layers.6": "worker1-hostname:10128",
-    "model.layers.7": "worker1-hostname:10128",
-    "model.layers.8": "worker1-hostname:10128",
-    "model.layers.9": "worker1-hostname:10128",
-    "model.layers.10": "worker1-hostname:10128",
-    "model.layers.11": "worker1-hostname:10128",
-    "model.layers.12": "worker1-hostname:10128",
-    "model.layers.13": "worker1-hostname:10128",
-    "model.layers.14": "worker1-hostname:10128",
-    "model.layers.15": "worker1-hostname:10128",
-    "model.layers.25": "worker2-hostname:10128",
-    "model.layers.26": "worker2-hostname:10128",
-    "model.layers.27": "worker2-hostname:10128",
-    "model.layers.28": "worker2-hostname:10128",
-    "model.layers.29": "worker2-hostname:10128",
-    "model.layers.30": "worker2-hostname:10128",
-    "model.layers.31": "worker2-hostname:10128"
-}
+```yaml
+worker0:
+  host: 'linux-server.local:10128'
+  description: 'NVIDIA Titan X Pascal (12GB)'
+  layers:
+    - 'model.layers.0'
+    - 'model.layers.1'
+    - 'model.layers.2'
+    - 'model.layers.3'
+    - 'model.layers.4'
+    - 'model.layers.5'
+    - 'model.layers.6'
+    - 'model.layers.7'
+    - 'model.layers.8'
+    - 'model.layers.9'
+    - 'model.layers.10'
+    - 'model.layers.11'
+    - 'model.layers.12'
+    - 'model.layers.13'
+    - 'model.layers.14'
+    - 'model.layers.15'
+
+worker1:
+  host: 'apple-server.local:10128'
+  description: 'Apple M1 Max (64GB)'
+  layers:
+    - 'model.layers.16'
+    - 'model.layers.17'
+    - 'model.layers.18'
+    - 'model.layers.19'
+    - 'model.layers.20'
+    - 'model.layers.21'
+    - 'model.layers.22'
+    - 'model.layers.23'
+    - 'model.layers.24'
+    - 'model.layers.25'
+    - 'model.layers.26'
+    - 'model.layers.27'
+    - 'model.layers.28'
+    - 'model.layers.29'
+    - 'model.layers.30'
+    - 'model.layers.31'
 ```
 
 ## License

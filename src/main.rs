@@ -21,6 +21,9 @@ struct Args {
     /// Mode.
     #[arg(long, default_value_t, value_enum)]
     mode: Mode,
+    /// Worker name.
+    #[arg(long)]
+    name: Option<String>,
     /// Binding address and port if in worker mode.
     #[arg(long, default_value = "127.0.0.1:10128")]
     address: String,
@@ -28,7 +31,7 @@ struct Args {
     #[arg(long, default_value = "./data/Meta-Llama-3-8B/")]
     model: String,
     /// Topology JSON file.
-    #[arg(long, default_value = "./data/topology.json")]
+    #[arg(long, default_value = "./data/topology.yml")]
     topology: String,
     /// The initial prompt.
     #[arg(long, default_value = "Hi! I am ")]

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use super::{Context, Message, Topology, WorkerInfo};
 use crate::model::{Block, Cache};
@@ -17,13 +17,28 @@ pub struct Worker {
 
 impl Worker {
     pub async fn new(ctx: Context) -> Result<Self> {
-        log::info!("loading worker topology from {}", &ctx.args.topology);
+        let worker_name = if let Some(name) = &ctx.args.name {
+            name.to_string()
+        } else {
+            return Err(anyhow!("no --name provided for worker"));
+        };
 
-        let topology: Topology = serde_json::from_str(&fs::read_to_string(&ctx.args.topology)?)?;
+        log::info!(
+            "loading worker '{}' topology from {}",
+            &worker_name,
+            &ctx.args.topology
+        );
+
+        let full = Topology::from_path(&ctx.args.topology)?;
+        let topology = if let Some(node) = full.get(&worker_name) {
+            node
+        } else {
+            return Err(anyhow!("could not find topology for {worker_name}"));
+        };
 
         let mut blocks = HashMap::new();
 
-        for block_layer_name in topology.keys() {
+        for block_layer_name in &topology.layers {
             log::info!("loading {} ...", &block_layer_name);
 
             let block = Block::load(

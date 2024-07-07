@@ -99,12 +99,16 @@ impl Llama {
         for i in 0..cfg.num_hidden_layers {
             let block_layer_name = format!("model.layers.{i}");
 
-            if let Some(worker_url) = topology.get(&block_layer_name) {
+            if let Some((node_name, node)) = topology.get_node_for_layer(&block_layer_name) {
+                log::debug!("node {node_name} will serve {}", &block_layer_name);
+
                 let client =
-                    crate::cake::Client::new(device.clone(), worker_url, &block_layer_name).await?;
+                    crate::cake::Client::new(device.clone(), &node.host, &block_layer_name).await?;
 
                 blocks.push(Box::new(client));
             } else {
+                log::debug!("{} will be served locally", &block_layer_name);
+
                 let block = Block::load(&block_layer_name, vb.pp(&block_layer_name), cfg)?;
 
                 blocks.push(Box::new(block));

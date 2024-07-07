@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     fmt::{Debug, Display},
     path::PathBuf,
 };
@@ -17,11 +16,13 @@ use crate::{
 mod client;
 mod master;
 mod proto;
+mod topology;
 mod worker;
 
 pub use client::*;
 pub use master::*;
 pub use proto::*;
+pub use topology::*;
 pub use worker::*;
 
 #[derive(clap::ValueEnum, Clone, Debug, Default)]
@@ -30,8 +31,6 @@ pub enum Mode {
     Master,
     Worker,
 }
-
-pub type Topology = HashMap<String, String>;
 
 pub struct Context {
     pub args: Args,

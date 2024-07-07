@@ -61,10 +61,7 @@ impl Master {
     pub async fn new(ctx: Context) -> Result<Self> {
         log::info!("loading master topology from {}", &ctx.args.topology);
 
-        let topology: Topology =
-            serde_json::from_str(&std::fs::read_to_string(&ctx.args.topology)?)?;
-
-        log::debug!("topology={:?}", &topology);
+        let topology = Topology::from_path(&ctx.args.topology)?;
 
         let model = Llama::load(&ctx.var_builder, &ctx.config, &ctx.device, topology).await?;
 
