@@ -6,13 +6,13 @@ The idea is to shard the transformer blocks to multiple devices in order to be a
 
 Run a worker node:
 
-```
-llama3-cake --model /path/to/Meta-Llama-3-8B --mode worker --name worker0 --topology topology.yaml --address 0.0.0.0:10128
+```bash
+llama3-cake --model /path/to/Meta-Llama-3-8B --mode worker --name worker0 --topology topology.yml --address 0.0.0.0:10128
 ```
 
 Run a master node:
 
-```
+```bash
 llama3-cake --model /path/to/Meta-Llama-3-8B --topology topology.yml
 ```
 
