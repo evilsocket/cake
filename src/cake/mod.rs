@@ -16,12 +16,12 @@ use crate::{
 
 mod client;
 mod master;
-mod message;
+mod proto;
 mod worker;
 
 pub use client::*;
 pub use master::*;
-pub use message::*;
+pub use proto::*;
 pub use worker::*;
 
 #[derive(clap::ValueEnum, Clone, Debug, Default)]
