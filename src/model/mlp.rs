@@ -8,18 +8,15 @@ pub struct MLP {
     gate_proj: Linear,
     up_proj: Linear,
     down_proj: Linear,
-    span: tracing::Span,
 }
 
 impl MLP {
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let _enter = self.span.enter();
         let x = (candle_nn::ops::silu(&self.gate_proj.forward(x)?)? * self.up_proj.forward(x)?)?;
         self.down_proj.forward(&x)
     }
 
     pub fn load(vb: VarBuilder, cfg: &super::Config) -> Result<Self> {
-        let span = tracing::span!(tracing::Level::TRACE, "mlp");
         let h_size = cfg.hidden_size;
         let i_size = cfg.intermediate_size;
         let gate_proj = linear(h_size, i_size, vb.pp("gate_proj"))?;
@@ -29,7 +26,6 @@ impl MLP {
             gate_proj,
             up_proj,
             down_proj,
-            span,
         })
     }
 }

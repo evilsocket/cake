@@ -14,12 +14,10 @@ pub struct Block {
     attn: super::CausalSelfAttention,
     rms_2: RmsNorm,
     mlp: super::MLP,
-    span: tracing::Span,
 }
 
 impl Block {
     pub fn load(name: &str, vb: VarBuilder, cfg: &super::Config) -> Result<Self> {
-        let span = tracing::span!(tracing::Level::TRACE, "block");
         let name = name.to_string();
         let attn = super::CausalSelfAttention::load(vb.pp("self_attn"), cfg)?;
         let mlp = super::MLP::load(vb.pp("mlp"), cfg)?;
@@ -35,7 +33,6 @@ impl Block {
             attn,
             rms_2,
             mlp,
-            span,
         })
     }
 
@@ -47,7 +44,6 @@ impl Block {
         cache: &mut Cache,
     ) -> Result<Tensor> {
         // log::info!("block forward[{index_pos}, {block_idx}]");
-        let _enter = self.span.enter();
         let residual = x;
         let x = self.rms_1.forward(x)?;
         let x = (self.attn.forward(&x, index_pos, block_idx, cache)? + residual)?;

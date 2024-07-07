@@ -13,8 +13,6 @@ pub struct CausalSelfAttention {
     num_attention_heads: usize,
     num_key_value_heads: usize,
     head_dim: usize,
-    span: tracing::Span,
-    span_rot: tracing::Span,
 }
 
 fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> Result<Tensor> {
@@ -31,7 +29,6 @@ impl CausalSelfAttention {
         index_pos: usize,
         cache: &super::Cache,
     ) -> Result<Tensor> {
-        let _enter = self.span_rot.enter();
         let (_b_sz, _, seq_len, _hidden_size) = x.dims4()?;
         let cos = cache.cos.narrow(0, index_pos, seq_len)?;
         let sin = cache.sin.narrow(0, index_pos, seq_len)?;
@@ -45,7 +42,6 @@ impl CausalSelfAttention {
         block_idx: usize,
         cache: &mut super::Cache,
     ) -> Result<Tensor> {
-        let _enter = self.span.enter();
         let (b_sz, seq_len, hidden_size) = x.dims3()?;
         let q = self.q_proj.forward(x)?;
         let k = self.k_proj.forward(x)?;
@@ -118,8 +114,6 @@ impl CausalSelfAttention {
     }
 
     pub fn load(vb: VarBuilder, cfg: &super::Config) -> Result<Self> {
-        let span = tracing::span!(tracing::Level::TRACE, "attn");
-        let span_rot = tracing::span!(tracing::Level::TRACE, "attn-rot");
         let size_in = cfg.hidden_size;
         let size_q = (cfg.hidden_size / cfg.num_attention_heads) * cfg.num_attention_heads;
         let size_kv = (cfg.hidden_size / cfg.num_attention_heads) * cfg.num_key_value_heads;
@@ -135,8 +129,6 @@ impl CausalSelfAttention {
             num_attention_heads: cfg.num_attention_heads,
             num_key_value_heads: cfg.num_key_value_heads,
             head_dim: cfg.hidden_size / cfg.num_attention_heads,
-            span,
-            span_rot,
         })
     }
 }
