@@ -30,9 +30,7 @@ struct ContentView: View {
                         
                         // print("  topologyPath=\(topologyPath)");
                         // print("  modelPath=\(modelPath)");
-                        
-                        testMetal();
-                        
+                                                
                         Task {
                             await startWorker(name:"iphone", modelPath: modelPath, topologyPath: topologyPath)
                            

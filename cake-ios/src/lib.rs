@@ -5,6 +5,9 @@ use cake_core::{
     Args,
 };
 
+/*
+https://github.com/huggingface/candle/issues/2322
+
 #[uniffi::export]
 pub fn test_metal() {
     let device = metal::Device::all().swap_remove(0);
@@ -24,6 +27,8 @@ pub fn test_metal() {
 
     println!("seed: {:?}", &seed);
 }
+
+ */
 
 #[uniffi::export]
 pub async fn start_worker(name: String, model_path: String, topology_path: String) {
