@@ -13,12 +13,16 @@ pub use token_output_stream::*;
 
 pub fn get_inference_device(force_cpu: bool, ordinal: usize) -> Result<Device> {
     if force_cpu {
+        log::debug!("device is forced cpu");
         Ok(Device::Cpu)
     } else if cuda_is_available() {
+        log::debug!("device is cuda {ordinal}");
         Ok(Device::new_cuda(ordinal)?)
     } else if metal_is_available() {
+        log::debug!("device is metal {ordinal}");
         Ok(Device::new_metal(ordinal)?)
     } else {
+        log::debug!("device is cpu");
         // fallback to cpu if nothing else available
         Ok(Device::Cpu)
     }

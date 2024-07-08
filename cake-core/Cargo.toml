@@ -19,18 +19,21 @@ serde_yaml = "0.9.34"
 tokenizers = { version = "0.19.1", features = ["onig"] }
 tokio = { version = "1.38.0", features = ["full"] }
 
-# use Metal accelleration on macOS and iOS.
+# Metal acceleration on macOS
 [target.'cfg(target_os = "macos")'.dependencies]
-candle-core = { version = "0.6.0", features = ["metal", "accelerate"] }
-candle-nn = { version = "0.6.0", features = ["metal", "accelerate"] }
-candle-transformers = { version = "0.6.0", features = ["metal", "accelerate"] }
+candle-core = { version = "0.6.0", features = ["metal"] }
+candle-nn = { version = "0.6.0", features = ["metal"] }
+candle-transformers = { version = "0.6.0", features = ["metal"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
-candle-core = { version = "0.6.0" }
-candle-nn = { version = "0.6.0" }
-candle-transformers = { version = "0.6.0" }
+candle-core = { version = "0.6.0", features = ["metal"] }
+candle-nn = { version = "0.6.0", features = ["metal"] }
+candle-transformers = { version = "0.6.0", features = ["metal"] }
+# candle-core = { version = "0.6.0", features = ["accelerate"] }
+# candle-nn = { version = "0.6.0", features = ["accelerate"] }
+# candle-transformers = { version = "0.6.0", features = ["accelerate"] }
 
-# use CUDA on everything else.
+# CUDA on everything else.
 [target.'cfg(not(any(target_os = "macos", target_os = "ios")))'.dependencies]
 candle-core = { version = "0.6.0", features = ["cuda"] }
 candle-nn = { version = "0.6.0", features = ["cuda"] }

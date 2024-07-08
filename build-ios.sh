@@ -10,7 +10,7 @@ cargo run --bin uniffi-bindgen generate --library ./target/debug/libcake.dylib -
 for TARGET in \
         aarch64-apple-ios
 do
-    rustup target add $TARGET
+    # rustup target add $TARGET
     cargo build --release --target=$TARGET
 done
  
@@ -25,7 +25,7 @@ mv ./cake-ios/bindings/cake.swift ./cake-ios-worker-app/Cake\ Worker/Cake.swift
 rm -rf "./cake-ios-worker-app/Cake.xcframework"
 xcodebuild -create-xcframework \
         -library ./target/aarch64-apple-ios/release/libcake.a -headers ./cake-ios/bindings \
-        -output "./cake-ios-worker-app/Cake.xcframework"
+        -output "./cake-ios-worker-app/Cake.xcframework" > /dev/null
  
 # Cleanup
 rm -rf ./cake-ios/bindings

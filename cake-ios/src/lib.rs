@@ -6,13 +6,30 @@ use cake_core::{
 };
 
 #[uniffi::export]
-pub async fn start_worker(name: String, model_path: String, topology_path: String) {
-    if std::env::var_os("RUST_LOG").is_none() {
-        // set `RUST_LOG=debug` to see debug logs
-        std::env::set_var("RUST_LOG", "debug");
-    }
+pub fn test_metal() {
+    let device = metal::Device::all().swap_remove(0);
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    println!("device: {:?}", &device);
+
+    println!(
+        "MTLResourceOptions::StorageModeManaged = 0x{:x}",
+        metal::MTLResourceOptions::StorageModeManaged
+    );
+
+    let seed = device.new_buffer_with_data(
+        [299792458].as_ptr() as *const std::ffi::c_void,
+        4,
+        metal::MTLResourceOptions::StorageModeManaged,
+    );
+
+    println!("seed: {:?}", &seed);
+}
+
+#[uniffi::export]
+pub async fn start_worker(name: String, model_path: String, topology_path: String) {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
+
+    log::debug!("@ creating context");
 
     let mut args = Args::default();
 
@@ -30,6 +47,8 @@ pub async fn start_worker(name: String, model_path: String, topology_path: Strin
         }
     };
 
+    log::debug!("@ creating worker");
+
     let mut worker = match Worker::new(ctx).await {
         Ok(w) => w,
         Err(e) => {
@@ -37,6 +56,8 @@ pub async fn start_worker(name: String, model_path: String, topology_path: Strin
             return;
         }
     };
+
+    log::debug!("@ running worker");
 
     match worker.run().await {
         Ok(_) => log::info!("worker exiting"),

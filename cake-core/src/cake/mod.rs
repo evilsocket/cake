@@ -51,7 +51,8 @@ impl Context {
             None => DType::F16,
         };
 
-        let device = utils::get_inference_device(args.cpu, args.device)?;
+        let device = utils::get_inference_device(args.cpu, args.device)
+            .map_err(|e| anyhow!("can't attach to device: {:?}", e))?;
 
         log::info!(
             "[{:?}] dtype={:?} device={:?} mem={}",

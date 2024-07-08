@@ -21,7 +21,7 @@ struct ContentView: View {
             .fileImporter(isPresented: $showActionSheet, allowedContentTypes: [.folder]) { result in
                 switch result {
                   case .success(let directory):
-                    print("using \(directory)");
+                    // print("using \(directory)");
                     
                     if directory.startAccessingSecurityScopedResource() {
                         let basePath = directory.path();
@@ -30,6 +30,8 @@ struct ContentView: View {
                         
                         // print("  topologyPath=\(topologyPath)");
                         // print("  modelPath=\(modelPath)");
+                        
+                        testMetal();
                         
                         Task {
                             await startWorker(name:"iphone", modelPath: modelPath, topologyPath: topologyPath)
