@@ -8,21 +8,54 @@
 import SwiftUI
 
 struct ContentView: View {
+    @State private var showActionSheet = false
+    @State private var baseFolder: URL!
+
     var body: some View {
         VStack {
+            Image(systemName: "folder")
+                .imageScale(.large)
+                .foregroundStyle(.tint)
+            Button("Select Folder") {
+                showActionSheet = true
+            }
+            .fileImporter(isPresented: $showActionSheet, allowedContentTypes: [.folder]) { result in
+                switch result {
+                  case .success(let directory):
+                    print("using \(directory)");
+                    self.baseFolder = directory;
+                  case .failure(let error):
+                      print(error)
+                }
+            }
+            Spacer()
+                .frame(height: 50)
             Image(systemName: "brain")
                 .imageScale(.large)
                 .foregroundStyle(.tint)
             Button("Run Node") {
-                let topologyPath = Bundle.main.path(forResource: "topology", ofType: "yml")!;
-                print("topologyPath=\(topologyPath)");
+                let gotAccess = self.baseFolder!.startAccessingSecurityScopedResource()
+                if !gotAccess {
+                    print("NO ACCESS PROVIDED");
+                    return
+                }
                 
-                let modelPath = "/private/var/containers/Bundle/Application/E5C11B90-02B0-495D-9F29-B95B6F6ECAAB/Cake Worker.app/Meta-Llama-3-8B";//Bundle.main.path(forResource: "Meta-Llama-3-8B", ofType: "")!;
-                print("modelPath=\(modelPath)");
+                let basePath = self.baseFolder!.path();
+                
+                print("running on \(basePath)");
+                
+                let topologyPath = basePath + "/topology.yml";
+                let modelPath = basePath + "/Meta-Llama-3-8B";
+                
+                print("  topologyPath=\(topologyPath)");
+                print("  modelPath=\(modelPath)");
                 
                 Task {
                     await startWorker(name:"iphone", modelPath: modelPath, topologyPath: topologyPath)
                 }
+                
+                self.baseFolder!.stopAccessingSecurityScopedResource()
+                
             }
         }
         .padding()
