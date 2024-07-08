@@ -78,10 +78,13 @@ impl Context {
         log::info!("loading tensors from {} ...", model_tensors_index.display());
 
         let filenames: Vec<std::path::PathBuf> =
-            utils::load_safetensors_from_index(model_tensors_index)?;
+            utils::load_safetensors_from_index(model_tensors_index)
+                .map_err(|e| anyhow!("can't load tensors index: {:?}", e))?;
 
-        let var_builder =
-            unsafe { VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)? };
+        let var_builder = unsafe {
+            VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)
+                .map_err(|e| anyhow!("can't create varbuilder from tensors: {:?}", e))?
+        };
 
         Ok(Context {
             args,

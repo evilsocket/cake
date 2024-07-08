@@ -19,16 +19,7 @@ pub fn get_inference_device(force_cpu: bool, ordinal: usize) -> Result<Device> {
     } else if metal_is_available() {
         Ok(Device::new_metal(ordinal)?)
     } else {
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        {
-            println!(
-                "Running on CPU, to run on GPU(metal), build this example with `--features metal`"
-            );
-        }
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        {
-            println!("Running on CPU, to run on GPU, build this example with `--features cuda`");
-        }
+        // fallback to cpu if nothing else available
         Ok(Device::Cpu)
     }
 }

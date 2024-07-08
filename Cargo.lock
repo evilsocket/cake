@@ -511,6 +511,8 @@ dependencies = [
  "anyhow",
  "async-std",
  "cake-core",
+ "env_logger",
+ "log",
  "uniffi",
 ]
 
