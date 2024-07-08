@@ -1,4 +1,4 @@
-use super::{Context, Topology};
+use super::Context;
 use crate::{
     model::{Llama, EOS_TOKEN},
     utils::{self, TokenOutputStream},
@@ -61,9 +61,7 @@ impl Master {
     pub async fn new(ctx: Context) -> Result<Self> {
         log::info!("loading master topology from {}", &ctx.args.topology);
 
-        let topology = Topology::from_path(&ctx.args.topology)?;
-
-        let model = Llama::load(&ctx.var_builder, &ctx.config, &ctx.device, topology).await?;
+        let model = Llama::load(&ctx.var_builder, &ctx.config, &ctx.device, &ctx.topology).await?;
 
         log::info!(
             "model loaded - mem={}",

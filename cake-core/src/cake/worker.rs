@@ -1,6 +1,6 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-use super::{Context, Message, Topology, WorkerInfo};
+use super::{Context, Message, WorkerInfo};
 use crate::model::{Block, Cache};
 
 use anyhow::Result;
@@ -23,14 +23,7 @@ impl Worker {
             return Err(anyhow!("no --name provided for worker"));
         };
 
-        log::info!(
-            "loading worker '{}' topology from {}",
-            &worker_name,
-            &ctx.args.topology
-        );
-
-        let full = Topology::from_path(&ctx.args.topology)?;
-        let topology = if let Some(node) = full.get(&worker_name) {
+        let worker_topology = if let Some(node) = ctx.topology.get(&worker_name) {
             node
         } else {
             return Err(anyhow!("could not find topology for {worker_name}"));
@@ -38,7 +31,7 @@ impl Worker {
 
         let mut blocks = HashMap::new();
 
-        for block_layer_name in &topology.layers {
+        for block_layer_name in &worker_topology.layers {
             log::info!("loading {} ...", &block_layer_name);
 
             let block = Block::load(

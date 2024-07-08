@@ -328,6 +328,7 @@ dependencies = [
  "clap",
  "human_bytes",
  "log",
+ "memmap2",
  "memory-stats",
  "safetensors",
  "serde",
@@ -335,6 +336,7 @@ dependencies = [
  "serde_yaml",
  "tokenizers",
  "tokio",
+ "yoke",
 ]
 
 [[package]]
@@ -346,6 +348,20 @@ dependencies = [
  "env_logger",
  "log",
  "uniffi",
+]
+
+[[package]]
+name = "cake-reduce-safetensors"
+version = "0.1.0"
+dependencies = [
+ "cake-core",
+ "candle-core",
+ "candle-nn",
+ "clap",
+ "memmap2",
+ "safetensors",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -80,7 +80,7 @@ impl Llama {
         vb: &VarBuilder<'static>,
         cfg: &Config,
         device: &Device,
-        topology: Topology,
+        topology: &Topology,
     ) -> Result<Self> {
         log::info!("loading embeddings ...");
         let embedding =

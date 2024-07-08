@@ -10,6 +10,17 @@ pub struct Node {
     pub layers: Vec<String>,
 }
 
+impl Node {
+    pub fn is_layer_owner(&self, full_layer_name: &str) -> bool {
+        for prefix in &self.layers {
+            if full_layer_name.starts_with(prefix) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Topology(HashMap<String, Node>);
 

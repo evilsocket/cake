@@ -26,7 +26,7 @@ struct ContentView: View {
                     if directory.startAccessingSecurityScopedResource() {
                         let basePath = directory.path();
                         let topologyPath = basePath + "topology.yml";
-                        let modelPath = basePath + "Meta-Llama-3-8B";
+                        let modelPath = basePath + "iphone-tensors";
                         
                         // print("  topologyPath=\(topologyPath)");
                         // print("  modelPath=\(modelPath)");

@@ -34,6 +34,7 @@ pub enum Mode {
 
 pub struct Context {
     pub args: Args,
+    pub topology: Topology,
     pub data_path: PathBuf,
     pub device: Device,
     pub config: Config,
@@ -62,6 +63,10 @@ impl Context {
             human_bytes::human_bytes(memory_stats::memory_stats().unwrap().physical_mem as f64)
         );
 
+        log::info!("loading topology from {}", &args.topology);
+
+        let topology = Topology::from_path(&args.topology)?;
+
         let data_path = PathBuf::from(&args.model);
         let config_filename = data_path.join("config.json");
         let model_tensors_index = data_path.join("model.safetensors.index.json");
@@ -89,6 +94,7 @@ impl Context {
 
         Ok(Context {
             args,
+            topology,
             data_path,
             device,
             config,
