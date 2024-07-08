@@ -24,18 +24,21 @@ struct ContentView: View {
                     print("using \(directory)");
                     
                     if directory.startAccessingSecurityScopedResource() {
-                        defer { directory.stopAccessingSecurityScopedResource() }
-
                         let basePath = directory.path();
                         let topologyPath = basePath + "topology.yml";
                         let modelPath = basePath + "Meta-Llama-3-8B";
                         
-                        print("  topologyPath=\(topologyPath)");
-                        print("  modelPath=\(modelPath)");
+                        // print("  topologyPath=\(topologyPath)");
+                        // print("  modelPath=\(modelPath)");
                         
                         Task {
                             await startWorker(name:"iphone", modelPath: modelPath, topologyPath: topologyPath)
+                           
+                            print("revoking access");
+                            directory.stopAccessingSecurityScopedResource()
                         }
+                        
+
                     } else {
                         print("access denied to \(directory)");
                     }
