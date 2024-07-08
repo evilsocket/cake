@@ -1,5 +1,8 @@
 /target
-/data
+/cake-data
+/cake-ios/bindings
+/cake-ios-worker-app/Cake.xcframework
+/cake-ios-worker-app/Cake\ Worker/Cake.swift
 
 .DS_Store
 

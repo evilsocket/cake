@@ -7,11 +7,6 @@ use cake_core::{
 
 #[uniffi::export]
 pub async fn start_worker(name: String, model_path: String, topology_path: String) {
-    println!(
-        "name={} model={} topology={}",
-        &name, &model_path, &topology_path
-    );
-
     let mut args = Args::default();
 
     args.address = "0.0.0.0:10128".to_string();

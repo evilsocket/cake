@@ -67,7 +67,10 @@ impl Context {
 
         log::info!("loading configuration from {}", config_filename.display());
 
-        let config: LlamaConfig = serde_json::from_slice(&std::fs::read(config_filename)?)?;
+        let data = std::fs::read(&config_filename)
+            .map_err(|e| anyhow!("can't read {}: {:?}", config_filename.display(), e))?;
+        let config: LlamaConfig = serde_json::from_slice(&data)
+            .map_err(|e| anyhow!("can't parse {}: {:?}", config_filename.display(), e))?;
         let config = config.into_config();
 
         let cache = Cache::new(true, dtype, &config, &device)?;

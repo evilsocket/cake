@@ -25,10 +25,10 @@ pub struct Args {
     #[arg(long, default_value = "127.0.0.1:10128")]
     pub address: String,
     /// Llama3 model data path.
-    #[arg(long, default_value = "./data/Meta-Llama-3-8B/")]
+    #[arg(long, default_value = "./cake-data/Meta-Llama-3-8B/")]
     pub model: String,
     /// Topology file.
-    #[arg(long, default_value = "./data/topology.yml")]
+    #[arg(long, default_value = "./cake-data/topology.yml")]
     pub topology: String,
     /// The initial prompt.
     #[arg(long, default_value = "Hi! I am ")]

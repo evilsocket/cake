@@ -38,9 +38,20 @@ pub fn load_safetensors_from_index(
     tensors_index_json_filename: PathBuf,
 ) -> Result<Vec<std::path::PathBuf>> {
     let parent_dir = tensors_index_json_filename.parent().unwrap();
-    let json_file = std::fs::File::open(&tensors_index_json_filename)?;
-    let json: serde_json::Value =
-        serde_json::from_reader(&json_file).map_err(candle_core::Error::wrap)?;
+    let json_file = std::fs::File::open(&tensors_index_json_filename).map_err(|e| {
+        anyhow!(
+            "can't open {}: {:?}",
+            tensors_index_json_filename.display(),
+            e
+        )
+    })?;
+    let json: serde_json::Value = serde_json::from_reader(&json_file).map_err(|e| {
+        anyhow!(
+            "can't parse {}: {:?}",
+            tensors_index_json_filename.display(),
+            e
+        )
+    })?;
     let weight_map = match json.get("weight_map") {
         None => bail!("no weight map in {json_file:?}"),
         Some(serde_json::Value::Object(map)) => map,
