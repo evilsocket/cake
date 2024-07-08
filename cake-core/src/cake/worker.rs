@@ -1,11 +1,19 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 
 use super::{Context, Message, WorkerInfo};
 use crate::model::{Block, Cache};
 
 use anyhow::Result;
-use candle_core::Device;
+use candle_core::{DType, Device};
 use tokio::net::{TcpListener, TcpStream};
+
+struct WorkerContext {
+    device: Device,
+    device_idx: usize,
+    dtype: DType,
+    blocks: Arc<HashMap<String, Block>>,
+    cache: Cache,
+}
 
 pub struct Worker {
     listener: TcpListener,
@@ -13,6 +21,8 @@ pub struct Worker {
     cache: Cache,
     blocks: Arc<HashMap<String, Block>>,
     device: Device,
+    device_idx: usize,
+    dtype: DType,
 }
 
 impl Worker {
@@ -55,24 +65,28 @@ impl Worker {
 
         let cache = ctx.cache;
         let device = ctx.device;
+        let dtype = ctx.dtype;
+        let device_idx = ctx.args.device;
 
         Ok(Self {
+            dtype,
             listener,
             cache,
             blocks,
             device,
+            device_idx,
         })
     }
 
     async fn handle_client(
         mut socket: TcpStream,
         client: SocketAddr,
-        blocks: Arc<HashMap<String, Block>>,
-        device: Device,
-        mut cache: Cache,
+        mut context: WorkerContext,
     ) -> Result<()> {
         // read and validate Hello
+        let start = Instant::now();
         let hello = Message::from_reader(&mut socket).await;
+        let latency = start.elapsed();
         let hello = if let Ok(hello) = hello {
             hello
         } else {
@@ -88,8 +102,21 @@ impl Worker {
 
         // send info
         let info = Message::WorkerInfo(WorkerInfo {
-            device: format!("{:?}", &device),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            device: if context.device.is_cuda() {
+                "cuda".to_string()
+            } else if context.device.is_metal() {
+                "metal".to_string()
+            } else {
+                "cpu".to_string()
+            },
+            device_idx: context.device_idx,
+            latency: latency.as_millis(),
+            dtype: format!("{:?}", context.dtype),
         });
+
         if let Err(e) = info.to_writer(&mut socket).await {
             return Err(anyhow!("[{}] could not send worker info: {:?}", &client, e));
         }
@@ -115,18 +142,18 @@ impl Worker {
             };
 
             // load raw tensor to device
-            let mut x = x.to_tensor(&device).unwrap();
+            let mut x = x.to_tensor(&context.device).unwrap();
 
             // log::info!("{}", if ops.len() == 1 { "RUN" } else { "BATCH" });
 
             // for each element in the ops batch
             for (layer_name, index_pos, block_idx) in ops {
                 // get layer block by name
-                if let Some(block) = blocks.get(&layer_name) {
+                if let Some(block) = context.blocks.get(&layer_name) {
                     // log::info!("  x = {}.forward(x, {index_pos}, {block_idx})", &layer_name);
                     // run forward pass
                     x = block
-                        .forward_imm(&x, index_pos, block_idx, &mut cache)
+                        .forward_imm(&x, index_pos, block_idx, &mut context.cache)
                         .await
                         .unwrap()
                 } else {
@@ -151,13 +178,16 @@ impl Worker {
         while let Ok((socket, client)) = self.listener.accept().await {
             log::info!("{} connected", &client);
 
-            // each client loop gets a new cache
-            let cache = self.cache.as_new();
-            let blocks = self.blocks.clone();
-            let device = self.device.clone();
+            let context = WorkerContext {
+                device: self.device.clone(),
+                device_idx: self.device_idx,
+                dtype: self.dtype.clone(),
+                blocks: self.blocks.clone(),
+                cache: self.cache.as_new(), // each client loop gets a new cache
+            };
 
             tokio::spawn(async move {
-                if let Err(e) = Self::handle_client(socket, client, blocks, device, cache).await {
+                if let Err(e) = Self::handle_client(socket, client, context).await {
                     log::error!("{}", e);
                 }
             });

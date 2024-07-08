@@ -55,7 +55,7 @@ impl Block {
 
 impl std::fmt::Display for Block {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}@<local>", &self.name)
+        write!(f, "{} (local)", &self.name)
     }
 }
 

@@ -38,7 +38,7 @@ impl Master {
 
         let tokenizer = utils::TokenOutputStream::new(tokenizer);
 
-        log::info!("prompt tokens: {:?}", &tokens);
+        log::debug!("prompt tokens: {:?}", &tokens);
 
         Ok((tokenizer, tokens, eos_token_id))
     }

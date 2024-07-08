@@ -13,7 +13,7 @@ pub struct Client {
     address: String,
     layer_name: String,
     stream: TcpStream,
-    worker_info: WorkerInfo,
+    info: WorkerInfo,
 }
 
 impl Client {
@@ -21,20 +21,18 @@ impl Client {
         let address = address.to_string();
         let layer_name = layer_name.to_string();
         let stream = TcpStream::connect(&address).await?;
-        let worker_info = WorkerInfo {
-            device: String::new(),
-        };
+        let worker_info = WorkerInfo::default();
 
         let mut client = Self {
             address,
             device,
             stream,
             layer_name,
-            worker_info,
+            info: worker_info,
         };
 
         let resp = client.request(Message::Hello).await?;
-        client.worker_info = if let Message::WorkerInfo(info) = resp {
+        client.info = if let Message::WorkerInfo(info) = resp {
             info
         } else {
             return Err(anyhow!("unexpected worker info message: {:?}", &resp));
@@ -61,8 +59,14 @@ impl std::fmt::Display for Client {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}@{} [{}]",
-            &self.layer_name, &self.address, &self.worker_info.device
+            "{}@{} [{}<{}> {}-{} latency={}ms]",
+            &self.layer_name,
+            &self.address,
+            &self.info.device,
+            &self.info.device_idx,
+            &self.info.os,
+            &self.info.arch,
+            self.info.latency
         )
     }
 }

@@ -34,6 +34,7 @@ pub enum Mode {
 
 pub struct Context {
     pub args: Args,
+    pub dtype: DType,
     pub topology: Topology,
     pub data_path: PathBuf,
     pub device: Device,
@@ -44,7 +45,7 @@ pub struct Context {
 
 impl Context {
     pub fn from_args(args: Args) -> Result<Self> {
-        let dtype = match args.dtype.as_deref() {
+        let dtype: DType = match args.dtype.as_deref() {
             Some("f16") => DType::F16,
             Some("bf16") => DType::BF16,
             Some("f32") => DType::F32,
@@ -94,6 +95,7 @@ impl Context {
 
         Ok(Context {
             args,
+            dtype,
             topology,
             data_path,
             device,

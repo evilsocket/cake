@@ -27,9 +27,15 @@ impl RawTensor {
     }
 }
 
-#[derive(Serialize, Debug, Deserialize)]
+#[derive(Serialize, Debug, Default, Deserialize)]
 pub struct WorkerInfo {
+    pub version: String,
+    pub dtype: String,
+    pub os: String,
+    pub arch: String,
     pub device: String,
+    pub device_idx: usize,
+    pub latency: u128,
 }
 
 #[derive(Serialize, Debug, Deserialize)]
