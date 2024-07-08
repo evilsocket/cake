@@ -31,7 +31,7 @@ pub fn test_metal() {
  */
 
 #[uniffi::export]
-pub async fn start_worker(name: String, model_path: String, topology_path: String) {
+pub fn start_worker(name: String, model_path: String, topology_path: String) {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
 
     log::debug!("@ creating context");
@@ -52,22 +52,28 @@ pub async fn start_worker(name: String, model_path: String, topology_path: Strin
         }
     };
 
-    log::debug!("@ creating worker");
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            log::debug!("@ creating worker");
 
-    let mut worker = match Worker::new(ctx).await {
-        Ok(w) => w,
-        Err(e) => {
-            log::error!("ERROR: {}", e);
-            return;
-        }
-    };
+            let mut worker = match Worker::new(ctx).await {
+                Ok(w) => w,
+                Err(e) => {
+                    log::error!("ERROR: {}", e);
+                    return;
+                }
+            };
 
-    log::debug!("@ running worker");
+            log::debug!("@ running worker");
 
-    match worker.run().await {
-        Ok(_) => log::info!("worker exiting"),
-        Err(e) => {
-            log::error!("ERROR: {}", e);
-        }
-    }
+            match worker.run().await {
+                Ok(_) => log::info!("worker exiting"),
+                Err(e) => {
+                    log::error!("ERROR: {}", e);
+                }
+            }
+        })
 }

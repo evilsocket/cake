@@ -33,10 +33,9 @@ candle-transformers = { version = "0.6.0", features = ["metal"] }
 # candle-transformers = { version = "0.6.0", features = ["metal"] }
 # https://github.com/huggingface/candle/issues/2322
 # https://github.com/huggingface/candle/issues/1841
-# use BLAS in the meantime
-candle-core = { version = "0.6.0", features = ["accelerate"] }
-candle-nn = { version = "0.6.0", features = ["accelerate"] }
-candle-transformers = { version = "0.6.0", features = ["accelerate"] }
+candle-core = { version = "0.6.0" }
+candle-nn = { version = "0.6.0" }
+candle-transformers = { version = "0.6.0" }
 
 # CUDA on everything else.
 [target.'cfg(not(any(target_os = "macos", target_os = "ios")))'.dependencies]

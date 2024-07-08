@@ -24,6 +24,11 @@ struct ContentView: View {
                     // print("using \(directory)");
                     
                     if directory.startAccessingSecurityScopedResource() {
+                        defer {
+                            print("revoking access");
+                            directory.stopAccessingSecurityScopedResource()
+                        }
+                        
                         let basePath = directory.path();
                         let topologyPath = basePath + "topology.yml";
                         let modelPath = basePath + "iphone-tensors";
@@ -31,14 +36,7 @@ struct ContentView: View {
                         // print("  topologyPath=\(topologyPath)");
                         // print("  modelPath=\(modelPath)");
                                                 
-                        Task {
-                            await startWorker(name:"iphone", modelPath: modelPath, topologyPath: topologyPath)
-                           
-                            print("revoking access");
-                            directory.stopAccessingSecurityScopedResource()
-                        }
-                        
-
+                        startWorker(name:"iphone", modelPath: modelPath, topologyPath: topologyPath)
                     } else {
                         print("access denied to \(directory)");
                     }
