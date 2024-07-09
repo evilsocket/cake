@@ -15,6 +15,8 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 
+const NUM_OPS_TO_STATS: usize = 5;
+
 struct WorkerContext {
     device: Device,
     device_idx: usize,
@@ -181,8 +183,6 @@ impl Worker {
                 }
             };
 
-            // log::info!("{}", if ops.len() == 1 { "RUN" } else { "BATCH" });
-
             // load raw tensor to device
             let mut x = x.to_tensor(&context.device).unwrap();
             let num_ops = ops.len();
@@ -224,18 +224,18 @@ impl Worker {
                 }
             }
 
-            if msg_idx % 3 == 0 {
+            // compute and print stats every NUM_OPS_TO_STATS operations to avoid spamming stdout
+            if msg_idx % NUM_OPS_TO_STATS == 0 {
                 log::info!(
                     "ops={}/s read={}/s write={}/s",
-                    avg_ops / 3,
-                    human_bytes::human_bytes(avg_read as f64 / 3.0),
-                    human_bytes::human_bytes(avg_write as f64 / 3.0)
+                    avg_ops / NUM_OPS_TO_STATS,
+                    human_bytes::human_bytes(avg_read as f64 / NUM_OPS_TO_STATS as f64),
+                    human_bytes::human_bytes(avg_write as f64 / NUM_OPS_TO_STATS as f64)
                 );
                 avg_ops = 0;
                 avg_write = 0;
                 avg_read = 0;
             }
-
             msg_idx += 1;
         }
 
