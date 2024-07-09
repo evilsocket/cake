@@ -4,15 +4,15 @@ use candle_nn::{Module, RmsNorm, VarBuilder};
 
 use async_trait::async_trait;
 
-use super::{Cache, Forwarder};
+use super::{Cache, CausalSelfAttention, Forwarder, MLP};
 
 #[derive(Debug, Clone)]
 pub struct Block {
     name: String,
     rms_1: RmsNorm,
-    attn: super::CausalSelfAttention,
+    attn: CausalSelfAttention,
     rms_2: RmsNorm,
-    mlp: super::MLP,
+    mlp: MLP,
 }
 
 impl Block {

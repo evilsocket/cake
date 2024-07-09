@@ -1,11 +1,19 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use super::{Context, Message, WorkerInfo};
 use crate::model::{Block, Cache};
 
 use anyhow::Result;
 use candle_core::{DType, Device};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+};
 
 struct WorkerContext {
     device: Device,
@@ -98,20 +106,35 @@ impl Worker {
         })
     }
 
+    async fn read_message_timed<R>(mut socket: R) -> Result<(Duration, usize, Message)>
+    where
+        R: AsyncReadExt + Unpin,
+    {
+        let start = Instant::now();
+        let (size, message) = Message::from_reader(&mut socket).await?;
+        let latency = start.elapsed();
+
+        Ok((latency, size, message))
+    }
+
+    async fn write_message_timed<W>(mut socket: W, message: Message) -> Result<(Duration, usize)>
+    where
+        W: AsyncWriteExt + Unpin,
+    {
+        let start = Instant::now();
+        let size = message.to_writer(&mut socket).await?;
+        let latency = start.elapsed();
+
+        Ok((latency, size))
+    }
+
     async fn handle_client(
         mut socket: TcpStream,
         client: SocketAddr,
         mut context: WorkerContext,
     ) -> Result<()> {
         // read and validate Hello
-        let start = Instant::now();
-        let hello = Message::from_reader(&mut socket).await;
-        let latency = start.elapsed();
-        let hello = if let Ok((_, hello)) = hello {
-            hello
-        } else {
-            return Err(anyhow!("[{}] could not read Hello: {:?}", &client, hello));
-        };
+        let (latency, _size, hello) = Self::read_message_timed(&mut socket).await?;
         if !matches!(hello, Message::Hello) {
             return Err(anyhow!(
                 "[{}] unpexpected message instead of hello: {:?}",
@@ -121,9 +144,12 @@ impl Worker {
         }
 
         // send info
-        let info = Message::WorkerInfo(context.to_info(latency.as_millis()));
-
-        if let Err(e) = info.to_writer(&mut socket).await {
+        if let Err(e) = Self::write_message_timed(
+            &mut socket,
+            Message::WorkerInfo(context.to_info(latency.as_millis())),
+        )
+        .await
+        {
             return Err(anyhow!("[{}] could not send worker info: {:?}", &client, e));
         }
 
@@ -132,97 +158,85 @@ impl Worker {
         let mut avg_write = 0;
         let mut avg_read = 0;
 
-        loop {
-            // read next message
-            let start_read = Instant::now();
-            let ret = Message::from_reader(&mut socket).await;
-            let elaps_read = start_read.elapsed();
-
-            if let Ok((msg_size, msg)) = ret {
-                let (x, ops) = match msg {
-                    // single block operation
-                    Message::TransformerOp {
-                        layer_name,
-                        x,
-                        index_pos,
-                        block_idx,
-                    } => (x, vec![(layer_name, index_pos, block_idx)]),
-                    Message::Batch { x, batch } => (x, batch),
-                    _ => {
-                        return Err(anyhow!(
-                            "[{}] unhandled message in loop: {:?}",
-                            &client,
-                            msg
-                        ));
-                    }
-                };
-
-                // load raw tensor to device
-                let mut x = x.to_tensor(&context.device).unwrap();
-
-                // log::info!("{}", if ops.len() == 1 { "RUN" } else { "BATCH" });
-
-                let num_ops = ops.len();
-                let start_ops = Instant::now();
-
-                // for each element in the ops batch
-                for (layer_name, index_pos, block_idx) in ops {
-                    // get layer block by name
-                    if let Some(block) = context.blocks.get(&layer_name) {
-                        // log::info!("  x = {}.forward(x, {index_pos}, {block_idx})", &layer_name);
-                        // run forward pass
-                        x = block
-                            .forward_imm(&x, index_pos, block_idx, &mut context.cache)
-                            .await
-                            .unwrap()
-                    } else {
-                        return Err(anyhow!("could not find layer {}", &layer_name));
-                    }
+        // keep reading messages
+        while let Ok((read_time, read_size, op_message)) =
+            Self::read_message_timed(&mut socket).await
+        {
+            let (x, ops) = match op_message {
+                // single block operation
+                Message::TransformerOp {
+                    layer_name,
+                    x,
+                    index_pos,
+                    block_idx,
+                } => (x, vec![(layer_name, index_pos, block_idx)]),
+                // batched
+                Message::Batch { x, batch } => (x, batch),
+                _ => {
+                    return Err(anyhow!(
+                        "[{}] unhandled message in loop: {:?}",
+                        &client,
+                        op_message
+                    ));
                 }
+            };
 
-                let elaps_ops = start_ops.elapsed();
-                let start_write = Instant::now();
+            // log::info!("{}", if ops.len() == 1 { "RUN" } else { "BATCH" });
 
-                // send response tensor
-                match Message::from_tensor(&x).to_writer(&mut socket).await {
-                    Err(e) => {
-                        return Err(anyhow!(
-                            "[{}] could not send response tensor: {:?}",
-                            &client,
-                            e
-                        ));
-                    }
-                    Ok(n) => {
-                        let elaps_write = start_write.elapsed();
+            // load raw tensor to device
+            let mut x = x.to_tensor(&context.device).unwrap();
+            let num_ops = ops.len();
+            let start_ops = Instant::now();
 
-                        let ops_per_sec = (num_ops as f64 / elaps_ops.as_secs_f64()) as usize;
-                        let write_bytes_per_sec = (n as f64 / elaps_write.as_secs_f64()) as usize;
-                        let read_bytes_per_sec =
-                            (msg_size as f64 / elaps_read.as_secs_f64()) as usize;
-
-                        avg_ops += ops_per_sec;
-                        avg_write += write_bytes_per_sec;
-                        avg_read += read_bytes_per_sec;
-                    }
+            // for each element in the ops batch
+            for (layer_name, index_pos, block_idx) in ops {
+                // get layer block by name
+                if let Some(block) = context.blocks.get(&layer_name) {
+                    // run forward pass
+                    x = block
+                        .forward_imm(&x, index_pos, block_idx, &mut context.cache)
+                        .await
+                        .unwrap()
+                } else {
+                    return Err(anyhow!("could not find layer {}", &layer_name));
                 }
-
-                if msg_idx % 3 == 0 {
-                    log::info!(
-                        "ops={}/s read={}/s write={}/s",
-                        avg_ops / 3,
-                        human_bytes::human_bytes(avg_read as f64 / 3.0),
-                        human_bytes::human_bytes(avg_write as f64 / 3.0)
-                    );
-                    avg_ops = 0;
-                    avg_write = 0;
-                    avg_read = 0;
-                }
-
-                msg_idx += 1;
-            } else {
-                log::error!("[{}] {:?}", &client, ret);
-                break;
             }
+
+            let elaps_ops = start_ops.elapsed();
+
+            // send response tensor
+            match Self::write_message_timed(&mut socket, Message::from_tensor(&x)).await {
+                Ok((elaps_write, written)) => {
+                    let ops_per_sec = (num_ops as f64 / elaps_ops.as_secs_f64()) as usize;
+                    let write_bytes_per_sec = (written as f64 / elaps_write.as_secs_f64()) as usize;
+                    let read_bytes_per_sec = (read_size as f64 / read_time.as_secs_f64()) as usize;
+
+                    avg_ops += ops_per_sec;
+                    avg_write += write_bytes_per_sec;
+                    avg_read += read_bytes_per_sec;
+                }
+                Err(e) => {
+                    return Err(anyhow!(
+                        "[{}] could not send response tensor: {:?}",
+                        &client,
+                        e
+                    ));
+                }
+            }
+
+            if msg_idx % 3 == 0 {
+                log::info!(
+                    "ops={}/s read={}/s write={}/s",
+                    avg_ops / 3,
+                    human_bytes::human_bytes(avg_read as f64 / 3.0),
+                    human_bytes::human_bytes(avg_write as f64 / 3.0)
+                );
+                avg_ops = 0;
+                avg_write = 0;
+                avg_read = 0;
+            }
+
+            msg_idx += 1;
         }
 
         Ok(())

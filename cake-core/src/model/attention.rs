@@ -28,7 +28,7 @@ impl CausalSelfAttention {
         index_pos: usize,
         cache: &super::Cache,
     ) -> Result<Tensor> {
-        let (_b_sz, _, seq_len, _hidden_size) = x.dims4()?;
+        let (_batch_size, _, seq_len, _hidden_size) = x.dims4()?;
         let cos = cache.cos.narrow(0, index_pos, seq_len)?;
         let sin = cache.sin.narrow(0, index_pos, seq_len)?;
         candle_nn::rotary_emb::rope(x, &cos, &sin)
