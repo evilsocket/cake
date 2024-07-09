@@ -348,9 +348,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "cake-reduce-safetensors"
+name = "cake-split-model"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "cake-core",
  "candle-core",
  "candle-nn",
@@ -359,6 +360,7 @@ dependencies = [
  "safetensors",
  "serde",
  "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]

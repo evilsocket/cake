@@ -1,5 +1,5 @@
 [package]
-name = "cake-reduce-safetensors"
+name = "cake-split-model"
 version = "0.1.0"
 edition = "2021"
 
@@ -12,3 +12,5 @@ serde_json = "1.0.120"
 memmap2 = "0.9.4"
 candle-core = "0.6.0"
 candle-nn = "0.6.0"
+anyhow = "1.0.86"
+serde_yaml = "0.9.34"
