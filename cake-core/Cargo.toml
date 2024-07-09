@@ -28,11 +28,11 @@ candle-nn = { version = "0.6.0", features = ["metal"] }
 candle-transformers = { version = "0.6.0", features = ["metal"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
+# https://github.com/huggingface/candle/issues/2322
+# https://github.com/huggingface/candle/issues/1841
 # candle-core = { version = "0.6.0", features = ["metal"] }
 # candle-nn = { version = "0.6.0", features = ["metal"] }
 # candle-transformers = { version = "0.6.0", features = ["metal"] }
-# https://github.com/huggingface/candle/issues/2322
-# https://github.com/huggingface/candle/issues/1841
 candle-core = { version = "0.6.0" }
 candle-nn = { version = "0.6.0" }
 candle-transformers = { version = "0.6.0" }
