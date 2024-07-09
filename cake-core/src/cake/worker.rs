@@ -242,18 +242,21 @@ impl Worker {
         Ok(())
     }
 
+    fn create_worker_context(&self) -> WorkerContext {
+        WorkerContext {
+            device: self.device.clone(),
+            device_idx: self.device_idx,
+            dtype: self.dtype,
+            blocks: self.blocks.clone(),
+            cache: self.cache.as_new(), // each client loop gets a new cache
+        }
+    }
+
     pub async fn run(&mut self) -> Result<()> {
         while let Ok((socket, client)) = self.listener.accept().await {
             log::info!("{} connected", &client);
 
-            let context = WorkerContext {
-                device: self.device.clone(),
-                device_idx: self.device_idx,
-                dtype: self.dtype,
-                blocks: self.blocks.clone(),
-                cache: self.cache.as_new(), // each client loop gets a new cache
-            };
-
+            let context = self.create_worker_context();
             tokio::spawn(async move {
                 if let Err(e) = Self::handle_client(socket, client, context).await {
                     log::error!("{}", e);
