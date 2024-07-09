@@ -6,7 +6,7 @@ build:
 
 test:
 	cargo test
-	
+
 lint:
 	cargo clippy --all-targets --all-features -- -D warnings
 
@@ -28,4 +28,15 @@ ios: ios_bindings
 	rm -rf ./cake-ios/bindings
 
 sync_bahamut:
-	rsync -rvzc --exclude=cake-data/cake-data-iphone --exclude=cake-data/Meta-Llama-3-8B --exclude=.git --exclude=target . bahamut.local:/home/evilsocket/llama3-cake
+	@echo "@ bahamut sync && build ..."
+	@rsync -rvzc --exclude=cake-data --exclude=.git --exclude=target . bahamut.local:/home/evilsocket/llama3-cake
+	@rsync -rvzc cake-data/topology.yml bahamut.local:/home/evilsocket/llama3-cake-data
+	@ssh bahamut.local "cd /home/evilsocket/llama3-cake && cargo build --release"
+
+sync_blade:
+	@echo "@ blade sync && build ..."
+	@rsync -rvzc --exclude=cake-data --exclude=.git --exclude=target . blade.local:/home/evilsocket/llama3-cake
+	@rsync -rvzc cake-data/topology.yml blade.local:/home/evilsocket/llama3-cake-data
+	@ssh blade.local "cd /home/evilsocket/llama3-cake && cargo build --release"
+
+sync: sync_bahamut sync_blade
