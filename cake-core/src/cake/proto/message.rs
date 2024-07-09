@@ -93,7 +93,7 @@ impl Message {
         bitcode::deserialize(raw).map_err(|e| anyhow!(e))
     }
 
-    pub async fn from_reader<R>(reader: &mut R) -> Result<Self>
+    pub async fn from_reader<R>(reader: &mut R) -> Result<(usize, Self)>
     where
         R: AsyncReadExt + Unpin,
     {
@@ -111,10 +111,10 @@ impl Message {
 
         reader.read_exact(&mut req).await?;
 
-        Self::from_bytes(&req)
+        Ok((req.len(), Self::from_bytes(&req)?))
     }
 
-    pub async fn to_writer<W>(&self, writer: &mut W) -> Result<()>
+    pub async fn to_writer<W>(&self, writer: &mut W) -> Result<usize>
     where
         W: AsyncWriteExt + Unpin,
     {
@@ -128,6 +128,6 @@ impl Message {
         writer.write_u32(req_size).await?;
         writer.write_all(&req).await?;
 
-        Ok(())
+        Ok(8 + req.len())
     }
 }

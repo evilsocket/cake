@@ -4,16 +4,17 @@ clean:
 build:
 	cargo build
 
+lint:
+	cargo clippy --all-targets --all-features -- -D warnings
+
 build_release:
 	cargo build --release
-
-build_aarch64:
-    cargo build --release --target=aarch64-apple-ios
 
 ios_bindings: build
 	cargo run --bin uniffi-bindgen generate --library ./target/debug/libcake.dylib --language swift --out-dir ./cake-ios/bindings
  
-ios: ios_bindings build_aarch64
+ios: ios_bindings
+	cargo build --release --target=aarch64-apple-ios
 	mv ./cake-ios/bindings/cakeFFI.modulemap ./cake-ios/bindings/module.modulemap
 	rm ./cake-ios-worker-app/Cake\ Worker/Cake.swift
 	mv ./cake-ios/bindings/cake.swift ./cake-ios-worker-app/Cake\ Worker/Cake.swift

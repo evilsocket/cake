@@ -15,6 +15,26 @@ struct WorkerContext {
     cache: Cache,
 }
 
+impl WorkerContext {
+    fn to_info(&self, latency: u128) -> WorkerInfo {
+        WorkerInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            os: std::env::consts::OS.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+            device: if self.device.is_cuda() {
+                "cuda".to_string()
+            } else if self.device.is_metal() {
+                "metal".to_string()
+            } else {
+                "cpu".to_string()
+            },
+            device_idx: self.device_idx,
+            latency,
+            dtype: format!("{:?}", self.dtype),
+        }
+    }
+}
+
 pub struct Worker {
     listener: TcpListener,
 
@@ -87,7 +107,7 @@ impl Worker {
         let start = Instant::now();
         let hello = Message::from_reader(&mut socket).await;
         let latency = start.elapsed();
-        let hello = if let Ok(hello) = hello {
+        let hello = if let Ok((_, hello)) = hello {
             hello
         } else {
             return Err(anyhow!("[{}] could not read Hello: {:?}", &client, hello));
@@ -101,73 +121,107 @@ impl Worker {
         }
 
         // send info
-        let info = Message::WorkerInfo(WorkerInfo {
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            os: std::env::consts::OS.to_string(),
-            arch: std::env::consts::ARCH.to_string(),
-            device: if context.device.is_cuda() {
-                "cuda".to_string()
-            } else if context.device.is_metal() {
-                "metal".to_string()
-            } else {
-                "cpu".to_string()
-            },
-            device_idx: context.device_idx,
-            latency: latency.as_millis(),
-            dtype: format!("{:?}", context.dtype),
-        });
+        let info = Message::WorkerInfo(context.to_info(latency.as_millis()));
 
         if let Err(e) = info.to_writer(&mut socket).await {
             return Err(anyhow!("[{}] could not send worker info: {:?}", &client, e));
         }
 
-        // read next message
-        while let Ok(msg) = Message::from_reader(&mut socket).await {
-            let (x, ops) = match msg {
-                // single block operation
-                Message::TransformerOp {
-                    layer_name,
-                    x,
-                    index_pos,
-                    block_idx,
-                } => (x, vec![(layer_name, index_pos, block_idx)]),
-                Message::Batch { x, batch } => (x, batch),
-                _ => {
-                    return Err(anyhow!(
-                        "[{}] unhandled message in loop: {:?}",
-                        &client,
-                        msg
-                    ));
+        let mut msg_idx = 0;
+        let mut avg_ops = 0;
+        let mut avg_write = 0;
+        let mut avg_read = 0;
+
+        loop {
+            // read next message
+            let start_read = Instant::now();
+            let ret = Message::from_reader(&mut socket).await;
+            let elaps_read = start_read.elapsed();
+
+            if let Ok((msg_size, msg)) = ret {
+                let (x, ops) = match msg {
+                    // single block operation
+                    Message::TransformerOp {
+                        layer_name,
+                        x,
+                        index_pos,
+                        block_idx,
+                    } => (x, vec![(layer_name, index_pos, block_idx)]),
+                    Message::Batch { x, batch } => (x, batch),
+                    _ => {
+                        return Err(anyhow!(
+                            "[{}] unhandled message in loop: {:?}",
+                            &client,
+                            msg
+                        ));
+                    }
+                };
+
+                // load raw tensor to device
+                let mut x = x.to_tensor(&context.device).unwrap();
+
+                // log::info!("{}", if ops.len() == 1 { "RUN" } else { "BATCH" });
+
+                let num_ops = ops.len();
+                let start_ops = Instant::now();
+
+                // for each element in the ops batch
+                for (layer_name, index_pos, block_idx) in ops {
+                    // get layer block by name
+                    if let Some(block) = context.blocks.get(&layer_name) {
+                        // log::info!("  x = {}.forward(x, {index_pos}, {block_idx})", &layer_name);
+                        // run forward pass
+                        x = block
+                            .forward_imm(&x, index_pos, block_idx, &mut context.cache)
+                            .await
+                            .unwrap()
+                    } else {
+                        return Err(anyhow!("could not find layer {}", &layer_name));
+                    }
                 }
-            };
 
-            // load raw tensor to device
-            let mut x = x.to_tensor(&context.device).unwrap();
+                let elaps_ops = start_ops.elapsed();
+                let start_write = Instant::now();
 
-            // log::info!("{}", if ops.len() == 1 { "RUN" } else { "BATCH" });
+                // send response tensor
+                match Message::from_tensor(&x).to_writer(&mut socket).await {
+                    Err(e) => {
+                        return Err(anyhow!(
+                            "[{}] could not send response tensor: {:?}",
+                            &client,
+                            e
+                        ));
+                    }
+                    Ok(n) => {
+                        let elaps_write = start_write.elapsed();
 
-            // for each element in the ops batch
-            for (layer_name, index_pos, block_idx) in ops {
-                // get layer block by name
-                if let Some(block) = context.blocks.get(&layer_name) {
-                    // log::info!("  x = {}.forward(x, {index_pos}, {block_idx})", &layer_name);
-                    // run forward pass
-                    x = block
-                        .forward_imm(&x, index_pos, block_idx, &mut context.cache)
-                        .await
-                        .unwrap()
-                } else {
-                    return Err(anyhow!("could not find layer {}", &layer_name));
+                        let ops_per_sec = (num_ops as f64 / elaps_ops.as_secs_f64()) as usize;
+                        let write_bytes_per_sec = (n as f64 / elaps_write.as_secs_f64()) as usize;
+                        let read_bytes_per_sec =
+                            (msg_size as f64 / elaps_read.as_secs_f64()) as usize;
+
+                        avg_ops += ops_per_sec;
+                        avg_write += write_bytes_per_sec;
+                        avg_read += read_bytes_per_sec;
+                    }
                 }
-            }
 
-            // send response tensor
-            if let Err(e) = Message::from_tensor(&x).to_writer(&mut socket).await {
-                return Err(anyhow!(
-                    "[{}] could not send response tensor: {:?}",
-                    &client,
-                    e
-                ));
+                if msg_idx % 3 == 0 {
+                    log::info!(
+                        "ops={}/s read={}/s write={}/s",
+                        avg_ops / 3,
+                        human_bytes::human_bytes(avg_read as f64 / 3.0),
+                        human_bytes::human_bytes(avg_write as f64 / 3.0)
+                    );
+                    avg_ops = 0;
+                    avg_write = 0;
+                    avg_read = 0;
+                }
+
+                msg_idx += 1;
+            } else {
+                log::error!("[{}] {:?}", &client, ret);
+                break;
             }
         }
 
@@ -181,7 +235,7 @@ impl Worker {
             let context = WorkerContext {
                 device: self.device.clone(),
                 device_idx: self.device_idx,
-                dtype: self.dtype.clone(),
+                dtype: self.dtype,
                 blocks: self.blocks.clone(),
                 cache: self.cache.as_new(), // each client loop gets a new cache
             };

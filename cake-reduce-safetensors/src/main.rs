@@ -74,7 +74,7 @@ fn main() {
 
     let tensors_index_path = data_path.join("model.safetensors.index.json");
     let tensors_index_data =
-        std::fs::read_to_string(&tensors_index_path).expect("can't read tensors index");
+        std::fs::read_to_string(tensors_index_path).expect("can't read tensors index");
     let tensors_index: Index =
         serde_json::from_str(&tensors_index_data).expect("can't parse index");
 
@@ -84,7 +84,7 @@ fn main() {
     println!("index has {} tensors", tensors_index.weight_map.len());
 
     for (layer_full_name, filename) in &tensors_index.weight_map {
-        if worker_node.is_layer_owner(&layer_full_name) {
+        if worker_node.is_layer_owner(layer_full_name) {
             //println!("{} {}", layer_full_name, filename);
             if let Some(layers) = reduced.get_mut(filename) {
                 layers.push(layer_full_name.to_string());
