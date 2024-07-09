@@ -19,7 +19,7 @@ pub struct Node {
 impl Node {
     pub fn is_layer_owner(&self, full_layer_name: &str) -> bool {
         for prefix in &self.layers {
-            if full_layer_name.starts_with(prefix) {
+            if full_layer_name.starts_with(&format!("{}.", prefix)) {
                 return true;
             }
         }
