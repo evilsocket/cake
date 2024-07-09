@@ -1,6 +1,5 @@
 use candle_core::{Result, Tensor};
-use candle_nn::{Module, VarBuilder};
-use candle_transformers::models::with_tracing::{linear_no_bias as linear, Linear};
+use candle_nn::{linear_no_bias as linear, Linear, Module, VarBuilder};
 
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone)]

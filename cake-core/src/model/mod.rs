@@ -15,9 +15,7 @@ pub use transformer::*;
 
 use anyhow::Result;
 use candle_core::{DType, Device, IndexOp, Tensor};
-use candle_nn::Embedding;
-use candle_nn::{Module, VarBuilder};
-use candle_transformers::models::with_tracing::{linear_no_bias as linear, Linear, RmsNorm};
+use candle_nn::{linear_no_bias as linear, Embedding, Linear, Module, RmsNorm, VarBuilder};
 
 use crate::cake::{Forwarder, Topology};
 
@@ -90,7 +88,7 @@ impl Llama {
         let lm_head = linear(cfg.hidden_size, cfg.vocab_size, vb.pp("lm_head"))?;
 
         log::info!("loading model.norm ...");
-        let ln_f = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("model.norm"))?;
+        let ln_f = candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("model.norm"))?;
 
         log::info!("loading {} blocks ...", cfg.num_hidden_layers);
 

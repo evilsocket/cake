@@ -36,13 +36,14 @@ pub fn start_worker(name: String, model_path: String, topology_path: String) {
 
     log::debug!("@ creating context");
 
-    let mut args = Args::default();
-
-    args.address = "0.0.0.0:10128".to_string();
-    args.mode = Mode::Worker;
-    args.name = Some(name);
-    args.model = model_path;
-    args.topology = topology_path;
+    let args = Args {
+        address: "0.0.0.0:10128".to_string(),
+        mode: Mode::Worker,
+        name: Some(name),
+        model: model_path,
+        topology: topology_path,
+        ..Default::default()
+    };
 
     let ctx = match Context::from_args(args) {
         Ok(ctx) => ctx,

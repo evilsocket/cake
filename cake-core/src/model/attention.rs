@@ -1,6 +1,5 @@
 use candle_core::{DType, Result, Tensor, D};
-use candle_nn::{Module, VarBuilder};
-use candle_transformers::models::with_tracing::{linear_no_bias as linear, Linear};
+use candle_nn::{linear_no_bias as linear, Linear, Module, VarBuilder};
 
 use super::MAX_SEQ_LEN;
 

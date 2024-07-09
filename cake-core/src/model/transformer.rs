@@ -1,7 +1,6 @@
 use anyhow::Result;
 use candle_core::Tensor;
-use candle_nn::{Module, VarBuilder};
-use candle_transformers::models::with_tracing::RmsNorm;
+use candle_nn::{Module, RmsNorm, VarBuilder};
 
 use async_trait::async_trait;
 
@@ -21,8 +20,9 @@ impl Block {
         let name = name.to_string();
         let attn = super::CausalSelfAttention::load(vb.pp("self_attn"), cfg)?;
         let mlp = super::MLP::load(vb.pp("mlp"), cfg)?;
-        let rms_1 = RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
-        let rms_2 = RmsNorm::new(
+        let rms_1 =
+            candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
+        let rms_2 = candle_nn::rms_norm(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb.pp("post_attention_layernorm"),
