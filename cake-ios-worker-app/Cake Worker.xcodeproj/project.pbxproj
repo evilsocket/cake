@@ -13,7 +13,6 @@
 		8830A11F2C3B019900BA42B5 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8830A11E2C3B019900BA42B5 /* Preview Assets.xcassets */; };
 		8876468D2C3B0261007A32E0 /* Cake.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8876468C2C3B0261007A32E0 /* Cake.swift */; };
 		8876468F2C3B05DB007A32E0 /* Cake.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8876468E2C3B05DB007A32E0 /* Cake.xcframework */; };
-		887646922C3B078F007A32E0 /* Accelerate.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 887646912C3B078F007A32E0 /* Accelerate.framework */; };
 		887646942C3B07A7007A32E0 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 887646932C3B07A7007A32E0 /* Metal.framework */; };
 		887646972C3B08B3007A32E0 /* MetalPerformanceShadersGraph.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 887646952C3B08B3007A32E0 /* MetalPerformanceShadersGraph.framework */; };
 		887646982C3B08B3007A32E0 /* MetalPerformanceShaders.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 887646962C3B08B3007A32E0 /* MetalPerformanceShaders.framework */; };
@@ -41,7 +40,6 @@
 				887646982C3B08B3007A32E0 /* MetalPerformanceShaders.framework in Frameworks */,
 				8876468F2C3B05DB007A32E0 /* Cake.xcframework in Frameworks */,
 				887646942C3B07A7007A32E0 /* Metal.framework in Frameworks */,
-				887646922C3B078F007A32E0 /* Accelerate.framework in Frameworks */,
 				887646972C3B08B3007A32E0 /* MetalPerformanceShadersGraph.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

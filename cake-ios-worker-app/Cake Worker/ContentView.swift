@@ -31,7 +31,7 @@ struct ContentView: View {
                         
                         let basePath = directory.path();
                         let topologyPath = basePath + "topology.yml";
-                        let modelPath = basePath + "iphone-tensors";
+                        let modelPath = basePath + "model";
                         
                         // print("  topologyPath=\(topologyPath)");
                         // print("  modelPath=\(modelPath)");

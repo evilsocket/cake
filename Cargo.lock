@@ -146,9 +146,9 @@ dependencies = [
 
 [[package]]
 name = "async-trait"
-version = "0.1.80"
+version = "0.1.81"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6fa2087f2753a7da8cc1c0dbfcf89579dd57458e36769de5ac750b4671737ca"
+checksum = "6e0c28dcc82d7c8ead5cb13beb15405b57b8546e93215673ff8ca0349a028107"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -316,8 +316,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "bitcode",
- "candle-core",
- "candle-nn",
+ "candle-core 0.6.0 (git+https://github.com/evilsocket/candle.git?branch=metal_ios_support)",
+ "candle-nn 0.6.0 (git+https://github.com/evilsocket/candle.git?branch=metal_ios_support)",
  "candle-transformers",
  "clap",
  "human_bytes",
@@ -353,8 +353,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cake-core",
- "candle-core",
- "candle-nn",
+ "candle-core 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "candle-nn 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "clap",
  "memmap2",
  "safetensors",
@@ -379,6 +379,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5b18de020c2729dbf7ac390325312644808b6ba9b7962f1f724e9185b1d53c7"
 dependencies = [
  "byteorder",
+ "gemm",
+ "half",
+ "memmap2",
+ "num-traits",
+ "num_cpus",
+ "rand",
+ "rand_distr",
+ "rayon",
+ "safetensors",
+ "thiserror",
+ "yoke",
+ "zip",
+]
+
+[[package]]
+name = "candle-core"
+version = "0.6.0"
+source = "git+https://github.com/evilsocket/candle.git?branch=metal_ios_support#2c0978c4f909a30ae1a6c3961c9676fe0cbdbe47"
+dependencies = [
+ "byteorder",
  "candle-kernels",
  "candle-metal-kernels",
  "cudarc",
@@ -400,8 +420,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bc0a71be8b2f0950b63fd602a5e10a74a4f94a5fd63059ae455e96163389488"
+source = "git+https://github.com/evilsocket/candle.git?branch=metal_ios_support#2c0978c4f909a30ae1a6c3961c9676fe0cbdbe47"
 dependencies = [
  "bindgen_cuda",
 ]
@@ -409,8 +428,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f889aacd02fd999620a0435133d7cf3b58c81ef9dd5e47c38939b7a72345ea86"
+source = "git+https://github.com/evilsocket/candle.git?branch=metal_ios_support#2c0978c4f909a30ae1a6c3961c9676fe0cbdbe47"
 dependencies = [
  "metal",
  "once_cell",
@@ -424,7 +442,21 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b006b30f66a0d94fc9cef0ac4de6ce510565f35ae2c6c35ce5d4aacfb0fc8eeb"
 dependencies = [
- "candle-core",
+ "candle-core 0.6.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "half",
+ "num-traits",
+ "rayon",
+ "safetensors",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "candle-nn"
+version = "0.6.0"
+source = "git+https://github.com/evilsocket/candle.git?branch=metal_ios_support#2c0978c4f909a30ae1a6c3961c9676fe0cbdbe47"
+dependencies = [
+ "candle-core 0.6.0 (git+https://github.com/evilsocket/candle.git?branch=metal_ios_support)",
  "candle-metal-kernels",
  "half",
  "metal",
@@ -438,12 +470,11 @@ dependencies = [
 [[package]]
 name = "candle-transformers"
 version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f0d4eb6a0d9279d5829b06b2bf3caa117904eefd6dcf879d16e687c4a84034c"
+source = "git+https://github.com/evilsocket/candle.git?branch=metal_ios_support#2c0978c4f909a30ae1a6c3961c9676fe0cbdbe47"
 dependencies = [
  "byteorder",
- "candle-core",
- "candle-nn",
+ "candle-core 0.6.0 (git+https://github.com/evilsocket/candle.git?branch=metal_ios_support)",
+ "candle-nn 0.6.0 (git+https://github.com/evilsocket/candle.git?branch=metal_ios_support)",
  "fancy-regex",
  "num-traits",
  "rand",
@@ -479,9 +510,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.0.105"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5208975e568d83b6b05cc0a063c8e7e9acc2b43bee6da15616a5b73e109d7437"
+checksum = "eaff6f8ce506b9773fa786672d63fc7a191ffea1be33f72bbd4aeacefca9ffc8"
 
 [[package]]
 name = "cfg-if"
@@ -491,9 +522,9 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
 name = "clap"
-version = "4.5.8"
+version = "4.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84b3edb18336f4df585bc9aa31dd99c036dfa5dc5e9a2939a722a188f3a8970d"
+checksum = "64acc1846d54c1fe936a78dc189c34e28d3f5afc348403f28ecf53660b9b8462"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -501,9 +532,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.5.8"
+version = "4.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1c09dd5ada6c6c78075d6fd0da3f90d8080651e2d6cc8eb2f1aaa4034ced708"
+checksum = "6fb8393d67ba2e7bfaf28a23458e4e2b543cc73a99595511eb207fdb8aede942"
 dependencies = [
  "anstream",
  "anstyle",
@@ -627,9 +658,9 @@ dependencies = [
 
 [[package]]
 name = "darling"
-version = "0.20.9"
+version = "0.20.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83b2eb4d90d12bdda5ed17de686c2acb4c57914f8f921b8da7e112b5a36f3fe1"
+checksum = "6f63b86c8a8826a49b8c21f08a2d07338eec8d900540f8630dc76284be802989"
 dependencies = [
  "darling_core",
  "darling_macro",
@@ -637,9 +668,9 @@ dependencies = [
 
 [[package]]
 name = "darling_core"
-version = "0.20.9"
+version = "0.20.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "622687fe0bac72a04e5599029151f5796111b90f1baaa9b544d807a5e31cd120"
+checksum = "95133861a8032aaea082871032f5815eb9e98cef03fa916ab4500513994df9e5"
 dependencies = [
  "fnv",
  "ident_case",
@@ -651,9 +682,9 @@ dependencies = [
 
 [[package]]
 name = "darling_macro"
-version = "0.20.9"
+version = "0.20.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "733cabb43482b1a1b53eee8583c2b9e8684d592215ea83efd305dd31bc2f0178"
+checksum = "d336a2a514f6ccccaa3e09b02d41d35330c07ddf03a62165fcec10bb561c7806"
 dependencies = [
  "darling_core",
  "quote",
@@ -1832,9 +1863,9 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "syn"
-version = "2.0.69"
+version = "2.0.70"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "201fcda3845c23e8212cd466bfebf0bd20694490fc0356ae8e428e0824a915a6"
+checksum = "2f0209b68b3613b093e0ec905354eccaedcfe83b8cb37cbdeae64026c3064c16"
 dependencies = [
  "proc-macro2",
  "quote",

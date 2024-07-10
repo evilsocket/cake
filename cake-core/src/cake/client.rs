@@ -42,8 +42,13 @@ impl Client {
     }
 
     async fn request(&mut self, req: Message) -> Result<Message> {
-        req.to_writer(&mut self.stream).await?;
-        let (_, msg) = super::Message::from_reader(&mut self.stream).await?;
+        req.to_writer(&mut self.stream)
+            .await
+            .map_err(|e| anyhow!("error sending message {:?}: {}", req, e))?;
+
+        let (_, msg) = super::Message::from_reader(&mut self.stream)
+            .await
+            .map_err(|e| anyhow!("error receiving response for {:?}: {}", req, e))?;
         Ok(msg)
     }
 
