@@ -32,6 +32,20 @@ worker1:
     - 'model.layers.16-31'
 ```
 
+## Support
+
+| OS                           | Architectures | Acceleration | Status |
+|:----------------------------------:|:------------------:|:------------------:|:------------------:|
+| GNU/Linux                 | arm, arm64, x86_64 | -                | :heavy_check_mark: |
+| GNU/Linux                 | arm, arm64, x86_64 | CUDA                | :heavy_check_mark: |
+| GNU/Linux                 | arm, arm64, x86_64 | BLAS                | :heavy_check_mark: |
+| macOS                 | intel | -                | :heavy_check_mark: |
+| macOS                 | aarch64 | -                | :heavy_check_mark: |
+| macOS                 | aarch64 | metal                | :heavy_check_mark: |
+| iOS / iPadOS                 | aarch64 | -                | :heavy_check_mark: |
+| iOS / iPadOS                 | aarch64 | metal                | [90% done, WIP](https://github.com/huggingface/candle/issues/2322) |
+| WebGPU                 | - | webgpu                | [in theory possible, not done](https://onnxruntime.ai/docs/tutorials/web/ep-webgpu.html) |
+
 ## License
 
 Released under the GPL 3 license. To see the licenses of the project dependencies, install cargo license with `cargo install cargo-license` and then run `cargo license`.
