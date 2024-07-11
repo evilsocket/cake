@@ -42,13 +42,18 @@ impl Llama {
         let num_blocks = self.blocks.len();
         let mut block_idx = 0;
 
+        log::info!("X = {}", &x);
+
         while block_idx < num_blocks {
-            let curr_block_id = self.blocks[block_idx].ident();
+            let curr_block_id = self.blocks[block_idx].ident().to_owned();
             if curr_block_id == "local" {
                 // do not batch local inferences
                 x = self.blocks[block_idx]
                     .forward(&x, index_pos, block_idx, cache)
-                    .await?;
+                    .await
+                    .map_err(|e| {
+                        anyhow!("error in forward operation of local block {block_idx}: {e}")
+                    })?;
 
                 block_idx += 1;
             } else {
@@ -64,14 +69,36 @@ impl Llama {
                     block_idx += 1;
                 }
 
-                x = self.blocks[first].forward_batch(&x, batch, cache).await?;
+                x = self.blocks[first]
+                    .forward_batch(&x, batch, cache)
+                    .await
+                    .map_err(|e| {
+                        anyhow!("error in forward batch operation for block {block_idx}: {e}")
+                    })?;
             }
+
+            log::info!("{}.forward(X) -> {}", &curr_block_id, &x);
         }
 
-        let x = self.ln_f.forward(&x)?;
-        let x = x.i((.., seq_len - 1, ..))?.contiguous()?;
-        let logits = self.lm_head.forward(&x)?;
-        logits.to_dtype(DType::F32).map_err(|e| anyhow!(e))
+        let x = self
+            .ln_f
+            .forward(&x)
+            .map_err(|e| anyhow!("error in ln_f.forward: {e}"))?;
+
+        let x = x
+            .i((.., seq_len - 1, ..))
+            .map_err(|e| anyhow!("error in x.i: {e}"))?
+            .contiguous()
+            .map_err(|e| anyhow!("error in x.i.contiguous: {e}"))?;
+
+        let logits = self
+            .lm_head
+            .forward(&x)
+            .map_err(|e| anyhow!("error in lm_head.forward: {e}"))?;
+
+        logits
+            .to_dtype(DType::F32)
+            .map_err(|e| anyhow!("error converting logits: {e}"))
     }
 
     pub async fn load(

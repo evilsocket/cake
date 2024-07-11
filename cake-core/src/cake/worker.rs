@@ -196,7 +196,7 @@ impl Worker {
                     x = block
                         .forward_imm(&x, index_pos, block_idx, &mut context.cache)
                         .await
-                        .unwrap()
+                        .unwrap();
                 } else {
                     return Err(anyhow!("could not find layer {}", &layer_name));
                 }

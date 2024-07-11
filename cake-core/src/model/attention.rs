@@ -1,8 +1,6 @@
 use candle_core::{DType, Result, Tensor, D};
 use candle_nn::{linear_no_bias as linear, Linear, Module, VarBuilder};
 
-use super::MAX_SEQ_LEN;
-
 #[derive(Debug, Clone)]
 pub struct CausalSelfAttention {
     q_proj: Linear,
@@ -29,8 +27,8 @@ impl CausalSelfAttention {
         cache: &super::Cache,
     ) -> Result<Tensor> {
         let (_batch_size, _, seq_len, _hidden_size) = x.dims4()?;
-        let cos = cache.cos.narrow(0, index_pos, seq_len)?;
-        let sin = cache.sin.narrow(0, index_pos, seq_len)?;
+        let cos = cache.cosine(index_pos, seq_len)?;
+        let sin = cache.sine(index_pos, seq_len)?;
         candle_nn::rotary_emb::rope(x, &cos, &sin)
     }
 
@@ -54,32 +52,14 @@ impl CausalSelfAttention {
             .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
             .transpose(1, 2)?
             .contiguous()?;
-        let mut v = v
+        let v = v
             .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
             .transpose(1, 2)?;
 
         let q = self.apply_rotary_emb(&q, index_pos, cache)?;
-        let mut k = self.apply_rotary_emb(&k, index_pos, cache)?;
+        let k = self.apply_rotary_emb(&k, index_pos, cache)?;
 
-        if cache.use_kv_cache {
-            if let Some((cache_k, cache_v)) = &cache.kvs[block_idx] {
-                k = Tensor::cat(&[cache_k, &k], 2)?.contiguous()?;
-                v = Tensor::cat(&[cache_v, &v], 2)?.contiguous()?;
-                let k_seq_len = k.dims()[1];
-                if k_seq_len > MAX_SEQ_LEN {
-                    k = k
-                        .narrow(D::Minus1, k_seq_len - MAX_SEQ_LEN, MAX_SEQ_LEN)?
-                        .contiguous()?
-                }
-                let v_seq_len = v.dims()[1];
-                if v_seq_len > 2 * MAX_SEQ_LEN {
-                    v = v
-                        .narrow(D::Minus1, v_seq_len - MAX_SEQ_LEN, MAX_SEQ_LEN)?
-                        .contiguous()?
-                }
-            }
-            cache.kvs[block_idx] = Some((k.clone(), v.clone()))
-        }
+        let (k, v) = cache.process_kv(block_idx, k, v)?;
 
         let k = self.repeat_kv(k)?;
         let v = self.repeat_kv(v)?;

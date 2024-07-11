@@ -45,10 +45,12 @@ impl Block {
     ) -> Result<Tensor> {
         // log::info!("block forward[{index_pos}, {block_idx}]");
         let residual = x;
+
         let x = self.rms_1.forward(x)?;
         let x = (self.attn.forward(&x, index_pos, block_idx, cache)? + residual)?;
         let residual = &x;
-        let x = (self.mlp.forward(&self.rms_2.forward(&x)?)? + residual)?;
+        let x = self.rms_2.forward(&x)?;
+        let x = (self.mlp.forward(&x)? + residual)?;
         Ok(x)
     }
 }

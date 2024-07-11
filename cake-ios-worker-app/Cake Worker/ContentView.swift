@@ -9,15 +9,19 @@ import SwiftUI
 
 struct ContentView: View {
     @State private var showActionSheet = false
+    @State private var buttonTitle: String = "Run Node"
 
     var body: some View {
         VStack {
             Image(systemName: "brain")
                 .imageScale(.large)
                 .foregroundStyle(.tint)
-            Button("Run Node") {
+            Button(buttonTitle) {
                 showActionSheet = true
+                buttonTitle = "Running ..."
             }
+            .buttonStyle(.borderless)
+            .controlSize(.large)
             .fileImporter(isPresented: $showActionSheet, allowedContentTypes: [.folder]) { result in
                 switch result {
                   case .success(let directory):

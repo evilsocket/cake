@@ -396,7 +396,7 @@ dependencies = [
 [[package]]
 name = "candle-core"
 version = "0.6.0"
-source = "git+https://github.com/evilsocket/candle.git?branch=metal_ios_support#2c0978c4f909a30ae1a6c3961c9676fe0cbdbe47"
+source = "git+https://github.com/evilsocket/candle.git?branch=metal_ios_support#fbebf3fcd8ce4fb29fecbaf74b61c56a393ddfbb"
 dependencies = [
  "byteorder",
  "candle-kernels",
@@ -420,7 +420,7 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.6.0"
-source = "git+https://github.com/evilsocket/candle.git?branch=metal_ios_support#2c0978c4f909a30ae1a6c3961c9676fe0cbdbe47"
+source = "git+https://github.com/evilsocket/candle.git?branch=metal_ios_support#fbebf3fcd8ce4fb29fecbaf74b61c56a393ddfbb"
 dependencies = [
  "bindgen_cuda",
 ]
@@ -428,7 +428,7 @@ dependencies = [
 [[package]]
 name = "candle-metal-kernels"
 version = "0.6.0"
-source = "git+https://github.com/evilsocket/candle.git?branch=metal_ios_support#2c0978c4f909a30ae1a6c3961c9676fe0cbdbe47"
+source = "git+https://github.com/evilsocket/candle.git?branch=metal_ios_support#fbebf3fcd8ce4fb29fecbaf74b61c56a393ddfbb"
 dependencies = [
  "metal",
  "once_cell",
@@ -454,7 +454,7 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.6.0"
-source = "git+https://github.com/evilsocket/candle.git?branch=metal_ios_support#2c0978c4f909a30ae1a6c3961c9676fe0cbdbe47"
+source = "git+https://github.com/evilsocket/candle.git?branch=metal_ios_support#fbebf3fcd8ce4fb29fecbaf74b61c56a393ddfbb"
 dependencies = [
  "candle-core 0.6.0 (git+https://github.com/evilsocket/candle.git?branch=metal_ios_support)",
  "candle-metal-kernels",
@@ -470,7 +470,7 @@ dependencies = [
 [[package]]
 name = "candle-transformers"
 version = "0.6.0"
-source = "git+https://github.com/evilsocket/candle.git?branch=metal_ios_support#2c0978c4f909a30ae1a6c3961c9676fe0cbdbe47"
+source = "git+https://github.com/evilsocket/candle.git?branch=metal_ios_support#fbebf3fcd8ce4fb29fecbaf74b61c56a393ddfbb"
 dependencies = [
  "byteorder",
  "candle-core 0.6.0 (git+https://github.com/evilsocket/candle.git?branch=metal_ios_support)",
