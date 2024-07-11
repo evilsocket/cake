@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
 
     let ctx = Context::from_args(args)?;
 
-    match ctx.args.mode {
+    let ret = match ctx.args.mode {
         Mode::Master => {
             Master::new(ctx)
                 .await?
@@ -36,11 +36,14 @@ async fn main() -> Result<()> {
                     }
                     std::io::stdout().flush().unwrap();
                 })
-                .await?;
+                .await
         }
-        Mode::Worker => {
-            Worker::new(ctx).await?.run().await?;
-        }
+        Mode::Worker => Worker::new(ctx).await?.run().await,
+    };
+
+    if ret.is_err() {
+        println!(); // we were streaming text
+        return ret;
     }
 
     Ok(())
