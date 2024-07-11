@@ -96,7 +96,7 @@ impl Master {
         let mut index_pos = 0;
 
         for index in 0..self.ctx.args.sample_len {
-            let (context_size, context_index) = if self.ctx.cache.use_kv_cache && index > 0 {
+            let (context_size, context_index) = if self.ctx.cache.with_kv_cache() && index > 0 {
                 (1, index_pos)
             } else {
                 (self.tokens.len(), 0)
@@ -108,12 +108,20 @@ impl Master {
             }
 
             let context_tokens = &self.tokens[self.tokens.len().saturating_sub(context_size)..];
-            let input = Tensor::new(context_tokens, &self.ctx.device)?.unsqueeze(0)?;
+            let input = Tensor::new(context_tokens, &self.ctx.device)?
+                .unsqueeze(0)
+                .map_err(|e| anyhow!("error squeezing context tokens: {e}"))?;
+
             let logits = self
                 .model
                 .forward(&input, context_index, &mut self.ctx.cache)
-                .await?;
-            let logits = logits.squeeze(0)?;
+                .await
+                .map_err(|e| anyhow!("error in model.forward: {e}"))?;
+
+            let logits = logits
+                .squeeze(0)
+                .map_err(|e| anyhow!("error squeezing logits: {e}"))?;
+
             let logits = if self.ctx.args.repeat_penalty == 1. {
                 logits
             } else {
@@ -129,13 +137,15 @@ impl Master {
             };
             index_pos += context_tokens.len();
 
-            let next_token = self.logits_processor.sample(&logits)?;
+            let next_token = self
+                .logits_processor
+                .sample(&logits)
+                .map_err(|e| anyhow!("error sampling logits {logits}: {e}"))?;
             self.tokens.push(next_token);
 
             if Some(next_token) == self.eos_token_id {
                 break;
-            }
-            if let Some(t) = self.tokenizer.next_token(next_token)? {
+            } else if let Some(t) = self.tokenizer.next_token(next_token)? {
                 stream(&t);
             }
         }
