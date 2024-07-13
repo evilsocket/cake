@@ -1,3 +1,11 @@
+<center>
+<p><small>Join the project community on our server!</small></p>
+<a href="https://discord.gg/https://discord.gg/btZpkp45gQ" target="_blank" title="Join our community!">
+  <img src="https://dcbadge.limes.pink/api/server/https://discord.gg/btZpkp45gQ"/>
+</a>
+</center>
+<hr/>
+
 `llama3-cake` is a pure Rust implementation of the llama3 LLM distributed inference based on [Candle](https://github.com/huggingface/candle).
 
 **This is experimental code**.
