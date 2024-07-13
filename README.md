@@ -32,6 +32,14 @@ worker1:
     - 'model.layers.16-31'
 ```
 
+As a memory and disk space optimization, you might want to give the worker only the data it actually needs from the model instead of the whole folder, in which case you can use the `cake-split-model` utility. For instance to generate a smaller version of the llama3 safetensors, you can:
+
+```bash
+cake-split-model --model-path path/to/Meta-Llama-3-8B --topology path/to/topology.yml --output output-folder-name
+```
+
+This will create a smaller folder with only the required layers tensors and the topology file for the specific worker.
+
 ## Support
 
 | OS                           | Architectures | Acceleration | Status |

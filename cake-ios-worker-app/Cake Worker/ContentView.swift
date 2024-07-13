@@ -40,7 +40,7 @@ struct ContentView: View {
                         // print("  topologyPath=\(topologyPath)");
                         // print("  modelPath=\(modelPath)");
                                                 
-                        startWorker(name:"iphone_cpu", modelPath: modelPath, topologyPath: topologyPath)
+                        startWorker(name:"iphone", modelPath: modelPath, topologyPath: topologyPath)
                     } else {
                         print("access denied to \(directory)");
                     }
