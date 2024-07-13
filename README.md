@@ -4,7 +4,7 @@
 
 The idea is to shard the transformer blocks to multiple devices in order to be able to run the inference on models that wouldn't normally fit in the GPU memory of a single device. Inferences over contiguous transformer blocks on the same worker are batched in order to minimize latency due to data transfer.
 
-Run a worker node:
+Run a worker node (read below on how to optimize model size for workers):
 
 ```bash
 cake-cli --model /path/to/Meta-Llama-3-8B --mode worker --name worker0 --topology topology.yml --address 0.0.0.0:10128
@@ -19,17 +19,35 @@ cake-cli --model /path/to/Meta-Llama-3-8B --topology topology.yml
 Where `topology.yaml` determines which layers are served by whom:
 
 ```yaml
-worker0:
-  host: 'linux-server.local:10128'
+linux_server_1:
+  host: 'linux_server.host:10128'
   description: 'NVIDIA Titan X Pascal (12GB)'
   layers:
-    - 'model.layers.0-15'
+    - 'model.layers.0-5'
 
-worker1:
-  host: 'apple-server.local:10128'
-  description: 'Apple M1 Max (64GB)'
+linux_server_2:
+  host: 'linux_server2.host:10128'
+  description: 'NVIDIA GeForce 3080 (10GB)'
   layers:
-    - 'model.layers.16-31'
+    - 'model.layers.6-16'
+
+iphone:
+  host: 'iphone.host:10128'
+  description: 'iPhone 15 Pro Max'
+  layers:
+    - 'model.layers.17'
+
+ipad:
+  host: 'ipad.host:10128'
+  description: 'iPad'
+  layers:
+    - 'model.layers.18-19'
+
+macbook:
+  host: 'macbook.host:10128'
+  description: 'M1 Max'
+  layers:
+    - 'model.layers.20-31' 
 ```
 
 As a memory and disk space optimization, you might want to give the worker only the data it actually needs from the model instead of the whole folder, in which case you can use the `cake-split-model` utility. For instance to generate a smaller version of the llama3 safetensors, you can:
@@ -38,7 +56,7 @@ As a memory and disk space optimization, you might want to give the worker only 
 cake-split-model --model-path path/to/Meta-Llama-3-8B --topology path/to/topology.yml --output output-folder-name
 ```
 
-This will create a smaller folder with only the required layers tensors and the topology file for the specific worker.
+This will create a smaller folder with only the required layers tensors and the topology file for the specific worker. Remember to also copy other model contents (config.json, tokenizer.json, etc) in the worker bundle before deploying it.
 
 ## Support
 
