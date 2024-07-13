@@ -42,7 +42,7 @@ impl Llama {
         let num_blocks = self.blocks.len();
         let mut block_idx = 0;
 
-        log::info!("X = {}", &x);
+        // log::info!("X = {}", &x);
 
         while block_idx < num_blocks {
             let curr_block_id = self.blocks[block_idx].ident().to_owned();
@@ -77,7 +77,7 @@ impl Llama {
                     })?;
             }
 
-            log::info!("{}.forward(X) -> {}", &curr_block_id, &x);
+            // log::info!("{}.forward(X) -> {}", &curr_block_id, &x);
         }
 
         let x = self

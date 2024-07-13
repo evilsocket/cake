@@ -25,35 +25,22 @@ yoke = { version = "0.7.4", features = ["derive"] }
 
 # Metal acceleration on macOS
 [target.'cfg(target_os = "macos")'.dependencies]
-candle-core = { git = "https://github.com/evilsocket/candle.git", branch = "metal_ios_support", features = [
-    "metal",
-] }
-candle-nn = { git = "https://github.com/evilsocket/candle.git", branch = "metal_ios_support", features = [
-    "metal",
-] }
-candle-transformers = { git = "https://github.com/evilsocket/candle.git", branch = "metal_ios_support", features = [
-    "metal",
-] }
+candle-core = { version = "0.6.0", features = ["metal"] }
+candle-nn = { version = "0.6.0", features = ["metal"] }
+candle-transformers = { version = "0.6.0", features = ["metal"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
-candle-core = { git = "https://github.com/evilsocket/candle.git", branch = "metal_ios_support", features = [
-    "metal",
-] }
-candle-nn = { git = "https://github.com/evilsocket/candle.git", branch = "metal_ios_support", features = [
-    "metal",
-] }
-candle-transformers = { git = "https://github.com/evilsocket/candle.git", branch = "metal_ios_support", features = [
-    "metal",
-] }
+# https://github.com/huggingface/candle/issues/2322
+# https://github.com/huggingface/candle/issues/1841
+# candle-core = { version = "0.6.0", features = ["metal"] }
+# candle-nn = { version = "0.6.0", features = ["metal"] }
+# candle-transformers = { version = "0.6.0", features = ["metal"] }
+candle-core = { version = "0.6.0" }
+candle-nn = { version = "0.6.0" }
+candle-transformers = { version = "0.6.0" }
 
 # CUDA on everything else.
 [target.'cfg(not(any(target_os = "macos", target_os = "ios")))'.dependencies]
-candle-core = { git = "https://github.com/evilsocket/candle.git", branch = "metal_ios_support", features = [
-    "cuda",
-] }
-candle-nn = { git = "https://github.com/evilsocket/candle.git", branch = "metal_ios_support", features = [
-    "cuda",
-] }
-candle-transformers = { git = "https://github.com/evilsocket/candle.git", branch = "metal_ios_support", features = [
-    "cuda",
-] }
+candle-core = { version = "0.6.0", features = ["cuda"] }
+candle-nn = { version = "0.6.0", features = ["cuda"] }
+candle-transformers = { version = "0.6.0", features = ["cuda"] }

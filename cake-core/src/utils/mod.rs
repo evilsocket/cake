@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use candle_core::{
     utils::{cuda_is_available, metal_is_available},
-    Device,
+    Device, Tensor,
 };
 
 use anyhow::{bail, Result};
@@ -64,4 +64,11 @@ pub fn load_safetensors_from_index(
         .collect::<Vec<std::path::PathBuf>>();
 
     Ok(safetensors_files)
+}
+
+/// Nasty hack to debug NaN in tensors.
+pub fn panic_on_nan(t: &Tensor, name: &str) {
+    if t.to_string().contains("NaN") {
+        panic!("\ntensor '{name}' contains NaN: \n{t}");
+    }
 }

@@ -69,11 +69,13 @@ impl CausalSelfAttention {
                 cache.apply_attention_mask(seq_len, &att)?
             };
             let att = candle_nn::ops::softmax(&att, D::Minus1)?;
+
             // Convert to contiguous as matmul doesn't support strided vs for now.
             att.matmul(&v.contiguous()?)?.to_dtype(in_dtype)?
         };
         let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, hidden_size])?;
         let y = self.o_proj.forward(&y)?;
+
         Ok(y)
     }
 
