@@ -1,6 +1,6 @@
 <p align="center">
   <small>Join the project community on our server!</small>
-  <br/>
+  <br/><br/>
   <a href="https://discord.gg/https://discord.gg/btZpkp45gQ" target="_blank" title="Join our community!">
     <img src="https://dcbadge.limes.pink/api/server/https://discord.gg/btZpkp45gQ"/>
   </a>
