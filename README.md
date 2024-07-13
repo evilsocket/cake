@@ -4,16 +4,21 @@
 
 The idea is to shard the transformer blocks to multiple devices in order to be able to run the inference on models that wouldn't normally fit in the GPU memory of a single device. Inferences over contiguous transformer blocks on the same worker are batched in order to minimize latency due to data transfer.
 
-Run a worker node (read below on how to optimize model size for workers):
+Run a worker node:
 
-```bash
-cake-cli --model /path/to/Meta-Llama-3-8B --mode worker --name worker0 --topology topology.yml --address 0.0.0.0:10128
+```sh
+cake-cli --model /path/to/Meta-Llama-3-8B \ # model path, read below on how to optimize model size for workers
+         --mode worker \                    # run as worker
+         --name worker0 \                   # worker name in topology file
+         --topology topology.yml \          # topology
+         --address 0.0.0.0:10128            # bind address
 ```
 
 Run a master node:
 
-```bash
-cake-cli --model /path/to/Meta-Llama-3-8B --topology topology.yml
+```sh
+cake-cli --model /path/to/Meta-Llama-3-8B \
+         --topology topology.yml
 ```
 
 Where `topology.yaml` determines which layers are served by whom:
@@ -52,13 +57,15 @@ macbook:
 
 As a memory and disk space optimization, you might want to give the worker only the data it actually needs from the model instead of the whole folder, in which case you can use the `cake-split-model` utility. For instance to generate a smaller version of the llama3 safetensors, you can:
 
-```bash
-cake-split-model --model-path path/to/Meta-Llama-3-8B --topology path/to/topology.yml --output output-folder-name
+```sh
+cake-split-model --model-path path/to/Meta-Llama-3-8B \ # source model to split
+                 --topology path/to/topology.yml \      # topology file
+                 --output output-folder-name            # output folder where all the workers data bundles will be saved
 ```
 
 This will create a smaller folder with only the required layers tensors and the topology file for the specific worker. Remember to also copy other model contents (config.json, tokenizer.json, etc) in the worker bundle before deploying it.
 
-## Support
+**Support**
 
 | OS                           | Architectures | Acceleration | Status |
 |:----------------------------------:|:------------------:|:------------------:|:------------------:|
