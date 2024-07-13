@@ -30,11 +30,11 @@ ios: ios_bindings
 sync_bahamut:
 	@echo "@ bahamut sync && build ..."
 	@rsync -rvzc --exclude=cake-data --exclude=.git --exclude=target . bahamut.local:/home/evilsocket/llama3-cake
-	@rsync -rvzc cake-data/nodes/bahamut_gpu0-node bahamut.local:/home/evilsocket/llama3-cake-data
+	@rsync -rvzc cake-data/8b-test/bahamut-node bahamut.local:/home/evilsocket/llama3-cake-data
 
 sync_blade:
 	@echo "@ blade sync && build ..."
 	@rsync -rvzc --exclude=cake-data --exclude=.git --exclude=target . blade.local:/home/evilsocket/llama3-cake
-	@rsync -rvzc cake-data/nodes/blade_gpu0-node blade.local:/home/evilsocket/llama3-cake-data
+	@rsync -rvzc cake-data/8b-test/blade-node blade.local:/home/evilsocket/llama3-cake-data
 	
 sync: sync_bahamut sync_blade
