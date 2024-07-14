@@ -25,6 +25,7 @@ pub struct LLama {
     index_pos: usize,
 
     blocks: Vec<Box<dyn Forwarder>>,
+
     ln_f: RmsNorm,
     lm_head: Linear,
 
@@ -168,7 +169,6 @@ impl Generator for LLama {
 
         for i in 0..ctx.config.num_hidden_layers {
             let block_layer_name = format!("model.layers.{i}");
-
             if let Some((node_name, node)) = ctx.topology.get_node_for_layer(&block_layer_name) {
                 log::debug!("node {node_name} will serve {}", &block_layer_name);
                 blocks.push(Box::new(
