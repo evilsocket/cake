@@ -74,7 +74,7 @@ cake-split-model --model-path path/to/Meta-Llama-3-8B \ # source model to split
 
 This will create a smaller folder with only the required layers tensors and the topology file for the specific worker. Remember to also copy other model contents (config.json, tokenizer.json, etc) in the worker bundle before deploying it.
 
-**Support**
+## Support
 
 | OS                           | Architectures | Acceleration | Status |
 |:----------------------------------:|:------------------:|:------------------:|:------------------:|
@@ -83,10 +83,12 @@ This will create a smaller folder with only the required layers tensors and the 
 | GNU/Linux                 | arm, arm64, x86_64 | BLAS                | :heavy_check_mark: |
 | macOS                 | intel | -                | :heavy_check_mark: |
 | macOS                 | aarch64 | -                | :heavy_check_mark: |
-| macOS                 | aarch64 | metal                | :heavy_check_mark: |
+| macOS                 | aarch64 | Metal                | :heavy_check_mark: |
+| Android                | arm, arm64, x86_64 | - | :heavy_check_mark: |
+| Android                | arm, arm64, x86_64 | CUDA | untested |
 | iOS / iPadOS                 | aarch64 | -                | :heavy_check_mark: |
-| iOS / iPadOS                 | aarch64 | metal                | [90% done, WIP](https://github.com/huggingface/candle/issues/2322) |
-| WebGPU                 | - | webgpu                | [in theory possible, not done](https://onnxruntime.ai/docs/tutorials/web/ep-webgpu.html) |
+| iOS / iPadOS                 | aarch64 | Metal                | [90% done, WIP](https://github.com/huggingface/candle/issues/2322) |
+| Web                 | - | WebGPU                | [in theory possible, not done](https://onnxruntime.ai/docs/tutorials/web/ep-webgpu.html) |
 
 ## License
 
