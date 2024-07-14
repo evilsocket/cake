@@ -7,7 +7,7 @@ use tokenizers::Tokenizer;
 
 use crate::{
     cake::{Context, Forwarder},
-    model::{Block, Token},
+    model::{Token, Transformer},
     utils::{self, TokenOutputStream},
 };
 
@@ -180,7 +180,7 @@ impl Generator for LLama {
             } else {
                 log::debug!("{} will be served locally", &block_layer_name);
 
-                let block = Block::load(
+                let block = Transformer::load(
                     &block_layer_name,
                     ctx.var_builder.pp(&block_layer_name),
                     &ctx.config,

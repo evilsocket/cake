@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use super::{Cache, CausalSelfAttention, Forwarder, MLP};
 
 #[derive(Debug, Clone)]
-pub struct Block {
+pub struct Transformer {
     name: String,
     rms_1: RmsNorm,
     attn: CausalSelfAttention,
@@ -15,7 +15,7 @@ pub struct Block {
     mlp: MLP,
 }
 
-impl Block {
+impl Transformer {
     pub fn load(name: &str, vb: VarBuilder, cfg: &super::Config) -> Result<Self> {
         let name = name.to_string();
         let attn = super::CausalSelfAttention::load(vb.pp("self_attn"), cfg)?;
@@ -55,14 +55,14 @@ impl Block {
     }
 }
 
-impl std::fmt::Display for Block {
+impl std::fmt::Display for Transformer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} (local)", &self.name)
     }
 }
 
 #[async_trait]
-impl Forwarder for Block {
+impl Forwarder for Transformer {
     async fn forward(
         &mut self,
         x: &Tensor,

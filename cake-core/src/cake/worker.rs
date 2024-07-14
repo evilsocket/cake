@@ -6,7 +6,7 @@ use std::{
 };
 
 use super::{Context, Message, WorkerInfo};
-use crate::model::{Block, Cache};
+use crate::model::{Transformer, Cache};
 
 use anyhow::Result;
 use candle_core::{DType, Device};
@@ -21,7 +21,7 @@ struct WorkerContext {
     device: Device,
     device_idx: usize,
     dtype: DType,
-    blocks: Arc<HashMap<String, Block>>,
+    blocks: Arc<HashMap<String, Transformer>>,
     cache: Cache,
 }
 
@@ -49,7 +49,7 @@ pub struct Worker {
     listener: TcpListener,
 
     cache: Cache,
-    blocks: Arc<HashMap<String, Block>>,
+    blocks: Arc<HashMap<String, Transformer>>,
     device: Device,
     device_idx: usize,
     dtype: DType,
@@ -74,7 +74,7 @@ impl Worker {
         for block_layer_name in &worker_topology.layers {
             log::info!("loading {} ...", &block_layer_name);
 
-            let block = Block::load(
+            let block = Transformer::load(
                 block_layer_name,
                 ctx.var_builder.pp(block_layer_name),
                 &ctx.config,
