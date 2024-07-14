@@ -9,7 +9,7 @@ pub mod cake;
 pub mod model;
 pub mod utils;
 
-#[derive(Parser, Default, Debug)]
+#[derive(Clone, Parser, Default, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
     /// GPU device index.

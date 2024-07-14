@@ -32,6 +32,7 @@ pub enum Mode {
     Worker,
 }
 
+#[derive(Clone)]
 pub struct Context {
     pub args: Args,
     pub dtype: DType,

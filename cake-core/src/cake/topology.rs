@@ -9,7 +9,7 @@ lazy_static! {
     static ref LAYER_RANGE_PARSER: Regex = Regex::new(r"(?m)^(.+[^\d])(\d+)-(\d+)$").unwrap();
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Node {
     pub host: String,
     pub description: Option<String>,
@@ -27,7 +27,7 @@ impl Node {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Topology(HashMap<String, Node>);
 
 impl Topology {
