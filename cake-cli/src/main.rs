@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
 
     let ret = match ctx.args.mode {
         Mode::Master => {
-            Master::new(ctx)
+            Master::<cake_core::model::LLama>::new(ctx)
                 .await?
                 .generate(|data| {
                     if data.is_empty() {

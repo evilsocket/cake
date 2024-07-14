@@ -1,17 +1,17 @@
+use crate::model::Generator;
+
 use super::Context;
-use crate::model::Model;
 
 use anyhow::Result;
 
-pub struct Master {
+pub struct Master<G> {
     ctx: Context,
-    model: Model,
+    model: Box<G>,
 }
 
-impl Master {
+impl<G: Generator> Master<G> {
     pub async fn new(ctx: Context) -> Result<Self> {
-        let model = Model::load(ctx.clone()).await?;
-
+        let model = G::load(ctx.clone()).await?;
         Ok(Self { ctx, model })
     }
 
@@ -37,14 +37,14 @@ impl Master {
             }
 
             let token = self.model.next_token(index).await?;
-            if token.is_eos {
+            if token.is_end_of_stream {
                 break;
             } else {
                 stream(&token.to_string());
             }
         }
 
-        if let Some(rest) = self.model.final_token()? {
+        if let Some(rest) = self.model.last().await? {
             stream(&rest);
         }
 
