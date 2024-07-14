@@ -7,6 +7,9 @@ use crate::model::Cache;
 
 use super::{Message, WorkerInfo};
 
+/// A client object used by the master to connect and orchestrate the workers.
+/// From the Cake perspective, each worker is a server and the master uses
+/// multiple Client instances to connect to them.
 #[derive(Debug)]
 pub struct Client {
     device: Device,
@@ -17,6 +20,8 @@ pub struct Client {
 }
 
 impl Client {
+    /// Connects to the given worker address.
+    /// NOTE: device and layer_name here are only passed for std::fmt::Display.
     pub async fn new(device: Device, address: &str, layer_name: &str) -> Result<Self> {
         let address = address.to_string();
         let layer_name = layer_name.to_string();
@@ -43,6 +48,7 @@ impl Client {
         Ok(client)
     }
 
+    /// Send a Message to the worker and return a response.
     async fn request(&mut self, req: Message) -> Result<Message> {
         req.to_writer(&mut self.stream)
             .await
@@ -91,6 +97,7 @@ impl super::Forwarder for Client {
         ))
     }
 
+    /// Executes the worker's pipeline for this tensor.
     async fn forward_mut(
         &mut self,
         x: &Tensor,
@@ -98,7 +105,7 @@ impl super::Forwarder for Client {
         block_idx: usize,
         _: &mut Cache,
     ) -> Result<Tensor> {
-        self.forward_request(super::Message::transformer_op(
+        self.forward_request(super::Message::single_op(
             &self.layer_name,
             x,
             index_pos,
@@ -107,6 +114,7 @@ impl super::Forwarder for Client {
         .await
     }
 
+    /// Executes the worker's pipeline with multiple batched steps for this tensor.
     async fn forward_batch(
         &mut self,
         x: &Tensor,

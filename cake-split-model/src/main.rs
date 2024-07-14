@@ -1,3 +1,5 @@
+//! This is a utility to split a single, safetensors based model into parts
+//! that are smaller and can be distributed to the workers instead of the entire model.
 use std::{
     collections::HashMap,
     fs::File,

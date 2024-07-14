@@ -6,6 +6,7 @@ use async_trait::async_trait;
 
 use super::{Cache, CausalSelfAttention, Config, Forwarder, MLP};
 
+/// Transformer block with causal self attention and several caching strategies.
 #[derive(Debug, Clone)]
 pub struct Transformer {
     name: String,

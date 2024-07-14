@@ -15,8 +15,10 @@ use tokio::{
     net::{TcpListener, TcpStream},
 };
 
+/// Determines how often worker statistics are calculated and printed.
 const NUM_OPS_TO_STATS: usize = 5;
 
+/// A single worker state.
 #[derive(Clone)]
 struct WorkerContext<F> {
     device: Device,
@@ -27,6 +29,7 @@ struct WorkerContext<F> {
 }
 
 impl<F: Forwarder> WorkerContext<F> {
+    /// Create a WorkerInfo structure to be sent to the master.
     fn to_info(&self, latency: u128) -> WorkerInfo {
         WorkerInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -45,6 +48,7 @@ impl<F: Forwarder> WorkerContext<F> {
         }
     }
 
+    /// Create a copy of self with new kv-cache.
     fn get_client_context(&self) -> Self {
         WorkerContext {
             device: self.device.clone(),
@@ -57,12 +61,14 @@ impl<F: Forwarder> WorkerContext<F> {
     }
 }
 
+/// Cake worker node.
 pub struct Worker<F> {
     listener: TcpListener,
     context: WorkerContext<F>,
 }
 
 impl<F: Forwarder + 'static> Worker<F> {
+    /// Create a new Worker from the context.
     pub async fn new(ctx: Context) -> Result<Self> {
         let worker_name = if let Some(name) = &ctx.args.name {
             name.to_string()
@@ -115,6 +121,7 @@ impl<F: Forwarder + 'static> Worker<F> {
         Ok(Self { listener, context })
     }
 
+    /// Read a message from the socket and return elapsed time, message size and message.
     async fn read_message_timed<R>(mut socket: R) -> Result<(Duration, usize, Message)>
     where
         R: AsyncReadExt + Unpin,
@@ -126,6 +133,7 @@ impl<F: Forwarder + 'static> Worker<F> {
         Ok((latency, size, message))
     }
 
+    /// Write a message to the socket and return the elapsed time with written size.
     async fn write_message_timed<W>(mut socket: W, message: Message) -> Result<(Duration, usize)>
     where
         W: AsyncWriteExt + Unpin,
@@ -137,7 +145,8 @@ impl<F: Forwarder + 'static> Worker<F> {
         Ok((latency, size))
     }
 
-    async fn handle_client(
+    /// Main loop handling communication with the master.
+    async fn handle_master_client(
         mut socket: TcpStream,
         client: SocketAddr,
         mut context: WorkerContext<F>,
@@ -249,13 +258,14 @@ impl<F: Forwarder + 'static> Worker<F> {
         Ok(())
     }
 
+    /// Run the worker server accept loop.
     pub async fn run(&mut self) -> Result<()> {
         while let Ok((socket, client)) = self.listener.accept().await {
             log::info!("{} connected", &client);
 
             let context = self.context.get_client_context();
             tokio::spawn(async move {
-                if let Err(e) = Self::handle_client(socket, client, context).await {
+                if let Err(e) = Self::handle_master_client(socket, client, context).await {
                     log::error!("{}", e);
                 }
             });

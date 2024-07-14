@@ -25,6 +25,7 @@ pub use proto::*;
 pub use topology::*;
 pub use worker::*;
 
+/// Determines if we run in master or worker mode.
 #[derive(clap::ValueEnum, Clone, Debug, Default)]
 pub enum Mode {
     #[default]
@@ -32,6 +33,7 @@ pub enum Mode {
     Worker,
 }
 
+/// Main contect object used as a shared state.
 #[derive(Clone)]
 pub struct Context {
     pub args: Args,
@@ -45,6 +47,7 @@ pub struct Context {
 }
 
 impl Context {
+    /// Create the context from the parsed command line arguments.
     pub fn from_args(args: Args) -> Result<Self> {
         let dtype: DType = match args.dtype.as_deref() {
             Some("f16") => DType::F16,

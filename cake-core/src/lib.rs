@@ -1,3 +1,4 @@
+//! This is the core library where all Cake logic is implemented.
 #[macro_use]
 extern crate anyhow;
 

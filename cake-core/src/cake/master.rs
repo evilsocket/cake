@@ -4,17 +4,20 @@ use super::Context;
 
 use anyhow::Result;
 
+/// A master connects to, communicates with and orchestrates the workers.
 pub struct Master<G> {
     ctx: Context,
     model: Box<G>,
 }
 
 impl<G: Generator> Master<G> {
+    /// Create a new instance.
     pub async fn new(ctx: Context) -> Result<Self> {
         let model = G::load(ctx.clone()).await?;
         Ok(Self { ctx, model })
     }
 
+    /// Start the generation loop and call the stream function for every token.
     pub async fn generate<S>(&mut self, stream: S) -> Result<()>
     where
         S: Fn(&str),

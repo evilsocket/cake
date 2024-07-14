@@ -13,8 +13,10 @@ use crate::{
 
 use super::Generator;
 
+/// End of stream token.
 const EOS_TOKEN: &str = "</s>";
 
+/// Load the tokenizer and return the first tokens from the prompt in context.
 fn load_tokenizer(ctx: &Context) -> Result<(TokenOutputStream, Vec<u32>, Option<u32>)> {
     let tokenizer_filename = ctx.data_path.join("tokenizer.json");
 
@@ -39,6 +41,7 @@ fn load_tokenizer(ctx: &Context) -> Result<(TokenOutputStream, Vec<u32>, Option<
     Ok((tokenizer, tokens, eos_token_id))
 }
 
+/// Create the logit sampling logic from the context.
 fn create_logits_processor(ctx: &Context) -> LogitsProcessor {
     let temperature = ctx.args.temperature;
     let sampling = if temperature <= 0. {
@@ -54,6 +57,7 @@ fn create_logits_processor(ctx: &Context) -> LogitsProcessor {
     LogitsProcessor::from_sampling(ctx.args.seed, sampling)
 }
 
+/// LLama main class.
 pub struct LLama {
     ctx: Context,
 
@@ -141,6 +145,7 @@ impl LLama {
 
 #[async_trait]
 impl Generator for LLama {
+    /// Load this model from the context.
     async fn load(ctx: Context) -> Result<Box<Self>> {
         log::info!("loading embeddings ...");
         let embedding: Embedding = candle_nn::embedding(
@@ -212,6 +217,7 @@ impl Generator for LLama {
         }))
     }
 
+    /// Return the next token.
     async fn next_token(&mut self, index: usize) -> Result<Token> {
         log::trace!("model.next_token({index})");
 
@@ -264,10 +270,12 @@ impl Generator for LLama {
         })
     }
 
+    /// Return any resitual token if necessary or None if not.
     async fn last(&mut self) -> Result<Option<String>> {
         self.tokenizer.decode_rest().map_err(anyhow::Error::msg)
     }
 
+    /// Return the number of generated tokens so far.
     fn generated_tokens(&self) -> usize {
         self.tokens.len()
     }

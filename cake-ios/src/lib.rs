@@ -1,34 +1,10 @@
+//! This is a small library that wraps cake-core and exposes it as an API to the Swift side of things on iOS.
 uniffi::setup_scaffolding!();
 
 use cake_core::{
     cake::{Context, Mode, Worker},
     Args,
 };
-
-/*
-https://github.com/huggingface/candle/issues/2322
-
-#[uniffi::export]
-pub fn test_metal() {
-    let device = metal::Device::all().swap_remove(0);
-
-    println!("device: {:?}", &device);
-
-    println!(
-        "MTLResourceOptions::StorageModeManaged = 0x{:x}",
-        metal::MTLResourceOptions::StorageModeManaged
-    );
-
-    let seed = device.new_buffer_with_data(
-        [299792458].as_ptr() as *const std::ffi::c_void,
-        4,
-        metal::MTLResourceOptions::StorageModeManaged,
-    );
-
-    println!("seed: {:?}", &seed);
-}
-
- */
 
 #[uniffi::export]
 pub fn start_worker(name: String, model_path: String, topology_path: String) {

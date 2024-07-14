@@ -1,3 +1,5 @@
+//! This is the cake command line utility.
+
 use std::io::Write;
 
 use cake_core::{
@@ -10,8 +12,10 @@ use clap::Parser;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // parse command line
     let args = Args::parse();
 
+    // setup logging
     if std::env::var_os("RUST_LOG").is_none() {
         // set `RUST_LOG=debug` to see debug logs
         std::env::set_var("RUST_LOG", "info,tokenizers=error");
@@ -22,8 +26,10 @@ async fn main() -> Result<()> {
         .format_target(false)
         .init();
 
+    // setup context
     let ctx = Context::from_args(args)?;
 
+    // run either in master or worker mode depending on command line
     let ret = match ctx.args.mode {
         Mode::Master => {
             Master::<cake_core::model::LLama>::new(ctx)
@@ -47,7 +53,8 @@ async fn main() -> Result<()> {
     };
 
     if ret.is_err() {
-        println!(); // we were streaming text
+        // we were possibly streaming text, add a newline before reporting the error
+        println!();
         return ret;
     }
 

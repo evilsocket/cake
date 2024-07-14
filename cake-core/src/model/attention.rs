@@ -1,3 +1,4 @@
+//! Causal self attention implementation.
 use candle_core::{DType, Result, Tensor, D};
 use candle_nn::{linear_no_bias as linear, Linear, Module, VarBuilder};
 
@@ -25,6 +26,7 @@ impl CausalSelfAttention {
         candle_nn::rotary_emb::rope(x, &cos, &sin)
     }
 
+    /// Process the input tensor using the given state indexes and cache.
     pub fn forward(
         &self,
         x: &Tensor,
@@ -86,6 +88,7 @@ impl CausalSelfAttention {
         )
     }
 
+    /// Load an instance of this object from the VarBuilder object with the given configuration.
     pub fn load(vb: VarBuilder, cfg: &super::Config) -> Result<Self> {
         let size_in = cfg.hidden_size;
         let size_q = (cfg.hidden_size / cfg.num_attention_heads) * cfg.num_attention_heads;

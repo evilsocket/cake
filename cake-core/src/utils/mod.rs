@@ -1,3 +1,5 @@
+//! Utility functions and abstractions.
+
 use std::path::PathBuf;
 
 use candle_core::{
@@ -11,6 +13,7 @@ mod token_output_stream;
 
 pub use token_output_stream::*;
 
+/// Returns the best available device at `ordinal` index (in case of multiple GPUs), or CPU if `force_cpu` is true.
 pub fn get_inference_device(force_cpu: bool, ordinal: usize) -> Result<Device> {
     if force_cpu {
         log::debug!("device is forced cpu");
@@ -67,7 +70,8 @@ pub fn load_safetensors_from_index(
 }
 
 /// Nasty hack to debug NaN in tensors.
-pub fn panic_on_nan(t: &Tensor, name: &str) {
+#[allow(dead_code)]
+pub(crate) fn panic_on_nan(t: &Tensor, name: &str) {
     if t.to_string().contains("NaN") {
         panic!("\ntensor '{name}' contains NaN: \n{t}");
     }

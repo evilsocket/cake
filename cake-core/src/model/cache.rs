@@ -4,6 +4,7 @@ use candle_core::{DType, Device, Result, Tensor, D};
 
 use super::{Config, MAX_SEQ_LEN};
 
+/// Abstraction over cosine and sine tables, kv-caching and attention masking.
 #[derive(Debug, Clone)]
 pub struct Cache {
     cos: Tensor,
@@ -17,6 +18,8 @@ pub struct Cache {
 }
 
 impl Cache {
+    /// Creates a new cache instance with the provided configuration.
+    /// Set `use_kv_cache` to false to disable kv-caching.
     pub fn new(use_kv_cache: bool, dtype: DType, config: &Config, device: &Device) -> Result<Self> {
         // precompute freqs_cis
         let n_elem = config.hidden_size / config.num_attention_heads;
@@ -57,18 +60,22 @@ impl Cache {
         })
     }
 
+    /// Return true if kv-caching is enabled.
     pub fn with_kv_cache(&self) -> bool {
         self.use_kv_cache
     }
 
+    /// Return the cached cosine value for the given position and sequence length.
     pub fn cosine(&self, index_pos: usize, seq_len: usize) -> Result<Tensor> {
         self.cos.narrow(0, index_pos, seq_len)
     }
 
+    /// Return the cached sine value for the given position and sequence length.
     pub fn sine(&self, index_pos: usize, seq_len: usize) -> Result<Tensor> {
         self.sin.narrow(0, index_pos, seq_len)
     }
 
+    /// Apply the attention mask to the given tensor.
     pub fn apply_attention_mask(&mut self, seq_len: usize, attention: &Tensor) -> Result<Tensor> {
         // check if we need to create the mask for this sequence length
         if let std::collections::hash_map::Entry::Vacant(entry) = self.masks.entry(seq_len) {
@@ -93,6 +100,7 @@ impl Cache {
         mask.where_cond(&on_true, attention)
     }
 
+    /// Process the input k and v by either generating their cache entry or applying a previously cached one.
     pub fn process_kv(
         &mut self,
         block_idx: usize,
@@ -124,6 +132,7 @@ impl Cache {
         Ok((k, v))
     }
 
+    /// Return a copy of this cache with the same state but new kv table.
     pub fn as_new(&self) -> Self {
         let mut copy = self.clone();
 

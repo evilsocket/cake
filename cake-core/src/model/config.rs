@@ -1,9 +1,11 @@
+/// Max supported sequence length.
 pub const MAX_SEQ_LEN: usize = 4096;
 
 fn default_rope() -> f32 {
     10_000.0
 }
 
+/// LLama specific configuration.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct LlamaConfig {
     pub hidden_size: usize,
@@ -20,10 +22,12 @@ pub struct LlamaConfig {
 }
 
 impl LlamaConfig {
+    /// Return the number of kv heads.
     pub fn num_key_value_heads(&self) -> usize {
         self.num_key_value_heads.unwrap_or(self.num_attention_heads)
     }
 
+    /// Return a generalized Config object.
     pub fn into_config(self) -> Config {
         Config {
             hidden_size: self.hidden_size,
@@ -40,6 +44,7 @@ impl LlamaConfig {
     }
 }
 
+/// Generalized LLama/LLM configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
     pub hidden_size: usize,
