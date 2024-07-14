@@ -6,7 +6,7 @@ use std::{
 };
 
 use super::{Context, Forwarder, Message, WorkerInfo};
-use crate::model::Cache;
+use crate::model::{Cache, Generator};
 
 use anyhow::Result;
 use candle_core::{DType, Device};
@@ -62,12 +62,12 @@ impl<F: Forwarder> WorkerContext<F> {
 }
 
 /// Cake worker node.
-pub struct Worker<F> {
+pub struct Worker<G: Generator> {
     listener: TcpListener,
-    context: WorkerContext<F>,
+    context: WorkerContext<G::Shardable>,
 }
 
-impl<F: Forwarder + 'static> Worker<F> {
+impl<G: Generator + 'static> Worker<G> {
     /// Create a new Worker from the context.
     pub async fn new(ctx: Context) -> Result<Self> {
         let worker_name = if let Some(name) = &ctx.args.name {
@@ -87,7 +87,7 @@ impl<F: Forwarder + 'static> Worker<F> {
         for block_layer_name in &worker_topology.layers {
             log::info!("loading {} ...", &block_layer_name);
 
-            let block = F::load(
+            let block = G::Shardable::load(
                 block_layer_name.to_string(),
                 ctx.var_builder.pp(block_layer_name),
                 &ctx.config,
@@ -149,7 +149,7 @@ impl<F: Forwarder + 'static> Worker<F> {
     async fn handle_master_client(
         mut socket: TcpStream,
         client: SocketAddr,
-        mut context: WorkerContext<F>,
+        mut context: WorkerContext<G::Shardable>,
     ) -> Result<()> {
         // read and validate Hello
         let (latency, _size, hello) = Self::read_message_timed(&mut socket).await?;
