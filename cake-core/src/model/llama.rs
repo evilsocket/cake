@@ -15,6 +15,45 @@ use super::Generator;
 
 const EOS_TOKEN: &str = "</s>";
 
+fn load_tokenizer(ctx: &Context) -> Result<(TokenOutputStream, Vec<u32>, Option<u32>)> {
+    let tokenizer_filename = ctx.data_path.join("tokenizer.json");
+
+    log::info!("loading tokenizer from {}", tokenizer_filename.display());
+
+    let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(anyhow::Error::msg)?;
+    let eos_token_id = ctx
+        .config
+        .eos_token_id
+        .or_else(|| tokenizer.token_to_id(EOS_TOKEN));
+
+    let tokens = tokenizer
+        .encode(ctx.args.prompt.clone(), true)
+        .map_err(anyhow::Error::msg)?
+        .get_ids()
+        .to_vec();
+
+    let tokenizer = utils::TokenOutputStream::new(tokenizer);
+
+    log::debug!("prompt tokens: {:?}", &tokens);
+
+    Ok((tokenizer, tokens, eos_token_id))
+}
+
+fn create_logits_processor(ctx: &Context) -> LogitsProcessor {
+    let temperature = ctx.args.temperature;
+    let sampling = if temperature <= 0. {
+        Sampling::ArgMax
+    } else {
+        match (ctx.args.top_k, ctx.args.top_p) {
+            (None, None) => Sampling::All { temperature },
+            (Some(k), None) => Sampling::TopK { k, temperature },
+            (None, Some(p)) => Sampling::TopP { p, temperature },
+            (Some(k), Some(p)) => Sampling::TopKThenTopP { k, p, temperature },
+        }
+    };
+    LogitsProcessor::from_sampling(ctx.args.seed, sampling)
+}
+
 pub struct LLama {
     ctx: Context,
 
@@ -33,45 +72,6 @@ pub struct LLama {
 }
 
 impl LLama {
-    fn create_tokenizer(ctx: &Context) -> Result<(TokenOutputStream, Vec<u32>, Option<u32>)> {
-        let tokenizer_filename = ctx.data_path.join("tokenizer.json");
-
-        log::info!("loading tokenizer from {}", tokenizer_filename.display());
-
-        let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(anyhow::Error::msg)?;
-        let eos_token_id = ctx
-            .config
-            .eos_token_id
-            .or_else(|| tokenizer.token_to_id(EOS_TOKEN));
-
-        let tokens = tokenizer
-            .encode(ctx.args.prompt.clone(), true)
-            .map_err(anyhow::Error::msg)?
-            .get_ids()
-            .to_vec();
-
-        let tokenizer = utils::TokenOutputStream::new(tokenizer);
-
-        log::debug!("prompt tokens: {:?}", &tokens);
-
-        Ok((tokenizer, tokens, eos_token_id))
-    }
-
-    fn create_logits_processor(ctx: &Context) -> LogitsProcessor {
-        let temperature = ctx.args.temperature;
-        let sampling = if temperature <= 0. {
-            Sampling::ArgMax
-        } else {
-            match (ctx.args.top_k, ctx.args.top_p) {
-                (None, None) => Sampling::All { temperature },
-                (Some(k), None) => Sampling::TopK { k, temperature },
-                (None, Some(p)) => Sampling::TopP { p, temperature },
-                (Some(k), Some(p)) => Sampling::TopKThenTopP { k, p, temperature },
-            }
-        };
-        LogitsProcessor::from_sampling(ctx.args.seed, sampling)
-    }
-
     async fn forward(&mut self, x: &Tensor, idx: usize) -> Result<Tensor> {
         let (_batch_size, seq_len) = x.dims2()?;
         let mut x = self.embedding.forward(x)?;
@@ -189,8 +189,8 @@ impl Generator for LLama {
             log::info!("  {}", block)
         }
 
-        let (tokenizer, tokens, eos_token_id) = Self::create_tokenizer(&ctx)?;
-        let logits_processor = Self::create_logits_processor(&ctx);
+        let (tokenizer, tokens, eos_token_id) = load_tokenizer(&ctx)?;
+        let logits_processor = create_logits_processor(&ctx);
         let index_pos = 0;
 
         log::info!(
