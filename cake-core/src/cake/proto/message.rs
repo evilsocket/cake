@@ -42,7 +42,7 @@ pub struct WorkerInfo {
 pub enum Message {
     Hello,
     WorkerInfo(WorkerInfo),
-    TransformerOp {
+    SingleOp {
         layer_name: String,
         x: RawTensor,
         index_pos: usize,
@@ -64,7 +64,7 @@ impl Message {
     ) -> Self {
         let layer_name = layer_name.to_owned();
         let x = RawTensor::from_tensor(x);
-        Self::TransformerOp {
+        Self::SingleOp {
             layer_name,
             x,
             index_pos,

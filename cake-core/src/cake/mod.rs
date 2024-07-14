@@ -108,8 +108,20 @@ impl Context {
 }
 
 #[async_trait]
-pub(crate) trait Forwarder: Debug + Send + Display {
+pub trait Forwarder: Debug + Send + Sync + Display {
+    fn load(name: String, vb: VarBuilder, cfg: &Config) -> Result<Box<Self>>
+    where
+        Self: Sized;
+
     async fn forward(
+        &self,
+        x: &Tensor,
+        index_pos: usize,
+        block_idx: usize,
+        cache: &mut Cache,
+    ) -> Result<Tensor>;
+
+    async fn forward_mut(
         &mut self,
         x: &Tensor,
         index_pos: usize,

@@ -4,7 +4,7 @@ use candle_nn::{Module, RmsNorm, VarBuilder};
 
 use async_trait::async_trait;
 
-use super::{Cache, CausalSelfAttention, Forwarder, MLP};
+use super::{Cache, CausalSelfAttention, Config, Forwarder, MLP};
 
 #[derive(Debug, Clone)]
 pub struct Transformer {
@@ -15,9 +15,15 @@ pub struct Transformer {
     mlp: MLP,
 }
 
-impl Transformer {
-    pub fn load(name: &str, vb: VarBuilder, cfg: &super::Config) -> Result<Self> {
-        let name = name.to_string();
+impl std::fmt::Display for Transformer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (local)", &self.name)
+    }
+}
+
+#[async_trait]
+impl Forwarder for Transformer {
+    fn load(name: String, vb: VarBuilder, cfg: &Config) -> Result<Box<Self>> {
         let attn = super::CausalSelfAttention::load(vb.pp("self_attn"), cfg)?;
         let mlp = super::MLP::load(vb.pp("mlp"), cfg)?;
         let rms_1 =
@@ -27,16 +33,16 @@ impl Transformer {
             cfg.rms_norm_eps,
             vb.pp("post_attention_layernorm"),
         )?;
-        Ok(Self {
+        Ok(Box::new(Self {
             name,
             rms_1,
             attn,
             rms_2,
             mlp,
-        })
+        }))
     }
 
-    pub async fn forward_imm(
+    async fn forward(
         &self,
         x: &Tensor,
         index_pos: usize,
@@ -53,24 +59,15 @@ impl Transformer {
 
         Ok(x)
     }
-}
 
-impl std::fmt::Display for Transformer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} (local)", &self.name)
-    }
-}
-
-#[async_trait]
-impl Forwarder for Transformer {
-    async fn forward(
+    async fn forward_mut(
         &mut self,
         x: &Tensor,
         index_pos: usize,
         block_idx: usize,
         cache: &mut Cache,
     ) -> Result<Tensor> {
-        self.forward_imm(x, index_pos, block_idx, cache).await
+        self.forward(x, index_pos, block_idx, cache).await
     }
 
     fn layer_name(&self) -> &str {

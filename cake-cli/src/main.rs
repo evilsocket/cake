@@ -38,7 +38,12 @@ async fn main() -> Result<()> {
                 })
                 .await
         }
-        Mode::Worker => Worker::new(ctx).await?.run().await,
+        Mode::Worker => {
+            Worker::<cake_core::model::Transformer>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
     };
 
     if ret.is_err() {

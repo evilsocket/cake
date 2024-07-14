@@ -81,7 +81,17 @@ impl std::fmt::Display for Client {
 
 #[async_trait]
 impl super::Forwarder for Client {
-    async fn forward(
+    fn load(_: String, _: candle_nn::VarBuilder, _: &crate::model::Config) -> Result<Box<Self>> {
+        Err(anyhow!("load should never be called on cake::Client"))
+    }
+
+    async fn forward(&self, _: &Tensor, _: usize, _: usize, _: &mut Cache) -> Result<Tensor> {
+        Err(anyhow!(
+            "immutable forward should never be called on cake::Client"
+        ))
+    }
+
+    async fn forward_mut(
         &mut self,
         x: &Tensor,
         index_pos: usize,

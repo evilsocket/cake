@@ -85,7 +85,7 @@ impl LLama {
             if curr_block_id == "local" {
                 // do not batch local inferences
                 x = self.blocks[block_idx]
-                    .forward(&x, idx, block_idx, &mut self.ctx.cache)
+                    .forward_mut(&x, idx, block_idx, &mut self.ctx.cache)
                     .await
                     .map_err(|e| {
                         anyhow!("error in forward operation of local block {block_idx}: {e}")
@@ -171,22 +171,17 @@ impl Generator for LLama {
 
             if let Some((node_name, node)) = ctx.topology.get_node_for_layer(&block_layer_name) {
                 log::debug!("node {node_name} will serve {}", &block_layer_name);
-
-                let client =
+                blocks.push(Box::new(
                     crate::cake::Client::new(ctx.device.clone(), &node.host, &block_layer_name)
-                        .await?;
-
-                blocks.push(Box::new(client));
+                        .await?,
+                ));
             } else {
                 log::debug!("{} will be served locally", &block_layer_name);
-
-                let block = Transformer::load(
-                    &block_layer_name,
+                blocks.push(Transformer::load(
+                    block_layer_name.clone(),
                     ctx.var_builder.pp(&block_layer_name),
                     &ctx.config,
-                )?;
-
-                blocks.push(Box::new(block));
+                )?);
             }
         }
 

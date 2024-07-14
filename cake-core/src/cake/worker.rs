@@ -5,8 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{Context, Message, WorkerInfo};
-use crate::model::{Transformer, Cache};
+use super::{Context, Forwarder, Message, WorkerInfo};
+use crate::model::Cache;
 
 use anyhow::Result;
 use candle_core::{DType, Device};
@@ -17,15 +17,16 @@ use tokio::{
 
 const NUM_OPS_TO_STATS: usize = 5;
 
-struct WorkerContext {
+#[derive(Clone)]
+struct WorkerContext<F> {
     device: Device,
     device_idx: usize,
     dtype: DType,
-    blocks: Arc<HashMap<String, Transformer>>,
+    blocks: Arc<HashMap<String, Box<F>>>,
     cache: Cache,
 }
 
-impl WorkerContext {
+impl<F: Forwarder> WorkerContext<F> {
     fn to_info(&self, latency: u128) -> WorkerInfo {
         WorkerInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -43,19 +44,25 @@ impl WorkerContext {
             dtype: format!("{:?}", self.dtype),
         }
     }
+
+    fn get_client_context(&self) -> Self {
+        WorkerContext {
+            device: self.device.clone(),
+            device_idx: self.device_idx,
+            dtype: self.dtype,
+            blocks: self.blocks.clone(),
+            // each client loop gets a new cache
+            cache: self.cache.as_new(),
+        }
+    }
 }
 
-pub struct Worker {
+pub struct Worker<F> {
     listener: TcpListener,
-
-    cache: Cache,
-    blocks: Arc<HashMap<String, Transformer>>,
-    device: Device,
-    device_idx: usize,
-    dtype: DType,
+    context: WorkerContext<F>,
 }
 
-impl Worker {
+impl<F: Forwarder + 'static> Worker<F> {
     pub async fn new(ctx: Context) -> Result<Self> {
         let worker_name = if let Some(name) = &ctx.args.name {
             name.to_string()
@@ -74,12 +81,11 @@ impl Worker {
         for block_layer_name in &worker_topology.layers {
             log::info!("loading {} ...", &block_layer_name);
 
-            let block = Transformer::load(
-                block_layer_name,
+            let block = F::load(
+                block_layer_name.to_string(),
                 ctx.var_builder.pp(block_layer_name),
                 &ctx.config,
             )?;
-
             blocks.insert(block_layer_name.to_string(), block);
         }
 
@@ -98,14 +104,15 @@ impl Worker {
         let dtype = ctx.dtype;
         let device_idx = ctx.args.device;
 
-        Ok(Self {
-            dtype,
-            listener,
-            cache,
-            blocks,
+        let context = WorkerContext {
             device,
             device_idx,
-        })
+            dtype,
+            blocks,
+            cache,
+        };
+
+        Ok(Self { listener, context })
     }
 
     async fn read_message_timed<R>(mut socket: R) -> Result<(Duration, usize, Message)>
@@ -133,7 +140,7 @@ impl Worker {
     async fn handle_client(
         mut socket: TcpStream,
         client: SocketAddr,
-        mut context: WorkerContext,
+        mut context: WorkerContext<F>,
     ) -> Result<()> {
         // read and validate Hello
         let (latency, _size, hello) = Self::read_message_timed(&mut socket).await?;
@@ -166,7 +173,7 @@ impl Worker {
         {
             let (x, ops) = match op_message {
                 // single block operation
-                Message::TransformerOp {
+                Message::SingleOp {
                     layer_name,
                     x,
                     index_pos,
@@ -194,7 +201,7 @@ impl Worker {
                 if let Some(block) = context.blocks.get(&layer_name) {
                     // run forward pass
                     x = block
-                        .forward_imm(&x, index_pos, block_idx, &mut context.cache)
+                        .forward(&x, index_pos, block_idx, &mut context.cache)
                         .await
                         .unwrap();
                 } else {
@@ -242,21 +249,11 @@ impl Worker {
         Ok(())
     }
 
-    fn create_worker_context(&self) -> WorkerContext {
-        WorkerContext {
-            device: self.device.clone(),
-            device_idx: self.device_idx,
-            dtype: self.dtype,
-            blocks: self.blocks.clone(),
-            cache: self.cache.as_new(), // each client loop gets a new cache
-        }
-    }
-
     pub async fn run(&mut self) -> Result<()> {
         while let Ok((socket, client)) = self.listener.accept().await {
             log::info!("{} connected", &client);
 
-            let context = self.create_worker_context();
+            let context = self.context.get_client_context();
             tokio::spawn(async move {
                 if let Err(e) = Self::handle_client(socket, client, context).await {
                     log::error!("{}", e);
