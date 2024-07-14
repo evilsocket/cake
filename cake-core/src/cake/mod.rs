@@ -70,32 +70,17 @@ impl Context {
 
         log::info!("loading topology from {}", &args.topology);
 
-        let topology = Topology::from_path(&args.topology)?;
-
         let data_path = PathBuf::from(&args.model);
+
         let config_filename = data_path.join("config.json");
-        let model_tensors_index = data_path.join("model.safetensors.index.json");
+        let config = LlamaConfig::from_path(&config_filename)?.into_config();
 
-        log::info!("loading configuration from {}", config_filename.display());
-
-        let data = std::fs::read(&config_filename)
-            .map_err(|e| anyhow!("can't read {}: {:?}", config_filename.display(), e))?;
-        let config: LlamaConfig = serde_json::from_slice(&data)
-            .map_err(|e| anyhow!("can't parse {}: {:?}", config_filename.display(), e))?;
-        let config = config.into_config();
-
+        let topology = Topology::from_path(&args.topology)?;
         let cache = Cache::new(true, dtype, &config, &device)?;
 
-        log::info!("loading tensors from {} ...", model_tensors_index.display());
-
-        let filenames: Vec<std::path::PathBuf> =
-            utils::load_safetensors_from_index(model_tensors_index)
-                .map_err(|e| anyhow!("can't load tensors index: {:?}", e))?;
-
-        let var_builder = unsafe {
-            VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)
-                .map_err(|e| anyhow!("can't create varbuilder from tensors: {:?}", e))?
-        };
+        let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
+        let var_builder =
+            utils::load_var_builder_from_index(model_tensors_index, dtype, device.clone())?;
 
         Ok(Context {
             args,

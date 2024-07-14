@@ -4,13 +4,14 @@ use std::path::PathBuf;
 
 use candle_core::{
     utils::{cuda_is_available, metal_is_available},
-    Device, Tensor,
+    DType, Device, Tensor,
 };
 
 use anyhow::{bail, Result};
 
 mod token_output_stream;
 
+use candle_nn::VarBuilder;
 pub use token_output_stream::*;
 
 /// Returns the best available device at `ordinal` index (in case of multiple GPUs), or CPU if `force_cpu` is true.
@@ -31,10 +32,15 @@ pub fn get_inference_device(force_cpu: bool, ordinal: usize) -> Result<Device> {
     }
 }
 
-/// Loads the safetensors files for a model from the hub based on a json index file.
-pub fn load_safetensors_from_index(
+/// Load the safetensors files for a model from the hub based on a json index file.
+pub fn load_safetensors_paths_from_index(
     tensors_index_json_filename: PathBuf,
 ) -> Result<Vec<std::path::PathBuf>> {
+    log::info!(
+        "loading tensors from {} ...",
+        tensors_index_json_filename.display()
+    );
+
     let parent_dir = tensors_index_json_filename.parent().unwrap();
     let json_file = std::fs::File::open(&tensors_index_json_filename).map_err(|e| {
         anyhow!(
@@ -67,6 +73,21 @@ pub fn load_safetensors_from_index(
         .collect::<Vec<std::path::PathBuf>>();
 
     Ok(safetensors_files)
+}
+
+/// Create a VarBuilder with the tensors loaded from the index.
+pub fn load_var_builder_from_index<'a>(
+    tensor_index: PathBuf,
+    dtype: DType,
+    device: Device,
+) -> Result<VarBuilder<'a>> {
+    let filenames: Vec<std::path::PathBuf> = load_safetensors_paths_from_index(tensor_index)
+        .map_err(|e| anyhow!("can't load tensors index: {:?}", e))?;
+
+    unsafe {
+        VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)
+            .map_err(|e| anyhow!("can't create varbuilder from tensors: {:?}", e))
+    }
 }
 
 /// Nasty hack to debug NaN in tensors.

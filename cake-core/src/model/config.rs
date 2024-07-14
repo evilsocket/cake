@@ -1,3 +1,7 @@
+use std::path::Path;
+
+use anyhow::Result;
+
 /// Max supported sequence length.
 pub const MAX_SEQ_LEN: usize = 4096;
 
@@ -22,6 +26,16 @@ pub struct LlamaConfig {
 }
 
 impl LlamaConfig {
+    /// Load the configuration from the given path.
+    pub fn from_path(path: &Path) -> Result<Self> {
+        log::info!("loading configuration from {}", path.display());
+
+        let data =
+            std::fs::read(path).map_err(|e| anyhow!("can't read {}: {:?}", path.display(), e))?;
+        serde_json::from_slice(&data)
+            .map_err(|e| anyhow!("can't parse {}: {:?}", path.display(), e))
+    }
+
     /// Return the number of kv heads.
     pub fn num_key_value_heads(&self) -> usize {
         self.num_key_value_heads.unwrap_or(self.num_attention_heads)

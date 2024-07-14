@@ -199,7 +199,7 @@ fn main() {
 
         safetensors::serialize_to_file(metadata, &None, &new_tensors_path).unwrap();
 
-        let loaded = utils::load_safetensors_from_index(new_index_path).unwrap();
+        let loaded = utils::load_safetensors_paths_from_index(new_index_path).unwrap();
 
         assert_eq!(loaded.len(), 1);
 
