@@ -7,7 +7,7 @@
 </p>
 <hr/>
 
-`llama3-cake` is a pure Rust implementation of the llama3 [LLM distributed inference](https://x.com/evilsocket/status/1812110504531259900) based on [Candle](https://github.com/huggingface/candle). The goal of the project is being able to run big (70B+) models by repurposing consumer hardware into an heterogeneous cluster of iOS, macOS, Linux and Windows devices.
+`Cake` is a pure Rust implementation of the [LLama3 distributed inference](https://x.com/evilsocket/status/1812110504531259900) based on [Candle](https://github.com/huggingface/candle). The goal of the project is being able to run big (70B+) models by repurposing consumer hardware into an heterogeneous cluster of iOS, macOS, Linux and Windows devices.
 
 **This is experimental code**.
 

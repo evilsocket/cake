@@ -1,3 +1,14 @@
 [workspace]
 resolver = "2"
 members = ["cake-core", "cake-cli", "cake-ios", "cake-split-model"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+description = "Distributed LLM inference for mobile, desktop and server."
+repository = "https://github.com/evilsocket/cake"
+keywords = ["blas", "tensor", "machine-learning"]
+authors = ["Simone Margaritelli <evilsocket@gmail.com>"]
+license = "GPL-3.0"
+readme = "README.md"
+categories = ["science"]
