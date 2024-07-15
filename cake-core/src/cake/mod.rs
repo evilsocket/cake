@@ -95,12 +95,15 @@ impl Context {
     }
 }
 
+/// This is the trait that a shardable object must implement.
 #[async_trait]
 pub trait Forwarder: Debug + Send + Sync + Display {
+    /// Create an instance of this object loading the specified layer(s) from a VarBuilder.
     fn load(name: String, vb: VarBuilder, cfg: &Config) -> Result<Box<Self>>
     where
         Self: Sized;
 
+    /// Applies a forward operation to the input tensor, does not require mutability.
     async fn forward(
         &self,
         x: &Tensor,
@@ -109,6 +112,7 @@ pub trait Forwarder: Debug + Send + Sync + Display {
         cache: &mut Cache,
     ) -> Result<Tensor>;
 
+    /// Applies a forward operation to the input tensor, requires mutability.
     async fn forward_mut(
         &mut self,
         x: &Tensor,
@@ -117,6 +121,7 @@ pub trait Forwarder: Debug + Send + Sync + Display {
         cache: &mut Cache,
     ) -> Result<Tensor>;
 
+    /// Applies a batch of forward operations to the input tensor.
     async fn forward_batch(
         &mut self,
         _x: &Tensor,
@@ -126,8 +131,10 @@ pub trait Forwarder: Debug + Send + Sync + Display {
         unimplemented!()
     }
 
+    /// Return the layer name.
     fn layer_name(&self) -> &str;
 
+    /// Return the unique identity or local.
     fn ident(&self) -> &str {
         "local"
     }
