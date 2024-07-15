@@ -7,11 +7,49 @@
 </p>
 <hr/>
 
-`Cake` is a pure Rust implementation of the [LLama3 distributed inference](https://x.com/evilsocket/status/1812110504531259900) based on [Candle](https://github.com/huggingface/candle). The goal of the project is being able to run big (70B+) models by repurposing consumer hardware into an heterogeneous cluster of iOS, macOS, Linux and Windows devices.
+
+`Cake` is a Rust framework for [distributed inference of large models like LLama3](https://x.com/evilsocket/status/1812110504531259900) based on [Candle](https://github.com/huggingface/candle). The goal of the project is being able to run big (70B+) models by repurposing consumer hardware into an heterogeneous cluster of iOS, Android, macOS, Linux and Windows devices, effectively leveraging [planned obsolescence](https://en.wikipedia.org/wiki/Planned_obsolescence) as a tool to make AI more accessible and democratic.
 
 **This is experimental code**.
 
 The idea is to shard the transformer blocks to multiple devices in order to be able to run the inference on models that wouldn't normally fit in the GPU memory of a single device. Inferences over contiguous transformer blocks on the same worker are batched in order to minimize latency due to data transfer.
+
+## Support
+
+| OS                           | Architectures | Acceleration | Status |
+|----------------------------------|------------------|------------------|------------------|
+| GNU/Linux                 | arm, arm64, x86_64 | -                | ✅ |
+| GNU/Linux                 | arm, arm64, x86_64 | CUDA                | ✅ |
+| GNU/Linux                 | arm, arm64, x86_64 | BLAS                | ✅ |
+| macOS                 | intel | -                | ✅ |
+| macOS                 | aarch64 | -                | ✅ |
+| macOS                 | aarch64 | Metal                | ✅ |
+| Android                | arm, arm64, x86_64 | - | ✅ |
+| Android                | arm, arm64, x86_64 | CUDA | [untested](https://docs.nvidia.com/gameworks/content/technologies/mobile/cuda_android_main.htm) |
+| iOS / iPadOS                 | aarch64 | -                | ✅ |
+| iOS / iPadOS                 | aarch64 | Metal                | 🛠️  [90% done, WIP](https://github.com/huggingface/candle/issues/2322) |
+| Web                 | - | WebGPU                | [in theory possible, not done](https://onnxruntime.ai/docs/tutorials/web/ep-webgpu.html) |
+
+CUDA >= 12.2 is required for CUDA accelerated systems.
+
+## Compile
+
+With [Rust installed](https://www.rust-lang.org/tools/install), you can build the core library and the CLI utilities with:
+
+```sh
+cargo build --release
+```
+
+This will compile with the best available accelleration for the host system.
+
+
+To generate the iOS bindings in the app that can then be [compiled and deployed via XCode](https://github.com/evilsocket/cake/tree/main/cake-ios-worker-app):
+
+```sh
+make ios
+```
+
+## Using
 
 Run a worker node:
 
@@ -73,26 +111,6 @@ cake-split-model --model-path path/to/Meta-Llama-3-8B \ # source model to split
 ```
 
 This will create a smaller folder with only the required layers tensors and the topology file for the specific worker. Remember to also copy other model contents (config.json, tokenizer.json, etc) in the worker bundle before deploying it.
-
-## Support
-
-| OS                           | Architectures | Acceleration | Status |
-|:----------------------------------:|:------------------:|:------------------:|:------------------:|
-| GNU/Linux                 | arm, arm64, x86_64 | -                | :heavy_check_mark: |
-| GNU/Linux                 | arm, arm64, x86_64 | CUDA                | :heavy_check_mark: |
-| GNU/Linux                 | arm, arm64, x86_64 | BLAS                | :heavy_check_mark: |
-| macOS                 | intel | -                | :heavy_check_mark: |
-| macOS                 | aarch64 | -                | :heavy_check_mark: |
-| macOS                 | aarch64 | Metal                | :heavy_check_mark: |
-| Android                | arm, arm64, x86_64 | - | :heavy_check_mark: |
-| Android                | arm, arm64, x86_64 | CUDA | untested |
-| iOS / iPadOS                 | aarch64 | -                | :heavy_check_mark: |
-| iOS / iPadOS                 | aarch64 | Metal                | [90% done, WIP](https://github.com/huggingface/candle/issues/2322) |
-| Web                 | - | WebGPU                | [in theory possible, not done](https://onnxruntime.ai/docs/tutorials/web/ep-webgpu.html) |
-
-### CUDA Note
-
-CUDA >= 12.2 is required for CUDA accelerated systems.
 
 ## License
 
