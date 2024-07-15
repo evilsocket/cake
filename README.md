@@ -90,6 +90,10 @@ This will create a smaller folder with only the required layers tensors and the 
 | iOS / iPadOS                 | aarch64 | Metal                | [90% done, WIP](https://github.com/huggingface/candle/issues/2322) |
 | Web                 | - | WebGPU                | [in theory possible, not done](https://onnxruntime.ai/docs/tutorials/web/ep-webgpu.html) |
 
+### CUDA Note
+
+CUDA >= 12.2 is required for CUDA accelerated systems.
+
 ## License
 
 Released under the GPL 3 license. To see the licenses of the project dependencies, install cargo license with `cargo install cargo-license` and then run `cargo license`.
