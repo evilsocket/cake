@@ -68,7 +68,7 @@ cake-cli --model /path/to/Meta-Llama-3-8B \
          --topology topology.yml
 ```
 
-Where `topology.yaml` determines which layers are served by whom:
+Where `topology.yaml` determines which layers are served by which worker (you can find a list of all the layers of a model in its [tensor index file](https://huggingface.co/meta-llama/Meta-Llama-3-70B/blob/main/model.safetensors.index.json)):
 
 ```yaml
 linux_server_1:
