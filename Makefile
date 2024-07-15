@@ -19,7 +19,7 @@ ios_bindings: build
 ios: ios_bindings
 	cargo build --release --target=aarch64-apple-ios
 	mv ./cake-ios/bindings/cakeFFI.modulemap ./cake-ios/bindings/module.modulemap
-	rm ./cake-ios-worker-app/Cake\ Worker/Cake.swift
+	rm ./cake-ios-worker-app/Cake\ Worker/Cake_WorkerApp.swift
 	mv ./cake-ios/bindings/cake.swift ./cake-ios-worker-app/Cake\ Worker/Cake.swift
 	rm -rf "./cake-ios-worker-app/Cake.xcframework"
 	xcodebuild -create-xcframework \
