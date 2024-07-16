@@ -27,7 +27,7 @@ The idea is to shard the transformer blocks to multiple devices in order to be a
 | GNU/Linux                 | arm, arm64, x86_64 | BLAS                | ✅ |
 | Windows                | x86_64 | BLAS                | [untested](https://github.com/evilsocket/cake/issues/7) |
 | Windows                | x86_64 | CUDA                | [untested](https://github.com/evilsocket/cake/issues/7) |
-| macOS                 | intel | -                | ✅ |
+| macOS                 | x86_64 | -                | ✅ |
 | macOS                 | aarch64 | -                | ✅ |
 | macOS                 | aarch64 | Metal                | ✅ |
 | Android                | arm, arm64, x86_64 | - | ✅ |
