@@ -13,14 +13,20 @@ use crate::{
     utils, Args,
 };
 
-mod client;
+#[cfg(feature = "master")]
+mod api;
+#[cfg(feature = "master")]
 mod master;
+
+mod client;
 mod proto;
 mod topology;
 mod worker;
 
-pub use client::*;
+#[cfg(feature = "master")]
 pub use master::*;
+
+pub use client::*;
 pub use proto::*;
 pub use topology::*;
 pub use worker::*;

@@ -1,26 +1,54 @@
-use crate::models::Generator;
+use std::io::Write;
 
-use super::Context;
+use crate::models::{chat::Message, Generator};
+
+use super::{api, Context};
 
 use anyhow::Result;
 
 /// A master connects to, communicates with and orchestrates the workers.
 pub struct Master<G> {
-    ctx: Context,
-    model: Box<G>,
+    pub ctx: Context,
+    pub model: Box<G>,
 }
 
-impl<G: Generator> Master<G> {
+impl<G: Generator + Send + Sync + 'static> Master<G> {
     /// Create a new instance.
     pub async fn new(ctx: Context) -> Result<Self> {
         let model = G::load(ctx.clone()).await?;
         Ok(Self { ctx, model })
     }
 
+    pub async fn run(mut self) -> Result<()> {
+        if self.ctx.args.api.is_some() {
+            // run as REST api
+            api::start(self).await?;
+        } else {
+            // if running in cli mode, pre add system and user prompts
+            self.model
+                .add_message(Message::system(self.ctx.args.prompt.clone()))?;
+            self.model
+                .add_message(Message::user(self.ctx.args.system_prompt.clone()))?;
+
+            // just run one generation to stdout
+            self.generate(|data| {
+                if data.is_empty() {
+                    println!();
+                } else {
+                    print!("{data}")
+                }
+                std::io::stdout().flush().unwrap();
+            })
+            .await?;
+        }
+
+        Ok(())
+    }
+
     /// Start the generation loop and call the stream function for every token.
-    pub async fn generate<S>(&mut self, stream: S) -> Result<()>
+    pub async fn generate<S>(&mut self, mut stream: S) -> Result<()>
     where
-        S: Fn(&str),
+        S: FnMut(&str),
     {
         log::info!(
             "starting the inference loop (mem={})\n\n",

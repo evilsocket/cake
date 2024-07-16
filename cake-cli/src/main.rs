@@ -1,7 +1,5 @@
 //! This is the cake command line utility.
 
-use std::io::Write;
-
 use cake_core::{
     cake::{Context, Master, Mode, Worker},
     Args,
@@ -18,7 +16,7 @@ async fn main() -> Result<()> {
     // setup logging
     if std::env::var_os("RUST_LOG").is_none() {
         // set `RUST_LOG=debug` to see debug logs
-        std::env::set_var("RUST_LOG", "info,tokenizers=error");
+        std::env::set_var("RUST_LOG", "info,tokenizers=error,actix_server=warn");
     }
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -34,14 +32,7 @@ async fn main() -> Result<()> {
         Mode::Master => {
             Master::<cake_core::models::llama3::LLama>::new(ctx)
                 .await?
-                .generate(|data| {
-                    if data.is_empty() {
-                        println!();
-                    } else {
-                        print!("{data}")
-                    }
-                    std::io::stdout().flush().unwrap();
-                })
+                .run()
                 .await
         }
         Mode::Worker => {

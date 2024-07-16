@@ -7,7 +7,7 @@ use tokenizers::Tokenizer;
 
 use crate::{
     cake::{Context, Forwarder},
-    models::{Generator, Token},
+    models::{chat::Message, Generator, Token},
     utils::{self, TokenOutputStream},
 };
 
@@ -17,7 +17,7 @@ use super::transformer::Transformer;
 const EOS_TOKEN: &str = "</s>";
 
 /// Load the tokenizer and return the first tokens from the prompt in context.
-fn load_tokenizer(ctx: &Context) -> Result<(TokenOutputStream, Vec<u32>, Option<u32>)> {
+fn load_tokenizer(ctx: &Context) -> Result<(TokenOutputStream, Option<u32>)> {
     let tokenizer_filename = ctx.data_path.join("tokenizer.json");
 
     log::info!("loading tokenizer from {}", tokenizer_filename.display());
@@ -28,17 +28,9 @@ fn load_tokenizer(ctx: &Context) -> Result<(TokenOutputStream, Vec<u32>, Option<
         .eos_token_id
         .or_else(|| tokenizer.token_to_id(EOS_TOKEN));
 
-    let tokens = tokenizer
-        .encode(ctx.args.prompt.clone(), true)
-        .map_err(anyhow::Error::msg)?
-        .get_ids()
-        .to_vec();
-
     let tokenizer = utils::TokenOutputStream::new(tokenizer);
 
-    log::debug!("prompt tokens: {:?}", &tokens);
-
-    Ok((tokenizer, tokens, eos_token_id))
+    Ok((tokenizer, eos_token_id))
 }
 
 /// Create the logit sampling logic from the context.
@@ -62,7 +54,6 @@ pub struct LLama {
     ctx: Context,
 
     tokenizer: TokenOutputStream,
-    tokens: Vec<u32>,
     embedding: Embedding,
     eos_token_id: Option<u32>,
     index_pos: usize,
@@ -73,6 +64,9 @@ pub struct LLama {
     lm_head: Linear,
 
     logits_processor: LogitsProcessor,
+
+    history: Vec<Message>,
+    tokens: Vec<u32>,
 }
 
 impl LLama {
@@ -141,11 +135,20 @@ impl LLama {
             .to_dtype(DType::F32)
             .map_err(|e| anyhow!("error converting logits: {e}"))
     }
+
+    fn raw_message(&self, message: &Message) -> String {
+        format!(
+            "<|start_header_id|>{}<|end_header_id|>\n\n{}<|eot_id|>\n",
+            message.role, &message.content
+        )
+    }
 }
 
 #[async_trait]
 impl Generator for LLama {
     type Shardable = Transformer;
+
+    const MODEL_NAME: &'static str = "llama3";
 
     /// Load this model from the context.
     async fn load(ctx: Context) -> Result<Box<Self>> {
@@ -196,7 +199,10 @@ impl Generator for LLama {
             log::info!("  {}", block)
         }
 
-        let (tokenizer, tokens, eos_token_id) = load_tokenizer(&ctx)?;
+        let (tokenizer, eos_token_id) = load_tokenizer(&ctx)?;
+        let tokens = vec![];
+        let history = vec![];
+
         let logits_processor = create_logits_processor(&ctx);
         let index_pos = 0;
 
@@ -208,6 +214,7 @@ impl Generator for LLama {
         Ok(Box::new(Self {
             tokenizer,
             tokens,
+            history,
             eos_token_id,
             index_pos,
             ctx,
@@ -217,6 +224,39 @@ impl Generator for LLama {
             lm_head,
             logits_processor,
         }))
+    }
+
+    /// Add a message to the chat history.
+    fn add_message(&mut self, message: Message) -> Result<()> {
+        self.history.push(message);
+
+        // generate raw from history
+        let mut raw = "<|begin_of_text|>".to_string();
+
+        for message in &self.history {
+            raw += &self.raw_message(message);
+        }
+
+        raw += "<|start_header_id|>assistant<|end_header_id|>";
+
+        log::debug!("{}", &raw);
+
+        // tokenize raw
+        self.tokens = self
+            .tokenizer
+            .tokenizer()
+            .encode(raw, true)
+            .map_err(anyhow::Error::msg)?
+            .get_ids()
+            .to_vec();
+
+        Ok(())
+    }
+
+    fn clear_history(&mut self) -> Result<()> {
+        self.tokens.clear();
+        self.history.clear();
+        Ok(())
     }
 
     /// Return the next token.

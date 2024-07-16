@@ -1,9 +1,11 @@
+pub mod chat;
 pub mod llama3;
 
 use crate::cake::{Context, Forwarder};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use chat::Message;
 
 /// A token.
 pub struct Token {
@@ -34,8 +36,18 @@ impl std::fmt::Display for Token {
 pub trait Generator {
     /// This associated type determines which part of the model can be sharded.
     type Shardable: Forwarder;
+
+    /// The model name.
+    const MODEL_NAME: &'static str;
+
     /// Load the model from the context.
     async fn load(context: Context) -> Result<Box<Self>>;
+
+    /// Add a message to the chat.
+    fn add_message(&mut self, message: Message) -> Result<()>;
+    /// Clear chat history.
+    fn clear_history(&mut self) -> Result<()>;
+
     /// Return the next token.
     async fn next_token(&mut self, index: usize) -> Result<Token>;
     /// Return the last residual data if any.

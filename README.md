@@ -63,11 +63,12 @@ cake-cli --model /path/to/Meta-Llama-3-8B \ # model path, read below on how to o
          --address 0.0.0.0:10128            # bind address
 ```
 
-Run a master node:
+Run a master node with an OpenAI compatible REST API:
 
 ```sh
-cake-cli --model /path/to/Meta-Llama-3-8B \
-         --topology topology.yml
+cake-cli --model /path/to/Meta-Llama-3-8B \ # model path
+         --api 0.0.0.0:8080               \ # API bind address
+         --topology topology.yml            # topology file
 ```
 
 Where `topology.yml` determines which layers are served by which worker (you can find a list of all the layers of a model in its [tensor index file](https://huggingface.co/meta-llama/Meta-Llama-3-70B/blob/main/model.safetensors.index.json)):
@@ -103,6 +104,27 @@ macbook:
   layers:
     - 'model.layers.20-31' 
 ```
+
+You can now interact with the cluster by:
+
+```sh
+curl http://master-ip:8080/api/v1/chat/completions \                                                                                                                           ~  
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+        {   
+            "role": "system",
+            "content": "You are a helpful AI assistant."
+        },  
+        {   
+            "role": "user",
+            "content": "Why is the sky blue?"
+        }
+    ]
+}'
+```
+
+### Splitting the Model
 
 As a memory and disk space optimization, you might want to give the worker only the data it actually needs from the model instead of the whole folder, in which case you can use the `cake-split-model` utility. For instance to generate a smaller version of the llama3 safetensors, you can:
 

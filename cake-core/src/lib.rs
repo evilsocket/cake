@@ -22,9 +22,12 @@ pub struct Args {
     /// Worker name.
     #[arg(long)]
     pub name: Option<String>,
-    /// Binding address and port if in worker mode.
+    /// Binding address and port for workers.
     #[arg(long, default_value = "127.0.0.1:10128")]
     pub address: String,
+    /// Enable OpenAI compatible chat completion API.
+    #[arg(long)]
+    pub api: Option<String>,
     /// Llama3 model data path.
     #[arg(long, default_value = "./cake-data/Meta-Llama-3-8B/")]
     pub model: String,
@@ -32,8 +35,11 @@ pub struct Args {
     #[arg(long, default_value = "./cake-data/topology.yml")]
     pub topology: String,
     /// The initial prompt.
-    #[arg(long, default_value = "Hi! I am ")]
+    #[arg(long, default_value = "Why is the sky blue?")]
     pub prompt: String,
+    /// The system prompt.
+    #[arg(long, default_value = "You are a helpful AI assistant.")]
+    pub system_prompt: String,
     /// The seed to use when generating random samples.
     #[arg(long, default_value_t = 299792458)]
     pub seed: u64,

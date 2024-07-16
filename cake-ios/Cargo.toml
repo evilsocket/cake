@@ -10,9 +10,9 @@ name = "cake"
 [dependencies]
 anyhow = "1.0.86"
 uniffi = { version = "0.28.0", features = ["cli", "tokio"] }
-cake-core = { path = "../cake-core" }
 env_logger = "0.11.3"
 log = "0.4.22"
 tokio = "1.38.0"
-# https://github.com/huggingface/candle/issues/2322
-# metal = "0.28.0"
+
+# we don't need master code here
+cake-core = { path = "../cake-core", default-features = false }
