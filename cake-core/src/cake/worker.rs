@@ -6,7 +6,7 @@ use std::{
 };
 
 use super::{Context, Forwarder, Message, WorkerInfo};
-use crate::model::{Cache, Generator};
+use crate::models::{llama3::Cache, Generator};
 
 use anyhow::Result;
 use candle_core::{DType, Device};

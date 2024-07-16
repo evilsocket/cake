@@ -1,4 +1,4 @@
-use crate::model::Generator;
+use crate::models::Generator;
 
 use super::Context;
 

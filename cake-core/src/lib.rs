@@ -7,7 +7,7 @@ use cake::Mode;
 use clap::Parser;
 
 pub mod cake;
-pub mod model;
+pub mod models;
 pub mod utils;
 
 #[derive(Clone, Parser, Default, Debug)]

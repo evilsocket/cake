@@ -3,7 +3,8 @@
 use std::io::Write;
 
 use cake_core::{
-    cake::{Context, Master, Mode, Worker}, model::LLama, Args
+    cake::{Context, Master, Mode, Worker},
+    Args,
 };
 
 use anyhow::Result;
@@ -31,7 +32,7 @@ async fn main() -> Result<()> {
     // run either in master or worker mode depending on command line
     let ret = match ctx.args.mode {
         Mode::Master => {
-            Master::<LLama>::new(ctx)
+            Master::<cake_core::models::llama3::LLama>::new(ctx)
                 .await?
                 .generate(|data| {
                     if data.is_empty() {
@@ -44,7 +45,7 @@ async fn main() -> Result<()> {
                 .await
         }
         Mode::Worker => {
-            Worker::<LLama>::new(ctx)
+            Worker::<cake_core::models::llama3::LLama>::new(ctx)
                 .await?
                 .run()
                 .await

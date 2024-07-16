@@ -9,7 +9,7 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 
 use crate::{
-    model::{Cache, Config, LlamaConfig},
+    models::llama3::{Cache, Config, LlamaConfig},
     utils, Args,
 };
 
@@ -41,7 +41,7 @@ pub struct Context {
     pub topology: Topology,
     pub data_path: PathBuf,
     pub device: Device,
-    pub config: Config,
+    pub config: Config, // TODO: decouple
     pub cache: Cache,
     pub var_builder: VarBuilder<'static>,
 }

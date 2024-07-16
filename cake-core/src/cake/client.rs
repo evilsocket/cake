@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use candle_core::{Device, Tensor};
 use tokio::net::TcpStream;
 
-use crate::model::Cache;
+use crate::models::llama3::{Cache, Config};
 
 use super::{Message, WorkerInfo};
 
@@ -87,7 +87,7 @@ impl std::fmt::Display for Client {
 
 #[async_trait]
 impl super::Forwarder for Client {
-    fn load(_: String, _: candle_nn::VarBuilder, _: &crate::model::Config) -> Result<Box<Self>> {
+    fn load(_: String, _: candle_nn::VarBuilder, _: &Config) -> Result<Box<Self>> {
         Err(anyhow!("load should never be called on cake::Client"))
     }
 

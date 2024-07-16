@@ -4,7 +4,9 @@ use candle_nn::{Module, RmsNorm, VarBuilder};
 
 use async_trait::async_trait;
 
-use super::{Cache, CausalSelfAttention, Config, Forwarder, MLP};
+use crate::cake::Forwarder;
+
+use super::{Cache, CausalSelfAttention, Config, MLP};
 
 /// Transformer block with causal self attention and several caching strategies.
 #[derive(Debug, Clone)]

@@ -1,17 +1,4 @@
-//! This module contains model and inference specific code.
-mod attention;
-mod cache;
-mod config;
-mod llama;
-mod mlp;
-mod transformer;
-
-pub use attention::*;
-pub use cache::*;
-pub use config::*;
-pub use llama::*;
-pub use mlp::*;
-pub use transformer::*;
+pub mod llama3;
 
 use crate::cake::{Context, Forwarder};
 
@@ -46,7 +33,7 @@ impl std::fmt::Display for Token {
 #[async_trait]
 pub trait Generator {
     /// This associated type determines which part of the model can be sharded.
-    type Shardable : Forwarder;
+    type Shardable: Forwarder;
     /// Load the model from the context.
     async fn load(context: Context) -> Result<Box<Self>>;
     /// Return the next token.
