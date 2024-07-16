@@ -74,8 +74,6 @@ impl Context {
             human_bytes::human_bytes(memory_stats::memory_stats().unwrap().physical_mem as f64)
         );
 
-        log::info!("loading topology from {}", &args.topology);
-
         let data_path = PathBuf::from(&args.model);
 
         let config_filename = data_path.join("config.json");

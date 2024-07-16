@@ -81,6 +81,8 @@ pub fn load_var_builder_from_index<'a>(
     dtype: DType,
     device: Device,
 ) -> Result<VarBuilder<'a>> {
+    log::info!("loading tensors in {}", tensor_index.display());
+
     let filenames: Vec<std::path::PathBuf> = load_safetensors_paths_from_index(tensor_index)
         .map_err(|e| anyhow!("can't load tensors index: {:?}", e))?;
 

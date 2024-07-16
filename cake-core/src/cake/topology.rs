@@ -39,8 +39,10 @@ pub struct Topology(HashMap<String, Node>);
 impl Topology {
     /// Load the topology from a yaml file.
     pub fn from_path(path: &str) -> Result<Self> {
-        let mut topology: Self =
-            serde_yaml::from_str(&std::fs::read_to_string(path)?).map_err(|e| anyhow!(e))?;
+        log::info!("loading topology from {}", path);
+
+        let mut topology: Self = serde_yaml::from_str(&std::fs::read_to_string(path)?)
+            .map_err(|e| anyhow!("can't read {path}: {e}"))?;
 
         // check for range expressions
         for (_worker_name, node) in topology.iter_mut() {
