@@ -78,8 +78,18 @@ impl<G: Generator + 'static> Worker<G> {
 
         let worker_topology = if let Some(node) = ctx.topology.get(&worker_name) {
             node
+        } else if !ctx.topology.is_empty() {
+            let first = ctx.topology.keys().next().unwrap();
+            log::warn!(
+                "topology for worker name '{}' not found, using '{}'",
+                &worker_name,
+                first
+            );
+            ctx.topology.get(first).unwrap()
         } else {
-            return Err(anyhow!("could not find topology for {worker_name}"));
+            return Err(anyhow!(
+                "could not find topology for {worker_name} and topology file is empty"
+            ));
         };
 
         let mut blocks = HashMap::new();
