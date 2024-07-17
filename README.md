@@ -9,6 +9,8 @@
 
 # Hi bob
 
+# yerrrrrrrr
+
 `Cake` is a Rust framework for [distributed inference of large models like LLama3](https://x.com/evilsocket/status/1812110504531259900) based on [Candle](https://github.com/huggingface/candle). The goal of the project is being able to run big (70B+) models by repurposing consumer hardware into an heterogeneous cluster of iOS, Android, macOS, Linux and Windows devices, effectively leveraging [planned obsolescence](https://en.wikipedia.org/wiki/Planned_obsolescence) as a tool to make AI more accessible and democratic.
 
 <p align="center">
