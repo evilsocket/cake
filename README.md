@@ -40,7 +40,7 @@ CUDA >= 12.2 is required for CUDA accelerated systems.
 
 ## Compile
 
-With [Rust installed](https://www.rust-lang.org/tools/install), you can build the core library and the CLI utilities with:
+With [Rust installed](https://www.rust-lang.org/tools/install), you can build the core library and the CLI utilities with different accelerations.
 
 Without acceleration (will use CPU):
 
