@@ -80,11 +80,12 @@ impl Context {
         let config = LlamaConfig::from_path(&config_filename)?.into_config();
 
         let topology = Topology::from_path(&args.topology)?;
-        let cache = Cache::new(true, dtype, &config, &device)?;
 
         let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
         let var_builder =
             utils::load_var_builder_from_index(model_tensors_index, dtype, device.clone())?;
+
+        let cache = Cache::new(true, dtype, &config, &device)?;
 
         Ok(Context {
             args,

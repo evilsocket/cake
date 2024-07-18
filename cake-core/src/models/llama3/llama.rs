@@ -57,6 +57,7 @@ pub struct LLama {
     embedding: Embedding,
     eos_token_id: Option<u32>,
     index_pos: usize,
+    generated: usize,
 
     blocks: Vec<Box<dyn Forwarder>>,
 
@@ -82,6 +83,8 @@ impl LLama {
         while block_idx < num_blocks {
             let curr_block_id = self.blocks[block_idx].ident().to_owned();
             if curr_block_id == "local" {
+                // log::info!("x={:?} idx={idx} block={block_idx}", x.shape());
+
                 // do not batch local inferences
                 x = self.blocks[block_idx]
                     .forward_mut(&x, idx, block_idx, &mut self.ctx.cache)
@@ -211,9 +214,12 @@ impl Generator for LLama {
             human_bytes::human_bytes(memory_stats::memory_stats().unwrap().physical_mem as f64)
         );
 
+        let generated = 0;
+
         Ok(Box::new(Self {
             tokenizer,
             tokens,
+            generated,
             history,
             eos_token_id,
             index_pos,
@@ -229,33 +235,16 @@ impl Generator for LLama {
     /// Add a message to the chat history.
     fn add_message(&mut self, message: Message) -> Result<()> {
         self.history.push(message);
-
-        // generate raw from history
-        let mut raw = "<|begin_of_text|>".to_string();
-
-        for message in &self.history {
-            raw += &self.raw_message(message);
-        }
-
-        raw += "<|start_header_id|>assistant<|end_header_id|>";
-
-        log::debug!("{}", &raw);
-
-        // tokenize raw
-        self.tokens = self
-            .tokenizer
-            .tokenizer()
-            .encode(raw, true)
-            .map_err(anyhow::Error::msg)?
-            .get_ids()
-            .to_vec();
-
         Ok(())
     }
 
-    fn clear_history(&mut self) -> Result<()> {
+    fn reset(&mut self) -> Result<()> {
         self.tokens.clear();
         self.history.clear();
+        self.tokenizer.clear();
+        self.ctx.cache.clear();
+        self.index_pos = 0;
+        self.generated = 0;
         Ok(())
     }
 
@@ -263,8 +252,34 @@ impl Generator for LLama {
     async fn next_token(&mut self, index: usize) -> Result<Token> {
         log::trace!("model.next_token({index})");
 
-        let num_tokens = self.generated_tokens();
+        // Prefill tokens with chat history the first time.
+        if self.generated == 0 {
+            log::debug!("generating history tokens ...");
 
+            // generate raw from history
+            let mut raw = "<|begin_of_text|>".to_string();
+
+            for message in &self.history {
+                raw += &self.raw_message(message);
+            }
+
+            raw += "<|start_header_id|>assistant<|end_header_id|>";
+
+            log::debug!("{}", &raw);
+
+            // tokenize raw
+            self.tokens = self
+                .tokenizer
+                .tokenizer()
+                .encode(raw, true)
+                .map_err(anyhow::Error::msg)?
+                .get_ids()
+                .to_vec();
+
+            log::debug!("history tokens: {}", self.tokens.len());
+        }
+
+        let num_tokens = self.tokens.len();
         let (context_size, context_index) = if self.ctx.cache.with_kv_cache() && index > 0 {
             (1, self.index_pos)
         } else {
@@ -272,11 +287,14 @@ impl Generator for LLama {
         };
 
         let context_offset = num_tokens.saturating_sub(context_size);
-        let context_tokens = self.tokens[context_offset..].to_vec();
+        let context_tokens = &self.tokens[context_offset..];
         let num_context_tokens = context_tokens.len();
+
         let input = Tensor::new(context_tokens, &self.ctx.device)?
             .unsqueeze(0)
             .map_err(|e| anyhow!("error squeezing context tokens: {e}"))?;
+
+        // log::info!("input={:?} context_index={context_index}", input.shape());
 
         let logits = self
             .forward(&input, context_index)
@@ -303,6 +321,7 @@ impl Generator for LLama {
             .logits_processor
             .sample(&logits)
             .map_err(|e| anyhow!("error sampling logits {logits}: {e}"))?;
+        self.generated += 1;
         self.tokens.push(next_token);
 
         Ok(Token {
@@ -319,6 +338,6 @@ impl Generator for LLama {
 
     /// Return the number of generated tokens so far.
     fn generated_tokens(&self) -> usize {
-        self.tokens.len()
+        self.generated
     }
 }

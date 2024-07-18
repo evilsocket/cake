@@ -45,6 +45,11 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
         Ok(())
     }
 
+    /// Reset the master state for a new inference.
+    pub fn reset(&mut self) -> Result<()> {
+        self.model.reset()
+    }
+
     /// Start the generation loop and call the stream function for every token.
     pub async fn generate<S>(&mut self, mut stream: S) -> Result<()>
     where

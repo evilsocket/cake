@@ -54,11 +54,17 @@ impl Forwarder for Transformer {
     ) -> Result<Tensor> {
         let residual = x;
 
-        let x = self.rms_1.forward(x)?;
-        let x = (self.attn.forward(&x, index_pos, block_idx, cache)? + residual)?;
+        let x = self.rms_1.forward(x).map_err(|e| anyhow!("rms_1: {e}"))?;
+        let x = (self
+            .attn
+            .forward(&x, index_pos, block_idx, cache)
+            .map_err(|e| anyhow!("attention: {e}"))?
+            + residual)
+            .map_err(|e| anyhow!("residual: {e}"))?;
         let residual = &x;
-        let x = self.rms_2.forward(&x)?;
-        let x = (self.mlp.forward(&x)? + residual)?;
+        let x = self.rms_2.forward(&x).map_err(|e| anyhow!("rms_2: {e}"))?;
+        let x = (self.mlp.forward(&x).map_err(|e| anyhow!("mlp: {e}"))? + residual)
+            .map_err(|e| anyhow!("mlp residual: {e}"))?;
 
         Ok(x)
     }

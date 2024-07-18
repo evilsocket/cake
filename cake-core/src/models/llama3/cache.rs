@@ -75,29 +75,18 @@ impl Cache {
         self.sin.narrow(0, index_pos, seq_len)
     }
 
-    /// Apply the attention mask to the given tensor.
-    pub fn apply_attention_mask(&mut self, seq_len: usize, attention: &Tensor) -> Result<Tensor> {
-        // check if we need to create the mask for this sequence length
-        if let std::collections::hash_map::Entry::Vacant(entry) = self.masks.entry(seq_len) {
+    /// Get the attention mask for the given sequence length.
+    pub fn mask(&mut self, seq_len: usize) -> Result<Tensor> {
+        if let Some(mask) = self.masks.get(&seq_len) {
+            Ok(mask.clone())
+        } else {
             let mask: Vec<_> = (0..seq_len)
                 .flat_map(|i| (0..seq_len).map(move |j| u8::from(j > i)))
                 .collect();
             let mask = Tensor::from_slice(&mask, (seq_len, seq_len), &self.device)?;
-            // cache it
-            entry.insert(mask.clone());
+            self.masks.insert(seq_len, mask.clone());
+            Ok(mask)
         }
-
-        // get cached mask
-        let mask = self.masks.get(&seq_len).unwrap();
-        // reshape
-        let attn_shape = attention.shape();
-        let mask = mask.broadcast_as(attn_shape)?;
-
-        // apply mask to the attention tensor
-        let on_true =
-            Tensor::new(f32::NEG_INFINITY, attention.device())?.broadcast_as(attn_shape.dims())?;
-
-        mask.where_cond(&on_true, attention)
     }
 
     /// Process the input k and v by either generating their cache entry or applying a previously cached one.
@@ -135,11 +124,13 @@ impl Cache {
     /// Return a copy of this cache with the same state but new kv table.
     pub fn as_new(&self) -> Self {
         let mut copy = self.clone();
-
-        // no need to clear attention masks as they only depend on sequence_length
-        // copy.masks.clear();
-        copy.kvs = vec![None; self.kvs.len()];
-
+        copy.clear();
         copy
+    }
+
+    /// Clear the cache.
+    pub fn clear(&mut self) {
+        self.masks.clear();
+        self.kvs = vec![None; self.kvs.len()];
     }
 }

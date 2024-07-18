@@ -75,7 +75,7 @@ where
 
     let mut master = state.write().await;
 
-    master.model.clear_history().unwrap();
+    master.reset().unwrap();
 
     for message in messages.0.messages {
         master.model.add_message(message).unwrap();

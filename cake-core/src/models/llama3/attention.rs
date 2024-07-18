@@ -13,6 +13,14 @@ pub struct CausalSelfAttention {
     head_dim: usize,
 }
 
+#[inline]
+fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> Result<Tensor> {
+    let shape = mask.shape();
+    let on_true = Tensor::new(on_true, on_false.device())?.broadcast_as(shape.dims())?;
+    let m = mask.where_cond(&on_true, on_false)?;
+    Ok(m)
+}
+
 impl CausalSelfAttention {
     fn apply_rotary_emb(
         &self,
@@ -33,31 +41,57 @@ impl CausalSelfAttention {
         index_pos: usize,
         block_idx: usize,
         cache: &mut super::Cache,
-    ) -> Result<Tensor> {
-        let (b_sz, seq_len, hidden_size) = x.dims3()?;
-        let q = self.q_proj.forward(x)?;
-        let k = self.k_proj.forward(x)?;
-        let v = self.v_proj.forward(x)?;
+    ) -> anyhow::Result<Tensor> {
+        let (b_sz, seq_len, hidden_size) = x.dims3().map_err(|e| anyhow!("x.dims3 -> {e}"))?;
+
+        // log::info!("x.dims3 = {:?}", x.dims3().unwrap());
+
+        let q = self
+            .q_proj
+            .forward(x)
+            .map_err(|e| anyhow!("q.forward -> {e}"))?;
+        let k = self
+            .k_proj
+            .forward(x)
+            .map_err(|e| anyhow!("k.forward -> {e}"))?;
+        let v = self
+            .v_proj
+            .forward(x)
+            .map_err(|e| anyhow!("v.forward -> {e}"))?;
 
         let q = q
             .reshape((b_sz, seq_len, self.num_attention_heads, self.head_dim))?
             .transpose(1, 2)?
-            .contiguous()?;
+            .contiguous()
+            .map_err(|e| anyhow!("q.reshape -> {e}"))?;
         let k = k
             .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
             .transpose(1, 2)?
-            .contiguous()?;
+            .contiguous()
+            .map_err(|e| anyhow!("k.reshape -> {e}"))?;
         let v = v
             .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
-            .transpose(1, 2)?;
+            .transpose(1, 2)
+            .map_err(|e| anyhow!("v.reshape -> {e}"))?;
 
-        let q = self.apply_rotary_emb(&q, index_pos, cache)?;
-        let k = self.apply_rotary_emb(&k, index_pos, cache)?;
+        let q = self
+            .apply_rotary_emb(&q, index_pos, cache)
+            .map_err(|e| anyhow!("q.apply_rotary_emb -> {e}"))?;
 
-        let (k, v) = cache.process_kv(block_idx, k, v)?;
+        let k = self
+            .apply_rotary_emb(&k, index_pos, cache)
+            .map_err(|e| anyhow!("k.apply_rotary_emb -> {e}"))?;
 
-        let k = self.repeat_kv(k)?;
-        let v = self.repeat_kv(v)?;
+        let (k, v) = cache
+            .process_kv(block_idx, k, v)
+            .map_err(|e| anyhow!("cache.process_kv(block={block_idx}) -> {e}"))?;
+
+        let k = self
+            .repeat_kv(k)
+            .map_err(|e| anyhow!("repeat_kv(k) -> {e}"))?;
+        let v = self
+            .repeat_kv(v)
+            .map_err(|e| anyhow!("repeat_kv(v) -> {e}"))?;
 
         let y = {
             let in_dtype = q.dtype();
@@ -68,7 +102,14 @@ impl CausalSelfAttention {
             let att = if seq_len == 1 {
                 att
             } else {
-                cache.apply_attention_mask(seq_len, &att)?
+                let mask = cache
+                    .mask(seq_len)
+                    .map_err(|e| anyhow!("cache.mask({seq_len}) -> {e}"))?
+                    .broadcast_as(att.shape())
+                    .map_err(|e| anyhow!("mask.broadcast_as({:?}) -> {e}", att.shape()))?;
+
+                masked_fill(&att, &mask, f32::NEG_INFINITY)
+                    .map_err(|e| anyhow!("masked_fill -> {e}"))?
             };
             let att = candle_nn::ops::softmax(&att, D::Minus1)?;
 

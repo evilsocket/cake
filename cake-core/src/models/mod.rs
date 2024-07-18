@@ -46,7 +46,7 @@ pub trait Generator {
     /// Add a message to the chat.
     fn add_message(&mut self, message: Message) -> Result<()>;
     /// Clear chat history.
-    fn clear_history(&mut self) -> Result<()>;
+    fn reset(&mut self) -> Result<()>;
 
     /// Return the next token.
     async fn next_token(&mut self, index: usize) -> Result<Token>;
