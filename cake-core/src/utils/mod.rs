@@ -32,6 +32,19 @@ pub fn get_inference_device(force_cpu: bool, ordinal: usize) -> Result<Device> {
     }
 }
 
+pub fn load_safetensors_from_model(
+    tensors_index_json_filename: PathBuf,
+) -> Result<Vec<std::path::PathBuf>> {
+
+    log::info!(
+        "loading tensors from {} ...",
+        "model.safetensors"
+    );
+    let parent_dir = tensors_index_json_filename.parent().unwrap();
+    let result = vec![parent_dir.join("model.safetensors")];
+    Ok(result)
+}
+
 /// Load the safetensors files for a model from the hub based on a json index file.
 pub fn load_safetensors_paths_from_index(
     tensors_index_json_filename: PathBuf,
@@ -83,8 +96,13 @@ pub fn load_var_builder_from_index<'a>(
 ) -> Result<VarBuilder<'a>> {
     log::info!("loading tensors in {}", tensor_index.display());
 
-    let filenames: Vec<std::path::PathBuf> = load_safetensors_paths_from_index(tensor_index)
-        .map_err(|e| anyhow!("can't load tensors index: {:?}", e))?;
+    let filenames: Vec<std::path::PathBuf> = if tensor_index.exists() {
+        load_safetensors_paths_from_index(tensor_index)
+            .map_err(|e| anyhow!("can't load tensors index: {:?}", e))?
+    } else {
+        load_safetensors_from_model(tensor_index)
+            .map_err(|e| anyhow!("can't load tensors index: {:?}", e))?
+    };
 
     unsafe {
         VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)
