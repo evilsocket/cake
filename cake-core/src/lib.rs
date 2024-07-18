@@ -35,7 +35,7 @@ pub struct Args {
     #[arg(long, default_value = "./cake-data/topology.yml")]
     pub topology: String,
     /// The initial prompt.
-    #[arg(long, default_value = "Why is the sky blue?")]
+    #[arg(long, default_value = "The sky is blue because ")]
     pub prompt: String,
     /// The system prompt.
     #[arg(long, default_value = "You are a helpful AI assistant.")]

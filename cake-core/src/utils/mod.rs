@@ -9,10 +9,7 @@ use candle_core::{
 
 use anyhow::{bail, Result};
 
-mod token_output_stream;
-
 use candle_nn::VarBuilder;
-pub use token_output_stream::*;
 
 /// Returns the best available device at `ordinal` index (in case of multiple GPUs), or CPU if `force_cpu` is true.
 pub fn get_inference_device(force_cpu: bool, ordinal: usize) -> Result<Device> {
@@ -35,11 +32,7 @@ pub fn get_inference_device(force_cpu: bool, ordinal: usize) -> Result<Device> {
 pub fn load_safetensors_from_model(
     tensors_index_json_filename: PathBuf,
 ) -> Result<Vec<std::path::PathBuf>> {
-
-    log::info!(
-        "loading tensors from {} ...",
-        "model.safetensors"
-    );
+    log::info!("loading tensors from {} ...", "model.safetensors");
     let parent_dir = tensors_index_json_filename.parent().unwrap();
     let result = vec![parent_dir.join("model.safetensors")];
     Ok(result)

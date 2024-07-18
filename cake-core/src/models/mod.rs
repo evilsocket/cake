@@ -50,8 +50,6 @@ pub trait Generator {
 
     /// Return the next token.
     async fn next_token(&mut self, index: usize) -> Result<Token>;
-    /// Return the last residual data if any.
-    async fn last(&mut self) -> Result<Option<String>>;
     /// Return the number of generated tokens so far.
     fn generated_tokens(&self) -> usize;
 }

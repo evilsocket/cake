@@ -26,9 +26,9 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
         } else {
             // if running in cli mode, pre add system and user prompts
             self.model
-                .add_message(Message::system(self.ctx.args.prompt.clone()))?;
+                .add_message(Message::system(self.ctx.args.system_prompt.clone()))?;
             self.model
-                .add_message(Message::user(self.ctx.args.system_prompt.clone()))?;
+                .add_message(Message::user(self.ctx.args.prompt.clone()))?;
 
             // just run one generation to stdout
             self.generate(|data| {
@@ -78,10 +78,6 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
             } else {
                 stream(&token.to_string());
             }
-        }
-
-        if let Some(rest) = self.model.last().await? {
-            stream(&rest);
         }
 
         // signal end of stream

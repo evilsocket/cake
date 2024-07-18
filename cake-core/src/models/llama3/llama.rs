@@ -8,27 +8,25 @@ use tokenizers::Tokenizer;
 use crate::{
     cake::{Context, Forwarder},
     models::{chat::Message, Generator, Token},
-    utils::{self, TokenOutputStream},
 };
 
-use super::transformer::Transformer;
+use super::{transformer::Transformer, History};
 
-/// End of stream token.
-const EOS_TOKEN: &str = "</s>";
+/// Default end of stream token if not found in configuration.
+const DEFAULT_EOS_TOKEN: &str = "</s>";
 
 /// Load the tokenizer and return the first tokens from the prompt in context.
-fn load_tokenizer(ctx: &Context) -> Result<(TokenOutputStream, Option<u32>)> {
+fn load_tokenizer(ctx: &Context) -> Result<(Tokenizer, Option<u32>)> {
     let tokenizer_filename = ctx.data_path.join("tokenizer.json");
 
     log::info!("loading tokenizer from {}", tokenizer_filename.display());
 
     let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(anyhow::Error::msg)?;
+
     let eos_token_id = ctx
         .config
         .eos_token_id
-        .or_else(|| tokenizer.token_to_id(EOS_TOKEN));
-
-    let tokenizer = utils::TokenOutputStream::new(tokenizer);
+        .or_else(|| tokenizer.token_to_id(DEFAULT_EOS_TOKEN));
 
     Ok((tokenizer, eos_token_id))
 }
@@ -53,7 +51,7 @@ fn create_logits_processor(ctx: &Context) -> LogitsProcessor {
 pub struct LLama {
     ctx: Context,
 
-    tokenizer: TokenOutputStream,
+    tokenizer: Tokenizer,
     embedding: Embedding,
     eos_token_id: Option<u32>,
     index_pos: usize,
@@ -66,7 +64,7 @@ pub struct LLama {
 
     logits_processor: LogitsProcessor,
 
-    history: Vec<Message>,
+    history: History,
     tokens: Vec<u32>,
 }
 
@@ -138,13 +136,6 @@ impl LLama {
             .to_dtype(DType::F32)
             .map_err(|e| anyhow!("error converting logits: {e}"))
     }
-
-    fn raw_message(&self, message: &Message) -> String {
-        format!(
-            "<|start_header_id|>{}<|end_header_id|>\n\n{}<|eot_id|>\n",
-            message.role, &message.content
-        )
-    }
 }
 
 #[async_trait]
@@ -204,7 +195,7 @@ impl Generator for LLama {
 
         let (tokenizer, eos_token_id) = load_tokenizer(&ctx)?;
         let tokens = vec![];
-        let history = vec![];
+        let history = History::new();
 
         let logits_processor = create_logits_processor(&ctx);
         let index_pos = 0;
@@ -238,10 +229,10 @@ impl Generator for LLama {
         Ok(())
     }
 
+    /// Reset the chat pipeline state.
     fn reset(&mut self) -> Result<()> {
         self.tokens.clear();
         self.history.clear();
-        self.tokenizer.clear();
         self.ctx.cache.clear();
         self.index_pos = 0;
         self.generated = 0;
@@ -254,27 +245,28 @@ impl Generator for LLama {
 
         // Prefill tokens with chat history the first time.
         if self.generated == 0 {
+            // make sure we start clean
+            self.tokens.clear();
+            self.ctx.cache.clear();
+            self.index_pos = 0;
+            self.generated = 0;
+
             log::debug!("generating history tokens ...");
 
             // generate raw from history
-            let mut raw = "<|begin_of_text|>".to_string();
+            let dialog = self.history.encode_dialog_to_prompt();
 
-            for message in &self.history {
-                raw += &self.raw_message(message);
-            }
-
-            raw += "<|start_header_id|>assistant<|end_header_id|>";
-
-            log::debug!("{}", &raw);
+            log::debug!("dialog={}", &dialog);
 
             // tokenize raw
             self.tokens = self
                 .tokenizer
-                .tokenizer()
-                .encode(raw, true)
+                .encode(dialog, false) // do not add special tokens as we already added them
                 .map_err(anyhow::Error::msg)?
                 .get_ids()
                 .to_vec();
+
+            log::debug!("encoded={:?}", &self.tokens);
 
             log::debug!("history tokens: {}", self.tokens.len());
         }
@@ -326,14 +318,15 @@ impl Generator for LLama {
 
         Ok(Token {
             id: next_token,
-            text: self.tokenizer.next_token(next_token)?,
+            text: match self.tokenizer.decode(&[next_token], false) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    log::error!("could not decode token {next_token}: {e}");
+                    None
+                }
+            },
             is_end_of_stream: Some(next_token) == self.eos_token_id,
         })
-    }
-
-    /// Return any resitual token if necessary or None if not.
-    async fn last(&mut self) -> Result<Option<String>> {
-        self.tokenizer.decode_rest().map_err(anyhow::Error::msg)
     }
 
     /// Return the number of generated tokens so far.
