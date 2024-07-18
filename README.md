@@ -40,14 +40,25 @@ CUDA >= 12.2 is required for CUDA accelerated systems.
 
 ## Compile
 
-With [Rust installed](https://www.rust-lang.org/tools/install), you can build the core library and the CLI utilities with:
+With [Rust installed](https://www.rust-lang.org/tools/install), you can build the core library and the CLI utilities with different accelerations.
+
+Without acceleration (will use CPU):
 
 ```sh
 cargo build --release
 ```
 
-This will compile with the best available accelleration for the host system.
+With Metal acceleration for Apple Silicon:
 
+```sh
+cargo build --release --features metal
+```
+
+With CUDA acceleration:
+
+```sh
+cargo build --release --features cuda
+```
 
 To generate the iOS bindings in the app that can then be [compiled and deployed via XCode](https://github.com/evilsocket/cake/tree/main/cake-ios-worker-app):
 

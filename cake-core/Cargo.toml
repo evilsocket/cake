@@ -26,28 +26,14 @@ yoke = { version = "0.7.4", features = ["derive"] }
 actix-web = { version = "4.8.0", optional = true }
 uuid = { version = "1.10.0", optional = true, features = ["v4"] }
 
-# Metal acceleration on macOS
-[target.'cfg(target_os = "macos")'.dependencies]
-candle-core = { version = "0.6.0", features = ["metal"] }
-candle-nn = { version = "0.6.0", features = ["metal"] }
-candle-transformers = { version = "0.6.0", features = ["metal"] }
-
-[target.'cfg(target_os = "ios")'.dependencies]
-# https://github.com/huggingface/candle/issues/2322
-# https://github.com/huggingface/candle/issues/1841
-# candle-core = { version = "0.6.0", features = ["metal"] }
-# candle-nn = { version = "0.6.0", features = ["metal"] }
-# candle-transformers = { version = "0.6.0", features = ["metal"] }
 candle-core = { version = "0.6.0" }
 candle-nn = { version = "0.6.0" }
 candle-transformers = { version = "0.6.0" }
 
-# CUDA on everything else.
-[target.'cfg(not(any(target_os = "macos", target_os = "ios")))'.dependencies]
-candle-core = { version = "0.6.0", features = ["cuda"] }
-candle-nn = { version = "0.6.0", features = ["cuda"] }
-candle-transformers = { version = "0.6.0", features = ["cuda"] }
-
 [features]
 default = ["master"]
+
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
+
 master = ["dep:actix-web", "dep:uuid"]
