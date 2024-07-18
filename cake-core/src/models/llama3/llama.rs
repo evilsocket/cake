@@ -136,6 +136,34 @@ impl LLama {
             .to_dtype(DType::F32)
             .map_err(|e| anyhow!("error converting logits: {e}"))
     }
+
+    fn start_dialog_prompt(&mut self) -> Result<()> {
+        // make sure we start clean
+        self.tokens.clear();
+        self.ctx.cache.clear();
+        self.index_pos = 0;
+
+        log::debug!("generating history tokens ...");
+
+        // generate raw from history
+        let dialog = self.history.encode_dialog_to_prompt();
+
+        log::debug!("dialog={}", &dialog);
+
+        // tokenize raw
+        self.tokens = self
+            .tokenizer
+            .encode(dialog, false) // do not add special tokens as we already added them
+            .map_err(anyhow::Error::msg)?
+            .get_ids()
+            .to_vec();
+
+        log::debug!("encoded={:?}", &self.tokens);
+
+        log::debug!("history tokens: {}", self.tokens.len());
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -245,30 +273,7 @@ impl Generator for LLama {
 
         // Prefill tokens with chat history the first time.
         if self.generated == 0 {
-            // make sure we start clean
-            self.tokens.clear();
-            self.ctx.cache.clear();
-            self.index_pos = 0;
-            self.generated = 0;
-
-            log::debug!("generating history tokens ...");
-
-            // generate raw from history
-            let dialog = self.history.encode_dialog_to_prompt();
-
-            log::debug!("dialog={}", &dialog);
-
-            // tokenize raw
-            self.tokens = self
-                .tokenizer
-                .encode(dialog, false) // do not add special tokens as we already added them
-                .map_err(anyhow::Error::msg)?
-                .get_ids()
-                .to_vec();
-
-            log::debug!("encoded={:?}", &self.tokens);
-
-            log::debug!("history tokens: {}", self.tokens.len());
+            self.start_dialog_prompt()?;
         }
 
         let num_tokens = self.tokens.len();
