@@ -1,3 +1,6 @@
+mod image;
+mod text;
+
 use std::io::Write;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -13,102 +16,21 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::RwLock;
 
-use crate::models::chat::Message;
-use crate::models::Generator;
+use crate::models::{Generator, ImageGenerator, TextGenerator};
+
+use image::*;
+use text::*;
 
 use super::Master;
-
-#[derive(Deserialize)]
-struct Request {
-    pub messages: Vec<Message>,
-}
-
-#[derive(Serialize)]
-struct Choice {
-    pub index: usize,
-    pub message: Message,
-}
-
-#[derive(Serialize)]
-struct Response {
-    pub id: String,
-    pub object: String,
-    pub created: u64,
-    pub model: String,
-    pub choices: Vec<Choice>,
-}
-
-impl Response {
-    pub fn from_assistant_response(model: String, message: String) -> Self {
-        let id = uuid::Uuid::new_v4().to_string();
-        let object = String::from("chat.completion");
-        let created = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let choices = vec![Choice {
-            index: 0,
-            message: Message::assistant(message),
-        }];
-
-        Self {
-            id,
-            object,
-            created,
-            model,
-            choices,
-        }
-    }
-}
-
-async fn chat<G>(
-    state: web::Data<Arc<RwLock<Master<G>>>>,
-    req: HttpRequest,
-    messages: web::Json<Request>,
-) -> impl Responder
-where
-    G: Generator + Send + Sync + 'static,
-{
-    let client = req.peer_addr().unwrap();
-
-    log::info!("starting chat for {} ...", &client);
-
-    let mut master = state.write().await;
-
-    master.reset().unwrap();
-
-    for message in messages.0.messages {
-        master.model.add_message(message).unwrap();
-    }
-
-    let mut resp = String::new();
-
-    // just run one generation to stdout
-    master
-        .generate(|data| {
-            resp += data;
-            if data.is_empty() {
-                println!();
-            } else {
-                print!("{data}")
-            }
-            std::io::stdout().flush().unwrap();
-        })
-        .await
-        .unwrap();
-
-    let response = Response::from_assistant_response(G::MODEL_NAME.to_string(), resp);
-
-    HttpResponse::Ok().json(response)
-}
 
 async fn not_found() -> actix_web::Result<HttpResponse> {
     Ok(HttpResponse::NotFound().body("nope"))
 }
 
-pub(crate) async fn start<G>(master: Master<G>) -> anyhow::Result<()>
+pub(crate) async fn start<TG, IG>(master: Master<TG, IG>) -> anyhow::Result<()>
 where
-    G: Generator + Send + Sync + 'static,
+    TG: TextGenerator + Send + Sync + 'static,
+    IG: ImageGenerator + Send + Sync + 'static,
 {
     let address = master.ctx.args.api.as_ref().unwrap().to_string();
 
@@ -120,7 +42,8 @@ where
         move || {
             App::new()
                 .app_data(web::Data::new(state.clone()))
-                .route("/api/v1/chat/completions", web::post().to(chat::<G>))
+                .route("/api/v1/chat/completions", web::post().to(generate_text::<TG, IG>))
+                .route("/api/v1/image", web::post().to(generate_image::<TG, IG>))
                 .default_service(web::route().to(not_found))
         }, //.wrap(actix_web::middleware::Logger::default()))
     )

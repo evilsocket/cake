@@ -125,11 +125,11 @@ impl super::Forwarder for Client {
             .await
     }
 
-    fn ident(&self) -> &str {
-        &self.address
-    }
-
     fn layer_name(&self) -> &str {
         &self.layer_name
+    }
+
+    fn ident(&self) -> &str {
+        &self.address
     }
 }

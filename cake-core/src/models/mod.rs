@@ -1,5 +1,6 @@
 pub mod chat;
 pub mod llama3;
+pub mod sd15;
 
 use crate::cake::{Context, Forwarder};
 
@@ -41,8 +42,14 @@ pub trait Generator {
     const MODEL_NAME: &'static str;
 
     /// Load the model from the context.
-    async fn load(context: Context) -> Result<Box<Self>>;
+    async fn load(context: Context) -> Result<Option<Box<Self>>>;
+}
 
+pub struct ImageGenerationParameters {
+
+}
+
+pub trait TextGenerator: Generator {
     /// Add a message to the chat.
     fn add_message(&mut self, message: Message) -> Result<()>;
     /// Clear chat history.
@@ -52,4 +59,8 @@ pub trait Generator {
     async fn next_token(&mut self, index: usize) -> Result<Token>;
     /// Return the number of generated tokens so far.
     fn generated_tokens(&self) -> usize;
+}
+
+pub trait ImageGenerator: Generator {
+    async fn generate_image(&mut self, params: &ImageGenerationParameters) -> Result<String>;
 }

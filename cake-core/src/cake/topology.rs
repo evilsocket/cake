@@ -16,18 +16,36 @@ pub struct Node {
     pub host: String,
     /// Optional descriptioon.
     pub description: Option<String>,
+    pub text_model: Option<TextModelLayers>,
+    pub image_model: Option<ImageModelLayers>
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct TextModelLayers {
     /// Layers hosted by this worker. Range expressions are supported.
     pub layers: Vec<String>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct ImageModelLayers {
+    pub text_encoder: bool,
+    pub unet: bool,
+    pub vae: bool
+}
+
 impl Node {
     /// Return true if this node hosts the specified layer.
-    pub fn is_layer_owner(&self, full_layer_name: &str) -> bool {
-        for prefix in &self.layers {
-            if full_layer_name.starts_with(&format!("{}.", prefix)) {
-                return true;
+    pub fn is_text_model_layer_owner(&self, full_layer_name: &str) -> bool {
+
+        if let Some(text_model_layers) = &self.text_model {
+            // 现在可以访问 model_layers.layers
+            for prefix in text_model_layers.layers {
+                if full_layer_name.starts_with(&format!("{}.", prefix)) {
+                    return true;
+                }
             }
         }
+
         false
     }
 }
@@ -46,28 +64,31 @@ impl Topology {
 
         // check for range expressions
         for (_worker_name, node) in topology.iter_mut() {
-            let mut layers = vec![];
-            for layer_name in &node.layers {
-                if let Some(caps) = LAYER_RANGE_PARSER.captures_iter(layer_name).next() {
-                    let base = caps.get(1).unwrap().as_str().to_string();
-                    let start = caps.get(2).unwrap().as_str().to_string().parse::<usize>()?;
-                    let stop = caps.get(3).unwrap().as_str().to_string().parse::<usize>()?;
 
-                    if stop <= start {
-                        return Err(anyhow!(
-                            "invalid range expression {layer_name}, end must be > start"
-                        ));
-                    }
+            if let Some(mut text_model_layers) = &node.text_model {
+                let mut layers = vec![];
+                for layer_name in &text_model_layers.layers {
+                    if let Some(caps) = LAYER_RANGE_PARSER.captures_iter(layer_name).next() {
+                        let base = caps.get(1).unwrap().as_str().to_string();
+                        let start = caps.get(2).unwrap().as_str().to_string().parse::<usize>()?;
+                        let stop = caps.get(3).unwrap().as_str().to_string().parse::<usize>()?;
 
-                    for n in start..=stop {
-                        layers.push(format!("{}{}", base, n));
+                        if stop <= start {
+                            return Err(anyhow!(
+                                "invalid range expression {layer_name}, end must be > start"
+                            ));
+                        }
+
+                        for n in start..=stop {
+                            layers.push(format!("{}{}", base, n));
+                        }
+                    } else {
+                        layers.push(layer_name.to_string());
                     }
-                } else {
-                    layers.push(layer_name.to_string());
                 }
-            }
 
-            node.layers = layers;
+                text_model_layers.layers = layers;
+            }
         }
 
         Ok(topology)
@@ -76,9 +97,11 @@ impl Topology {
     /// Return the node serving the specified layer, or None if not found.
     pub fn get_node_for_layer(&self, layer_name: &str) -> Option<(&str, &Node)> {
         for (node_name, node) in &self.0 {
-            for node_layer_name in &node.layers {
-                if layer_name == node_layer_name {
-                    return Some((node_name, node));
+            if let Some(text_model_layers) = &node.text_model {
+                for node_layer_name in &text_model_layers.layers {
+                    if layer_name == node_layer_name {
+                        return Some((node_name, node));
+                    }
                 }
             }
         }

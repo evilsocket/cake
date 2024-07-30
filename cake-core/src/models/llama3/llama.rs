@@ -9,7 +9,7 @@ use crate::{
     cake::{Context, Forwarder},
     models::{chat::Message, Generator, Token},
 };
-
+use crate::models::TextGenerator;
 use super::{transformer::Transformer, History};
 
 /// Default end of stream token if not found in configuration.
@@ -166,10 +166,8 @@ impl LLama {
     }
 }
 
-#[async_trait]
 impl Generator for LLama {
     type Shardable = Transformer;
-
     const MODEL_NAME: &'static str = "llama3";
 
     /// Load this model from the context.
@@ -250,6 +248,10 @@ impl Generator for LLama {
             logits_processor,
         }))
     }
+}
+
+#[async_trait]
+impl TextGenerator for LLama {
 
     /// Add a message to the chat history.
     fn add_message(&mut self, message: Message) -> Result<()> {
