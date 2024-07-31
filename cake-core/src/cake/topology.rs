@@ -4,6 +4,7 @@ use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use crate::ModelType;
 
 lazy_static! {
     static ref LAYER_RANGE_PARSER: Regex = Regex::new(r"(?m)^(.+[^\d])(\d+)-(\d+)$").unwrap();
@@ -16,33 +17,16 @@ pub struct Node {
     pub host: String,
     /// Optional descriptioon.
     pub description: Option<String>,
-    pub text_model: Option<TextModelLayers>,
-    pub image_model: Option<ImageModelLayers>
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct TextModelLayers {
-    /// Layers hosted by this worker. Range expressions are supported.
     pub layers: Vec<String>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct ImageModelLayers {
-    pub text_encoder: bool,
-    pub unet: bool,
-    pub vae: bool
 }
 
 impl Node {
     /// Return true if this node hosts the specified layer.
     pub fn is_text_model_layer_owner(&self, full_layer_name: &str) -> bool {
 
-        if let Some(text_model_layers) = &self.text_model {
-            // 现在可以访问 model_layers.layers
-            for prefix in text_model_layers.layers {
-                if full_layer_name.starts_with(&format!("{}.", prefix)) {
-                    return true;
-                }
+        for prefix in self.layers {
+            if full_layer_name.starts_with(&format!("{}.", prefix)) {
+                return true;
             }
         }
 
@@ -56,18 +40,18 @@ pub struct Topology(HashMap<String, Node>);
 
 impl Topology {
     /// Load the topology from a yaml file.
-    pub fn from_path(path: &str) -> Result<Self> {
+    pub fn from_path(path: &str, model_type: ModelType) -> Result<Self> {
         log::info!("loading topology from {}", path);
 
         let mut topology: Self = serde_yaml::from_str(&std::fs::read_to_string(path)?)
             .map_err(|e| anyhow!("can't read {path}: {e}"))?;
 
-        // check for range expressions
-        for (_worker_name, node) in topology.iter_mut() {
+        if (model_type == ModelType::TextModel) {
+            // check for range expressions
+            for (_worker_name, node) in topology.iter_mut() {
 
-            if let Some(mut text_model_layers) = &node.text_model {
                 let mut layers = vec![];
-                for layer_name in &text_model_layers.layers {
+                for layer_name in &node.layers {
                     if let Some(caps) = LAYER_RANGE_PARSER.captures_iter(layer_name).next() {
                         let base = caps.get(1).unwrap().as_str().to_string();
                         let start = caps.get(2).unwrap().as_str().to_string().parse::<usize>()?;
@@ -87,7 +71,7 @@ impl Topology {
                     }
                 }
 
-                text_model_layers.layers = layers;
+                node.layers = layers;
             }
         }
 
@@ -97,11 +81,9 @@ impl Topology {
     /// Return the node serving the specified layer, or None if not found.
     pub fn get_node_for_layer(&self, layer_name: &str) -> Option<(&str, &Node)> {
         for (node_name, node) in &self.0 {
-            if let Some(text_model_layers) = &node.text_model {
-                for node_layer_name in &text_model_layers.layers {
-                    if layer_name == node_layer_name {
-                        return Some((node_name, node));
-                    }
+            for node_layer_name in &node.layers {
+                if layer_name == node_layer_name {
+                    return Some((node_name, node));
                 }
             }
         }

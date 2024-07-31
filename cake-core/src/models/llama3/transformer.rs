@@ -3,7 +3,7 @@ use candle_core::Tensor;
 use candle_nn::{Module, RmsNorm, VarBuilder};
 
 use async_trait::async_trait;
-
+use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
 use crate::cake::Forwarder;
 
 use super::{Cache, CausalSelfAttention, Config, MLP};
@@ -26,7 +26,7 @@ impl std::fmt::Display for Transformer {
 
 #[async_trait]
 impl Forwarder for Transformer {
-    fn load(name: String, vb: VarBuilder, cfg: &Config) -> Result<Box<Self>> {
+    fn load_text_model(name: String, vb: VarBuilder, cfg: &Config) -> Result<Box<Self>> {
         let attn = super::CausalSelfAttention::load(vb.pp("self_attn"), cfg)?;
         let mlp = super::MLP::load(vb.pp("mlp"), cfg)?;
         let rms_1 =
@@ -43,6 +43,13 @@ impl Forwarder for Transformer {
             rms_2,
             mlp,
         }))
+    }
+
+    fn load_image_model(name: String, cfg: &StableDiffusionConfig) -> Result<Box<Self>>
+    where
+        Self: Sized
+    {
+        Err(anyhow!("load_image_model should never be called on Transformer"))
     }
 
     async fn forward(

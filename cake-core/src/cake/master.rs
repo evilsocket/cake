@@ -29,21 +29,25 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
             api::start(self).await?;
         } else {
             // if running in cli mode, pre add system and user prompts
-            self.llm_model
+            if self.ctx.args.model_type == "text" {
+                self.llm_model
                 .add_message(Message::system(self.ctx.args.system_prompt.clone()))?;
             self.llm_model
                 .add_message(Message::user(self.ctx.args.prompt.clone()))?;
 
-            // just run one generation to stdout
-            self.generate_text(|data| {
-                if data.is_empty() {
-                    println!();
-                } else {
-                    print!("{data}")
-                }
-                std::io::stdout().flush().unwrap();
-            })
-            .await?;
+                // just run one generation to stdout
+                self.generate_text(|data| {
+                    if data.is_empty() {
+                        println!();
+                    } else {
+                        print!("{data}")
+                    }
+                    std::io::stdout().flush().unwrap();
+                })
+                .await?;
+            } else {
+                self.generate_image().await?;
+            }
         }
 
         Ok(())

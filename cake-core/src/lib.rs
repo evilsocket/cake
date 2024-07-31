@@ -10,6 +10,13 @@ pub mod cake;
 pub mod models;
 pub mod utils;
 
+#[derive(Clone, Parser, Default, Debug, Eq, PartialEq)]
+pub enum ModelType {
+    #[default]
+    TextModel,
+    ImageModel
+}
+
 #[derive(Clone, Parser, Default, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
@@ -67,4 +74,106 @@ pub struct Args {
     /// Run on CPU rather than on GPU.
     #[arg(long)]
     pub cpu: bool,
+
+    #[arg(long, default_value = "text")]
+    pub model_type: ModelType,
+
+    #[arg(long)]
+    pub sd_args: SDArgs,
+}
+
+#[derive(Clone, Parser, Default, Debug)]
+#[command(author, version, about, long_about = None)]
+pub struct SDArgs {
+    #[arg(long), default_value=""]
+    pub tokenizer: Option<String>,
+
+    #[arg(long), default_value=""]
+    pub tokenizer_2: Option<String>,
+
+    #[arg(long, value_enum, default_value = "v1-5")]
+    sd_version: StableDiffusionVersion,
+
+    #[arg(long, default_value_t = true)]
+    use_f16: bool,
+
+    #[arg(long)]
+    width: Option<usize>,
+
+    #[arg(long)]
+    height: Option<usize>,
+
+    #[arg(long)]
+    sliced_attention_size: Option<usize>,
+
+    #[arg(long)]
+    clip_weights: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq, Default)]
+pub enum StableDiffusionVersion {
+    #[default]
+    V1_5,
+    V2_1,
+    Xl,
+    Turbo,
+}
+
+impl StableDiffusionVersion {
+    fn repo(&self) -> &'static str {
+        match self {
+            Self::Xl => "stabilityai/stable-diffusion-xl-base-1.0",
+            Self::V2_1 => "stabilityai/stable-diffusion-2-1",
+            Self::V1_5 => "runwayml/stable-diffusion-v1-5",
+            Self::Turbo => "stabilityai/sdxl-turbo",
+        }
+    }
+
+    fn unet_file(&self, use_f16: bool) -> &'static str {
+        match self {
+            Self::V1_5 | Self::V2_1 | Self::Xl | Self::Turbo => {
+                if use_f16 {
+                    "unet/diffusion_pytorch_model.fp16.safetensors"
+                } else {
+                    "unet/diffusion_pytorch_model.safetensors"
+                }
+            }
+        }
+    }
+
+    fn vae_file(&self, use_f16: bool) -> &'static str {
+        match self {
+            Self::V1_5 | Self::V2_1 | Self::Xl | Self::Turbo => {
+                if use_f16 {
+                    "vae/diffusion_pytorch_model.fp16.safetensors"
+                } else {
+                    "vae/diffusion_pytorch_model.safetensors"
+                }
+            }
+        }
+    }
+
+    fn clip_file(&self, use_f16: bool) -> &'static str {
+        match self {
+            Self::V1_5 | Self::V2_1 | Self::Xl | Self::Turbo => {
+                if use_f16 {
+                    "text_encoder/model.fp16.safetensors"
+                } else {
+                    "text_encoder/model.safetensors"
+                }
+            }
+        }
+    }
+
+    fn clip2_file(&self, use_f16: bool) -> &'static str {
+        match self {
+            Self::V1_5 | Self::V2_1 | Self::Xl | Self::Turbo => {
+                if use_f16 {
+                    "text_encoder_2/model.fp16.safetensors"
+                } else {
+                    "text_encoder_2/model.safetensors"
+                }
+            }
+        }
+    }
 }

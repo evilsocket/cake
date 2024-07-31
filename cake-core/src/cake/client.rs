@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use candle_core::{Device, Tensor};
+use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
 use tokio::net::TcpStream;
 
 use crate::models::llama3::{Cache, Config};
@@ -87,8 +88,15 @@ impl std::fmt::Display for Client {
 
 #[async_trait]
 impl super::Forwarder for Client {
-    fn load(_: String, _: candle_nn::VarBuilder, _: &Config) -> Result<Box<Self>> {
-        Err(anyhow!("load should never be called on cake::Client"))
+    fn load_text_model(_: String, _: candle_nn::VarBuilder, _: &Config) -> Result<Box<Self>> {
+        Err(anyhow!("load_text_model should never be called on cake::Client"))
+    }
+
+    fn load_image_model(name: String, cfg: &StableDiffusionConfig) -> Result<Box<Self>>
+    where
+        Self: Sized
+    {
+        Err(anyhow!("load_image_model should never be called on cake::Client"))
     }
 
     async fn forward(&self, _: &Tensor, _: usize, _: usize, _: &mut Cache) -> Result<Tensor> {

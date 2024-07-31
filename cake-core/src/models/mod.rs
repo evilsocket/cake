@@ -1,12 +1,13 @@
 pub mod chat;
 pub mod llama3;
-pub mod sd15;
+pub mod sd;
 
 use crate::cake::{Context, Forwarder};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use chat::Message;
+use crate::models::sd::ImageGenerationArgs;
 
 /// A token.
 pub struct Token {
@@ -35,6 +36,7 @@ impl std::fmt::Display for Token {
 /// A model must implement this trait in order to be usable by the Cake framework.
 #[async_trait]
 pub trait Generator {
+
     /// This associated type determines which part of the model can be sharded.
     type Shardable: Forwarder;
 
@@ -45,11 +47,8 @@ pub trait Generator {
     async fn load(context: Context) -> Result<Option<Box<Self>>>;
 }
 
-pub struct ImageGenerationParameters {
-
-}
-
 pub trait TextGenerator: Generator {
+
     /// Add a message to the chat.
     fn add_message(&mut self, message: Message) -> Result<()>;
     /// Clear chat history.
@@ -62,5 +61,5 @@ pub trait TextGenerator: Generator {
 }
 
 pub trait ImageGenerator: Generator {
-    async fn generate_image(&mut self, params: &ImageGenerationParameters) -> Result<String>;
+    async fn generate_image(&mut self, args: ImageGenerationArgs) -> Result<String>;
 }
