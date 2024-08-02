@@ -107,7 +107,19 @@ pub struct SDArgs {
     sliced_attention_size: Option<usize>,
 
     #[arg(long)]
-    clip_weights: Option<String>,
+    clip: Option<String>,
+
+    #[arg(long)]
+    clip2: Option<String>,
+
+    #[arg(long)]
+    vae: Option<String>,
+
+    #[arg(long)]
+    unet: Option<String>,
+
+    #[arg(long, default_value_t = false)]
+    use_flash_attention: bool,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq, Default)]

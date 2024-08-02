@@ -97,7 +97,7 @@ impl<G: Generator + 'static> Worker<G> {
         for block_layer_name in &worker_topology.layers {
             log::info!("loading {} ...", &block_layer_name);
 
-            let block = G::Shardable::load_text_model(
+            let block = G::Shardable::load(
                 block_layer_name.to_string(),
                 ctx.var_builder.pp(block_layer_name),
                 &ctx.config,

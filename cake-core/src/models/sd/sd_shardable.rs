@@ -22,18 +22,11 @@ impl Display for SDShardable {
 }
 
 impl Forwarder for SDShardable {
-    fn load_text_model(name: String, vb: VarBuilder, cfg: &Config) -> anyhow::Result<Box<Self>>
+    fn load(name: String, vb: VarBuilder, cfg: &Config) -> anyhow::Result<Box<Self>>
     where
         Self: Sized
     {
         Err(anyhow!("load_text_model should never be called on SDShardable"))
-    }
-
-    fn load_image_model(name: String, cfg: &StableDiffusionConfig) -> anyhow::Result<Box<Self>>
-    where
-        Self: Sized
-    {
-        todo!()
     }
 
     async fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {

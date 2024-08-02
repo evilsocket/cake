@@ -2,15 +2,20 @@ use clap::Parser;
 use tokenizers::Tokenizer;
 use crate::cake::{Context, Forwarder};
 use anyhow::{Error as E, Result};
-use candle_core::{D, Device, DType, Tensor};
+use candle_core::{D, Device, DType, IndexOp, Tensor};
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
+use candle_transformers::models::stable_diffusion::vae::DiagonalGaussianDistribution;
+use tracing_subscriber::fmt::time;
 use crate::models::{Generator, ImageGenerator};
 use crate::{Args, SDArgs, StableDiffusionVersion};
 use crate::models::llama3::Cache;
 use crate::models::sd::clip::Clip;
 use crate::models::sd::sd_shardable::SDShardable;
+use crate::models::sd::unet::UNet;
+use crate::models::sd::util::pack_tensors;
+use crate::models::sd::vae::VAE;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -190,6 +195,8 @@ pub struct SD {
     pad_id_2: Option<u32>,
     text_model: Box<dyn Forwarder>,
     text_model_2: Option<Box<dyn Forwarder>>,
+    vae: Box<dyn Forwarder>,
+    unet: Box<dyn Forwarder>,
     dtype: DType,
     sd_version: StableDiffusionVersion,
     sd_config: StableDiffusionConfig,
@@ -216,10 +223,17 @@ impl Generator for SD {
             width,
             height,
             sliced_attention_size,
+            clip,
+            clip2,
+            vae,
+            unet,
+            use_flash_attention,
             ..
         } = context.args.sd_args;
 
         let dtype = if use_f16 { DType::F16 } else { DType::F32 };
+        let device = get_device(cpu)?;
+        let cache = context.cache.clone();
 
         let sd_config = match sd_version {
             StableDiffusionVersion::V1_5 => {
@@ -239,6 +253,7 @@ impl Generator for SD {
         };
 
         // Tokenizer
+        println!("Loading the Tokenizer.");
 
         let tokenizer_file = ModelFile::Tokenizer;
         let tokenizer = tokenizer_file.get(tokenizer, sd_version, use_f16)?;
@@ -250,6 +265,7 @@ impl Generator for SD {
         };
 
         // Tokenizer 2
+        println!("Loading the Tokenizer 2.");
 
         let mut tokenizer_2_option: Option<Tokenizer> = None;
         let mut pad_id_2: Option<u32> = None;
@@ -268,30 +284,99 @@ impl Generator for SD {
         }
 
         // Clip
+        println!("Loading the Clip text model.");
 
         let text_model: dyn Forwarder;
 
         if let Some((node_name, node)) = context.topology.get_node_for_layer(ModelFile::Clip.name()) {
-            log::debug!("node {node_name} will serve clip");
+            log::debug!("node {node_name} will serve Clip");
             text_model = Box::new(
                 crate::cake::Client::new(context.device.clone(), &node.host, ModelFile::Clip.name())
                     .await?,
             );
         } else {
-            log::debug!("clip will be served locally");
-            text_model = Clip::load_image_model(ModelFile::Clip.name().to_string(), &sd_config);
+            log::debug!("Clip will be served locally");
+            text_model = Clip::load_model(
+                ModelFile::Clip,
+                clip,
+                sd_version,
+                use_f16,
+                &device,
+                dtype,
+                &sd_config.clip
+            );
         }
 
         // Clip 2
+        println!("Loading the Clip 2 text model.");
 
-        let text_model_2: Option<dyn Forwarder> = None;
+        let mut text_model_2: Option<dyn Forwarder> = None;
         if let Some(StableDiffusionVersion::Xl) | Some(StableDiffusionVersion::Turbo) = sd_version {
-
+            if let Some((node_name, node)) = context.topology.get_node_for_layer(ModelFile::Clip2.name()) {
+                log::debug!("node {node_name} will serve clip2");
+                text_model_2 = Some(Box::new(
+                    crate::cake::Client::new(context.device.clone(), &node.host, ModelFile::Clip2.name())
+                        .await?,
+                ));
+            } else {
+                log::debug!("Clip 2 will be served locally");
+                text_model_2 = Some(Clip::load_model(
+                    ModelFile::Clip2,
+                    clip2,
+                    sd_version,
+                    use_f16,
+                    &device,
+                    dtype,
+                    sd_config.clip2.as_ref().unwrap()
+                ));
+            }
         }
 
-        let device = device(cpu)?;
+        // VAE
+        println!("Loading the VAE.");
 
-        let cache = context.cache.clone();
+        let vae_model: dyn Forwarder;
+
+        if let Some((node_name, node)) = context.topology.get_node_for_layer(ModelFile::Vae.name()) {
+            log::debug!("node {node_name} will serve VAE");
+            vae_model = Box::new(
+                crate::cake::Client::new(context.device.clone(), &node.host, ModelFile::Vae.name())
+                    .await?,
+            );
+        } else {
+            log::debug!("VAE will be served locally");
+            vae_model = VAE::load_model(
+                vae,
+                sd_version,
+                use_f16,
+                &device,
+                dtype,
+                &sd_config,
+            )
+        }
+
+        // Unet
+        println!("Loading the UNet.");
+
+        let unet_model: dyn Forwarder;
+        if let Some((node_name, node)) = context.topology.get_node_for_layer(ModelFile::Unet.name()) {
+            log::debug!("node {node_name} will serve UNet");
+            unet_model = Box::new(
+                crate::cake::Client::new(context.device.clone(), &node.host, ModelFile::Unet.name())
+                    .await?,
+            );
+        } else {
+            log::debug!("UNet will be served locally");
+            unet_model = UNet::load_model(
+                unet,
+                use_flash_attention,
+                sd_version,
+                use_f16,
+                &device,
+                dtype,
+                &sd_config,
+            )
+        }
 
         Ok(Some(Box::new(Self {
             tokenizer,
@@ -304,13 +389,15 @@ impl Generator for SD {
             pad_id_2,
             text_model_2,
             device,
-            cache
+            cache,
+            vae: vae_model,
+            unet: unet_model,
         })))
     }
 }
 
 impl ImageGenerator for SD {
-    async fn generate_image(&mut self, args: ImageGenerationArgs) -> Result<String> {
+    async fn generate_image(&mut self, args: ImageGenerationArgs) -> Result<()> {
         use tracing_chrome::ChromeLayerBuilder;
         use tracing_subscriber::prelude::*;
 
@@ -318,18 +405,12 @@ impl ImageGenerator for SD {
             prompt,
             uncond_prompt,
             n_steps,
-            tokenizer,
             final_image,
             num_samples,
             bsize,
             sd_version,
-            clip_weights,
-            vae_weights,
-            unet_weights,
             tracing,
-            use_f16,
             guidance_scale,
-            use_flash_attn,
             img2img,
             img2img_strength,
             seed,
@@ -382,18 +463,8 @@ impl ImageGenerator for SD {
         let text_embeddings = which
             .iter()
             .map(|first| {
-                self.text_embeddings(
-                    &prompt,
-                    &uncond_prompt,
-                    tokenizer.clone(),
-                    clip_weights.clone(),
-                    sd_version,
-                    use_f16,
-                    &device,
-                    dtype,
-                    use_guide_scale,
-                    *first,
-                )
+                self.text_embeddings(&prompt, &uncond_prompt, use_guide_scale, *first)
+                    .expect("Error generating text embeddings");
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -401,19 +472,13 @@ impl ImageGenerator for SD {
         let text_embeddings = text_embeddings.repeat((bsize, 1, 1))?;
         println!("{text_embeddings:?}");
 
-        println!("Building the autoencoder.");
-        let vae_weights = ModelFile::Vae.get(vae_weights, sd_version, use_f16)?;
-        let vae = sd_config.build_vae(vae_weights, &device, dtype)?;
         let init_latent_dist = match &img2img {
             None => None,
             Some(image) => {
-                let image = image_preprocess(image)?.to_device(&device)?;
-                Some(vae.encode(&image)?)
+                let image = image_preprocess(image)?.to_device(&self.device)?;
+                Some(VAE::encode(&self.vae, image, &self.device, &mut self.cache).await?)
             }
         };
-        println!("Building the unet.");
-        let unet_weights = ModelFile::Unet.get(unet_weights, sd_version, use_f16)?;
-        let unet = sd_config.build_unet(unet_weights, &device, 4, use_flash_attn, dtype)?;
 
         let t_start = if img2img.is_some() {
             n_steps - (n_steps as f64 * img2img_strength) as usize
@@ -431,8 +496,9 @@ impl ImageGenerator for SD {
         for idx in 0..num_samples {
             let timesteps = scheduler.timesteps();
             let latents = match &init_latent_dist {
+
                 Some(init_latent_dist) => {
-                    let latents = (init_latent_dist.sample()? * vae_scale)?.to_device(&device)?;
+                    let latents = (init_latent_dist.sample()? * vae_scale)?.to_device(&self.device)?;
                     if t_start < timesteps.len() {
                         let noise = latents.randn_like(0f64, 1f64)?;
                         scheduler.add_noise(&latents, noise, timesteps[t_start])?
@@ -440,20 +506,23 @@ impl ImageGenerator for SD {
                         latents
                     }
                 }
+
                 None => {
                     let latents = Tensor::randn(
                         0f32,
                         1f32,
-                        (bsize, 4, sd_config.height / 8, sd_config.width / 8),
-                        &device,
+                        (bsize, 4, self.sd_config.height / 8, self.sd_config.width / 8),
+                        &self.device,
                     )?;
                     // scale the initial noise by the standard deviation required by the scheduler
                     (latents * scheduler.init_noise_sigma())?
                 }
             };
-            let mut latents = latents.to_dtype(dtype)?;
+
+            let mut latents = latents.to_dtype(self.dtype)?;
 
             println!("starting sampling");
+
             for (timestep_index, &timestep) in timesteps.iter().enumerate() {
                 if timestep_index < t_start {
                     continue;
@@ -466,8 +535,17 @@ impl ImageGenerator for SD {
                 };
 
                 let latent_model_input = scheduler.scale_model_input(latent_model_input, timestep)?;
-                let noise_pred =
-                    unet.forward(&latent_model_input, timestep as f64, &text_embeddings)?;
+
+                println!("UNet forwarding.");
+
+                let noise_pred = UNet::forward_unpacked(
+                    &self.unet,
+                    latent_model_input,
+                    text_embeddings.clone(),
+                    timestep,
+                    &self.device,
+                    &mut self.cache,
+                ).await?;
 
                 let noise_pred = if use_guide_scale {
                     let noise_pred = noise_pred.chunk(2, 0)?;
@@ -483,8 +561,7 @@ impl ImageGenerator for SD {
                 println!("step {}/{n_steps} done, {:.2}s", timestep_index + 1, dt);
 
                 if args.intermediary_images {
-                    save_image(
-                        &vae,
+                    self.save_image(
                         &latents,
                         vae_scale,
                         bsize,
@@ -501,8 +578,8 @@ impl ImageGenerator for SD {
                 idx + 1,
                 num_samples
             );
-            save_image(
-                &vae,
+
+            self.save_image(
                 &latents,
                 vae_scale,
                 bsize,
@@ -519,6 +596,51 @@ impl ImageGenerator for SD {
 impl SD {
 
     #[allow(clippy::too_many_arguments)]
+    async fn save_image(
+        &mut self,
+        latents: &Tensor,
+        vae_scale: f64,
+        bsize: usize,
+        idx: usize,
+        final_image: &str,
+        num_samples: usize,
+        timestep_ids: Option<usize>,
+    ) -> Result<()> {
+
+        let scaled = (latents / vae_scale)?;
+        let images = VAE::decode(&self.vae, scaled, &self.device, &mut self.cache).await?;
+        let images = ((images / 2.)? + 0.5)?.to_device(&Device::Cpu)?;
+        let images = (images.clamp(0f32, 1.)? * 255.)?.to_dtype(DType::U8)?;
+        for batch in 0..bsize {
+            let image = images.i(batch)?;
+            let image_filename = output_filename(
+                final_image,
+                (bsize * idx) + batch + 1,
+                batch + num_samples,
+                timestep_ids,
+            );
+            self.save_image_disk(&image, image_filename)?;
+        }
+        Ok(())
+    }
+
+    pub fn save_image_disk<P: AsRef<std::path::Path>>(&self, img: &Tensor, p: P) -> Result<()> {
+        let p = p.as_ref();
+        let (channel, height, width) = img.dims3()?;
+        if channel != 3 {
+            anyhow::bail!("save_image expects an input of shape (3, height, width)")
+        }
+        let img = img.permute((1, 2, 0))?.flatten_all()?;
+        let pixels = img.to_vec1::<u8>()?;
+        let image: image::ImageBuffer<image::Rgb<u8>, Vec<u8>> =
+            match image::ImageBuffer::from_raw(width as u32, height as u32, pixels) {
+                Some(image) => image,
+                None => anyhow::bail!("error saving image {p:?}"),
+            };
+        image.save(p).map_err(anyhow::Error::wrap)?;
+        Ok(())
+    }
+
     fn text_embeddings(
         & mut self,
         prompt: &str,
@@ -527,17 +649,22 @@ impl SD {
         first: bool,
     ) -> Result<Tensor> {
 
-        let tokenizer = if first {
-            &self.tokenizer
-        } else {
-            &self.tokenizer_2
-        };
+        let tokenizer;
+        let text_model;
+        let pad_id;
+        let max_token_embeddings;
 
-        let text_model = if first {
-            &self.text_model
+        if first {
+            tokenizer = &self.tokenizer;
+            text_model = &self.text_model;
+            pad_id = self.pad_id;
+            max_token_embeddings = self.sd_config.clip.max_position_embeddings;
         } else {
-            &self.text_model_2
-        };
+            tokenizer = self.tokenizer_2.as_ref().unwrap();
+            text_model = self.text_model_2.as_ref().unwrap();
+            pad_id = self.pad_id_2.unwrap();
+            max_token_embeddings = self.sd_config.clip2.as_ref().unwrap().max_position_embeddings;
+        }
 
         println!("Running with prompt \"{prompt}\".");
 
@@ -547,21 +674,19 @@ impl SD {
             .get_ids()
             .to_vec();
 
-        if tokens.len() > self.sd_config.clip.max_position_embeddings {
+        if tokens.len() > max_token_embeddings {
             anyhow::bail!(
                 "the prompt is too long, {} > max-tokens ({})",
                 tokens.len(),
-                self.sd_config.clip.max_position_embeddings
+                max_token_embeddings
             )
         }
 
-        while tokens.len() < self.sd_config.clip.max_position_embeddings {
-            tokens.push(self.pad_id)
+        while tokens.len() < max_token_embeddings {
+            tokens.push(pad_id)
         }
 
         let tokens = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
-
-        println!("Building the Clip transformer.");
 
         let cache = &mut self.cache;
 
@@ -573,18 +698,20 @@ impl SD {
                 .map_err(E::msg)?
                 .get_ids()
                 .to_vec();
-            if uncond_tokens.len() > self.sd_config.clip.max_position_embeddings {
+            if uncond_tokens.len() > max_token_embeddings {
                 anyhow::bail!(
                     "the negative prompt is too long, {} > max-tokens ({})",
                     uncond_tokens.len(),
-                    self.sd_config.clip.max_position_embeddings
+                    max_token_embeddings
                 )
             }
-            while uncond_tokens.len() < self.sd_config.clip.max_position_embeddings {
-                uncond_tokens.push(self.pad_id)
+            while uncond_tokens.len() < max_token_embeddings {
+                uncond_tokens.push(pad_id)
             }
 
             let uncond_tokens = Tensor::new(uncond_tokens.as_slice(), &self.device)?.unsqueeze(0)?;
+
+            println!("Clip forwarding.");
             let uncond_embeddings = text_model.forward(&uncond_tokens, 0, 0, cache)?;
 
             Tensor::cat(&[uncond_embeddings, text_embeddings], 0)?.to_dtype(self.dtype)?
@@ -596,7 +723,34 @@ impl SD {
     }
 }
 
-pub fn device(cpu: bool) -> Result<Device> {
+fn output_filename(
+    basename: &str,
+    sample_idx: usize,
+    num_samples: usize,
+    timestep_idx: Option<usize>,
+) -> String {
+    let filename = if num_samples > 1 {
+        match basename.rsplit_once('.') {
+            None => format!("{basename}.{sample_idx}.png"),
+            Some((filename_no_extension, extension)) => {
+                format!("{filename_no_extension}.{sample_idx}.{extension}")
+            }
+        }
+    } else {
+        basename.to_string()
+    };
+    match timestep_idx {
+        None => filename,
+        Some(timestep_idx) => match filename.rsplit_once('.') {
+            None => format!("{filename}-{timestep_idx}.png"),
+            Some((filename_no_extension, extension)) => {
+                format!("{filename_no_extension}-{timestep_idx}.{extension}")
+            }
+        },
+    }
+}
+
+pub fn get_device(cpu: bool) -> Result<Device> {
     if cpu {
         Ok(Device::Cpu)
     } else if cuda_is_available() {
@@ -616,5 +770,25 @@ pub fn device(cpu: bool) -> Result<Device> {
         }
         Ok(Device::Cpu)
     }
+}
+
+fn image_preprocess<T: AsRef<std::path::Path>>(path: T) -> Result<Tensor> {
+    let img = image::ImageReader::open(path)?.decode()?;
+    let (height, width) = (img.height() as usize, img.width() as usize);
+    let height = height - height % 32;
+    let width = width - width % 32;
+    let img = img.resize_to_fill(
+        width as u32,
+        height as u32,
+        image::imageops::FilterType::CatmullRom,
+    );
+    let img = img.to_rgb8();
+    let img = img.into_raw();
+    let img = Tensor::from_vec(img, (height, width, 3), &Device::Cpu)?
+        .permute((2, 0, 1))?
+        .to_dtype(DType::F32)?
+        .affine(2. / 255., -1.)?
+        .unsqueeze(0)?;
+    Ok(img)
 }
 

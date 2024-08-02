@@ -8,10 +8,7 @@ use async_trait::async_trait;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
-use crate::{
-    models::llama3::{Cache, Config, LlamaConfig},
-    utils, Args,
-};
+use crate::{models::llama3::{Cache, Config, LlamaConfig}, utils, Args, models::sd::ModelFile, StableDiffusionVersion};
 
 #[cfg(feature = "master")]
 mod api;
@@ -104,11 +101,7 @@ impl Context {
 #[async_trait]
 pub trait Forwarder: Debug + Send + Sync + Display {
     /// Create an instance of this object loading the specified layer(s) from a VarBuilder.
-    fn load_text_model(name: String, vb: VarBuilder, cfg: &Config) -> Result<Box<Self>>
-    where
-        Self: Sized;
-
-    fn load_image_model(name: String, cfg: &StableDiffusionConfig) -> Result<Box<Self>>
+    fn load(name: String, vb: VarBuilder, cfg: &Config) -> Result<Box<Self>>
     where
         Self: Sized;
 

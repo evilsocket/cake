@@ -207,7 +207,7 @@ impl Generator for LLama {
                 ));
             } else {
                 log::debug!("{} will be served locally", &block_layer_name);
-                blocks.push(Transformer::load_text_model(
+                blocks.push(Transformer::load(
                     block_layer_name.clone(),
                     ctx.var_builder.pp(&block_layer_name),
                     &ctx.config,
