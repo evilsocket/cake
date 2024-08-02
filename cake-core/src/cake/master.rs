@@ -6,6 +6,7 @@ use super::{api, Context};
 
 use anyhow::Result;
 use image::{DynamicImage, ImageReader};
+use crate::ModelType;
 
 /// A master connects to, communicates with and orchestrates the workers.
 pub struct Master<TG, IG> {
@@ -29,7 +30,7 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
             api::start(self).await?;
         } else {
             // if running in cli mode, pre add system and user prompts
-            if self.ctx.args.model_type == "text" {
+            if self.ctx.args.model_type == ModelType::TextModel {
                 self.llm_model
                 .add_message(Message::system(self.ctx.args.system_prompt.clone()))?;
             self.llm_model

@@ -1,12 +1,11 @@
 use anyhow::Result;
 use candle_core::Tensor;
-use candle_nn::{Module, RmsNorm, VarBuilder};
+use candle_nn::{Module, RmsNorm};
 
 use async_trait::async_trait;
-use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
-use crate::cake::Forwarder;
+use crate::cake::{Context, Forwarder};
 
-use super::{Cache, CausalSelfAttention, Config, MLP};
+use super::{Cache, CausalSelfAttention, MLP};
 
 /// Transformer block with causal self attention and several caching strategies.
 #[derive(Debug, Clone)]
@@ -26,7 +25,11 @@ impl std::fmt::Display for Transformer {
 
 #[async_trait]
 impl Forwarder for Transformer {
-    fn load(name: String, vb: VarBuilder, cfg: &Config) -> Result<Box<Self>> {
+    fn load(name: String, ctx: &Context) -> Result<Box<Self>> {
+
+        let vb = &ctx.var_builder;
+        let cfg = &ctx.config;
+
         let attn = super::CausalSelfAttention::load(vb.pp("self_attn"), cfg)?;
         let mlp = super::MLP::load(vb.pp("mlp"), cfg)?;
         let rms_1 =

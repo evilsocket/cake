@@ -6,7 +6,7 @@ use tokio::net::TcpStream;
 
 use crate::models::llama3::{Cache, Config};
 
-use super::{Message, WorkerInfo};
+use super::{Context, Message, WorkerInfo};
 
 /// A client object used by the master to connect and orchestrate the workers.
 /// From the Cake perspective, each worker is a server and the master uses
@@ -88,15 +88,8 @@ impl std::fmt::Display for Client {
 
 #[async_trait]
 impl super::Forwarder for Client {
-    fn load(_: String, _: candle_nn::VarBuilder, _: &Config) -> Result<Box<Self>> {
-        Err(anyhow!("load_text_model should never be called on cake::Client"))
-    }
-
-    fn load_image_model(name: String, cfg: &StableDiffusionConfig) -> Result<Box<Self>>
-    where
-        Self: Sized
-    {
-        Err(anyhow!("load_image_model should never be called on cake::Client"))
+    fn load(_: String, _: &Context) -> Result<Box<Self>> {
+        Err(anyhow!("load should never be called on cake::Client"))
     }
 
     async fn forward(&self, _: &Tensor, _: usize, _: usize, _: &mut Cache) -> Result<Tensor> {

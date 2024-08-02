@@ -14,7 +14,7 @@ use crate::models::llama3::Cache;
 use crate::models::sd::clip::Clip;
 use crate::models::sd::sd_shardable::SDShardable;
 use crate::models::sd::unet::UNet;
-use crate::models::sd::util::pack_tensors;
+use crate::models::sd::util::{get_device, pack_tensors};
 use crate::models::sd::vae::VAE;
 
 #[derive(Parser)]
@@ -176,7 +176,7 @@ impl ModelFile {
         }
     }
 
-    fn name(&self) -> &'static str {
+    pub(crate) fn name(&self) -> &'static str {
         match *self {
             ModelFile::Tokenizer => "tokenizer",
             ModelFile::Tokenizer2 => "tokenizer_2",
@@ -747,28 +747,6 @@ fn output_filename(
                 format!("{filename_no_extension}-{timestep_idx}.{extension}")
             }
         },
-    }
-}
-
-pub fn get_device(cpu: bool) -> Result<Device> {
-    if cpu {
-        Ok(Device::Cpu)
-    } else if cuda_is_available() {
-        Ok(Device::new_cuda(0)?)
-    } else if metal_is_available() {
-        Ok(Device::new_metal(0)?)
-    } else {
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        {
-            println!(
-                "Running on CPU, to run on GPU(metal), build this example with `--features metal`"
-            );
-        }
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        {
-            println!("Running on CPU, to run on GPU, build this example with `--features cuda`");
-        }
-        Ok(Device::Cpu)
     }
 }
 

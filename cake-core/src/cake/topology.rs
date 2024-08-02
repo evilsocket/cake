@@ -1,3 +1,4 @@
+use std::cmp::PartialEq;
 use std::collections::HashMap;
 
 use anyhow::Result;
@@ -40,13 +41,13 @@ pub struct Topology(HashMap<String, Node>);
 
 impl Topology {
     /// Load the topology from a yaml file.
-    pub fn from_path(path: &str, model_type: ModelType) -> Result<Self> {
+    pub fn from_path(path: &str, model_type: &ModelType) -> Result<Self> {
         log::info!("loading topology from {}", path);
 
         let mut topology: Self = serde_yaml::from_str(&std::fs::read_to_string(path)?)
             .map_err(|e| anyhow!("can't read {path}: {e}"))?;
 
-        if (model_type == ModelType::TextModel) {
+        if (*model_type == ModelType::TextModel) {
             // check for range expressions
             for (_worker_name, node) in topology.iter_mut() {
 

@@ -99,8 +99,7 @@ impl<G: Generator + 'static> Worker<G> {
 
             let block = G::Shardable::load(
                 block_layer_name.to_string(),
-                ctx.var_builder.pp(block_layer_name),
-                &ctx.config,
+                &ctx,
             )?;
             blocks.insert(block_layer_name.to_string(), block);
         }

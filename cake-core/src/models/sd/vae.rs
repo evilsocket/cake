@@ -1,12 +1,11 @@
 use std::fmt::{Debug, Display, Formatter};
 use candle_core::{Device, DType, Tensor};
-use candle_nn::VarBuilder;
 use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
 use candle_transformers::models::stable_diffusion::vae::{AutoEncoderKL, DiagonalGaussianDistribution};
-use crate::cake::Forwarder;
-use crate::models::llama3::{Cache, Config};
+use crate::cake::{Context, Forwarder};
+use crate::models::llama3::{Cache};
 use crate::models::sd::ModelFile;
-use crate::models::sd::util::pack_tensors;
+use crate::models::sd::util::{get_device, get_sd_config, pack_tensors};
 use crate::StableDiffusionVersion;
 
 pub struct VAE {
@@ -26,11 +25,23 @@ impl Display for VAE {
 }
 
 impl Forwarder for VAE {
-    fn load(name: String, vb: VarBuilder, cfg: &Config) -> anyhow::Result<Box<Self>>
+    fn load(name: String, ctx: &Context) -> anyhow::Result<Box<Self>>
     where
         Self: Sized
     {
-        Err(anyhow!("load should never be called on VAE"))
+        let dtype = if ctx.args.sd_args.use_f16 { DType::F16 } else { DType::F32 };
+        let device = get_device(ctx.args.cpu)?;
+
+        let sd_config = get_sd_config(ctx)?;
+
+        Self::load_model(
+            ctx.args.sd_args.vae.clone(),
+            ctx.args.sd_args.sd_version,
+            ctx.args.sd_args.use_f16,
+            &device,
+            dtype,
+            &sd_config,
+        )
     }
 
     async fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {
@@ -42,7 +53,7 @@ impl Forwarder for VAE {
     }
 
     fn layer_name(&self) -> &str {
-        todo!()
+        "vae"
     }
 }
 

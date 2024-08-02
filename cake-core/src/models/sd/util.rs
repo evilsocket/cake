@@ -1,5 +1,9 @@
 use candle_core::{Device, Tensor};
 use anyhow::Result;
+use candle_core::utils::{cuda_is_available, metal_is_available};
+use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
+use crate::cake::Context;
+use crate::StableDiffusionVersion;
 
 pub fn pack_tensors(tensors: Vec<Tensor>, device: &Device) -> Result<Tensor> {
     let num_tensors = tensors.len();
@@ -51,4 +55,49 @@ pub fn unpack_tensors(tensor: Tensor) -> Result<Vec<Tensor>> {
     }
 
     Ok(unpacked_tensors)
+}
+
+pub fn get_device(cpu: bool) -> Result<Device> {
+    if cpu {
+        Ok(Device::Cpu)
+    } else if cuda_is_available() {
+        Ok(Device::new_cuda(0)?)
+    } else if metal_is_available() {
+        Ok(Device::new_metal(0)?)
+    } else {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            println!(
+                "Running on CPU, to run on GPU(metal), build this example with `--features metal`"
+            );
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        {
+            println!("Running on CPU, to run on GPU, build this example with `--features cuda`");
+        }
+        Ok(Device::Cpu)
+    }
+}
+
+pub fn get_sd_config(ctx: &Context) -> Result<StableDiffusionConfig> {
+    let height = ctx.args.sd_args.height;
+    let width= ctx.args.sd_args.width;
+    let sliced_attention_size = ctx.args.sd_args.sliced_attention_size;
+    let sd_config = match ctx.args.sd_args.sd_version {
+        StableDiffusionVersion::V1_5 => {
+            StableDiffusionConfig::v1_5(sliced_attention_size, height, width)
+        }
+        StableDiffusionVersion::V2_1 => {
+            StableDiffusionConfig::v2_1(sliced_attention_size, height, width)
+        }
+        StableDiffusionVersion::Xl => {
+            StableDiffusionConfig::sdxl(sliced_attention_size, height, width)
+        }
+        StableDiffusionVersion::Turbo => StableDiffusionConfig::sdxl_turbo(
+            ctx.args.sd_args.sliced_attention_size,
+            ctx.args.sd_args.height,
+            ctx.args.sd_args.width,
+        ),
+    };
+    Ok(sd_config)
 }

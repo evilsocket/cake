@@ -76,7 +76,7 @@ impl Context {
         let config_filename = data_path.join("config.json");
         let config = LlamaConfig::from_path(&config_filename)?.into_config();
 
-        let topology = Topology::from_path(&args.topology)?;
+        let topology = Topology::from_path(&args.topology, &args.model_type)?;
 
         let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
         let var_builder =
@@ -101,7 +101,7 @@ impl Context {
 #[async_trait]
 pub trait Forwarder: Debug + Send + Sync + Display {
     /// Create an instance of this object loading the specified layer(s) from a VarBuilder.
-    fn load(name: String, vb: VarBuilder, cfg: &Config) -> Result<Box<Self>>
+    fn load(name: String, ctx: &Context) -> Result<Box<Self>>
     where
         Self: Sized;
 
