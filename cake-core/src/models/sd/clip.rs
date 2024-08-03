@@ -1,5 +1,5 @@
 use std::fmt::{Debug, Display, Formatter};
-use candle_core::{Device, DType, Tensor};
+use candle_core::{Device, DType, Module, Tensor};
 use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::stable_diffusion::clip::ClipTextTransformer;
 use crate::cake::{Context, Forwarder};
@@ -63,11 +63,11 @@ impl Forwarder for Clip {
     }
 
     async fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {
-        todo!()
+        Ok(self.clip_model.forward(x).expect("Error running Clip forward"))
     }
 
     async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {
-        todo!()
+        self.forward(x, index_pos, block_idx, cache)
     }
 
     fn layer_name(&self) -> &str {

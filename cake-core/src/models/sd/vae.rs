@@ -1,11 +1,11 @@
 use std::fmt::{Debug, Display, Formatter};
 use candle_core::{Device, DType, Tensor};
 use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
-use candle_transformers::models::stable_diffusion::vae::{AutoEncoderKL, DiagonalGaussianDistribution};
+use candle_transformers::models::stable_diffusion::vae::{AutoEncoderKL};
 use crate::cake::{Context, Forwarder};
 use crate::models::llama3::{Cache};
 use crate::models::sd::ModelFile;
-use crate::models::sd::util::{get_device, get_sd_config, pack_tensors};
+use crate::models::sd::util::{get_device, get_sd_config, pack_tensors, unpack_tensors};
 use crate::StableDiffusionVersion;
 
 pub struct VAE {
@@ -45,11 +45,21 @@ impl Forwarder for VAE {
     }
 
     async fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {
-        todo!()
+        let unpacked_tensors = unpack_tensors(x)?;
+
+        let direction = unpacked_tensors.get(0).unwrap().to_scalar()?;
+        let input = unpacked_tensors.get(1).unwrap();
+
+        if direction == 1 {
+            let dist = self.vae_model.encode(input)?;
+            Ok(dist.sample()?)
+        } else {
+            Ok(self.vae_model.decode(input)?)
+        }
     }
 
     async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {
-        todo!()
+        self.forward(x, index_pos, block_idx, cache)
     }
 
     fn layer_name(&self) -> &str {
@@ -69,7 +79,7 @@ impl VAE {
         }))
     }
 
-    pub async fn encode(forwarder: &Box<dyn Forwarder>, image: Tensor, device: &Device, cache: &mut Cache) -> anyhow::Result<DiagonalGaussianDistribution> {
+    pub async fn encode(forwarder: &Box<dyn Forwarder>, image: Tensor, device: &Device, cache: &mut Cache) -> anyhow::Result<Tensor> {
         let tensors = Vec::from([
             Tensor::from_slice(&*[1], 1, device)?,
             image
@@ -77,8 +87,7 @@ impl VAE {
 
         let combined_tensor = pack_tensors(tensors, device)?;
 
-        let parameters = forwarder.forward(&combined_tensor, 0, 0, cache).await?;
-        Ok(DiagonalGaussianDistribution::new(&parameters)?)
+        Ok(forwarder.forward(&combined_tensor, 0, 0, cache).await?)
     }
 
     pub async fn decode(forwarder: &Box<dyn Forwarder>, latents: Tensor, device: &Device, cache: &mut Cache) -> anyhow::Result<Tensor> {

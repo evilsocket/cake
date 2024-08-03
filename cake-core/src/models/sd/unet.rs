@@ -2,10 +2,11 @@ use std::fmt::{Debug, Display, Formatter};
 use candle_core::{Device, DType, Tensor};
 use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
 use candle_transformers::models::stable_diffusion::unet_2d::UNet2DConditionModel;
+use tracing_subscriber::fmt::time;
 use crate::cake::{Context, Forwarder};
 use crate::models::llama3::{Cache};
 use crate::models::sd::ModelFile;
-use crate::models::sd::util::{get_device, get_sd_config, pack_tensors};
+use crate::models::sd::util::{get_device, get_sd_config, pack_tensors, unpack_tensors};
 use crate::StableDiffusionVersion;
 
 pub struct UNet {
@@ -45,11 +46,17 @@ impl Forwarder for UNet {
     }
 
     async fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {
-        todo!()
+        let unpacked_tensors = unpack_tensors(x)?;
+        let latent_model_input = unpacked_tensors.get(0).unwrap();
+        let text_embeddings = unpacked_tensors.get(1).unwrap();
+        let timestep = unpacked_tensors.get(2).unwrap().to_scalar()?;
+
+        Ok(self.unet_model.forward(latent_model_input, timestep, text_embeddings).expect("Error running UNet forward"))
+
     }
 
     async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {
-        todo!()
+        self.forward(x, index_pos, block_idx, cache)
     }
 
     fn layer_name(&self) -> &str {

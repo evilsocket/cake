@@ -472,7 +472,7 @@ impl ImageGenerator for SD {
         let text_embeddings = text_embeddings.repeat((bsize, 1, 1))?;
         println!("{text_embeddings:?}");
 
-        let init_latent_dist = match &img2img {
+        let init_latent_dist_sample = match &img2img {
             None => None,
             Some(image) => {
                 let image = image_preprocess(image)?.to_device(&self.device)?;
@@ -495,10 +495,10 @@ impl ImageGenerator for SD {
 
         for idx in 0..num_samples {
             let timesteps = scheduler.timesteps();
-            let latents = match &init_latent_dist {
+            let latents = match &init_latent_dist_sample {
 
                 Some(init_latent_dist) => {
-                    let latents = (init_latent_dist.sample()? * vae_scale)?.to_device(&self.device)?;
+                    let latents = (init_latent_dist * vae_scale)?.to_device(&self.device)?;
                     if t_start < timesteps.len() {
                         let noise = latents.randn_like(0f64, 1f64)?;
                         scheduler.add_noise(&latents, noise, timesteps[t_start])?

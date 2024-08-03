@@ -28,7 +28,7 @@ pub fn pack_tensors(tensors: Vec<Tensor>, device: &Device) -> Result<Tensor> {
     Ok(Tensor::cat(&prepared_tensors, 0)?)
 }
 
-pub fn unpack_tensors(tensor: Tensor) -> Result<Vec<Tensor>> {
+pub fn unpack_tensors(tensor: &Tensor) -> Result<Vec<Tensor>> {
 
     let mut unpacked_tensors: Vec<Tensor> = Vec::new();
 
