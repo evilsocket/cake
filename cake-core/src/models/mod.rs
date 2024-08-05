@@ -6,6 +6,7 @@ use crate::cake::{Context, Forwarder};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use image::{DynamicImage, ImageBuffer};
 use chat::Message;
 use crate::models::sd::ImageGenerationArgs;
 
@@ -61,5 +62,5 @@ pub trait TextGenerator: Generator {
 }
 
 pub trait ImageGenerator: Generator {
-    async fn generate_image(&mut self, args: ImageGenerationArgs) -> Result<String>;
+    async fn generate_image(&mut self, args: &ImageGenerationArgs) -> Result<Vec<ImageBuffer<image::Rgb<u8>, Vec<u8>>>>;
 }

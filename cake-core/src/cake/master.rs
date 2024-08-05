@@ -5,7 +5,8 @@ use crate::models::{chat::Message, Generator, ImageGenerator, TextGenerator};
 use super::{api, Context};
 
 use anyhow::Result;
-use image::{DynamicImage, ImageReader};
+use image::{DynamicImage, ImageBuffer, ImageReader};
+use crate::models::sd::{ImageGenerationArgs};
 use crate::ModelType;
 
 /// A master connects to, communicates with and orchestrates the workers.
@@ -47,7 +48,13 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
                 })
                 .await?;
             } else {
-                self.generate_image().await?;
+                let images = self.generate_image(self.ctx.args).await?;
+
+                let mut num = 0;
+                for image in images {
+                    image.save(format!("image_{}.png", num)).expect("Error saving image to disk");;
+                    num+=1;
+                }
             }
         }
 
@@ -105,8 +112,11 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
         Ok(())
     }
 
-    pub async fn generate_image(&mut self) -> Result<(DynamicImage)> {
-        let bytes: Vec<u8> = Vec::new();
-        Ok(ImageReader::new(Cursor::new(bytes)).with_guessed_format()?.decode()?)
+    pub async fn generate_image(&mut self, args: &ImageGenerationArgs) -> Result<Vec<ImageBuffer<image::Rgb<u8>, Vec<u8>>>> {
+        if let Some(mut sd_model) = &self.sd_model {
+            Ok(sd_model.generate_image(args).await?)
+        } else {
+            anyhow::bail!("SD model is not initialized")
+        }
     }
 }

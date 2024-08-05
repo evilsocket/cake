@@ -649,6 +649,7 @@ dependencies = [
  "actix-web",
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "bitcode",
  "candle-core",
  "candle-nn",

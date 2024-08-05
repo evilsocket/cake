@@ -7,6 +7,7 @@ use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
 use candle_transformers::models::stable_diffusion::vae::DiagonalGaussianDistribution;
+use image::{DynamicImage, ImageBuffer};
 use tracing_subscriber::fmt::time;
 use crate::models::{Generator, ImageGenerator};
 use crate::{Args, SDArgs, StableDiffusionVersion};
@@ -30,10 +31,6 @@ pub struct ImageGenerationArgs {
     #[arg(long, default_value = "")]
     uncond_prompt: String,
 
-    /// Run on CPU rather than on GPU.
-    #[arg(long)]
-    cpu: bool,
-
     /// Enable tracing (generates a trace-timestamp.json file).
     #[arg(long)]
     tracing: bool,
@@ -45,26 +42,6 @@ pub struct ImageGenerationArgs {
     /// The width in pixels of the generated image.
     #[arg(long)]
     width: Option<usize>,
-
-    /// The UNet weight file, in .safetensors format.
-    #[arg(long, value_name = "FILE")]
-    unet_weights: Option<String>,
-
-    /// The CLIP weight file, in .safetensors format.
-    #[arg(long, value_name = "FILE")]
-    clip_weights: Option<String>,
-
-    /// The VAE weight file, in .safetensors format.
-    #[arg(long, value_name = "FILE")]
-    vae_weights: Option<String>,
-
-    #[arg(long, value_name = "FILE")]
-    /// The file specifying the tokenizer to used for tokenization.
-    tokenizer: Option<String>,
-
-    /// The size of the sliced attention or 0 for automatic slicing (disabled by default)
-    #[arg(long)]
-    sliced_attention_size: Option<usize>,
 
     /// The number of steps to run the diffusion for.
     #[arg(long)]
@@ -78,22 +55,9 @@ pub struct ImageGenerationArgs {
     #[arg[long, default_value_t = 1]]
     bsize: usize,
 
-    /// The name of the final image to generate.
-    #[arg(long, value_name = "FILE", default_value = "sd_final.png")]
-    final_image: String,
-
-    #[arg(long, value_enum, default_value = "v2-1")]
-    sd_version: StableDiffusionVersion,
-
     /// Generate intermediary images at each step.
     #[arg(long, action)]
     intermediary_images: bool,
-
-    #[arg(long)]
-    use_flash_attn: bool,
-
-    #[arg(long)]
-    use_f16: bool,
 
     #[arg(long)]
     guidance_scale: Option<f64>,
@@ -397,7 +361,7 @@ impl Generator for SD {
 }
 
 impl ImageGenerator for SD {
-    async fn generate_image(&mut self, args: ImageGenerationArgs) -> Result<()> {
+    async fn generate_image(&mut self, args: ImageGenerationArgs) -> Result<Vec<ImageBuffer<image::Rgb<u8>, Vec<u8>>>> {
         use tracing_chrome::ChromeLayerBuilder;
         use tracing_subscriber::prelude::*;
 
@@ -405,10 +369,8 @@ impl ImageGenerator for SD {
             prompt,
             uncond_prompt,
             n_steps,
-            final_image,
             num_samples,
             bsize,
-            sd_version,
             tracing,
             guidance_scale,
             img2img,
@@ -416,6 +378,8 @@ impl ImageGenerator for SD {
             seed,
             ..
         } = args;
+
+        let sd_version = self.sd_version;
 
         if !(0. ..=1.).contains(&img2img_strength) {
             anyhow::bail!("img2img-strength should be between 0 and 1, got {img2img_strength}")
@@ -493,6 +457,8 @@ impl ImageGenerator for SD {
             StableDiffusionVersion::Turbo => 0.13025,
         };
 
+        let mut final_images = Vec::new();
+
         for idx in 0..num_samples {
             let timesteps = scheduler.timesteps();
             let latents = match &init_latent_dist_sample {
@@ -559,18 +525,6 @@ impl ImageGenerator for SD {
                 latents = scheduler.step(&noise_pred, timestep, &latents)?;
                 let dt = start_time.elapsed().as_secs_f32();
                 println!("step {}/{n_steps} done, {:.2}s", timestep_index + 1, dt);
-
-                if args.intermediary_images {
-                    self.save_image(
-                        &latents,
-                        vae_scale,
-                        bsize,
-                        idx,
-                        &final_image,
-                        num_samples,
-                        Some(timestep_index + 1),
-                    )?;
-                }
             }
 
             println!(
@@ -579,66 +533,50 @@ impl ImageGenerator for SD {
                 num_samples
             );
 
-            self.save_image(
+            let mut batched_images = self.split_images(
                 &latents,
                 vae_scale,
                 bsize,
-                idx,
-                &final_image,
-                num_samples,
-                None,
-            )?;
+            ).await?;
+
+            final_images.append(&mut batched_images);
         }
-        Ok(())
+
+        Ok(final_images)
     }
 }
 
 impl SD {
-
-    #[allow(clippy::too_many_arguments)]
-    async fn save_image(
+    async fn split_images(
         &mut self,
         latents: &Tensor,
         vae_scale: f64,
         bsize: usize,
-        idx: usize,
-        final_image: &str,
-        num_samples: usize,
-        timestep_ids: Option<usize>,
-    ) -> Result<()> {
+    ) -> Result<Vec<ImageBuffer<image::Rgb<u8>, Vec<u8>>>> {
+
+        let mut images_vec = Vec::new();
 
         let scaled = (latents / vae_scale)?;
         let images = VAE::decode(&self.vae, scaled, &self.device, &mut self.cache).await?;
         let images = ((images / 2.)? + 0.5)?.to_device(&Device::Cpu)?;
         let images = (images.clamp(0f32, 1.)? * 255.)?.to_dtype(DType::U8)?;
         for batch in 0..bsize {
-            let image = images.i(batch)?;
-            let image_filename = output_filename(
-                final_image,
-                (bsize * idx) + batch + 1,
-                batch + num_samples,
-                timestep_ids,
-            );
-            self.save_image_disk(&image, image_filename)?;
-        }
-        Ok(())
-    }
+            let image_tensor = images.i(batch)?;
+            let (channel, height, width) = image_tensor.dims3()?;
+            if channel != 3 {
+                anyhow::bail!("save_image expects an input of shape (3, height, width)")
+            }
+            let image_tensor = image_tensor.permute((1, 2, 0))?.flatten_all()?;
+            let pixels = image_tensor.to_vec1::<u8>()?;
 
-    pub fn save_image_disk<P: AsRef<std::path::Path>>(&self, img: &Tensor, p: P) -> Result<()> {
-        let p = p.as_ref();
-        let (channel, height, width) = img.dims3()?;
-        if channel != 3 {
-            anyhow::bail!("save_image expects an input of shape (3, height, width)")
-        }
-        let img = img.permute((1, 2, 0))?.flatten_all()?;
-        let pixels = img.to_vec1::<u8>()?;
-        let image: image::ImageBuffer<image::Rgb<u8>, Vec<u8>> =
-            match image::ImageBuffer::from_raw(width as u32, height as u32, pixels) {
-                Some(image) => image,
-                None => anyhow::bail!("error saving image {p:?}"),
+            let image: ImageBuffer<image::Rgb<u8>, Vec<u8>> =
+                match ImageBuffer::from_raw(width as u32, height as u32, pixels) {
+                    Some(image) => image,
+                    None => anyhow::bail!("error saving image {p:?}"),
             };
-        image.save(p).map_err(anyhow::Error::wrap)?;
-        Ok(())
+            images_vec.push(image)
+        }
+        Ok(images_vec)
     }
 
     fn text_embeddings(
@@ -720,33 +658,6 @@ impl SD {
         };
 
         Ok(text_embeddings)
-    }
-}
-
-fn output_filename(
-    basename: &str,
-    sample_idx: usize,
-    num_samples: usize,
-    timestep_idx: Option<usize>,
-) -> String {
-    let filename = if num_samples > 1 {
-        match basename.rsplit_once('.') {
-            None => format!("{basename}.{sample_idx}.png"),
-            Some((filename_no_extension, extension)) => {
-                format!("{filename_no_extension}.{sample_idx}.{extension}")
-            }
-        }
-    } else {
-        basename.to_string()
-    };
-    match timestep_idx {
-        None => filename,
-        Some(timestep_idx) => match filename.rsplit_once('.') {
-            None => format!("{filename}-{timestep_idx}.png"),
-            Some((filename_no_extension, extension)) => {
-                format!("{filename_no_extension}-{timestep_idx}.{extension}")
-            }
-        },
     }
 }
 

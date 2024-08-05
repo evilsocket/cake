@@ -2,6 +2,7 @@ use candle_core::{Device, Tensor};
 use anyhow::Result;
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
+use image::ImageBuffer;
 use crate::cake::Context;
 use crate::StableDiffusionVersion;
 
