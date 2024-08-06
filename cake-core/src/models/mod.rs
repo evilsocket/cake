@@ -1,14 +1,15 @@
+use anyhow::Result;
+use async_trait::async_trait;
+use image::ImageBuffer;
+
+use chat::Message;
+
+use crate::cake::{Context, Forwarder};
+use crate::ImageGenerationArgs;
+
 pub mod chat;
 pub mod llama3;
 pub mod sd;
-
-use crate::cake::{Context, Forwarder};
-
-use anyhow::Result;
-use async_trait::async_trait;
-use image::{DynamicImage, ImageBuffer};
-use chat::Message;
-use crate::models::sd::ImageGenerationArgs;
 
 /// A token.
 pub struct Token {
@@ -48,6 +49,7 @@ pub trait Generator {
     async fn load(context: Context) -> Result<Option<Box<Self>>>;
 }
 
+#[async_trait]
 pub trait TextGenerator: Generator {
 
     /// Add a message to the chat.
@@ -61,6 +63,7 @@ pub trait TextGenerator: Generator {
     fn generated_tokens(&self) -> usize;
 }
 
+#[async_trait]
 pub trait ImageGenerator: Generator {
     async fn generate_image(&mut self, args: &ImageGenerationArgs) -> Result<Vec<ImageBuffer<image::Rgb<u8>, Vec<u8>>>>;
 }

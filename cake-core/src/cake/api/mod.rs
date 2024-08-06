@@ -1,22 +1,15 @@
 mod image;
 mod text;
 
-use std::io::Write;
 use std::sync::Arc;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 
 use actix_web::web;
 use actix_web::App;
-use actix_web::HttpRequest;
 use actix_web::HttpResponse;
 use actix_web::HttpServer;
-use actix_web::Responder;
-use serde::Deserialize;
-use serde::Serialize;
 use tokio::sync::RwLock;
 
-use crate::models::{Generator, ImageGenerator, TextGenerator};
+use crate::models::{ImageGenerator, TextGenerator};
 
 use image::*;
 use text::*;

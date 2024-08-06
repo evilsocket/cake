@@ -70,4 +70,4 @@ fastlane/screenshots/**/*.png
 fastlane/test_output
 
 .idea
-models/
+/models

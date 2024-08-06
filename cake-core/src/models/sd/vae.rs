@@ -1,4 +1,5 @@
 use std::fmt::{Debug, Display, Formatter};
+use async_trait::async_trait;
 use candle_core::{Device, DType, Tensor};
 use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
 use candle_transformers::models::stable_diffusion::vae::{AutoEncoderKL};
@@ -24,8 +25,9 @@ impl Display for VAE {
     }
 }
 
+#[async_trait]
 impl Forwarder for VAE {
-    fn load(name: String, ctx: &Context) -> anyhow::Result<Box<Self>>
+    fn load(_name: String, ctx: &Context) -> anyhow::Result<Box<Self>>
     where
         Self: Sized
     {
@@ -47,7 +49,7 @@ impl Forwarder for VAE {
     async fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {
         let unpacked_tensors = unpack_tensors(x)?;
 
-        let direction = unpacked_tensors.get(0).unwrap().to_scalar()?;
+        let direction:i64 = unpacked_tensors.get(0).unwrap().to_scalar()?;
         let input = unpacked_tensors.get(1).unwrap();
 
         if direction == 1 {
@@ -59,7 +61,7 @@ impl Forwarder for VAE {
     }
 
     async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {
-        self.forward(x, index_pos, block_idx, cache)
+        self.forward(x, index_pos, block_idx, cache).await
     }
 
     fn layer_name(&self) -> &str {
@@ -81,7 +83,7 @@ impl VAE {
 
     pub async fn encode(forwarder: &Box<dyn Forwarder>, image: Tensor, device: &Device, cache: &mut Cache) -> anyhow::Result<Tensor> {
         let tensors = Vec::from([
-            Tensor::from_slice(&*[1], 1, device)?,
+            Tensor::from_slice(&[1i64], 1, device)?,
             image
         ]);
 
@@ -92,7 +94,7 @@ impl VAE {
 
     pub async fn decode(forwarder: &Box<dyn Forwarder>, latents: Tensor, device: &Device, cache: &mut Cache) -> anyhow::Result<Tensor> {
         let tensors = Vec::from([
-            Tensor::from_slice(&*[0], 1, device)?,
+            Tensor::from_slice(&[0i64], 1, device)?,
             latents,
         ]);
 

@@ -4,13 +4,14 @@ extern crate anyhow;
 
 use cake::Mode;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+use serde::Deserialize;
 
 pub mod cake;
 pub mod models;
 pub mod utils;
 
-#[derive(Clone, Parser, Default, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Parser, Default, Debug, Eq, PartialEq, PartialOrd, Ord, ValueEnum)]
 pub enum ModelType {
     #[default]
     TextModel,
@@ -78,48 +79,99 @@ pub struct Args {
     #[arg(long, default_value = "text")]
     pub model_type: ModelType,
 
-    #[arg(long)]
+    #[clap(flatten)]
     pub sd_args: SDArgs,
+
+    #[clap(flatten)]
+    pub sd_img_gen_args: ImageGenerationArgs,
 }
 
 #[derive(Clone, Parser, Default, Debug)]
-#[command(author, version, about, long_about = None)]
 pub struct SDArgs {
-    #[arg(long), default_value=""]
+    #[arg(long="sd-tokenizer", default_value="")]
     pub tokenizer: Option<String>,
 
-    #[arg(long), default_value=""]
+    #[arg(long="sd-tokenizer-2", default_value="")]
     pub tokenizer_2: Option<String>,
 
-    #[arg(long, value_enum, default_value = "v1-5")]
+    #[arg(long="sd-version", value_enum, default_value = "v1-5")]
     sd_version: StableDiffusionVersion,
 
-    #[arg(long, default_value_t = true)]
+    #[arg(long="sd-use-f16", default_value_t = true)]
     use_f16: bool,
 
-    #[arg(long)]
+    #[arg(long="sd-width")]
     width: Option<usize>,
 
-    #[arg(long)]
+    #[arg(long="sd-height")]
     height: Option<usize>,
 
-    #[arg(long)]
+    #[arg(long="sd-sliced-attention-size")]
     sliced_attention_size: Option<usize>,
 
-    #[arg(long)]
+    #[arg(long="sd-clip")]
     clip: Option<String>,
 
-    #[arg(long)]
+    #[arg(long="sd-clip2")]
     clip2: Option<String>,
 
-    #[arg(long)]
+    #[arg(long="sd-vae")]
     vae: Option<String>,
 
-    #[arg(long)]
+    #[arg(long="sd-unet")]
     unet: Option<String>,
 
-    #[arg(long, default_value_t = false)]
+    #[arg(long="sd-use-flash-attention", default_value_t = false)]
     use_flash_attention: bool,
+}
+
+#[derive(Clone, Parser, Default, Debug, Deserialize)]
+pub struct ImageGenerationArgs {
+    /// The prompt to be used for image generation.
+    #[arg(
+        long="sd-prompt",
+        default_value = "A very realistic photo of a rusty robot walking on a sandy beach"
+    )]
+    prompt: String,
+
+    #[arg(long="sd-uncond-prompt", default_value = "")]
+    uncond_prompt: String,
+
+    /// Enable tracing (generates a trace-timestamp.json file).
+    #[arg(long="sd-tracing")]
+    tracing: bool,
+
+    /// The number of steps to run the diffusion for.
+    #[arg(long="sd-n-steps")]
+    n_steps: Option<usize>,
+
+    /// The number of samples to generate iteratively.
+    #[arg(long="sd-num-samples", default_value_t = 1)]
+    num_samples: usize,
+
+    /// The numbers of samples to generate simultaneously.
+    #[arg(long="sd-bsize", default_value_t = 1)]
+    bsize: usize,
+
+    /// Generate intermediary images at each step.
+    #[arg(long="sd-intermediary-images", action)]
+    intermediary_images: bool,
+
+    #[arg(long="sd-guidance-scale")]
+    guidance_scale: Option<f64>,
+
+    #[arg(long="sd-img2img", value_name = "FILE")]
+    img2img: Option<String>,
+
+    /// The strength, indicates how much to transform the initial image. The
+    /// value must be between 0 and 1, a value of 1 discards the initial image
+    /// information.
+    #[arg(long="sd-img2img-strength", default_value_t = 0.8)]
+    img2img_strength: f64,
+
+    /// The seed to use when generating random samples.
+    #[arg(long="sd-seed")]
+    seed: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq, Default)]

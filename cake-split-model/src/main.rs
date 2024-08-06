@@ -7,10 +7,7 @@ use std::{
 };
 
 use anyhow::Result;
-use cake_core::{
-    cake::{Node, Topology},
-    utils,
-};
+use cake_core::{cake::{Node, Topology}, ModelType, utils};
 use clap::Parser;
 use safetensors::{Dtype, SafeTensors, View};
 use serde::{Deserialize, Serialize};
@@ -87,7 +84,7 @@ fn reduce_for_worker(
     let mut new_index = Index::new();
 
     for (layer_full_name, filename) in &index.weight_map {
-        if worker.is_layer_owner(layer_full_name) {
+        if worker.is_text_model_layer_owner(layer_full_name) {
             //println!("{} {}", layer_full_name, filename);
             if let Some(layers) = reduced.get_mut(filename) {
                 layers.push(layer_full_name.to_string());
@@ -145,7 +142,7 @@ fn main() {
     let args = Args::parse();
     let data_path = PathBuf::from(&args.model_path);
 
-    let topology = Topology::from_path(&args.topology).expect("can't load topology");
+    let topology = Topology::from_path(&args.topology, &ModelType::TextModel).expect("can't load topology");
     let index = load_index(&data_path).expect("can't load index");
 
     println!("index has {} tensors", index.weight_map.len());

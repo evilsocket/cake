@@ -166,12 +166,13 @@ impl LLama {
     }
 }
 
+ #[async_trait]
 impl Generator for LLama {
     type Shardable = Transformer;
     const MODEL_NAME: &'static str = "llama3";
 
     /// Load this model from the context.
-    async fn load(ctx: Context) -> Result<Box<Self>> {
+    async fn load(ctx: Context) -> Result<Option<Box<Self>>> {
         log::info!("loading embeddings ...");
         let embedding: Embedding = candle_nn::embedding(
             ctx.config.vocab_size,
@@ -209,8 +210,7 @@ impl Generator for LLama {
                 log::debug!("{} will be served locally", &block_layer_name);
                 blocks.push(Transformer::load(
                     block_layer_name.clone(),
-                    ctx.var_builder.pp(&block_layer_name),
-                    &ctx.config,
+                    &ctx,
                 )?);
             }
         }
@@ -233,7 +233,7 @@ impl Generator for LLama {
 
         let generated = 0;
 
-        Ok(Box::new(Self {
+        Ok(Some(Box::new(Self {
             tokenizer,
             tokens,
             generated,
@@ -246,7 +246,7 @@ impl Generator for LLama {
             ln_f,
             lm_head,
             logits_processor,
-        }))
+        })))
     }
 }
 

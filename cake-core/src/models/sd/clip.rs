@@ -1,4 +1,5 @@
 use std::fmt::{Debug, Display, Formatter};
+use async_trait::async_trait;
 use candle_core::{Device, DType, Module, Tensor};
 use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::stable_diffusion::clip::ClipTextTransformer;
@@ -25,6 +26,7 @@ impl Display for Clip {
     }
 }
 
+#[async_trait]
 impl Forwarder for Clip {
     fn load(name: String, ctx: &Context) -> anyhow::Result<Box<Self>>
     where
@@ -35,16 +37,19 @@ impl Forwarder for Clip {
         let sd_config = get_sd_config(ctx)?;
         let clip_config;
 
-        match name {
-            String::from("clip") => {
+        match name.as_str() {
+            "clip" => {
                 model_file = ModelFile::Clip;
                 model_filename = ctx.args.sd_args.clip.clone();
                 clip_config = sd_config.clip;
             },
-            String::from("clip2") => {
+            "clip2" => {
                 model_file = ModelFile::Clip2;
                 model_filename = ctx.args.sd_args.clip2.clone();
                 clip_config = sd_config.clip2.unwrap();
+            }
+            _ => {
+                anyhow::bail!("name not recognized");
             }
         };
 
@@ -67,7 +72,7 @@ impl Forwarder for Clip {
     }
 
     async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {
-        self.forward(x, index_pos, block_idx, cache)
+        self.forward(x, index_pos, block_idx, cache).await
     }
 
     fn layer_name(&self) -> &str {

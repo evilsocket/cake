@@ -1,8 +1,8 @@
 use std::fmt::{Debug, Display, Formatter};
+use async_trait::async_trait;
 use candle_core::{Device, DType, Tensor};
 use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
 use candle_transformers::models::stable_diffusion::unet_2d::UNet2DConditionModel;
-use tracing_subscriber::fmt::time;
 use crate::cake::{Context, Forwarder};
 use crate::models::llama3::{Cache};
 use crate::models::sd::ModelFile;
@@ -25,6 +25,7 @@ impl Display for UNet {
     }
 }
 
+#[async_trait]
 impl Forwarder for UNet {
     fn load(name: String, ctx: &Context) -> anyhow::Result<Box<Self>>
     where
@@ -56,7 +57,7 @@ impl Forwarder for UNet {
     }
 
     async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {
-        self.forward(x, index_pos, block_idx, cache)
+        self.forward(x, index_pos, block_idx, cache).await
     }
 
     fn layer_name(&self) -> &str {
@@ -87,7 +88,7 @@ impl UNet {
     ) -> anyhow::Result<Tensor> {
 
         // Pack the tensors to be sent into one
-        let timestep_tensor = Tensor::from_slice(&*[timestep], 1, device)?;
+        let timestep_tensor = Tensor::from_slice(&[timestep as i64], 1, device)?;
 
         let tensors = Vec::from([
             latent_model_input,

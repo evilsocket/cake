@@ -7,8 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
-use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
-use crate::{models::llama3::{Cache, Config, LlamaConfig}, utils, Args, models::sd::ModelFile, StableDiffusionVersion};
+use crate::{models::llama3::{Cache, Config, LlamaConfig}, utils, Args};
 
 #[cfg(feature = "master")]
 mod api;

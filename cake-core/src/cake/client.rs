@@ -1,10 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use candle_core::{Device, Tensor};
-use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
 use tokio::net::TcpStream;
 
-use crate::models::llama3::{Cache, Config};
+use crate::models::llama3::Cache;
 
 use super::{Context, Message, WorkerInfo};
 

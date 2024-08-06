@@ -1,4 +1,3 @@
-use std::cmp::PartialEq;
 use std::collections::HashMap;
 
 use anyhow::Result;
@@ -25,7 +24,7 @@ impl Node {
     /// Return true if this node hosts the specified layer.
     pub fn is_text_model_layer_owner(&self, full_layer_name: &str) -> bool {
 
-        for prefix in self.layers {
+        for prefix in self.layers.iter() {
             if full_layer_name.starts_with(&format!("{}.", prefix)) {
                 return true;
             }
@@ -47,7 +46,7 @@ impl Topology {
         let mut topology: Self = serde_yaml::from_str(&std::fs::read_to_string(path)?)
             .map_err(|e| anyhow!("can't read {path}: {e}"))?;
 
-        if (*model_type == ModelType::TextModel) {
+        if *model_type == ModelType::TextModel {
             // check for range expressions
             for (_worker_name, node) in topology.iter_mut() {
 

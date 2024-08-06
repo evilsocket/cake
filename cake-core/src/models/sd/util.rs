@@ -2,27 +2,26 @@ use candle_core::{Device, Tensor};
 use anyhow::Result;
 use candle_core::utils::{cuda_is_available, metal_is_available};
 use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
-use image::ImageBuffer;
 use crate::cake::Context;
 use crate::StableDiffusionVersion;
 
 pub fn pack_tensors(tensors: Vec<Tensor>, device: &Device) -> Result<Tensor> {
     let num_tensors = tensors.len();
     let mut prepared_tensors = Vec::from([
-        Tensor::from_slice(&*[num_tensors], (1), device)?,
+        Tensor::from_slice(&[num_tensors as i64], 1, device)?,
     ]);
 
     for tensor in tensors {
         let shape_info = tensor.shape().clone().into_dims();
 
-        let shape_info_f64 = shape_info.clone().into_iter().map(|x| f64::from(x)).collect();
+        let shape_info_i64 = shape_info.clone().into_iter().map(|x| x as i64).collect();
 
         let shape_info_len = shape_info.len();
 
         let flattened_tensor = tensor.flatten_all()?;
 
-        prepared_tensors.push(Tensor::from_slice(&*[shape_info_len], 1, device)?);
-        prepared_tensors.push(Tensor::from_vec(shape_info_f64, shape_info_len, device)?);
+        prepared_tensors.push(Tensor::from_slice(&[shape_info_len as i64], 1, device)?);
+        prepared_tensors.push(Tensor::from_vec(shape_info_i64, shape_info_len, device)?);
         prepared_tensors.push(flattened_tensor);
     }
 
@@ -33,23 +32,25 @@ pub fn unpack_tensors(tensor: &Tensor) -> Result<Vec<Tensor>> {
 
     let mut unpacked_tensors: Vec<Tensor> = Vec::new();
 
-    let num_tensors = tensor.get(0)?.to_scalar() as usize;
+    let num_tensors: i64 = tensor.get(0)?.to_scalar()?;
 
-    let mut idx = 1;
+    let mut idx:i64 = 1;
 
-    for i in 0..num_tensors {
-        let shape_info_len = tensor.get(idx)?.to_scalar() as usize;
+    for _i in 0..num_tensors {
+        let shape_info_len: i64 = tensor.get(idx as usize)?.to_scalar()?;
         idx += 1;
 
-        let shape_info: Vec<usize> = tensor
-            .narrow(0, idx, shape_info_len)?
-            .to_vec1()?.into_iter().map(|x| usize::from(x)).collect();
+        let shape_info: Vec<i64> = tensor
+            .narrow(0, idx as usize, shape_info_len as usize)?
+            .to_vec1()?.into_iter().collect();
 
         idx += shape_info_len;
 
-        let num_elements = shape_info.iter().product();
+        let num_elements: i64 = shape_info.iter().product();
 
-        let extracted = tensor.narrow(0, idx, num_elements)?.reshape(shape_info)?;
+        let shape_info_usize: Vec<_> = shape_info.iter().map(|&x|{x as usize}).collect();
+
+        let extracted = tensor.narrow(0, idx as usize, num_elements as usize)?.reshape(shape_info_usize)?;
         idx += num_elements;
 
         unpacked_tensors.push(extracted);

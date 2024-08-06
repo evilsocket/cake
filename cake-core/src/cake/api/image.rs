@@ -7,11 +7,12 @@ use image::{DynamicImage, ImageFormat};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use crate::cake::Master;
-use crate::models::{ImageGenerationArgs, TextGenerator};
+use crate::ImageGenerationArgs;
+use crate::models::{TextGenerator};
 use crate::models::ImageGenerator;
 
 #[derive(Deserialize)]
-struct ImageRequest {
+pub struct ImageRequest {
     pub image_args: ImageGenerationArgs
 }
 
@@ -35,7 +36,7 @@ where
 
     let mut master = state.write().await;
 
-    let images = master.generate_image(&image_request.image_args).await.expect("Error generating images using API");
+    let images = master.generate_image(image_request.image_args.clone()).await.expect("Error generating images using API");
 
     let base64_images: Vec<String> = images
         .iter()

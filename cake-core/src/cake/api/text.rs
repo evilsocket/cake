@@ -9,7 +9,7 @@ use crate::models::chat::Message;
 use crate::models::{ImageGenerator, TextGenerator};
 
 #[derive(Deserialize)]
-struct ChatRequest {
+pub struct ChatRequest {
     pub messages: Vec<Message>,
 }
 
@@ -68,8 +68,10 @@ where
 
     master.reset().unwrap();
 
+    let llm_model = master.llm_model.as_mut().expect("LLM model not found");
+
     for message in messages.0.messages {
-        master.llm_model.add_message(message).unwrap();
+        llm_model.add_message(message).unwrap();
     }
 
     let mut resp = String::new();
