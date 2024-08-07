@@ -6,7 +6,7 @@ use std::{
 };
 
 use super::{Context, Forwarder, Message, WorkerInfo};
-use crate::models::{llama3::Cache, Generator};
+use crate::models::Generator;
 
 use anyhow::Result;
 use candle_core::{DType, Device};
@@ -25,7 +25,7 @@ struct WorkerContext<F> {
     device_idx: usize,
     dtype: DType,
     blocks: Arc<HashMap<String, Box<F>>>,
-    cache: Option<Cache>,
+    context: Context,
 }
 
 impl<F: Forwarder> WorkerContext<F> {
@@ -50,13 +50,24 @@ impl<F: Forwarder> WorkerContext<F> {
 
     /// Create a copy of self with new kv-cache.
     fn get_client_context(&self) -> Self {
+
+        let cache = match &self.context.cache {
+            None => None,
+            Some(cache) => {
+                Some(cache.as_new())
+            }
+        };
+
+        let mut cloned_context = self.context.clone();
+        cloned_context.cache = cache;
+
         WorkerContext {
             device: self.device.clone(),
             device_idx: self.device_idx,
             dtype: self.dtype,
             blocks: self.blocks.clone(),
             // each client loop gets a new cache
-            cache: Some(self.cache.as_ref().expect("Not cache specified").as_new()),
+            context: cloned_context
         }
     }
 }
@@ -69,7 +80,7 @@ pub struct Worker<G: Generator> {
 
 impl<G: Generator + 'static> Worker<G> {
     /// Create a new Worker from the context.
-    pub async fn new(ctx: Context) -> Result<Self> {
+    pub async fn new(ctx: &mut Context) -> Result<Self> {
         let worker_name = if let Some(name) = &ctx.args.name {
             name.to_string()
         } else {
@@ -114,8 +125,7 @@ impl<G: Generator + 'static> Worker<G> {
             human_bytes::human_bytes(memory_stats::memory_stats().unwrap().physical_mem as f64)
         );
 
-        let cache = ctx.cache;
-        let device = ctx.device;
+        let device = ctx.device.clone();
         let dtype = ctx.dtype;
         let device_idx = ctx.args.device;
 
@@ -124,7 +134,7 @@ impl<G: Generator + 'static> Worker<G> {
             device_idx,
             dtype,
             blocks,
-            cache,
+            context: ctx.clone()
         };
 
         Ok(Self { listener, context })
@@ -219,7 +229,7 @@ impl<G: Generator + 'static> Worker<G> {
                 if let Some(block) = context.blocks.get(&layer_name) {
                     // run forward pass
                     x = block
-                        .forward(&x, index_pos, block_idx, context.cache.as_mut())
+                        .forward(&x, index_pos, block_idx, &mut context.context)
                         .await
                         .unwrap();
                 } else {

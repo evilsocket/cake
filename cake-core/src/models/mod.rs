@@ -46,7 +46,7 @@ pub trait Generator {
     const MODEL_NAME: &'static str;
 
     /// Load the model from the context.
-    async fn load(context: Context) -> Result<Option<Box<Self>>>;
+    async fn load(context: &mut Context) -> Result<Option<Box<Self>>>;
 }
 
 #[async_trait]

@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
         .init();
 
     // setup context
-    let ctx = Context::from_args(args)?;
+    let mut ctx = Context::from_args(args)?;
 
     // run either in master or worker mode depending on command line
     let ret = match ctx.args.mode {
@@ -38,13 +38,13 @@ async fn main() -> Result<()> {
         Mode::Worker => {
             match ctx.args.model_type {
                 ModelType::TextModel => {
-                    Worker::<cake_core::models::llama3::LLama>::new(ctx)
+                    Worker::<cake_core::models::llama3::LLama>::new(&mut ctx)
                         .await?
                         .run()
                         .await
                 }
                 ModelType::ImageModel => {
-                    Worker::<cake_core::models::sd::SD>::new(ctx)
+                    Worker::<cake_core::models::sd::SD>::new(&mut ctx)
                         .await?
                         .run()
                         .await

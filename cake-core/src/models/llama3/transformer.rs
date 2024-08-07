@@ -5,7 +5,7 @@ use candle_nn::{Module, RmsNorm};
 use async_trait::async_trait;
 use crate::cake::{Context, Forwarder};
 
-use super::{Cache, CausalSelfAttention, MLP};
+use super::{CausalSelfAttention, MLP};
 
 /// Transformer block with causal self attention and several caching strategies.
 #[derive(Debug, Clone)]
@@ -53,16 +53,14 @@ impl Forwarder for Transformer {
         x: &Tensor,
         index_pos: usize,
         block_idx: usize,
-        mut cache: Option<&mut Cache>,
+        ctx: &mut Context,
     ) -> Result<Tensor> {
         let residual = x;
 
-        let cache = cache.as_mut().expect("No cache specified");
-        
         let x = self.rms_1.forward(x).map_err(|e| anyhow!("rms_1: {e}"))?;
         let x = (self
             .attn
-            .forward(&x, index_pos, block_idx, cache)
+            .forward(&x, index_pos, block_idx, &mut ctx.cache.as_mut().expect("No cache specified"))
             .map_err(|e| anyhow!("attention: {e}"))?
             + residual)
             .map_err(|e| anyhow!("residual: {e}"))?;
@@ -79,9 +77,9 @@ impl Forwarder for Transformer {
         x: &Tensor,
         index_pos: usize,
         block_idx: usize,
-        cache: Option<&mut Cache>,
+        ctx: &mut Context,
     ) -> Result<Tensor> {
-        self.forward(x, index_pos, block_idx, cache).await
+        self.forward(x, index_pos, block_idx, ctx).await
     }
 
     fn layer_name(&self) -> &str {

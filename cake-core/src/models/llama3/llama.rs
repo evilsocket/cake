@@ -73,8 +73,6 @@ impl LLama {
         let (_batch_size, seq_len) = x.dims2()?;
         let mut x = self.embedding.forward(x)?;
 
-        let cache = self.ctx.cache.as_mut().expect("Not cache specified");
-
         let num_blocks = self.blocks.len();
         let mut block_idx = 0;
 
@@ -87,7 +85,7 @@ impl LLama {
 
                 // do not batch local inferences
                 x = self.blocks[block_idx]
-                    .forward_mut(&x, idx, block_idx, Some(cache))
+                    .forward_mut(&x, idx, block_idx, &mut self.ctx)
                     .await
                     .map_err(|e| {
                         anyhow!("error in forward operation of local block {block_idx}: {e}")
@@ -108,7 +106,7 @@ impl LLama {
                 }
 
                 x = self.blocks[first]
-                    .forward_batch(&x, batch, Some(cache))
+                    .forward_batch(&x, batch, &mut self.ctx)
                     .await
                     .map_err(|e| {
                         anyhow!("error in forward batch operation for block {block_idx}: {e}")
@@ -174,7 +172,7 @@ impl Generator for LLama {
     const MODEL_NAME: &'static str = "llama3";
 
     /// Load this model from the context.
-    async fn load(ctx: Context) -> Result<Option<Box<Self>>> {
+    async fn load(ctx: &mut Context) -> Result<Option<Box<Self>>> {
 
         let config = ctx.config.as_ref().expect("No config specified");
         let var_builder = ctx.var_builder.as_ref().expect("No var_builder specified");
@@ -246,7 +244,7 @@ impl Generator for LLama {
             history,
             eos_token_id,
             index_pos,
-            ctx,
+            ctx: ctx.clone(),
             embedding,
             blocks,
             ln_f,

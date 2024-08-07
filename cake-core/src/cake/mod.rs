@@ -114,7 +114,7 @@ pub trait Forwarder: Debug + Send + Sync + Display {
         x: &Tensor,
         index_pos: usize,
         block_idx: usize,
-        cache: Option<&mut Cache>,
+        ctx: &mut Context
     ) -> Result<Tensor>;
 
     /// Applies a forward operation to the input tensor, requires mutability.
@@ -123,7 +123,7 @@ pub trait Forwarder: Debug + Send + Sync + Display {
         x: &Tensor,
         index_pos: usize,
         block_idx: usize,
-        cache: Option<&mut Cache>,
+        ctx: &mut Context
     ) -> Result<Tensor>;
 
     /// Applies a batch of forward operations to the input tensor.
@@ -131,7 +131,7 @@ pub trait Forwarder: Debug + Send + Sync + Display {
         &mut self,
         _x: &Tensor,
         _batch: Vec<(String, usize, usize)>,
-        _cache: Option<&mut Cache>,
+        _ctx: &mut Context
     ) -> Result<Tensor> {
         unimplemented!()
     }

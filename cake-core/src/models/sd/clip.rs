@@ -4,7 +4,6 @@ use candle_core::{Device, DType, Module, Tensor};
 use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::stable_diffusion::clip::ClipTextTransformer;
 use crate::cake::{Context, Forwarder};
-use crate::models::llama3::Cache;
 use crate::models::sd::sd::ModelFile;
 use crate::models::sd::util::{get_device, get_sd_config};
 use crate::StableDiffusionVersion;
@@ -68,12 +67,12 @@ impl Forwarder for Clip {
         )
     }
 
-    async fn forward(&self, x: &Tensor, _index_pos: usize, _block_idx: usize, _cache: Option<&mut Cache>) -> anyhow::Result<Tensor> {
+    async fn forward(&self, x: &Tensor, _index_pos: usize, _block_idx: usize, _ctx: &mut Context) -> anyhow::Result<Tensor> {
         Ok(self.clip_model.forward(x).expect("Error running Clip forward"))
     }
 
-    async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, cache: Option<&mut Cache>) -> anyhow::Result<Tensor> {
-        self.forward(x, index_pos, block_idx, cache).await
+    async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, ctx: &mut Context) -> anyhow::Result<Tensor> {
+        self.forward(x, index_pos, block_idx, ctx).await
     }
 
     fn layer_name(&self) -> &str {

@@ -17,11 +17,17 @@ pub struct Master<TG, IG> {
 
 impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync + 'static> Master<TG, IG> {
     /// Create a new instance.
-    pub async fn new(ctx: Context) -> Result<Self> {
-
-        let llm_model = TG::load(ctx.clone()).await?;
-        let sd_model = IG::load(ctx.clone()).await?;
-        Ok(Self { ctx, llm_model, sd_model })
+    pub async fn new(mut ctx: Context) -> Result<Self> {
+        match ctx.args.model_type {
+            ModelType::ImageModel => {
+                let sd_model = IG::load(&mut ctx).await?;
+                Ok(Self { ctx, sd_model, llm_model: None })
+            },
+            ModelType::TextModel => {
+                let llm_model = TG::load(&mut ctx).await?;
+                Ok(Self { ctx, llm_model, sd_model: None })
+            }
+        }
     }
 
     pub async fn run(mut self) -> Result<()> {

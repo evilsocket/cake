@@ -4,7 +4,6 @@ use candle_core::{Device, DType, Tensor};
 use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
 use candle_transformers::models::stable_diffusion::unet_2d::UNet2DConditionModel;
 use crate::cake::{Context, Forwarder};
-use crate::models::llama3::{Cache};
 use crate::models::sd::ModelFile;
 use crate::models::sd::util::{get_device, get_sd_config, pack_tensors, unpack_tensors};
 use crate::StableDiffusionVersion;
@@ -47,18 +46,20 @@ impl Forwarder for UNet {
         )
     }
 
-    async fn forward(&self, x: &Tensor, _index_pos: usize, _block_idx: usize, _cache: Option<&mut Cache>) -> anyhow::Result<Tensor> {
+    async fn forward(&self, x: &Tensor, _index_pos: usize, _block_idx: usize, ctx: &mut Context) -> anyhow::Result<Tensor> {
         let unpacked_tensors = unpack_tensors(x)?;
-        let latent_model_input = unpacked_tensors.get(0).unwrap();
-        let text_embeddings = unpacked_tensors.get(1).unwrap();
-        let timestep = unpacked_tensors.get(2).unwrap().to_scalar()?;
+        let latent_model_input = &unpacked_tensors[0].to_dtype(ctx.dtype)?;
+        let text_embeddings = &unpacked_tensors[1].to_dtype(ctx.dtype)?;
 
-        Ok(self.unet_model.forward(latent_model_input, timestep, text_embeddings).expect("Error running UNet forward"))
+        let timestep_tensor = &unpacked_tensors[2];
+        let timestep_vec = timestep_tensor.to_vec1()?;
+        let timestep_f64 = timestep_vec.get(0).expect("Error retrieving timestep");
 
+        Ok(self.unet_model.forward(latent_model_input, *timestep_f64, text_embeddings).expect("Error running UNet forward"))
     }
 
-    async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, cache: Option<&mut Cache>) -> anyhow::Result<Tensor> {
-        self.forward(x, index_pos, block_idx, cache).await
+    async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, ctx: &mut Context) -> anyhow::Result<Tensor> {
+        self.forward(x, index_pos, block_idx, ctx).await
     }
 
     fn layer_name(&self) -> &str {
@@ -80,15 +81,16 @@ impl UNet {
     }
 
     pub async fn forward_unpacked(
-        forwarder: &Box<dyn Forwarder>,
+        forwarder: &mut Box<dyn Forwarder>,
         latent_model_input: Tensor,
         text_embeddings: Tensor,
         timestep: usize,
-        device: &Device
+        device: &Device,
+        ctx: &mut Context
     ) -> anyhow::Result<Tensor> {
 
         // Pack the tensors to be sent into one
-        let timestep_tensor = Tensor::from_slice(&[timestep as i64], 1, device)?;
+        let timestep_tensor = Tensor::from_slice(&[timestep as f64], 1, device)?;
 
         let tensors = Vec::from([
             latent_model_input,
@@ -97,6 +99,6 @@ impl UNet {
         ]);
 
         let combined_tensor = pack_tensors(tensors, &device)?;
-        Ok(forwarder.forward(&combined_tensor, 0, 0, None).await?)
+        Ok(forwarder.forward_mut(&combined_tensor, 0, 0, ctx).await?)
     }
 }

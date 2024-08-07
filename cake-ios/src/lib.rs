@@ -21,7 +21,7 @@ pub fn start_worker(name: String, model_path: String, topology_path: String) {
         ..Default::default()
     };
 
-    let ctx = match Context::from_args(args) {
+    let mut ctx = match Context::from_args(args) {
         Ok(ctx) => ctx,
         Err(e) => {
             log::error!("ERROR: {}", e);
@@ -36,7 +36,7 @@ pub fn start_worker(name: String, model_path: String, topology_path: String) {
         .block_on(async {
             log::debug!("@ creating worker");
 
-            let mut worker = match Worker::<cake_core::models::llama3::LLama>::new(ctx).await {
+            let mut worker = match Worker::<cake_core::models::llama3::LLama>::new(&mut ctx).await {
                 Ok(w) => w,
                 Err(e) => {
                     log::error!("ERROR: {}", e);
