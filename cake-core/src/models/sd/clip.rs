@@ -4,7 +4,7 @@ use candle_core::{Device, DType, Module, Tensor};
 use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::stable_diffusion::clip::ClipTextTransformer;
 use crate::cake::{Context, Forwarder};
-use crate::models::llama3::{Cache};
+use crate::models::llama3::Cache;
 use crate::models::sd::sd::ModelFile;
 use crate::models::sd::util::{get_device, get_sd_config};
 use crate::StableDiffusionVersion;

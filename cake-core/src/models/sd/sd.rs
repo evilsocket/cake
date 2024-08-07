@@ -1,3 +1,4 @@
+use hf_hub::Cache;
 use tokenizers::Tokenizer;
 use crate::cake::{Context, Forwarder};
 use anyhow::{Error as E, Result};
@@ -14,7 +15,7 @@ use crate::models::sd::sd_shardable::SDShardable;
 use crate::models::sd::unet::UNet;
 use crate::models::sd::util::get_device;
 use crate::models::sd::vae::VAE;
-use log::{debug};
+use log::debug;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelFile {
@@ -74,10 +75,13 @@ impl ModelFile {
                         }
                     }
                 };
-                let cache_path = std::path::PathBuf::from(cache_dir.as_str());
+                let mut cache_path = std::path::PathBuf::from(cache_dir.as_str());
+                cache_path.push("hub");
+
                 debug!("Model cache dir: {:?}", cache_path);
-                let api = ApiBuilder::new()
-                    .with_cache_dir(cache_path)
+
+                let cache = Cache::new(cache_path);
+                let api = ApiBuilder::from_cache(cache)
                     .build()
                     .unwrap();
 
@@ -327,7 +331,7 @@ impl ImageGenerator for SD {
             guidance_scale,
             img2img,
             img2img_strength,
-            seed,
+            image_seed,
             ..
         } = args;
 
@@ -364,7 +368,7 @@ impl ImageGenerator for SD {
             },
         };
 
-        if let Some(seed) = seed {
+        if let Some(seed) = image_seed {
             self.device.set_seed(*seed)?;
         }
         let use_guide_scale = guidance_scale > &1.0;

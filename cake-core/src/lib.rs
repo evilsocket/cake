@@ -72,7 +72,7 @@ pub struct Args {
     /// Use different dtype than f16
     #[arg(long)]
     pub dtype: Option<String>,
-    
+
     /// Run on CPU rather than on GPU.
     #[arg(long, default_value_t = false)]
     pub cpu: bool,
@@ -169,7 +169,7 @@ pub struct ImageGenerationArgs {
 
     /// The seed to use when generating random samples.
     #[arg(long="sd-seed")]
-    seed: Option<u64>,
+    image_seed: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq, Default)]
