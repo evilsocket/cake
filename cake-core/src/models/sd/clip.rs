@@ -63,6 +63,7 @@ impl Forwarder for Clip {
             ctx.args.sd_args.use_f16,
             &device,
             dtype,
+            ctx.args.model.clone(),
             &clip_config
         )
     }
@@ -88,11 +89,12 @@ impl Clip {
         use_f16: bool,
         device: &Device,
         dtype: DType,
+        cache_dir: String,
         config: &stable_diffusion::clip::Config) -> anyhow::Result<Box<Self>>
     where
         Self: Sized
     {
-        let clip_weights = model_file.get(name, version, use_f16)?;
+        let clip_weights = model_file.get(name, version, use_f16, cache_dir)?;
         let clip_model = stable_diffusion::build_clip_transformer(config, clip_weights, device, dtype)?;
         let layer_name = model_file.name();
         Ok(Box::new(Self {

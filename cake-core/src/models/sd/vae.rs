@@ -42,6 +42,7 @@ impl Forwarder for VAE {
             ctx.args.sd_args.use_f16,
             &device,
             dtype,
+            ctx.args.model.clone(),
             &sd_config,
         )
     }
@@ -70,10 +71,10 @@ impl Forwarder for VAE {
 }
 
 impl VAE {
-    pub fn load_model(name: Option<String>, version: StableDiffusionVersion, use_f16: bool, device: &Device, dtype: DType, config: &StableDiffusionConfig) -> anyhow::Result<Box<Self>>
+    pub fn load_model(name: Option<String>, version: StableDiffusionVersion, use_f16: bool, device: &Device, dtype: DType, cache_dir: String, config: &StableDiffusionConfig) -> anyhow::Result<Box<Self>>
     where
         Self: Sized {
-        let vae_weights = ModelFile::Vae.get(name, version, use_f16)?;
+        let vae_weights = ModelFile::Vae.get(name, version, use_f16, cache_dir)?;
         let vae_model = config.build_vae(vae_weights, device, dtype)?;
 
         Ok(Box::new(Self{

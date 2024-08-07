@@ -42,6 +42,7 @@ impl Forwarder for UNet {
             ctx.args.sd_args.use_f16,
             &device,
             dtype,
+            ctx.args.model.clone(),
             &sd_config,
         )
     }
@@ -66,11 +67,11 @@ impl Forwarder for UNet {
 }
 
 impl UNet {
-    pub fn load_model(name: Option<String>, use_flash_attn: bool, version: StableDiffusionVersion, use_f16: bool, device: &Device, dtype: DType, config: &StableDiffusionConfig) -> anyhow::Result<Box<Self>>
+    pub fn load_model(name: Option<String>, use_flash_attn: bool, version: StableDiffusionVersion, use_f16: bool, device: &Device, dtype: DType, cache_dir: String, config: &StableDiffusionConfig) -> anyhow::Result<Box<Self>>
     where
         Self: Sized {
 
-        let unet_weights = ModelFile::Unet.get(name, version, use_f16)?;
+        let unet_weights = ModelFile::Unet.get(name, version, use_f16, cache_dir)?;
         let unet = config.build_unet(unet_weights, &device, 4, use_flash_attn, dtype)?;
 
         Ok(Box::new(Self{

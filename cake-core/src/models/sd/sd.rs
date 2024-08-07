@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use candle_core::{D, Device, DType, IndexOp, Tensor};
 use candle_transformers::models::stable_diffusion::schedulers::Scheduler;
 use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
+use hf_hub::api::sync::ApiBuilder;
 use image::ImageBuffer;
 use tokio::sync::Mutex;
 use crate::models::{Generator, ImageGenerator};
@@ -34,6 +35,7 @@ impl ModelFile {
         filename: Option<String>,
         version: StableDiffusionVersion,
         use_f16: bool,
+        cache_dir: String
     ) -> Result<std::path::PathBuf> {
         use hf_hub::api::sync::Api;
         match filename {
@@ -76,7 +78,10 @@ impl ModelFile {
                         }
                     }
                 };
-                let filename = Api::new()?.model(repo.to_string()).get(path)?;
+                let cache_path = std::path::PathBuf::from(cache_dir.as_str());
+                let api = ApiBuilder::new().with_cache_dir(cache_path).build().unwrap();
+                
+                let filename = api.model(repo.to_string()).get(path)?;
                 Ok(filename)
             }
         }
@@ -163,7 +168,7 @@ impl Generator for SD {
         println!("Loading the Tokenizer.");
 
         let tokenizer_file = ModelFile::Tokenizer;
-        let tokenizer = tokenizer_file.get(tokenizer, sd_version, use_f16)?;
+        let tokenizer = tokenizer_file.get(tokenizer, sd_version, use_f16, context.args.model.clone())?;
         let tokenizer = Tokenizer::from_file(tokenizer).map_err(E::msg)?;
 
         let pad_id = match &sd_config.clip.pad_with {
@@ -179,7 +184,7 @@ impl Generator for SD {
 
         if let StableDiffusionVersion::Xl | StableDiffusionVersion::Turbo = sd_version {
             let tokenizer_2_file = ModelFile::Tokenizer2;
-            let tokenizer_2 = tokenizer_2_file.get(tokenizer_2, sd_version, use_f16)?;
+            let tokenizer_2 = tokenizer_2_file.get(tokenizer_2, sd_version, use_f16, context.args.model.clone())?;
             let tokenizer_2 = Tokenizer::from_file(tokenizer_2).map_err(E::msg)?;
 
             if let Some(clip2) = &sd_config.clip2 {
@@ -212,6 +217,7 @@ impl Generator for SD {
                 use_f16,
                 &device,
                 dtype,
+                context.args.model.clone(),
                 &sd_config.clip
             )?;
         }
@@ -236,6 +242,7 @@ impl Generator for SD {
                     use_f16,
                     &device,
                     dtype,
+                    context.args.model.clone(),
                     sd_config.clip2.as_ref().unwrap()
                 )?);
             }
@@ -260,6 +267,7 @@ impl Generator for SD {
                 use_f16,
                 &device,
                 dtype,
+                context.args.model.clone(),
                 &sd_config,
             )?;
         }
@@ -283,6 +291,7 @@ impl Generator for SD {
                 use_f16,
                 &device,
                 dtype,
+                context.args.model.clone(),
                 &sd_config,
             )?;
         }
