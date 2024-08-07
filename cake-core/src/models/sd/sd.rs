@@ -14,6 +14,7 @@ use crate::models::sd::sd_shardable::SDShardable;
 use crate::models::sd::unet::UNet;
 use crate::models::sd::util::get_device;
 use crate::models::sd::vae::VAE;
+use log::{debug};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelFile {
@@ -74,7 +75,11 @@ impl ModelFile {
                     }
                 };
                 let cache_path = std::path::PathBuf::from(cache_dir.as_str());
-                let api = ApiBuilder::new().with_cache_dir(cache_path).build().unwrap();
+                debug!("Model cache dir: {:?}", cache_path);
+                let api = ApiBuilder::new()
+                    .with_cache_dir(cache_path)
+                    .build()
+                    .unwrap();
 
                 let filename = api.model(repo.to_string()).get(path)?;
                 Ok(filename)
@@ -636,4 +641,3 @@ fn image_preprocess<T: AsRef<std::path::Path>>(path: T) -> Result<Tensor> {
         .unsqueeze(0)?;
     Ok(img)
 }
-
