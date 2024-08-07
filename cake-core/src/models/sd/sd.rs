@@ -80,7 +80,7 @@ impl ModelFile {
                 };
                 let cache_path = std::path::PathBuf::from(cache_dir.as_str());
                 let api = ApiBuilder::new().with_cache_dir(cache_path).build().unwrap();
-                
+
                 let filename = api.model(repo.to_string()).get(path)?;
                 Ok(filename)
             }
@@ -321,7 +321,7 @@ impl ImageGenerator for SD {
         use tracing_subscriber::prelude::*;
 
         let ImageGenerationArgs {
-            prompt,
+            image_prompt,
             uncond_prompt,
             n_steps,
             num_samples,
@@ -375,7 +375,7 @@ impl ImageGenerator for SD {
         let mut text_embeddings: Vec<Tensor> = Vec::new();
 
         let text_embeddings_1 = self.text_embeddings(
-            &prompt,
+            &image_prompt,
             &uncond_prompt,
             use_guide_scale,
             true
@@ -385,7 +385,7 @@ impl ImageGenerator for SD {
 
         if let StableDiffusionVersion::Xl | StableDiffusionVersion::Turbo = sd_version {
             let text_embeddings_2 = self.text_embeddings(
-                &prompt,
+                &image_prompt,
                 &uncond_prompt,
                 use_guide_scale,
                 false

@@ -72,11 +72,12 @@ pub struct Args {
     /// Use different dtype than f16
     #[arg(long)]
     pub dtype: Option<String>,
+    
     /// Run on CPU rather than on GPU.
-    #[arg(long)]
+    #[arg(long, default_value_t = false)]
     pub cpu: bool,
 
-    #[arg(long, default_value = "text")]
+    #[arg(long, default_value = "text-model")]
     pub model_type: ModelType,
 
     #[clap(flatten)]
@@ -88,10 +89,10 @@ pub struct Args {
 
 #[derive(Clone, Parser, Default, Debug)]
 pub struct SDArgs {
-    #[arg(long="sd-tokenizer", default_value="")]
+    #[arg(long="sd-tokenizer")]
     pub tokenizer: Option<String>,
 
-    #[arg(long="sd-tokenizer-2", default_value="")]
+    #[arg(long="sd-tokenizer-2")]
     pub tokenizer_2: Option<String>,
 
     #[arg(long="sd-version", value_enum, default_value = "v1-5")]
@@ -128,17 +129,14 @@ pub struct SDArgs {
 #[derive(Clone, Parser, Default, Debug, Deserialize)]
 pub struct ImageGenerationArgs {
     /// The prompt to be used for image generation.
-    #[arg(
-        long="sd-prompt",
-        default_value = "A very realistic photo of a rusty robot walking on a sandy beach"
-    )]
-    prompt: String,
+    #[arg(long="sd-image-prompt",  default_value = "A very realistic photo of a rusty robot walking on a sandy beach")]
+    image_prompt: String,
 
     #[arg(long="sd-uncond-prompt", default_value = "")]
     uncond_prompt: String,
 
     /// Enable tracing (generates a trace-timestamp.json file).
-    #[arg(long="sd-tracing")]
+    #[arg(long="sd-tracing", default_value_t = false)]
     tracing: bool,
 
     /// The number of steps to run the diffusion for.
@@ -154,7 +152,7 @@ pub struct ImageGenerationArgs {
     bsize: usize,
 
     /// Generate intermediary images at each step.
-    #[arg(long="sd-intermediary-images", action)]
+    #[arg(long="sd-intermediary-images", default_value_t = false, action)]
     intermediary_images: bool,
 
     #[arg(long="sd-guidance-scale")]
