@@ -27,8 +27,8 @@ impl std::fmt::Display for Transformer {
 impl Forwarder for Transformer {
     fn load(name: String, ctx: &Context) -> Result<Box<Self>> {
 
-        let vb = &ctx.var_builder;
-        let cfg = &ctx.config;
+        let vb = &ctx.var_builder.as_ref().expect("No var_builder specified");
+        let cfg = &ctx.config.as_ref().expect("No config specified");
 
         let attn = super::CausalSelfAttention::load(vb.pp("self_attn"), cfg)?;
         let mlp = super::MLP::load(vb.pp("mlp"), cfg)?;
@@ -53,10 +53,12 @@ impl Forwarder for Transformer {
         x: &Tensor,
         index_pos: usize,
         block_idx: usize,
-        cache: &mut Cache,
+        mut cache: Option<&mut Cache>,
     ) -> Result<Tensor> {
         let residual = x;
 
+        let cache = cache.as_mut().expect("No cache specified");
+        
         let x = self.rms_1.forward(x).map_err(|e| anyhow!("rms_1: {e}"))?;
         let x = (self
             .attn
@@ -77,7 +79,7 @@ impl Forwarder for Transformer {
         x: &Tensor,
         index_pos: usize,
         block_idx: usize,
-        cache: &mut Cache,
+        cache: Option<&mut Cache>,
     ) -> Result<Tensor> {
         self.forward(x, index_pos, block_idx, cache).await
     }

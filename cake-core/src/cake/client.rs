@@ -91,7 +91,7 @@ impl super::Forwarder for Client {
         Err(anyhow!("load should never be called on cake::Client"))
     }
 
-    async fn forward(&self, _: &Tensor, _: usize, _: usize, _: &mut Cache) -> Result<Tensor> {
+    async fn forward(&self, _: &Tensor, _: usize, _: usize, _: Option<&mut Cache>) -> Result<Tensor> {
         Err(anyhow!(
             "immutable forward should never be called on cake::Client"
         ))
@@ -103,7 +103,7 @@ impl super::Forwarder for Client {
         x: &Tensor,
         index_pos: usize,
         block_idx: usize,
-        _: &mut Cache,
+        _: Option<&mut Cache>,
     ) -> Result<Tensor> {
         self.forward_request(super::Message::single_op(
             &self.layer_name,
@@ -119,7 +119,7 @@ impl super::Forwarder for Client {
         &mut self,
         x: &Tensor,
         batch: Vec<(String, usize, usize)>,
-        _: &mut Cache,
+        _: Option<&mut Cache>,
     ) -> Result<Tensor> {
         self.forward_request(super::Message::from_batch(x, batch))
             .await

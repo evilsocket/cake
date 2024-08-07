@@ -1,17 +1,13 @@
-use std::sync::Arc;
 use tokenizers::Tokenizer;
 use crate::cake::{Context, Forwarder};
 use anyhow::{Error as E, Result};
 use async_trait::async_trait;
 use candle_core::{D, Device, DType, IndexOp, Tensor};
-use candle_transformers::models::stable_diffusion::schedulers::Scheduler;
 use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
 use hf_hub::api::sync::ApiBuilder;
 use image::ImageBuffer;
-use tokio::sync::Mutex;
 use crate::models::{Generator, ImageGenerator};
 use crate::{Args, ImageGenerationArgs, SDArgs, StableDiffusionVersion};
-use crate::models::llama3::Cache;
 use crate::models::sd::clip::Clip;
 use crate::models::sd::safe_scheduler::SafeScheduler;
 use crate::models::sd::sd_shardable::SDShardable;
@@ -37,7 +33,6 @@ impl ModelFile {
         use_f16: bool,
         cache_dir: String
     ) -> Result<std::path::PathBuf> {
-        use hf_hub::api::sync::Api;
         match filename {
             Some(filename) => Ok(std::path::PathBuf::from(filename)),
             None => {
@@ -112,7 +107,6 @@ pub struct SD {
     sd_version: StableDiffusionVersion,
     sd_config: StableDiffusionConfig,
     device: Device,
-    cache: Cache
 }
 
 #[async_trait]
@@ -145,7 +139,6 @@ impl Generator for SD {
 
         let dtype = if use_f16 { DType::F16 } else { DType::F32 };
         let device = get_device(cpu)?;
-        let cache = context.cache.clone();
 
         let sd_config = match sd_version {
             StableDiffusionVersion::V1_5 => {
@@ -307,7 +300,6 @@ impl Generator for SD {
             pad_id_2,
             text_model_2,
             device,
-            cache,
             vae: vae_model,
             unet: unet_model,
         })))
@@ -402,7 +394,7 @@ impl ImageGenerator for SD {
             None => None,
             Some(image) => {
                 let image = image_preprocess(image)?.to_device(&self.device)?;
-                Some(VAE::encode(&self.vae, image, &self.device, &mut self.cache).await?)
+                Some(VAE::encode(&self.vae, image, &self.device).await?)
             }
         };
 
@@ -477,7 +469,6 @@ impl ImageGenerator for SD {
                     text_embeddings.clone(),
                     timestep,
                     &self.device,
-                    &mut self.cache,
                 ).await?;
 
                 let noise_pred = if use_guide_scale {
@@ -524,7 +515,7 @@ impl SD {
         let mut images_vec = Vec::new();
 
         let scaled = (latents / vae_scale)?;
-        let images = VAE::decode(&self.vae, scaled, &self.device, &mut self.cache).await?;
+        let images = VAE::decode(&self.vae, scaled, &self.device).await?;
         let images = ((images / 2.)? + 0.5)?.to_device(&Device::Cpu)?;
         let images = (images.clamp(0f32, 1.)? * 255.)?.to_dtype(DType::U8)?;
         for batch in 0..bsize {
@@ -593,9 +584,7 @@ impl SD {
 
         let tokens = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
 
-        let cache = &mut self.cache;
-
-        let text_embeddings = text_model.forward(&tokens, 0, 0, cache).await?;
+        let text_embeddings = text_model.forward(&tokens, 0, 0, None).await?;
 
         let text_embeddings = if use_guide_scale {
             let mut uncond_tokens = tokenizer
@@ -617,7 +606,7 @@ impl SD {
             let uncond_tokens = Tensor::new(uncond_tokens.as_slice(), &self.device)?.unsqueeze(0)?;
 
             println!("Clip forwarding.");
-            let uncond_embeddings = text_model.forward(&uncond_tokens, 0, 0, cache).await?;
+            let uncond_embeddings = text_model.forward(&uncond_tokens, 0, 0, None).await?;
 
             Tensor::cat(&[uncond_embeddings, text_embeddings], 0)?.to_dtype(self.dtype)?
         } else {

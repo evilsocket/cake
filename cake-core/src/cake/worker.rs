@@ -25,7 +25,7 @@ struct WorkerContext<F> {
     device_idx: usize,
     dtype: DType,
     blocks: Arc<HashMap<String, Box<F>>>,
-    cache: Cache,
+    cache: Option<Cache>,
 }
 
 impl<F: Forwarder> WorkerContext<F> {
@@ -56,7 +56,7 @@ impl<F: Forwarder> WorkerContext<F> {
             dtype: self.dtype,
             blocks: self.blocks.clone(),
             // each client loop gets a new cache
-            cache: self.cache.as_new(),
+            cache: Some(self.cache.as_ref().expect("Not cache specified").as_new()),
         }
     }
 }
@@ -219,7 +219,7 @@ impl<G: Generator + 'static> Worker<G> {
                 if let Some(block) = context.blocks.get(&layer_name) {
                     // run forward pass
                     x = block
-                        .forward(&x, index_pos, block_idx, &mut context.cache)
+                        .forward(&x, index_pos, block_idx, context.cache.as_mut())
                         .await
                         .unwrap();
                 } else {

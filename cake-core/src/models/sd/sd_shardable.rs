@@ -56,15 +56,15 @@ impl Forwarder for SDShardable {
         }))
     }
 
-    async fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {
+    async fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize, cache: Option<&mut Cache>) -> anyhow::Result<Tensor> {
         self.forwarder.forward(x, index_pos, block_idx, cache).await
     }
 
-    async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {
+    async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, cache: Option<&mut Cache>) -> anyhow::Result<Tensor> {
         self.forwarder.forward_mut(x, index_pos, block_idx, cache).await
     }
 
-    async fn forward_batch(&mut self, _x: &Tensor, _batch: Vec<(String, usize, usize)>, _cache: &mut Cache) -> anyhow::Result<Tensor> {
+    async fn forward_batch(&mut self, _x: &Tensor, _batch: Vec<(String, usize, usize)>, _cache: Option<&mut Cache>) -> anyhow::Result<Tensor> {
         self.forwarder.forward_batch(_x, _batch, _cache).await
     }
 

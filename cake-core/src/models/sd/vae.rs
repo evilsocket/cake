@@ -47,7 +47,7 @@ impl Forwarder for VAE {
         )
     }
 
-    async fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {
+    async fn forward(&self, x: &Tensor, _index_pos: usize, _block_idx: usize, _cache: Option<&mut Cache>) -> anyhow::Result<Tensor> {
         let unpacked_tensors = unpack_tensors(x)?;
 
         let direction:i64 = unpacked_tensors.get(0).unwrap().to_scalar()?;
@@ -61,7 +61,7 @@ impl Forwarder for VAE {
         }
     }
 
-    async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {
+    async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, cache: Option<&mut Cache>) -> anyhow::Result<Tensor> {
         self.forward(x, index_pos, block_idx, cache).await
     }
 
@@ -82,7 +82,7 @@ impl VAE {
         }))
     }
 
-    pub async fn encode(forwarder: &Box<dyn Forwarder>, image: Tensor, device: &Device, cache: &mut Cache) -> anyhow::Result<Tensor> {
+    pub async fn encode(forwarder: &Box<dyn Forwarder>, image: Tensor, device: &Device) -> anyhow::Result<Tensor> {
         let tensors = Vec::from([
             Tensor::from_slice(&[1i64], 1, device)?,
             image
@@ -90,10 +90,10 @@ impl VAE {
 
         let combined_tensor = pack_tensors(tensors, device)?;
 
-        Ok(forwarder.forward(&combined_tensor, 0, 0, cache).await?)
+        Ok(forwarder.forward(&combined_tensor, 0, 0, None).await?)
     }
 
-    pub async fn decode(forwarder: &Box<dyn Forwarder>, latents: Tensor, device: &Device, cache: &mut Cache) -> anyhow::Result<Tensor> {
+    pub async fn decode(forwarder: &Box<dyn Forwarder>, latents: Tensor, device: &Device) -> anyhow::Result<Tensor> {
         let tensors = Vec::from([
             Tensor::from_slice(&[0i64], 1, device)?,
             latents,
@@ -101,7 +101,7 @@ impl VAE {
 
         let combined_tensor = pack_tensors(tensors, device)?;
 
-        let result = forwarder.forward(&combined_tensor, 0, 0, cache).await?;
+        let result = forwarder.forward(&combined_tensor, 0, 0, None).await?;
         Ok(result)
     }
 }

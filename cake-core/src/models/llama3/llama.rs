@@ -24,7 +24,7 @@ fn load_tokenizer(ctx: &Context) -> Result<(Tokenizer, Option<u32>)> {
     let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(anyhow::Error::msg)?;
 
     let eos_token_id = ctx
-        .config
+        .config.as_ref().expect("No config specified")
         .eos_token_id
         .or_else(|| tokenizer.token_to_id(DEFAULT_EOS_TOKEN));
 
@@ -73,6 +73,8 @@ impl LLama {
         let (_batch_size, seq_len) = x.dims2()?;
         let mut x = self.embedding.forward(x)?;
 
+        let cache = self.ctx.cache.as_mut().expect("Not cache specified");
+
         let num_blocks = self.blocks.len();
         let mut block_idx = 0;
 
@@ -85,7 +87,7 @@ impl LLama {
 
                 // do not batch local inferences
                 x = self.blocks[block_idx]
-                    .forward_mut(&x, idx, block_idx, &mut self.ctx.cache)
+                    .forward_mut(&x, idx, block_idx, Some(cache))
                     .await
                     .map_err(|e| {
                         anyhow!("error in forward operation of local block {block_idx}: {e}")
@@ -106,7 +108,7 @@ impl LLama {
                 }
 
                 x = self.blocks[first]
-                    .forward_batch(&x, batch, &mut self.ctx.cache)
+                    .forward_batch(&x, batch, Some(cache))
                     .await
                     .map_err(|e| {
                         anyhow!("error in forward batch operation for block {block_idx}: {e}")
@@ -140,7 +142,7 @@ impl LLama {
     fn start_dialog_prompt(&mut self) -> Result<()> {
         // make sure we start clean
         self.tokens.clear();
-        self.ctx.cache.clear();
+        self.ctx.cache.as_mut().expect("No cache specified").clear();
         self.index_pos = 0;
 
         log::debug!("generating history tokens ...");
@@ -173,32 +175,36 @@ impl Generator for LLama {
 
     /// Load this model from the context.
     async fn load(ctx: Context) -> Result<Option<Box<Self>>> {
+
+        let config = ctx.config.as_ref().expect("No config specified");
+        let var_builder = ctx.var_builder.as_ref().expect("No var_builder specified");
+
         log::info!("loading embeddings ...");
         let embedding: Embedding = candle_nn::embedding(
-            ctx.config.vocab_size,
-            ctx.config.hidden_size,
-            ctx.var_builder.pp("model.embed_tokens"),
+            config.vocab_size,
+            config.hidden_size,
+            var_builder.pp("model.embed_tokens"),
         )?;
 
         log::info!("loading lm_head ...");
         let lm_head = linear(
-            ctx.config.hidden_size,
-            ctx.config.vocab_size,
-            ctx.var_builder.pp("lm_head"),
+            config.hidden_size,
+            config.vocab_size,
+            var_builder.pp("lm_head"),
         )?;
 
         log::info!("loading model.norm ...");
         let ln_f = candle_nn::rms_norm(
-            ctx.config.hidden_size,
-            ctx.config.rms_norm_eps,
-            ctx.var_builder.pp("model.norm"),
+            config.hidden_size,
+            config.rms_norm_eps,
+            var_builder.pp("model.norm"),
         )?;
 
-        log::info!("loading {} blocks ...", ctx.config.num_hidden_layers);
+        log::info!("loading {} blocks ...", config.num_hidden_layers);
 
         let mut blocks: Vec<Box<dyn Forwarder>> = vec![];
 
-        for i in 0..ctx.config.num_hidden_layers {
+        for i in 0..config.num_hidden_layers {
             let block_layer_name = format!("model.layers.{i}");
             if let Some((node_name, node)) = ctx.topology.get_node_for_layer(&block_layer_name) {
                 log::debug!("node {node_name} will serve {}", &block_layer_name);
@@ -263,7 +269,7 @@ impl TextGenerator for LLama {
     fn reset(&mut self) -> Result<()> {
         self.tokens.clear();
         self.history.clear();
-        self.ctx.cache.clear();
+        self.ctx.cache.as_mut().expect("No cache specified").clear();
         self.index_pos = 0;
         self.generated = 0;
         Ok(())
@@ -279,7 +285,7 @@ impl TextGenerator for LLama {
         }
 
         let num_tokens = self.tokens.len();
-        let (context_size, context_index) = if self.ctx.cache.with_kv_cache() && index > 0 {
+        let (context_size, context_index) = if self.ctx.cache.as_ref().expect("No cache specified").with_kv_cache() && index > 0 {
             (1, self.index_pos)
         } else {
             (num_tokens, 0)

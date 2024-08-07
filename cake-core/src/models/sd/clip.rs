@@ -68,11 +68,11 @@ impl Forwarder for Clip {
         )
     }
 
-    async fn forward(&self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {
+    async fn forward(&self, x: &Tensor, _index_pos: usize, _block_idx: usize, _cache: Option<&mut Cache>) -> anyhow::Result<Tensor> {
         Ok(self.clip_model.forward(x).expect("Error running Clip forward"))
     }
 
-    async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, cache: &mut Cache) -> anyhow::Result<Tensor> {
+    async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, cache: Option<&mut Cache>) -> anyhow::Result<Tensor> {
         self.forward(x, index_pos, block_idx, cache).await
     }
 
