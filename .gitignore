@@ -73,4 +73,4 @@ fastlane/test_output
 /models
 /*.sh
 .vscode/
-*.png
+/images

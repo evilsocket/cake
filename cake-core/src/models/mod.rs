@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use image::ImageBuffer;
+use image::{ImageBuffer, Rgb};
 
 use chat::Message;
 
@@ -65,5 +65,7 @@ pub trait TextGenerator: Generator {
 
 #[async_trait]
 pub trait ImageGenerator: Generator {
-    async fn generate_image(&mut self, args: &ImageGenerationArgs) -> Result<Vec<ImageBuffer<image::Rgb<u8>, Vec<u8>>>>;
+    async fn generate_image<F>(&mut self, args: &ImageGenerationArgs, mut callback: F) -> Result<(), anyhow::Error>
+    where
+        F: FnMut(Vec<ImageBuffer<Rgb<u8>, Vec<u8>>>) + Send + 'static;
 }

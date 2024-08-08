@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use candle_core::{D, Device, DType, IndexOp, Tensor};
 use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
 use hf_hub::api::sync::ApiBuilder;
-use image::ImageBuffer;
+use image::{ImageBuffer, Rgb};
 use crate::models::{Generator, ImageGenerator};
 use crate::{Args, ImageGenerationArgs, SDArgs, StableDiffusionVersion};
 use crate::models::sd::clip::Clip;
@@ -333,7 +333,10 @@ impl Generator for SD {
 
 #[async_trait]
 impl ImageGenerator for SD {
-    async fn generate_image(&mut self, args: &ImageGenerationArgs) -> Result<Vec<ImageBuffer<image::Rgb<u8>, Vec<u8>>>> {
+    async fn generate_image<F>(&mut self, args: &ImageGenerationArgs, mut callback: F) -> Result<(), anyhow::Error>
+    where
+        F: FnMut(Vec<ImageBuffer<Rgb<u8>, Vec<u8>>>) + Send + 'static,
+    {
         use tracing_chrome::ChromeLayerBuilder;
         use tracing_subscriber::prelude::*;
 
@@ -348,6 +351,7 @@ impl ImageGenerator for SD {
             img2img,
             img2img_strength,
             image_seed,
+            intermediary_images,
             ..
         } = args;
 
@@ -436,8 +440,6 @@ impl ImageGenerator for SD {
             StableDiffusionVersion::Turbo => 0.13025,
         };
 
-        let mut final_images = Vec::new();
-
         let safe_scheduler = SafeScheduler{
             scheduler: self.sd_config.build_scheduler(*n_steps)?
         };
@@ -512,6 +514,11 @@ impl ImageGenerator for SD {
                 latents = safe_scheduler.scheduler.step(&noise_pred, timestep, &latents)?;
                 let dt = start_time.elapsed().as_secs_f32();
                 info!("step {}/{n_steps} done, {:.2}s", timestep_index + 1, dt);
+
+                if *intermediary_images {
+                    let intermediary_batched_images = self.split_images(&latents, vae_scale, *bsize).await?;
+                    callback(intermediary_batched_images);
+                }
             }
 
             info!(
@@ -520,16 +527,16 @@ impl ImageGenerator for SD {
                 num_samples
             );
 
-            let mut batched_images = self.split_images(
+            let batched_images = self.split_images(
                 &latents,
                 vae_scale,
                 *bsize,
             ).await?;
 
-            final_images.append(&mut batched_images);
+            callback(batched_images);
         }
 
-        Ok(final_images)
+        Ok(())
     }
 }
 

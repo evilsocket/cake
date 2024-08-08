@@ -5,7 +5,7 @@ use crate::models::{chat::Message, ImageGenerator, TextGenerator};
 use super::{api, Context};
 
 use anyhow::Result;
-use image::ImageBuffer;
+use image::{ImageBuffer, Rgb};
 use crate::{ImageGenerationArgs, ModelType};
 
 /// A master connects to, communicates with and orchestrates the workers.
@@ -53,13 +53,18 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
                 })
                 .await?;
             } else {
-                let images = self.generate_image(self.ctx.args.sd_img_gen_args.clone()).await?;
+                let mut step_num = 0;
 
-                let mut num = 0;
-                for image in images {
-                    image.save(format!("image_{}.png", num)).expect("Error saving image to disk");
-                    num+=1;
-                }
+                self.generate_image(self.ctx.args.sd_img_gen_args.clone(), move |images| {
+
+                    let mut batched_num = 0;
+                    for image in images {
+                        image.save(format!("images/image_{}_{}.png", batched_num, step_num)).expect("Error saving image to disk");
+                        batched_num+=1;
+                    }
+                    step_num+=1;
+
+                }).await?;
             }
         }
 
@@ -118,8 +123,11 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
         Ok(())
     }
 
-    pub async fn generate_image(&mut self, args: ImageGenerationArgs) -> Result<Vec<ImageBuffer<image::Rgb<u8>, Vec<u8>>>> {
+    pub async fn generate_image<F>(&mut self, args: ImageGenerationArgs, callback: F) -> Result<()>
+    where
+        F: FnMut(Vec<ImageBuffer<Rgb<u8>, Vec<u8>>>) + Send + 'static
+    {
         let sd_model = self.sd_model.as_mut().expect("SD model not found");
-        Ok(sd_model.generate_image(&args).await?)
+        sd_model.generate_image(&args, callback).await
     }
 }
