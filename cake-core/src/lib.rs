@@ -126,49 +126,76 @@ pub struct SDArgs {
     use_flash_attention: bool,
 }
 
+fn default_prompt() -> String {
+    "A very realistic photo of a rusty robot walking on a sandy beach".to_string()
+}
+
+fn empty_str() -> String {
+    "".to_string()
+}
+
+fn usize_one() -> usize {
+    1
+}
+
+fn default_img2img_strength() -> f64 {
+    0.8
+}
+
 #[derive(Clone, Parser, Default, Debug, Deserialize)]
 pub struct ImageGenerationArgs {
     /// The prompt to be used for image generation.
     #[arg(long="sd-image-prompt",  default_value = "A very realistic photo of a rusty robot walking on a sandy beach")]
+    #[serde(rename(deserialize="sd-image-prompt"), default="default_prompt")]
     image_prompt: String,
 
     #[arg(long="sd-uncond-prompt", default_value = "")]
+    #[serde(rename(deserialize="sd-uncond-prompt"), default="empty_str")]
     uncond_prompt: String,
 
     /// Enable tracing (generates a trace-timestamp.json file).
     #[arg(long="sd-tracing", default_value_t = false)]
+    #[serde(rename(deserialize="sd-tracing"), default)]
     tracing: bool,
 
     /// The number of steps to run the diffusion for.
     #[arg(long="sd-n-steps")]
+    #[serde(rename(deserialize="sd-n-steps"))]
     n_steps: Option<usize>,
 
     /// The number of samples to generate iteratively.
     #[arg(long="sd-num-samples", default_value_t = 1)]
+    #[serde(rename(deserialize="sd-num-samples"), default="usize_one")]
     num_samples: usize,
 
     /// The numbers of samples to generate simultaneously.
     #[arg(long="sd-bsize", default_value_t = 1)]
+    #[serde(rename(deserialize="sd-bsize"), default="usize_one")]
     bsize: usize,
 
     /// Generate intermediary images at each step.
     #[arg(long="sd-intermediary-images", default_value_t = false, action)]
+    #[serde(rename(deserialize="sd-intermediary-images"), default)]
     intermediary_images: bool,
 
     #[arg(long="sd-guidance-scale")]
+    #[serde(rename(deserialize="sd-guidance-scale"))]
     guidance_scale: Option<f64>,
 
     #[arg(long="sd-img2img", value_name = "FILE")]
+    #[serde(rename(deserialize="sd-img2img"))]
     img2img: Option<String>,
 
     /// The strength, indicates how much to transform the initial image. The
     /// value must be between 0 and 1, a value of 1 discards the initial image
     /// information.
     #[arg(long="sd-img2img-strength", default_value_t = 0.8)]
+    #[serde(rename(deserialize="sd-img2img-strength"), default="default_img2img_strength")]
     img2img_strength: f64,
 
     /// The seed to use when generating random samples.
     #[arg(long="sd-seed")]
+    #[serde(rename(deserialize="sd-seed"))]
     image_seed: Option<u64>,
 }
 
