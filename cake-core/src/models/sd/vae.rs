@@ -8,19 +8,14 @@ use crate::models::sd::ModelFile;
 use crate::models::sd::util::{get_device, get_sd_config, pack_tensors, unpack_tensors};
 use crate::StableDiffusionVersion;
 
+#[derive(Debug)]
 pub struct VAE {
     vae_model: AutoEncoderKL
 }
 
-impl Debug for VAE {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
-    }
-}
-
 impl Display for VAE {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        write!(f, "VAE (local)")
     }
 }
 

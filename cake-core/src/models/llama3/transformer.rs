@@ -27,8 +27,8 @@ impl std::fmt::Display for Transformer {
 impl Forwarder for Transformer {
     fn load(name: String, ctx: &Context) -> Result<Box<Self>> {
 
-        let vb = &ctx.var_builder.as_ref().expect("No var_builder specified");
-        let cfg = &ctx.config.as_ref().expect("No config specified");
+        let vb = ctx.var_builder.as_ref().expect("No var_builder specified");
+        let cfg = ctx.config.as_ref().expect("No config specified");
 
         let attn = super::CausalSelfAttention::load(vb.pp("self_attn"), cfg)?;
         let mlp = super::MLP::load(vb.pp("mlp"), cfg)?;

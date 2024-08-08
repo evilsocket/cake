@@ -6,20 +6,15 @@ use crate::models::sd::clip::Clip;
 use crate::models::sd::unet::UNet;
 use crate::models::sd::vae::VAE;
 
+#[derive(Debug)]
 pub struct SDShardable {
     forwarder: Box<dyn Forwarder>,
     layer_name: String,
 }
 
-impl Debug for SDShardable {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
-    }
-}
-
 impl Display for SDShardable {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        write!(f, "{} (local)", &self.layer_name)
     }
 }
 

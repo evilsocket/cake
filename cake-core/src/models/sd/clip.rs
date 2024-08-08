@@ -8,20 +8,15 @@ use crate::models::sd::sd::ModelFile;
 use crate::models::sd::util::{get_device, get_sd_config};
 use crate::StableDiffusionVersion;
 
+#[derive(Debug)]
 pub struct Clip {
     clip_model: ClipTextTransformer,
     layer_name: &'static str
 }
 
-impl Debug for Clip {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
-    }
-}
-
 impl Display for Clip {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        write!(f, "{} (local)", &self.layer_name)
     }
 }
 
