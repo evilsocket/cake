@@ -8,7 +8,7 @@
 <hr/>
 
 
-`Cake` is a Rust framework for [distributed inference of large models like LLama3](https://x.com/evilsocket/status/1812110504531259900) based on [Candle](https://github.com/huggingface/candle). The goal of the project is being able to run big (70B+) models by repurposing consumer hardware into an heterogeneous cluster of iOS, Android, macOS, Linux and Windows devices, effectively leveraging [planned obsolescence](https://en.wikipedia.org/wiki/Planned_obsolescence) as a tool to make AI more accessible and democratic.
+`Cake` is a Rust framework for distributed inference of large models like [LLama3](https://x.com/evilsocket/status/1812110504531259900) and Stable Diffusion based on [Candle](https://github.com/huggingface/candle). The goal of the project is being able to run big (70B+) models by repurposing consumer hardware into an heterogeneous cluster of iOS, Android, macOS, Linux and Windows devices, effectively leveraging [planned obsolescence](https://en.wikipedia.org/wiki/Planned_obsolescence) as a tool to make AI more accessible and democratic.
 
 <p align="center">
   <strong>
@@ -117,21 +117,21 @@ macbook:
   host: 'macbook.host:10128'
   description: 'M1 Max'
   layers:
-    - 'model.layers.20-31' 
+    - 'model.layers.20-31'
 ```
 
 You can now interact with the cluster by:
 
 ```sh
-curl http://master-ip:8080/api/v1/chat/completions \                                                                                                                           ~  
+curl http://master-ip:8080/api/v1/chat/completions \                                                                                                                           ~
   -H "Content-Type: application/json" \
   -d '{
     "messages": [
-        {   
+        {
             "role": "system",
             "content": "You are a helpful AI assistant."
-        },  
-        {   
+        },
+        {
             "role": "user",
             "content": "Why is the sky blue?"
         }
@@ -150,6 +150,63 @@ cake-split-model --model-path path/to/Meta-Llama-3-8B \ # source model to split
 ```
 
 This will create a smaller folder with only the required layers tensors and the topology file for the specific worker. Remember to also copy other model contents (config.json, tokenizer.json, etc) in the worker bundle before deploying it.
+
+### Stable Diffusion Image Generation
+
+Define the model parts inside `topology.yml`:
+
+```yaml
+wsl2_on_windows:
+  host: 192.168.1.2:10128
+  description: NVIDIA RTX 4090 24GB
+  layers:
+  - unet
+
+macbook:
+  host: 192.168.1.3:10128
+  description: Macbook M2
+  layers:
+  - clip
+  - vae
+```
+
+Run a worker node:
+
+```sh
+cake-cli --model /path/to/hf/cache \        # The cache dir for huggingface models
+         --mode worker \                    # run as worker
+         --name wsl2_on_windows \           # worker name in topology file
+         --model-type image-model \         # use image-model for SD, text-model or skip for LLM
+         --topology topology.yml \          # topology
+         --address 0.0.0.0:10128            # bind address
+```
+
+The model could be switched between SD1.5, SD2.1, SDXL and SDXL Turbo by specifying [more command line arguments](./cake-core/src/lib.rs).
+
+Run a master node with REST API:
+
+```sh
+cake-cli --model /path/to/hf/cache \        # The cache dir for huggingface models
+         --api 0.0.0.0:8080 \               # API bind address
+         --topology topology.yml            # topology file
+```
+
+Generate images using the cluster:
+
+```sh
+curl http://master-ip:8080/api/v1/image \                                                                                                                           ~
+  -H "Content-Type: application/json" \
+  -d '{
+    "image_args": {
+      "sd-image-prompt": "An old man sitting on the chair at seaside",
+      "sd-num-samples": 1,
+      "sd-image-seed": 2439383
+    }
+}'
+```
+
+More control arguments could be found [inside the codes](./cake-core/src/lib.rs).
+
 
 ## License
 
