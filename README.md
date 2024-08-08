@@ -183,6 +183,8 @@ cake-cli --model /path/to/hf/cache \        # The cache dir for huggingface mode
 
 The model could be switched between SD1.5, SD2.1, SDXL and SDXL Turbo by specifying [more command line arguments](./cake-core/src/lib.rs).
 
+The model files will be downloaded from Huggingface automatically if not found in the local cache directory.
+
 Run a master node with REST API:
 
 ```sh
