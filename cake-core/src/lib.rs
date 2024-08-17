@@ -173,10 +173,10 @@ pub struct ImageGenerationArgs {
     #[serde(rename(deserialize="sd-bsize"), default="usize_one")]
     bsize: usize,
 
-    /// Generate intermediary images at each step.
-    #[arg(long="sd-intermediary-images", default_value_t = false, action)]
+    /// Generate intermediary images every n steps.
+    #[arg(long="sd-intermediary-images", default_value_t = 0, action)]
     #[serde(rename(deserialize="sd-intermediary-images"), default)]
-    intermediary_images: bool,
+    intermediary_images: usize,
 
     #[arg(long="sd-guidance-scale")]
     #[serde(rename(deserialize="sd-guidance-scale"))]

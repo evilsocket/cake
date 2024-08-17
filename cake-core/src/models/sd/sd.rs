@@ -515,7 +515,7 @@ impl ImageGenerator for SD {
                 let dt = start_time.elapsed().as_secs_f32();
                 info!("step {}/{n_steps} done, {:.2}s", timestep_index + 1, dt);
 
-                if *intermediary_images {
+                if *intermediary_images != 0 && timestep_index % *intermediary_images == 0{
                     let intermediary_batched_images = self.split_images(&latents, vae_scale, *bsize).await?;
                     callback(intermediary_batched_images);
                 }
