@@ -7,6 +7,7 @@ use crate::cake::{Context, Forwarder};
 use crate::models::sd::ModelFile;
 use crate::models::sd::util::{get_device, get_sd_config, pack_tensors, unpack_tensors};
 use crate::StableDiffusionVersion;
+use log::info;
 
 #[derive(Debug)]
 pub struct VAE {
@@ -42,6 +43,9 @@ impl Forwarder for VAE {
     }
 
     async fn forward(&self, x: &Tensor, _index_pos: usize, _block_idx: usize, ctx: &mut Context) -> anyhow::Result<Tensor> {
+
+        info!("VAE model forwarding...");
+        
         let unpacked_tensors = unpack_tensors(x)?;
 
         let direction_tensor = &unpacked_tensors[0];
@@ -74,6 +78,8 @@ impl VAE {
         let vae_weights = ModelFile::Vae.get(name, version, use_f16, cache_dir)?;
         let vae_model = config.build_vae(vae_weights, device, dtype)?;
 
+        info!("Loading VAE model...");
+        
         Ok(Box::new(Self{
             vae_model,
         }))

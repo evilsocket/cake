@@ -7,6 +7,7 @@ use crate::cake::{Context, Forwarder};
 use crate::models::sd::ModelFile;
 use crate::models::sd::util::{get_device, get_sd_config, pack_tensors, unpack_tensors};
 use crate::StableDiffusionVersion;
+use log::info;
 
 #[derive(Debug)]
 pub struct UNet {
@@ -50,6 +51,8 @@ impl Forwarder for UNet {
         let timestep_vec = timestep_tensor.to_vec1()?;
         let timestep_f64 = timestep_vec.get(0).expect("Error retrieving timestep");
 
+        info!("UNet model forwarding...");
+        
         Ok(self.unet_model.forward(latent_model_input, *timestep_f64, text_embeddings).expect("Error running UNet forward"))
     }
 
@@ -70,6 +73,8 @@ impl UNet {
         let unet_weights = ModelFile::Unet.get(name, version, use_f16, cache_dir)?;
         let unet = config.build_unet(unet_weights, &device, 4, use_flash_attn, dtype)?;
 
+        info!("Loading UNet model...");
+        
         Ok(Box::new(Self{
             unet_model: unet,
         }))

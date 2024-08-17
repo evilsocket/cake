@@ -7,6 +7,7 @@ use crate::cake::{Context, Forwarder};
 use crate::models::sd::sd::ModelFile;
 use crate::models::sd::util::{get_device, get_sd_config};
 use crate::StableDiffusionVersion;
+use log::info;
 
 #[derive(Debug)]
 pub struct Clip {
@@ -63,6 +64,7 @@ impl Forwarder for Clip {
     }
 
     async fn forward(&self, x: &Tensor, _index_pos: usize, _block_idx: usize, _ctx: &mut Context) -> anyhow::Result<Tensor> {
+        info!("Clip model forwarding");
         Ok(self.clip_model.forward(x).expect("Error running Clip forward"))
     }
 
@@ -91,6 +93,9 @@ impl Clip {
         let clip_weights = model_file.get(name, version, use_f16, cache_dir)?;
         let clip_model = stable_diffusion::build_clip_transformer(config, clip_weights, device, dtype)?;
         let layer_name = model_file.name();
+
+        info!("Loading Clip model: ${layer_name}");
+
         Ok(Box::new(Self {
             clip_model,
             layer_name,
