@@ -5,9 +5,9 @@ use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
 use candle_transformers::models::stable_diffusion::vae::AutoEncoderKL;
 use crate::cake::{Context, Forwarder};
 use crate::models::sd::ModelFile;
-use crate::models::sd::util::{get_device, get_sd_config, pack_tensors, unpack_tensors};
+use crate::models::sd::util::{get_sd_config, pack_tensors, unpack_tensors};
 use crate::StableDiffusionVersion;
-use log::info;
+use log::{info, debug};
 
 #[derive(Debug)]
 pub struct VAE {
@@ -26,17 +26,14 @@ impl Forwarder for VAE {
     where
         Self: Sized
     {
-        let dtype = if ctx.args.sd_args.use_f16 { DType::F16 } else { DType::F32 };
-        let device = get_device(ctx.args.cpu)?;
-
         let sd_config = get_sd_config(ctx)?;
 
         Self::load_model(
             ctx.args.sd_args.vae.clone(),
             ctx.args.sd_args.sd_version,
             ctx.args.sd_args.use_f16,
-            &device,
-            dtype,
+            &ctx.device,
+            ctx.dtype,
             ctx.args.model.clone(),
             &sd_config,
         )
@@ -45,16 +42,18 @@ impl Forwarder for VAE {
     async fn forward(&self, x: &Tensor, _index_pos: usize, _block_idx: usize, ctx: &mut Context) -> anyhow::Result<Tensor> {
 
         info!("VAE model forwarding...");
-        
+
         let unpacked_tensors = unpack_tensors(x)?;
 
         let direction_tensor = &unpacked_tensors[0];
         let direction_vec = direction_tensor.to_vec1()?;
-        let direction_f64: f64 = *direction_vec.get(0).expect("Error retrieving direction info");
+        let direction_f32: f32 = *direction_vec.get(0).expect("Error retrieving direction info");
 
         let input = &unpacked_tensors[1].to_dtype(ctx.dtype)?;
 
-        if direction_f64 == 1.0 {
+        debug!("VAE tensors decoded.");
+        
+        if direction_f32 == 1.0 {
             let dist = self.vae_model.encode(&input)?;
             Ok(dist.sample()?)
         } else {
@@ -79,30 +78,30 @@ impl VAE {
         let vae_model = config.build_vae(vae_weights, device, dtype)?;
 
         info!("Loading VAE model...");
-        
+
         Ok(Box::new(Self{
             vae_model,
         }))
     }
 
-    pub async fn encode(forwarder: &mut Box<dyn Forwarder>, image: Tensor, device: &Device, ctx: &mut Context) -> anyhow::Result<Tensor> {
+    pub async fn encode(forwarder: &mut Box<dyn Forwarder>, image: Tensor, ctx: &mut Context) -> anyhow::Result<Tensor> {
         let tensors = Vec::from([
-            Tensor::from_slice(&[1f64], 1, device)?,
+            Tensor::from_slice(&[1f32], 1, &ctx.device)?,
             image
         ]);
 
-        let combined_tensor = pack_tensors(tensors, device)?;
+        let combined_tensor = pack_tensors(tensors, &ctx.device)?;
 
         Ok(forwarder.forward_mut(&combined_tensor, 0, 0, ctx).await?)
     }
 
-    pub async fn decode(forwarder: &mut Box<dyn Forwarder>, latents: Tensor, device: &Device, ctx: &mut Context) -> anyhow::Result<Tensor> {
+    pub async fn decode(forwarder: &mut Box<dyn Forwarder>, latents: Tensor, ctx: &mut Context) -> anyhow::Result<Tensor> {
         let tensors = Vec::from([
-            Tensor::from_slice(&[0f64], 1, device)?,
+            Tensor::from_slice(&[0f32], 1, &ctx.device)?,
             latents,
         ]);
 
-        let combined_tensor = pack_tensors(tensors, device)?;
+        let combined_tensor = pack_tensors(tensors, &ctx.device)?;
 
         let result = forwarder.forward_mut(&combined_tensor, 0, 0, ctx).await?;
         Ok(result)

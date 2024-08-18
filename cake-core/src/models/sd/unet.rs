@@ -49,11 +49,11 @@ impl Forwarder for UNet {
 
         let timestep_tensor = &unpacked_tensors[2];
         let timestep_vec = timestep_tensor.to_vec1()?;
-        let timestep_f64 = timestep_vec.get(0).expect("Error retrieving timestep");
+        let timestep_f32: &f32 = timestep_vec.get(0).expect("Error retrieving timestep");
 
         info!("UNet model forwarding...");
         
-        Ok(self.unet_model.forward(latent_model_input, *timestep_f64, text_embeddings).expect("Error running UNet forward"))
+        Ok(self.unet_model.forward(latent_model_input, *timestep_f32 as f64, text_embeddings).expect("Error running UNet forward"))
     }
 
     async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, ctx: &mut Context) -> anyhow::Result<Tensor> {
@@ -85,12 +85,11 @@ impl UNet {
         latent_model_input: Tensor,
         text_embeddings: Tensor,
         timestep: usize,
-        device: &Device,
         ctx: &mut Context
     ) -> anyhow::Result<Tensor> {
 
         // Pack the tensors to be sent into one
-        let timestep_tensor = Tensor::from_slice(&[timestep as f64], 1, device)?;
+        let timestep_tensor = Tensor::from_slice(&[timestep as f32], 1, &ctx.device)?;
 
         let tensors = Vec::from([
             latent_model_input,
@@ -98,7 +97,7 @@ impl UNet {
             timestep_tensor
         ]);
 
-        let combined_tensor = pack_tensors(tensors, &device)?;
+        let combined_tensor = pack_tensors(tensors, &ctx.device)?;
         Ok(forwarder.forward_mut(&combined_tensor, 0, 0, ctx).await?)
     }
 }

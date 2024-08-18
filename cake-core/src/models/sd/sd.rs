@@ -8,12 +8,11 @@ use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
 use hf_hub::api::sync::ApiBuilder;
 use image::{ImageBuffer, Rgb};
 use crate::models::{Generator, ImageGenerator};
-use crate::{Args, ImageGenerationArgs, SDArgs, StableDiffusionVersion};
+use crate::{ImageGenerationArgs, SDArgs, StableDiffusionVersion};
 use crate::models::sd::clip::Clip;
 use crate::models::sd::safe_scheduler::SafeScheduler;
 use crate::models::sd::sd_shardable::SDShardable;
 use crate::models::sd::unet::UNet;
-use crate::models::sd::util::get_device;
 use crate::models::sd::vae::VAE;
 use log::{debug, info};
 
@@ -82,8 +81,7 @@ impl ModelFile {
 
                 let cache = Cache::new(cache_path);
                 let api = ApiBuilder::from_cache(cache)
-                    .build()
-                    .unwrap();
+                    .build()?;
 
                 let filename = api.model(repo.to_string()).get(path)?;
                 Ok(filename)
@@ -112,10 +110,8 @@ pub struct SD {
     text_model_2: Option<Box<dyn Forwarder>>,
     vae: Box<dyn Forwarder>,
     unet: Box<dyn Forwarder>,
-    dtype: DType,
     sd_version: StableDiffusionVersion,
     sd_config: StableDiffusionConfig,
-    device: Device,
     context: Context
 }
 
@@ -125,11 +121,6 @@ impl Generator for SD {
     const MODEL_NAME: &'static str = "stable-diffusion";
 
     async fn load(context: &mut Context) -> Result<Option<Box<Self>>> {
-
-        let Args {
-            cpu,
-            ..
-        } = context.args;
 
         let SDArgs {
             tokenizer,
@@ -146,9 +137,6 @@ impl Generator for SD {
             use_flash_attention,
             ..
         } = &context.args.sd_args;
-
-        let dtype = if *use_f16 { DType::F16 } else { DType::F32 };
-        let device = get_device(cpu)?;
 
         let sd_config = match *sd_version {
             StableDiffusionVersion::V1_5 => {
@@ -222,8 +210,8 @@ impl Generator for SD {
                 clip.clone(),
                 *sd_version,
                 *use_f16,
-                &device,
-                dtype,
+                &context.device,
+                context.dtype,
                 context.args.model.clone(),
                 &sd_config.clip
             )?;
@@ -251,8 +239,8 @@ impl Generator for SD {
                     clip2.clone(),
                     *sd_version,
                     *use_f16,
-                    &device,
-                    dtype,
+                    &context.device,
+                    context.dtype,
                     context.args.model.clone(),
                     sd_config.clip2.as_ref().unwrap()
                 )?);
@@ -278,8 +266,8 @@ impl Generator for SD {
                 vae.clone(),
                 *sd_version,
                 *use_f16,
-                &device,
-                dtype,
+                &context.device,
+                context.dtype,
                 context.args.model.clone(),
                 &sd_config,
             )?;
@@ -304,8 +292,8 @@ impl Generator for SD {
                 *use_flash_attention,
                 *sd_version,
                 *use_f16,
-                &device,
-                dtype,
+                &context.device,
+                context.dtype,
                 context.args.model.clone(),
                 &sd_config,
             )?;
@@ -315,7 +303,6 @@ impl Generator for SD {
 
         Ok(Some(Box::new(Self {
             tokenizer,
-            dtype,
             sd_version: *sd_version,
             sd_config,
             pad_id,
@@ -323,7 +310,6 @@ impl Generator for SD {
             tokenizer_2: tokenizer_2_option,
             pad_id_2,
             text_model_2,
-            device,
             vae: vae_model,
             unet: unet_model,
             context: context.clone(),
@@ -389,7 +375,7 @@ impl ImageGenerator for SD {
         };
 
         if let Some(seed) = image_seed {
-            self.device.set_seed(*seed)?;
+            self.context.device.set_seed(*seed)?;
         }
         let use_guide_scale = guidance_scale > &1.0;
 
@@ -417,13 +403,13 @@ impl ImageGenerator for SD {
 
         let text_embeddings = Tensor::cat(&text_embeddings, D::Minus1)?;
         let text_embeddings = text_embeddings.repeat((*bsize, 1, 1))?;
-        println!("{text_embeddings:?}");
+        debug!("{text_embeddings:?}");
 
         let init_latent_dist_sample = match &img2img {
             None => None,
             Some(image) => {
-                let image = image_preprocess(image)?.to_device(&self.device)?;
-                Some(VAE::encode(&mut self.vae, image, &self.device, &mut self.context).await?)
+                let image = image_preprocess(image)?.to_device(&self.context.device)?;
+                Some(VAE::encode(&mut self.vae, image, &mut self.context).await?)
             }
         };
 
@@ -450,7 +436,7 @@ impl ImageGenerator for SD {
             let latents = match &init_latent_dist_sample {
 
                 Some(init_latent_dist) => {
-                    let latents = (init_latent_dist * vae_scale)?.to_device(&self.device)?;
+                    let latents = (init_latent_dist * vae_scale)?.to_device(&self.context.device)?;
                     if t_start < timesteps.len() {
                         let noise = latents.randn_like(0f64, 1f64)?;
                         safe_scheduler.scheduler.add_noise(&latents, noise, timesteps[t_start])?
@@ -464,16 +450,16 @@ impl ImageGenerator for SD {
                         0f32,
                         1f32,
                         (*bsize, 4, self.sd_config.height / 8, self.sd_config.width / 8),
-                        &self.device,
+                        &&self.context.device,
                     )?;
                     // scale the initial noise by the standard deviation required by the scheduler
                     (latents * safe_scheduler.scheduler.init_noise_sigma())?
                 }
             };
 
-            let mut latents = latents.to_dtype(self.dtype)?;
+            let mut latents = latents.to_dtype(self.context.dtype)?;
 
-            info!("Starting sampling...");
+            debug!("Starting sampling...");
 
             for (timestep_index, &timestep) in timesteps.iter().enumerate() {
 
@@ -496,13 +482,15 @@ impl ImageGenerator for SD {
                     latent_model_input,
                     text_embeddings.clone(),
                     timestep,
-                    &self.device,
                     &mut self.context
                 ).await?;
 
                 debug!("UNet forwarding completed!");
 
                 let noise_pred = if use_guide_scale {
+
+                    debug!("Applying guidance scale...");
+                    
                     let noise_pred = noise_pred.chunk(2, 0)?;
                     let (noise_pred_uncond, noise_pred_text) = (&noise_pred[0], &noise_pred[1]);
 
@@ -511,17 +499,20 @@ impl ImageGenerator for SD {
                     noise_pred
                 };
 
+                debug!("Scheduler stepping...");
+                
                 latents = safe_scheduler.scheduler.step(&noise_pred, timestep, &latents)?;
+                
                 let dt = start_time.elapsed().as_secs_f32();
                 info!("step {}/{n_steps} done, {:.2}s", timestep_index + 1, dt);
-
+                
                 if *intermediary_images != 0 && timestep_index % *intermediary_images == 0{
                     let intermediary_batched_images = self.split_images(&latents, vae_scale, *bsize).await?;
                     callback(intermediary_batched_images);
                 }
             }
 
-            info!(
+            debug!(
                 "Generating the final image for sample {}/{}.",
                 idx + 1,
                 num_samples
@@ -551,7 +542,7 @@ impl SD {
         let mut images_vec = Vec::new();
 
         let scaled = (latents / vae_scale)?;
-        let images = VAE::decode(&mut self.vae, scaled, &self.device, &mut self.context).await?;
+        let images = VAE::decode(&mut self.vae, scaled, &mut self.context).await?;
         let images = ((images / 2.)? + 0.5)?.to_device(&Device::Cpu)?;
         let images = (images.clamp(0f32, 1.)? * 255.)?.to_dtype(DType::U8)?;
         for batch in 0..bsize {
@@ -618,7 +609,7 @@ impl SD {
             tokens.push(pad_id)
         }
 
-        let tokens = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
+        let tokens = Tensor::new(tokens.as_slice(), &&self.context.device)?.unsqueeze(0)?;
 
         let text_embeddings = text_model.forward_mut(&tokens, 0, 0, &mut self.context).await?;
 
@@ -639,14 +630,14 @@ impl SD {
                 uncond_tokens.push(pad_id)
             }
 
-            let uncond_tokens = Tensor::new(uncond_tokens.as_slice(), &self.device)?.unsqueeze(0)?;
+            let uncond_tokens = Tensor::new(uncond_tokens.as_slice(), &&self.context.device)?.unsqueeze(0)?;
 
             info!("Clip forwarding...");
             let uncond_embeddings = text_model.forward_mut(&uncond_tokens, 0, 0, &mut self.context).await?;
 
-            Tensor::cat(&[uncond_embeddings, text_embeddings], 0)?.to_dtype(self.dtype)?
+            Tensor::cat(&[uncond_embeddings, text_embeddings], 0)?.to_dtype(self.context.dtype)?
         } else {
-            text_embeddings.to_dtype(self.dtype)?
+            text_embeddings.to_dtype(self.context.dtype)?
         };
 
         Ok(text_embeddings)

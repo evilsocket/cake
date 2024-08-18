@@ -10,12 +10,17 @@ import SwiftUI
 struct ContentView: View {
     @State private var showActionSheet = false
     @State private var buttonTitle: String = "Run Node"
+    @State private var selectedModelType: String = "text"
 
     var body: some View {
         VStack {
             Image(systemName: "brain")
                 .imageScale(.large)
                 .foregroundStyle(.tint)
+            Picker("Model type", selection: $selectedModelType) {
+                Text("Text Model").tag("text")
+                Text("Image Model").tag("image")
+            }.padding()
             Button(buttonTitle) {
                 showActionSheet = true
                 buttonTitle = "Running ..."
@@ -39,8 +44,10 @@ struct ContentView: View {
                         
                         // print("  topologyPath=\(topologyPath)");
                         // print("  modelPath=\(modelPath)");
-                                                
-                        startWorker(name:"iphone", modelPath: modelPath, topologyPath: topologyPath)
+                                
+                        print("Model type: \(selectedModelType)");
+                        
+                        startWorker(name:"iphone", modelPath: modelPath, topologyPath: topologyPath, modelType: selectedModelType)
                     } else {
                         print("access denied to \(directory)");
                     }

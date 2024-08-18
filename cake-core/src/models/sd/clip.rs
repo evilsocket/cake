@@ -94,7 +94,7 @@ impl Clip {
         let clip_model = stable_diffusion::build_clip_transformer(config, clip_weights, device, dtype)?;
         let layer_name = model_file.name();
 
-        info!("Loading Clip model: ${layer_name}");
+        info!("Loading Clip model: {layer_name}");
 
         Ok(Box::new(Self {
             clip_model,
