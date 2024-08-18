@@ -190,6 +190,7 @@ Run a master node with REST API:
 ```sh
 cake-cli --model /path/to/hf/cache \        # The cache dir for huggingface models
          --api 0.0.0.0:8080 \               # API bind address
+         --model-type image-model \         # use image-model for SD, text-model or skip for LLM
          --topology topology.yml            # topology file
 ```
 
