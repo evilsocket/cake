@@ -5,7 +5,7 @@ use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
 use candle_transformers::models::stable_diffusion::unet_2d::UNet2DConditionModel;
 use crate::cake::{Context, Forwarder};
 use crate::models::sd::ModelFile;
-use crate::models::sd::util::{get_device, get_sd_config, pack_tensors, unpack_tensors};
+use crate::models::sd::util::{get_sd_config, pack_tensors, unpack_tensors};
 use crate::StableDiffusionVersion;
 use log::info;
 
@@ -26,8 +26,6 @@ impl Forwarder for UNet {
     where
         Self: Sized
     {
-        let dtype = if ctx.args.sd_args.use_f16 { DType::F16 } else { DType::F32 };
-        let device = get_device(ctx.args.cpu)?;
         let sd_config = get_sd_config(ctx)?;
 
         Self::load_model(
@@ -35,8 +33,8 @@ impl Forwarder for UNet {
             ctx.args.sd_args.use_flash_attention,
             ctx.args.sd_args.sd_version,
             ctx.args.sd_args.use_f16,
-            &device,
-            dtype,
+            &ctx.device,
+            ctx.dtype,
             ctx.args.model.clone(),
             &sd_config,
         )

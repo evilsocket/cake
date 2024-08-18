@@ -5,7 +5,7 @@ use candle_transformers::models::stable_diffusion;
 use candle_transformers::models::stable_diffusion::clip::ClipTextTransformer;
 use crate::cake::{Context, Forwarder};
 use crate::models::sd::sd::ModelFile;
-use crate::models::sd::util::{get_device, get_sd_config};
+use crate::models::sd::util::get_sd_config;
 use crate::StableDiffusionVersion;
 use log::info;
 
@@ -48,16 +48,13 @@ impl Forwarder for Clip {
             }
         };
 
-        let dtype = if ctx.args.sd_args.use_f16 { DType::F16 } else { DType::F32 };
-        let device = get_device(ctx.args.cpu)?;
-
         Self::load_model(
             model_file,
             model_filename,
             ctx.args.sd_args.sd_version,
             ctx.args.sd_args.use_f16,
-            &device,
-            dtype,
+            &ctx.device,
+            ctx.dtype,
             ctx.args.model.clone(),
             &clip_config
         )
