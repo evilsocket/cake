@@ -1,9 +1,6 @@
 //! This is the cake command line utility.
 
-use cake_core::{
-    cake::{Context, Master, Mode, Worker},
-    Args,
-};
+use cake_core::{cake::{Context, Master, Mode, Worker}, Args, ModelType};
 
 use anyhow::Result;
 use clap::Parser;
@@ -25,21 +22,34 @@ async fn main() -> Result<()> {
         .init();
 
     // setup context
-    let ctx = Context::from_args(args)?;
+    let mut ctx = Context::from_args(args)?;
 
     // run either in master or worker mode depending on command line
     let ret = match ctx.args.mode {
         Mode::Master => {
-            Master::<cake_core::models::llama3::LLama>::new(ctx)
+            Master::<
+                cake_core::models::llama3::LLama,
+                cake_core::models::sd::SD
+            >::new(ctx)
                 .await?
                 .run()
                 .await
         }
         Mode::Worker => {
-            Worker::<cake_core::models::llama3::LLama>::new(ctx)
-                .await?
-                .run()
-                .await
+            match ctx.args.model_type {
+                ModelType::TextModel => {
+                    Worker::<cake_core::models::llama3::LLama>::new(&mut ctx)
+                        .await?
+                        .run()
+                        .await
+                }
+                ModelType::ImageModel => {
+                    Worker::<cake_core::models::sd::SD>::new(&mut ctx)
+                        .await?
+                        .run()
+                        .await
+                }
+            }
         }
     };
 

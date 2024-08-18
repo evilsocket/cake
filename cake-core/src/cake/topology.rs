@@ -4,6 +4,7 @@ use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use crate::ModelType;
 
 lazy_static! {
     static ref LAYER_RANGE_PARSER: Regex = Regex::new(r"(?m)^(.+[^\d])(\d+)-(\d+)$").unwrap();
@@ -16,18 +17,19 @@ pub struct Node {
     pub host: String,
     /// Optional descriptioon.
     pub description: Option<String>,
-    /// Layers hosted by this worker. Range expressions are supported.
     pub layers: Vec<String>,
 }
 
 impl Node {
     /// Return true if this node hosts the specified layer.
-    pub fn is_layer_owner(&self, full_layer_name: &str) -> bool {
-        for prefix in &self.layers {
+    pub fn is_text_model_layer_owner(&self, full_layer_name: &str) -> bool {
+
+        for prefix in self.layers.iter() {
             if full_layer_name.starts_with(&format!("{}.", prefix)) {
                 return true;
             }
         }
+
         false
     }
 }
@@ -38,36 +40,39 @@ pub struct Topology(HashMap<String, Node>);
 
 impl Topology {
     /// Load the topology from a yaml file.
-    pub fn from_path(path: &str) -> Result<Self> {
+    pub fn from_path(path: &str, model_type: &ModelType) -> Result<Self> {
         log::info!("loading topology from {}", path);
 
         let mut topology: Self = serde_yaml::from_str(&std::fs::read_to_string(path)?)
             .map_err(|e| anyhow!("can't read {path}: {e}"))?;
 
-        // check for range expressions
-        for (_worker_name, node) in topology.iter_mut() {
-            let mut layers = vec![];
-            for layer_name in &node.layers {
-                if let Some(caps) = LAYER_RANGE_PARSER.captures_iter(layer_name).next() {
-                    let base = caps.get(1).unwrap().as_str().to_string();
-                    let start = caps.get(2).unwrap().as_str().to_string().parse::<usize>()?;
-                    let stop = caps.get(3).unwrap().as_str().to_string().parse::<usize>()?;
+        if *model_type == ModelType::TextModel {
+            // check for range expressions
+            for (_worker_name, node) in topology.iter_mut() {
 
-                    if stop <= start {
-                        return Err(anyhow!(
-                            "invalid range expression {layer_name}, end must be > start"
-                        ));
-                    }
+                let mut layers = vec![];
+                for layer_name in &node.layers {
+                    if let Some(caps) = LAYER_RANGE_PARSER.captures_iter(layer_name).next() {
+                        let base = caps.get(1).unwrap().as_str().to_string();
+                        let start = caps.get(2).unwrap().as_str().to_string().parse::<usize>()?;
+                        let stop = caps.get(3).unwrap().as_str().to_string().parse::<usize>()?;
 
-                    for n in start..=stop {
-                        layers.push(format!("{}{}", base, n));
+                        if stop <= start {
+                            return Err(anyhow!(
+                                "invalid range expression {layer_name}, end must be > start"
+                            ));
+                        }
+
+                        for n in start..=stop {
+                            layers.push(format!("{}{}", base, n));
+                        }
+                    } else {
+                        layers.push(layer_name.to_string());
                     }
-                } else {
-                    layers.push(layer_name.to_string());
                 }
-            }
 
-            node.layers = layers;
+                node.layers = layers;
+            }
         }
 
         Ok(topology)

@@ -1,12 +1,11 @@
 use anyhow::Result;
 use candle_core::Tensor;
-use candle_nn::{Module, RmsNorm, VarBuilder};
+use candle_nn::{Module, RmsNorm};
 
 use async_trait::async_trait;
+use crate::cake::{Context, Forwarder};
 
-use crate::cake::Forwarder;
-
-use super::{Cache, CausalSelfAttention, Config, MLP};
+use super::{CausalSelfAttention, MLP};
 
 /// Transformer block with causal self attention and several caching strategies.
 #[derive(Debug, Clone)]
@@ -26,7 +25,11 @@ impl std::fmt::Display for Transformer {
 
 #[async_trait]
 impl Forwarder for Transformer {
-    fn load(name: String, vb: VarBuilder, cfg: &Config) -> Result<Box<Self>> {
+    fn load(name: String, ctx: &Context) -> Result<Box<Self>> {
+
+        let vb = ctx.var_builder.as_ref().expect("No var_builder specified");
+        let cfg = ctx.config.as_ref().expect("No config specified");
+
         let attn = super::CausalSelfAttention::load(vb.pp("self_attn"), cfg)?;
         let mlp = super::MLP::load(vb.pp("mlp"), cfg)?;
         let rms_1 =
@@ -50,14 +53,14 @@ impl Forwarder for Transformer {
         x: &Tensor,
         index_pos: usize,
         block_idx: usize,
-        cache: &mut Cache,
+        ctx: &mut Context,
     ) -> Result<Tensor> {
         let residual = x;
 
         let x = self.rms_1.forward(x).map_err(|e| anyhow!("rms_1: {e}"))?;
         let x = (self
             .attn
-            .forward(&x, index_pos, block_idx, cache)
+            .forward(&x, index_pos, block_idx, &mut ctx.cache.as_mut().expect("No cache specified"))
             .map_err(|e| anyhow!("attention: {e}"))?
             + residual)
             .map_err(|e| anyhow!("residual: {e}"))?;
@@ -74,9 +77,9 @@ impl Forwarder for Transformer {
         x: &Tensor,
         index_pos: usize,
         block_idx: usize,
-        cache: &mut Cache,
+        ctx: &mut Context,
     ) -> Result<Tensor> {
-        self.forward(x, index_pos, block_idx, cache).await
+        self.forward(x, index_pos, block_idx, ctx).await
     }
 
     fn layer_name(&self) -> &str {

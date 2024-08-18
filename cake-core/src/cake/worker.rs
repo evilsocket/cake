@@ -6,7 +6,7 @@ use std::{
 };
 
 use super::{Context, Forwarder, Message, WorkerInfo};
-use crate::models::{llama3::Cache, Generator};
+use crate::{models::Generator, ModelType};
 
 use anyhow::Result;
 use candle_core::{DType, Device};
@@ -25,7 +25,7 @@ struct WorkerContext<F> {
     device_idx: usize,
     dtype: DType,
     blocks: Arc<HashMap<String, Box<F>>>,
-    cache: Cache,
+    context: Context,
 }
 
 impl<F: Forwarder> WorkerContext<F> {
@@ -50,13 +50,24 @@ impl<F: Forwarder> WorkerContext<F> {
 
     /// Create a copy of self with new kv-cache.
     fn get_client_context(&self) -> Self {
+
+        let cache = match &self.context.cache {
+            None => None,
+            Some(cache) => {
+                Some(cache.as_new())
+            }
+        };
+
+        let mut cloned_context = self.context.clone();
+        cloned_context.cache = cache;
+
         WorkerContext {
             device: self.device.clone(),
             device_idx: self.device_idx,
             dtype: self.dtype,
             blocks: self.blocks.clone(),
             // each client loop gets a new cache
-            cache: self.cache.as_new(),
+            context: cloned_context
         }
     }
 }
@@ -69,7 +80,7 @@ pub struct Worker<G: Generator> {
 
 impl<G: Generator + 'static> Worker<G> {
     /// Create a new Worker from the context.
-    pub async fn new(ctx: Context) -> Result<Self> {
+    pub async fn new(ctx: &mut Context) -> Result<Self> {
         let worker_name = if let Some(name) = &ctx.args.name {
             name.to_string()
         } else {
@@ -94,16 +105,24 @@ impl<G: Generator + 'static> Worker<G> {
 
         let mut blocks = HashMap::new();
 
+        let vb = ctx.var_builder.clone();
+
         for block_layer_name in &worker_topology.layers {
             log::info!("loading {} ...", &block_layer_name);
 
+            if ctx.args.model_type == ModelType::TextModel {
+                ctx.var_builder = Some(vb.clone().expect("Error retrieving var_builder").pp(block_layer_name));
+            }
+
             let block = G::Shardable::load(
                 block_layer_name.to_string(),
-                ctx.var_builder.pp(block_layer_name),
-                &ctx.config,
+                &ctx,
             )?;
+
             blocks.insert(block_layer_name.to_string(), block);
         }
+
+        ctx.var_builder = vb;
 
         let blocks = Arc::new(blocks);
 
@@ -115,8 +134,7 @@ impl<G: Generator + 'static> Worker<G> {
             human_bytes::human_bytes(memory_stats::memory_stats().unwrap().physical_mem as f64)
         );
 
-        let cache = ctx.cache;
-        let device = ctx.device;
+        let device = ctx.device.clone();
         let dtype = ctx.dtype;
         let device_idx = ctx.args.device;
 
@@ -125,7 +143,7 @@ impl<G: Generator + 'static> Worker<G> {
             device_idx,
             dtype,
             blocks,
-            cache,
+            context: ctx.clone()
         };
 
         Ok(Self { listener, context })
@@ -220,7 +238,7 @@ impl<G: Generator + 'static> Worker<G> {
                 if let Some(block) = context.blocks.get(&layer_name) {
                     // run forward pass
                     x = block
-                        .forward(&x, index_pos, block_idx, &mut context.cache)
+                        .forward(&x, index_pos, block_idx, &mut context.context)
                         .await
                         .unwrap();
                 } else {

@@ -1,22 +1,33 @@
 use std::io::Write;
 
-use crate::models::{chat::Message, Generator};
+use crate::models::{chat::Message, ImageGenerator, TextGenerator};
 
 use super::{api, Context};
 
 use anyhow::Result;
+use image::{ImageBuffer, Rgb};
+use crate::{ImageGenerationArgs, ModelType};
 
 /// A master connects to, communicates with and orchestrates the workers.
-pub struct Master<G> {
+pub struct Master<TG, IG> {
     pub ctx: Context,
-    pub model: Box<G>,
+    pub llm_model: Option<Box<TG>>,
+    pub sd_model: Option<Box<IG>>
 }
 
-impl<G: Generator + Send + Sync + 'static> Master<G> {
+impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync + 'static> Master<TG, IG> {
     /// Create a new instance.
-    pub async fn new(ctx: Context) -> Result<Self> {
-        let model = G::load(ctx.clone()).await?;
-        Ok(Self { ctx, model })
+    pub async fn new(mut ctx: Context) -> Result<Self> {
+        match ctx.args.model_type {
+            ModelType::ImageModel => {
+                let sd_model = IG::load(&mut ctx).await?;
+                Ok(Self { ctx, sd_model, llm_model: None })
+            },
+            ModelType::TextModel => {
+                let llm_model = TG::load(&mut ctx).await?;
+                Ok(Self { ctx, llm_model, sd_model: None })
+            }
+        }
     }
 
     pub async fn run(mut self) -> Result<()> {
@@ -25,21 +36,36 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
             api::start(self).await?;
         } else {
             // if running in cli mode, pre add system and user prompts
-            self.model
-                .add_message(Message::system(self.ctx.args.system_prompt.clone()))?;
-            self.model
-                .add_message(Message::user(self.ctx.args.prompt.clone()))?;
+            if self.ctx.args.model_type == ModelType::TextModel {
 
-            // just run one generation to stdout
-            self.generate(|data| {
-                if data.is_empty() {
-                    println!();
-                } else {
-                    print!("{data}")
-                }
-                std::io::stdout().flush().unwrap();
-            })
-            .await?;
+                let llm_model = self.llm_model.as_mut().expect("LLM model not found");
+                llm_model.add_message(Message::system(self.ctx.args.system_prompt.clone()))?;
+                llm_model.add_message(Message::user(self.ctx.args.prompt.clone()))?;
+
+                // just run one generation to stdout
+                self.generate_text(|data| {
+                    if data.is_empty() {
+                        println!();
+                    } else {
+                        print!("{data}")
+                    }
+                    std::io::stdout().flush().unwrap();
+                })
+                .await?;
+            } else {
+                let mut step_num = 0;
+
+                self.generate_image(self.ctx.args.sd_img_gen_args.clone(), move |images| {
+
+                    let mut batched_num = 0;
+                    for image in images {
+                        image.save(format!("images/image_{}_{}.png", batched_num, step_num)).expect("Error saving image to disk");
+                        batched_num+=1;
+                    }
+                    step_num+=1;
+
+                }).await?;
+            }
         }
 
         Ok(())
@@ -47,11 +73,11 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
 
     /// Reset the master state for a new inference.
     pub fn reset(&mut self) -> Result<()> {
-        self.model.reset()
+        self.llm_model.as_mut().expect("LLM model not found").reset()
     }
 
     /// Start the generation loop and call the stream function for every token.
-    pub async fn generate<S>(&mut self, mut stream: S) -> Result<()>
+    pub async fn generate_text<S>(&mut self, mut stream: S) -> Result<()>
     where
         S: FnMut(&str),
     {
@@ -65,6 +91,7 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
         stream(&self.ctx.args.prompt);
 
         let mut start_gen = std::time::Instant::now();
+        let llm_model = self.llm_model.as_mut().expect("LLM model not found");
 
         for index in 0..self.ctx.args.sample_len {
             if index == 1 {
@@ -72,7 +99,7 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
                 start_gen = std::time::Instant::now()
             }
 
-            let token = self.model.next_token(index).await?;
+            let token = llm_model.next_token(index).await?;
             if token.is_end_of_stream {
                 break;
             } else {
@@ -84,7 +111,7 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
         stream("");
 
         let dt = start_gen.elapsed();
-        let generated = self.model.generated_tokens();
+        let generated = llm_model.generated_tokens();
 
         log::info!(
             "{} tokens generated ({} token/s) - mem={}",
@@ -94,5 +121,13 @@ impl<G: Generator + Send + Sync + 'static> Master<G> {
         );
 
         Ok(())
+    }
+
+    pub async fn generate_image<F>(&mut self, args: ImageGenerationArgs, callback: F) -> Result<()>
+    where
+        F: FnMut(Vec<ImageBuffer<Rgb<u8>, Vec<u8>>>) + Send + 'static
+    {
+        let sd_model = self.sd_model.as_mut().expect("SD model not found");
+        sd_model.generate_image(&args, callback).await
     }
 }

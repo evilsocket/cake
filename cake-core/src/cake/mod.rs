@@ -7,11 +7,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
-
-use crate::{
-    models::llama3::{Cache, Config, LlamaConfig},
-    utils, Args,
-};
+use crate::{models::llama3::{Cache, Config, LlamaConfig}, utils, Args, ModelType};
 
 #[cfg(feature = "master")]
 mod api;
@@ -47,9 +43,9 @@ pub struct Context {
     pub topology: Topology,
     pub data_path: PathBuf,
     pub device: Device,
-    pub config: Config, // TODO: decouple
-    pub cache: Cache,
-    pub var_builder: VarBuilder<'static>,
+    pub config: Option<Config>, // TODO: decouple
+    pub cache: Option<Cache>,
+    pub var_builder: Option<VarBuilder<'static>>,
 }
 
 impl Context {
@@ -75,17 +71,21 @@ impl Context {
         );
 
         let data_path = PathBuf::from(&args.model);
+        let topology = Topology::from_path(&args.topology, &args.model_type)?;
 
-        let config_filename = data_path.join("config.json");
-        let config = LlamaConfig::from_path(&config_filename)?.into_config();
+        let mut config :Option<Config> = None;
+        let mut cache: Option<Cache> = None;
+        let mut var_builder:Option<VarBuilder> = None;
 
-        let topology = Topology::from_path(&args.topology)?;
-
-        let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
-        let var_builder =
-            utils::load_var_builder_from_index(model_tensors_index, dtype, device.clone())?;
-
-        let cache = Cache::new(true, dtype, &config, &device)?;
+        if args.model_type == ModelType::TextModel {
+            let config_filename = data_path.join("config.json");
+            let config_internal = LlamaConfig::from_path(&config_filename)?.into_config();
+            let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
+            var_builder =
+            Some(utils::load_var_builder_from_index(model_tensors_index, dtype, device.clone())?);
+            cache = Some(Cache::new(true, dtype, &config_internal, &device)?);
+            config = Some(config_internal);
+        }
 
         Ok(Context {
             args,
@@ -104,7 +104,7 @@ impl Context {
 #[async_trait]
 pub trait Forwarder: Debug + Send + Sync + Display {
     /// Create an instance of this object loading the specified layer(s) from a VarBuilder.
-    fn load(name: String, vb: VarBuilder, cfg: &Config) -> Result<Box<Self>>
+    fn load(name: String, ctx: &Context) -> Result<Box<Self>>
     where
         Self: Sized;
 
@@ -114,7 +114,7 @@ pub trait Forwarder: Debug + Send + Sync + Display {
         x: &Tensor,
         index_pos: usize,
         block_idx: usize,
-        cache: &mut Cache,
+        ctx: &mut Context
     ) -> Result<Tensor>;
 
     /// Applies a forward operation to the input tensor, requires mutability.
@@ -123,7 +123,7 @@ pub trait Forwarder: Debug + Send + Sync + Display {
         x: &Tensor,
         index_pos: usize,
         block_idx: usize,
-        cache: &mut Cache,
+        ctx: &mut Context
     ) -> Result<Tensor>;
 
     /// Applies a batch of forward operations to the input tensor.
@@ -131,7 +131,7 @@ pub trait Forwarder: Debug + Send + Sync + Display {
         &mut self,
         _x: &Tensor,
         _batch: Vec<(String, usize, usize)>,
-        _cache: &mut Cache,
+        _ctx: &mut Context
     ) -> Result<Tensor> {
         unimplemented!()
     }

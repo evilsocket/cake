@@ -3,9 +3,7 @@ use async_trait::async_trait;
 use candle_core::{Device, Tensor};
 use tokio::net::TcpStream;
 
-use crate::models::llama3::{Cache, Config};
-
-use super::{Message, WorkerInfo};
+use super::{Context, Message, WorkerInfo};
 
 /// A client object used by the master to connect and orchestrate the workers.
 /// From the Cake perspective, each worker is a server and the master uses
@@ -87,11 +85,11 @@ impl std::fmt::Display for Client {
 
 #[async_trait]
 impl super::Forwarder for Client {
-    fn load(_: String, _: candle_nn::VarBuilder, _: &Config) -> Result<Box<Self>> {
+    fn load(_: String, _: &Context) -> Result<Box<Self>> {
         Err(anyhow!("load should never be called on cake::Client"))
     }
 
-    async fn forward(&self, _: &Tensor, _: usize, _: usize, _: &mut Cache) -> Result<Tensor> {
+    async fn forward(&self, _: &Tensor, _: usize, _: usize, _: &mut Context) -> Result<Tensor> {
         Err(anyhow!(
             "immutable forward should never be called on cake::Client"
         ))
@@ -103,7 +101,7 @@ impl super::Forwarder for Client {
         x: &Tensor,
         index_pos: usize,
         block_idx: usize,
-        _: &mut Cache,
+        _: &mut Context,
     ) -> Result<Tensor> {
         self.forward_request(super::Message::single_op(
             &self.layer_name,
@@ -119,17 +117,17 @@ impl super::Forwarder for Client {
         &mut self,
         x: &Tensor,
         batch: Vec<(String, usize, usize)>,
-        _: &mut Cache,
+        _: &mut Context,
     ) -> Result<Tensor> {
         self.forward_request(super::Message::from_batch(x, batch))
             .await
     }
 
-    fn ident(&self) -> &str {
-        &self.address
-    }
-
     fn layer_name(&self) -> &str {
         &self.layer_name
+    }
+
+    fn ident(&self) -> &str {
+        &self.address
     }
 }

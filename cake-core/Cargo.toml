@@ -29,6 +29,11 @@ uuid = { version = "1.10.0", optional = true, features = ["v4"] }
 candle-core = { version = "0.6.0" }
 candle-nn = { version = "0.6.0" }
 candle-transformers = { version = "0.6.0" }
+image = "0.25.2"
+hf-hub = "0.3.2"
+tracing-chrome = "0.7.2"
+tracing-subscriber = "0.3.18"
+base64 = "0.22.1"
 
 [features]
 default = ["master"]
