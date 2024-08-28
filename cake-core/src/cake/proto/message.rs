@@ -3,11 +3,11 @@ use std::str::FromStr;
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use safetensors::View;
-use serde::{Deserialize, Serialize};
+use speedy::{BigEndian, Readable, Writable};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Represents a tensor in Cake protocol.
-#[derive(Serialize, Debug, Deserialize)]
+#[derive(Debug, Readable, Writable)]
 pub struct RawTensor {
     /// Tensor data.
     pub data: Vec<u8>,
@@ -29,12 +29,17 @@ impl RawTensor {
     /// Convert the raw tensor in a Tensor allocated on the given device.
     pub fn to_tensor(&self, device: &Device) -> Result<Tensor> {
         let dtype = DType::from_str(&self.dtype)?;
-        Tensor::from_raw_buffer(&self.data, dtype, &self.shape, device).map_err(|e| anyhow!(e))
+        Ok(Tensor::from_raw_buffer(
+            &self.data,
+            dtype,
+            &self.shape,
+            device,
+        )?)
     }
 }
 
 /// Diagnostic information about a worker.
-#[derive(Serialize, Debug, Default, Deserialize)]
+#[derive(Debug, Default, Readable, Writable)]
 pub struct WorkerInfo {
     /// Protocol version.
     pub version: String,
@@ -53,7 +58,7 @@ pub struct WorkerInfo {
 }
 
 /// A Cake protocol message.
-#[derive(Serialize, Debug, Deserialize)]
+#[derive(Debug, Readable, Writable)]
 pub enum Message {
     /// First message sent.
     Hello,
@@ -73,6 +78,22 @@ pub enum Message {
     },
     /// A message to transmit tensors.
     Tensor(RawTensor),
+}
+
+#[inline]
+async fn read_u32be<R>(reader: &mut R) -> Result<u32>
+where
+    R: AsyncReadExt + Unpin,
+{
+    Ok(u32::from_be(reader.read_u32().await?))
+}
+
+#[inline]
+async fn write_u32be<W>(writer: &mut W, n: u32) -> Result<()>
+where
+    W: AsyncWriteExt + Unpin,
+{
+    Ok(writer.write_u32(n.to_be()).await?)
 }
 
 impl Message {
@@ -102,16 +123,16 @@ impl Message {
     }
 
     // Yes, I could use GRPC, but this is simpler and faster.
-    // Check bitcode benchmarks ;)
+    // Check speedy benchmarks ;)
 
     /// Serializes the message to raw bytes.
     fn to_bytes(&self) -> Result<Vec<u8>> {
-        bitcode::serialize(self).map_err(|e| anyhow!(e))
+        Ok(self.write_to_vec_with_ctx(BigEndian::default())?)
     }
 
     /// Deserializes a Message from raw bytes.
     fn from_bytes(raw: &[u8]) -> Result<Self> {
-        bitcode::deserialize(raw).map_err(|e| anyhow!(e))
+        Ok(Self::read_from_buffer_with_ctx(BigEndian::default(), raw)?)
     }
 
     /// Read a Message with the provided reader.
@@ -119,12 +140,12 @@ impl Message {
     where
         R: AsyncReadExt + Unpin,
     {
-        let magic = reader.read_u32().await?;
+        let magic = read_u32be(reader).await?;
         if magic != super::PROTO_MAGIC {
             return Err(anyhow!("invalid magic value: {magic}"));
         }
 
-        let req_size = reader.read_u32().await?;
+        let req_size = read_u32be(reader).await?;
         if req_size > super::MESSAGE_MAX_SIZE {
             return Err(anyhow!("request size {req_size} > MESSAGE_MAX_SIZE"));
         }
@@ -147,8 +168,8 @@ impl Message {
             return Err(anyhow!("request size {req_size} > MESSAGE_MAX_SIZE"));
         }
 
-        writer.write_u32(super::PROTO_MAGIC).await?;
-        writer.write_u32(req_size).await?;
+        write_u32be(writer, super::PROTO_MAGIC).await?;
+        write_u32be(writer, req_size).await?;
         writer.write_all(&req).await?;
 
         Ok(8 + req.len())
