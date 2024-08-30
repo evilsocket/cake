@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.86"
 async-trait = "0.1.80"
-bitcode = { version = "0.6.0", features = ["serde"] }
 
 clap = { version = "4.5.8", features = ["derive"] }
 human_bytes = "0.4.3"
@@ -19,6 +18,7 @@ safetensors = "0.4.3"
 serde = { version = "1.0.203", features = ["derive"] }
 serde_json = "1.0.120"
 serde_yaml = "0.9.34"
+speedy = "0.8.7"
 tokenizers = { version = "0.19.1", features = ["onig"] }
 tokio = { version = "1.38.0", features = ["full"] }
 yoke = { version = "0.7.4", features = ["derive"] }
