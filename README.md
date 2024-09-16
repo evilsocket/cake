@@ -224,7 +224,7 @@ docker run --rm -v /path/to/data:/data ghcr.io/evilsocket/cake \
 Run a worker node:
 
 ```sh
-docker run --rm -p 10128:10128 -v /path/to/data:/data ghcr.io/evilsocket/cake \
+docker run --rm --network host -v /path/to/data:/data ghcr.io/evilsocket/cake \
   cake-cli --model /data/Meta-Llama-3-8B \    # model path
            --mode worker \                    # run as worker
            --name worker0 \                   # worker name in topology file
@@ -235,7 +235,7 @@ docker run --rm -p 10128:10128 -v /path/to/data:/data ghcr.io/evilsocket/cake \
 Run a master node with an OpenAI compatible REST API:
 
 ```sh
-docker run --rm -p 8080:8080 -v /path/to/data:/data ghcr.io/evilsocket/cake \
+docker run --rm --network host -v /path/to/data:/data ghcr.io/evilsocket/cake \
   cake-cli --model /data/Meta-Llama-3-8B \    # model path
            --api 0.0.0.0:8080 \               # API bind address
            --topology /data/topology.yml      # topology file
