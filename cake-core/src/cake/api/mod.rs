@@ -35,7 +35,10 @@ where
         move || {
             App::new()
                 .app_data(web::Data::new(state.clone()))
-                .route("/api/v1/chat/completions", web::post().to(generate_text::<TG, IG>))
+                .route(
+                    "/api/v1/chat/completions",
+                    web::post().to(generate_text::<TG, IG>),
+                )
                 .route("/api/v1/image", web::post().to(generate_image::<TG, IG>))
                 .default_service(web::route().to(not_found))
         }, //.wrap(actix_web::middleware::Logger::default()))

@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
+use crate::ModelType;
 use anyhow::Result;
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use crate::ModelType;
 
 lazy_static! {
     static ref LAYER_RANGE_PARSER: Regex = Regex::new(r"(?m)^(.+[^\d])(\d+)-(\d+)$").unwrap();
@@ -23,7 +23,6 @@ pub struct Node {
 impl Node {
     /// Return true if this node hosts the specified layer.
     pub fn is_text_model_layer_owner(&self, full_layer_name: &str) -> bool {
-
         for prefix in self.layers.iter() {
             if full_layer_name.starts_with(&format!("{}.", prefix)) {
                 return true;
@@ -49,7 +48,6 @@ impl Topology {
         if *model_type == ModelType::TextModel {
             // check for range expressions
             for (_worker_name, node) in topology.iter_mut() {
-
                 let mut layers = vec![];
                 for layer_name in &node.layers {
                     if let Some(caps) = LAYER_RANGE_PARSER.captures_iter(layer_name).next() {

@@ -1,15 +1,13 @@
-use candle_core::{Device, Tensor};
-use anyhow::Result;
-use candle_core::utils::{cuda_is_available, metal_is_available};
-use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
 use crate::cake::Context;
 use crate::StableDiffusionVersion;
+use anyhow::Result;
+use candle_core::utils::{cuda_is_available, metal_is_available};
+use candle_core::{Device, Tensor};
+use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
 
 pub fn pack_tensors(tensors: Vec<Tensor>, device: &Device) -> Result<Tensor> {
     let num_tensors = tensors.len();
-    let mut prepared_tensors = Vec::from([
-        Tensor::from_slice(&[num_tensors as f32], 1, device)?,
-    ]);
+    let mut prepared_tensors = Vec::from([Tensor::from_slice(&[num_tensors as f32], 1, device)?]);
 
     for tensor in tensors {
         let shape_info = tensor.shape().clone().into_dims();
@@ -29,13 +27,12 @@ pub fn pack_tensors(tensors: Vec<Tensor>, device: &Device) -> Result<Tensor> {
 }
 
 pub fn unpack_tensors(tensor: &Tensor) -> Result<Vec<Tensor>> {
-
     let mut unpacked_tensors: Vec<Tensor> = Vec::new();
 
     let num_tensors: f32 = tensor.get(0)?.to_scalar()?;
     let num_tensors_i32 = num_tensors as i32;
 
-    let mut idx:i32 = 1;
+    let mut idx: i32 = 1;
 
     for _i in 0..num_tensors_i32 {
         let shape_info_len: f32 = tensor.get(idx as usize)?.to_scalar()?;
@@ -44,15 +41,19 @@ pub fn unpack_tensors(tensor: &Tensor) -> Result<Vec<Tensor>> {
 
         let shape_info: Vec<i32> = tensor
             .narrow(0, idx as usize, shape_info_len as usize)?
-            .to_vec1()?.into_iter().map(|x: f32| {x as i32}).collect();
+            .to_vec1()?
+            .into_iter()
+            .map(|x: f32| x as i32)
+            .collect();
 
         idx += shape_info_len as i32;
 
         let num_elements: i32 = shape_info.iter().product();
 
-        let shape_info_usize: Vec<_> = shape_info.iter().map(|&x|{x as usize}).collect();
+        let shape_info_usize: Vec<_> = shape_info.iter().map(|&x| x as usize).collect();
 
-        let extracted = tensor.narrow(0, idx as usize, num_elements as usize)?
+        let extracted = tensor
+            .narrow(0, idx as usize, num_elements as usize)?
             .reshape(shape_info_usize)?;
         idx += num_elements;
 
@@ -86,7 +87,7 @@ pub fn get_device(cpu: bool) -> Result<Device> {
 
 pub fn get_sd_config(ctx: &Context) -> Result<StableDiffusionConfig> {
     let height = ctx.args.sd_args.height;
-    let width= ctx.args.sd_args.width;
+    let width = ctx.args.sd_args.width;
     let sliced_attention_size = ctx.args.sd_args.sliced_attention_size;
     let sd_config = match ctx.args.sd_args.sd_version {
         StableDiffusionVersion::V1_5 => {

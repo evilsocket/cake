@@ -1,6 +1,7 @@
 use crate::models::chat::Message;
 
 /// Chat history.
+#[derive(Debug)]
 pub struct History(Vec<Message>);
 
 // Adapted from https://github.com/meta-llama/llama3/blob/main/llama/tokenizer.py#L202

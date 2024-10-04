@@ -7,7 +7,10 @@ use std::{
 };
 
 use anyhow::Result;
-use cake_core::{cake::{Node, Topology}, ModelType, utils};
+use cake_core::{
+    cake::{Node, Topology},
+    utils, ModelType,
+};
 use clap::Parser;
 use safetensors::{Dtype, SafeTensors, View};
 use serde::{Deserialize, Serialize};
@@ -142,7 +145,8 @@ fn main() {
     let args = Args::parse();
     let data_path = PathBuf::from(&args.model_path);
 
-    let topology = Topology::from_path(&args.topology, &ModelType::TextModel).expect("can't load topology");
+    let topology =
+        Topology::from_path(&args.topology, &ModelType::TextModel).expect("can't load topology");
     let index = load_index(&data_path).expect("can't load index");
 
     println!("index has {} tensors", index.weight_map.len());

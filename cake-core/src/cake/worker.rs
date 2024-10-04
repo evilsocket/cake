@@ -50,12 +50,9 @@ impl<F: Forwarder> WorkerContext<F> {
 
     /// Create a copy of self with new kv-cache.
     fn get_client_context(&self) -> Self {
-
         let cache = match &self.context.cache {
             None => None,
-            Some(cache) => {
-                Some(cache.as_new())
-            }
+            Some(cache) => Some(cache.as_new()),
         };
 
         let mut cloned_context = self.context.clone();
@@ -67,7 +64,7 @@ impl<F: Forwarder> WorkerContext<F> {
             dtype: self.dtype,
             blocks: self.blocks.clone(),
             // each client loop gets a new cache
-            context: cloned_context
+            context: cloned_context,
         }
     }
 }
@@ -111,13 +108,14 @@ impl<G: Generator + 'static> Worker<G> {
             log::info!("loading {} ...", &block_layer_name);
 
             if ctx.args.model_type == ModelType::TextModel {
-                ctx.var_builder = Some(vb.clone().expect("Error retrieving var_builder").pp(block_layer_name));
+                ctx.var_builder = Some(
+                    vb.clone()
+                        .expect("Error retrieving var_builder")
+                        .pp(block_layer_name),
+                );
             }
 
-            let block = G::Shardable::load(
-                block_layer_name.to_string(),
-                &ctx,
-            )?;
+            let block = G::Shardable::load(block_layer_name.to_string(), &ctx)?;
 
             blocks.insert(block_layer_name.to_string(), block);
         }
@@ -143,7 +141,7 @@ impl<G: Generator + 'static> Worker<G> {
             device_idx,
             dtype,
             blocks,
-            context: ctx.clone()
+            context: ctx.clone(),
         };
 
         Ok(Self { listener, context })
@@ -208,6 +206,28 @@ impl<G: Generator + 'static> Worker<G> {
         while let Ok((read_time, read_size, op_message)) =
             Self::read_message_timed(&mut socket).await
         {
+            if matches!(op_message, Message::Goodbye) {
+                log::info!("[{}] goodbye", &client);
+                context
+                    .context
+                    .cache
+                    .as_mut()
+                    .expect("No cache specified")
+                    .clear();
+
+                // send info
+                if let Err(e) = Self::write_message_timed(
+                    &mut socket,
+                    Message::WorkerInfo(context.to_info(read_time.as_millis())),
+                )
+                .await
+                {
+                    return Err(anyhow!("[{}] could not send worker info: {:?}", &client, e));
+                }
+                
+                continue;
+            }
+
             let (x, ops) = match op_message {
                 // single block operation
                 Message::SingleOp {

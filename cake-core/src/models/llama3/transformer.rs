@@ -2,8 +2,8 @@ use anyhow::Result;
 use candle_core::Tensor;
 use candle_nn::{Module, RmsNorm};
 
-use async_trait::async_trait;
 use crate::cake::{Context, Forwarder};
+use async_trait::async_trait;
 
 use super::{CausalSelfAttention, MLP};
 
@@ -26,7 +26,6 @@ impl std::fmt::Display for Transformer {
 #[async_trait]
 impl Forwarder for Transformer {
     fn load(name: String, ctx: &Context) -> Result<Box<Self>> {
-
         let vb = ctx.var_builder.as_ref().expect("No var_builder specified");
         let cfg = ctx.config.as_ref().expect("No config specified");
 
@@ -60,7 +59,12 @@ impl Forwarder for Transformer {
         let x = self.rms_1.forward(x).map_err(|e| anyhow!("rms_1: {e}"))?;
         let x = (self
             .attn
-            .forward(&x, index_pos, block_idx, &mut ctx.cache.as_mut().expect("No cache specified"))
+            .forward(
+                &x,
+                index_pos,
+                block_idx,
+                &mut ctx.cache.as_mut().expect("No cache specified"),
+            )
             .map_err(|e| anyhow!("attention: {e}"))?
             + residual)
             .map_err(|e| anyhow!("residual: {e}"))?;

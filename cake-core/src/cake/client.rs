@@ -123,6 +123,11 @@ impl super::Forwarder for Client {
             .await
     }
 
+    async fn goodbye(&mut self) -> Result<()> {
+        self.request(Message::Goodbye).await?;
+        Ok(())
+    }
+
     fn layer_name(&self) -> &str {
         &self.layer_name
     }
