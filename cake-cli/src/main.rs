@@ -16,7 +16,7 @@ async fn main() -> Result<()> {
     // setup logging
     if std::env::var_os("RUST_LOG").is_none() {
         // set `RUST_LOG=debug` to see debug logs
-        std::env::set_var("RUST_LOG", "debug,tokenizers=error,actix_server=warn");
+        std::env::set_var("RUST_LOG", "info,tokenizers=error,actix_server=warn");
     }
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
