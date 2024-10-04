@@ -1,18 +1,18 @@
-use std::fmt::{Debug, Display, Formatter};
-use async_trait::async_trait;
-use candle_core::{Device, DType, Module, Tensor};
-use candle_transformers::models::stable_diffusion;
-use candle_transformers::models::stable_diffusion::clip::ClipTextTransformer;
 use crate::cake::{Context, Forwarder};
 use crate::models::sd::sd::ModelFile;
 use crate::models::sd::util::get_sd_config;
 use crate::StableDiffusionVersion;
+use async_trait::async_trait;
+use candle_core::{DType, Device, Module, Tensor};
+use candle_transformers::models::stable_diffusion;
+use candle_transformers::models::stable_diffusion::clip::ClipTextTransformer;
 use log::info;
+use std::fmt::{Debug, Display, Formatter};
 
 #[derive(Debug)]
 pub struct Clip {
     clip_model: ClipTextTransformer,
-    layer_name: &'static str
+    layer_name: &'static str,
 }
 
 impl Display for Clip {
@@ -25,7 +25,7 @@ impl Display for Clip {
 impl Forwarder for Clip {
     fn load(name: String, ctx: &Context) -> anyhow::Result<Box<Self>>
     where
-        Self: Sized
+        Self: Sized,
     {
         let model_file;
         let model_filename;
@@ -37,7 +37,7 @@ impl Forwarder for Clip {
                 model_file = ModelFile::Clip;
                 model_filename = ctx.args.sd_args.clip.clone();
                 clip_config = sd_config.clip;
-            },
+            }
             "clip2" => {
                 model_file = ModelFile::Clip2;
                 model_filename = ctx.args.sd_args.clip2.clone();
@@ -56,16 +56,31 @@ impl Forwarder for Clip {
             &ctx.device,
             ctx.dtype,
             ctx.args.model.clone(),
-            &clip_config
+            &clip_config,
         )
     }
 
-    async fn forward(&self, x: &Tensor, _index_pos: usize, _block_idx: usize, _ctx: &mut Context) -> anyhow::Result<Tensor> {
+    async fn forward(
+        &self,
+        x: &Tensor,
+        _index_pos: usize,
+        _block_idx: usize,
+        _ctx: &mut Context,
+    ) -> anyhow::Result<Tensor> {
         info!("Clip model forwarding");
-        Ok(self.clip_model.forward(x).expect("Error running Clip forward"))
+        Ok(self
+            .clip_model
+            .forward(x)
+            .expect("Error running Clip forward"))
     }
 
-    async fn forward_mut(&mut self, x: &Tensor, index_pos: usize, block_idx: usize, ctx: &mut Context) -> anyhow::Result<Tensor> {
+    async fn forward_mut(
+        &mut self,
+        x: &Tensor,
+        index_pos: usize,
+        block_idx: usize,
+        ctx: &mut Context,
+    ) -> anyhow::Result<Tensor> {
         self.forward(x, index_pos, block_idx, ctx).await
     }
 
@@ -83,12 +98,14 @@ impl Clip {
         device: &Device,
         dtype: DType,
         cache_dir: String,
-        config: &stable_diffusion::clip::Config) -> anyhow::Result<Box<Self>>
+        config: &stable_diffusion::clip::Config,
+    ) -> anyhow::Result<Box<Self>>
     where
-        Self: Sized
+        Self: Sized,
     {
         let clip_weights = model_file.get(name, version, use_f16, cache_dir)?;
-        let clip_model = stable_diffusion::build_clip_transformer(config, clip_weights, device, dtype)?;
+        let clip_model =
+            stable_diffusion::build_clip_transformer(config, clip_weights, device, dtype)?;
         let layer_name = model_file.name();
 
         info!("Loading Clip model: {layer_name}");

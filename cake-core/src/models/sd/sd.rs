@@ -1,20 +1,20 @@
-use hf_hub::Cache;
-use tokenizers::Tokenizer;
 use crate::cake::{Context, Forwarder};
-use anyhow::{Error as E, Result};
-use async_trait::async_trait;
-use candle_core::{D, Device, DType, IndexOp, Tensor};
-use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
-use hf_hub::api::sync::ApiBuilder;
-use image::{ImageBuffer, Rgb};
-use crate::models::{Generator, ImageGenerator};
-use crate::{ImageGenerationArgs, SDArgs, StableDiffusionVersion};
 use crate::models::sd::clip::Clip;
 use crate::models::sd::safe_scheduler::SafeScheduler;
 use crate::models::sd::sd_shardable::SDShardable;
 use crate::models::sd::unet::UNet;
 use crate::models::sd::vae::VAE;
+use crate::models::{Generator, ImageGenerator};
+use crate::{ImageGenerationArgs, SDArgs, StableDiffusionVersion};
+use anyhow::{Error as E, Result};
+use async_trait::async_trait;
+use candle_core::{DType, Device, IndexOp, Tensor, D};
+use candle_transformers::models::stable_diffusion::StableDiffusionConfig;
+use hf_hub::api::sync::ApiBuilder;
+use hf_hub::Cache;
+use image::{ImageBuffer, Rgb};
 use log::{debug, info};
+use tokenizers::Tokenizer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelFile {
@@ -32,7 +32,7 @@ impl ModelFile {
         filename: Option<String>,
         version: StableDiffusionVersion,
         use_f16: bool,
-        cache_dir: String
+        cache_dir: String,
     ) -> Result<std::path::PathBuf> {
         match filename {
             Some(filename) => Ok(std::path::PathBuf::from(filename)),
@@ -80,8 +80,7 @@ impl ModelFile {
                 debug!("Model cache dir: {:?}", cache_path);
 
                 let cache = Cache::new(cache_path);
-                let api = ApiBuilder::from_cache(cache)
-                    .build()?;
+                let api = ApiBuilder::from_cache(cache).build()?;
 
                 let filename = api.model(repo.to_string()).get(path)?;
                 Ok(filename)
@@ -112,7 +111,7 @@ pub struct SD {
     unet: Box<dyn Forwarder>,
     sd_version: StableDiffusionVersion,
     sd_config: StableDiffusionConfig,
-    context: Context
+    context: Context,
 }
 
 #[async_trait]
@@ -121,7 +120,6 @@ impl Generator for SD {
     const MODEL_NAME: &'static str = "stable-diffusion";
 
     async fn load(context: &mut Context) -> Result<Option<Box<Self>>> {
-
         let SDArgs {
             tokenizer,
             tokenizer_2,
@@ -148,16 +146,21 @@ impl Generator for SD {
             StableDiffusionVersion::Xl => {
                 StableDiffusionConfig::sdxl(*sliced_attention_size, *height, *width)
             }
-            StableDiffusionVersion::Turbo => StableDiffusionConfig::sdxl_turbo(
-                *sliced_attention_size, *height, *width
-            ),
+            StableDiffusionVersion::Turbo => {
+                StableDiffusionConfig::sdxl_turbo(*sliced_attention_size, *height, *width)
+            }
         };
 
         // Tokenizer
         info!("Loading the Tokenizer...");
 
         let tokenizer_file = ModelFile::Tokenizer;
-        let tokenizer = tokenizer_file.get(tokenizer.clone(), *sd_version, *use_f16, context.args.model.clone())?;
+        let tokenizer = tokenizer_file.get(
+            tokenizer.clone(),
+            *sd_version,
+            *use_f16,
+            context.args.model.clone(),
+        )?;
         let tokenizer = Tokenizer::from_file(tokenizer).map_err(E::msg)?;
 
         let pad_id = match &sd_config.clip.pad_with {
@@ -173,16 +176,22 @@ impl Generator for SD {
         let mut pad_id_2: Option<u32> = None;
 
         if let StableDiffusionVersion::Xl | StableDiffusionVersion::Turbo = sd_version {
-
             info!("Loading the Tokenizer 2...");
 
             let tokenizer_2_file = ModelFile::Tokenizer2;
-            let tokenizer_2 = tokenizer_2_file.get(tokenizer_2.clone(), *sd_version, *use_f16, context.args.model.clone())?;
+            let tokenizer_2 = tokenizer_2_file.get(
+                tokenizer_2.clone(),
+                *sd_version,
+                *use_f16,
+                context.args.model.clone(),
+            )?;
             let tokenizer_2 = Tokenizer::from_file(tokenizer_2).map_err(E::msg)?;
 
             if let Some(clip2) = &sd_config.clip2 {
                 pad_id_2 = match &clip2.pad_with {
-                    Some(padding) => Some(*tokenizer_2.get_vocab(true).get(padding.as_str()).unwrap()),
+                    Some(padding) => {
+                        Some(*tokenizer_2.get_vocab(true).get(padding.as_str()).unwrap())
+                    }
                     None => Some(*tokenizer_2.get_vocab(true).get("<|endoftext|>").unwrap()),
                 };
             }
@@ -197,11 +206,16 @@ impl Generator for SD {
 
         let text_model: Box<dyn Forwarder>;
 
-        if let Some((node_name, node)) = context.topology.get_node_for_layer(ModelFile::Clip.name()) {
+        if let Some((node_name, node)) = context.topology.get_node_for_layer(ModelFile::Clip.name())
+        {
             info!("node {node_name} will serve Clip");
             text_model = Box::new(
-                crate::cake::Client::new(context.device.clone(), &node.host, ModelFile::Clip.name())
-                    .await?,
+                crate::cake::Client::new(
+                    context.device.clone(),
+                    &node.host,
+                    ModelFile::Clip.name(),
+                )
+                .await?,
             );
         } else {
             info!("Clip will be served locally");
@@ -213,7 +227,7 @@ impl Generator for SD {
                 &context.device,
                 context.dtype,
                 context.args.model.clone(),
-                &sd_config.clip
+                &sd_config.clip,
             )?;
         }
 
@@ -223,14 +237,19 @@ impl Generator for SD {
 
         let mut text_model_2: Option<Box<dyn Forwarder>> = None;
         if let StableDiffusionVersion::Xl | StableDiffusionVersion::Turbo = sd_version {
-
             info!("Loading the Clip 2 text model.");
 
-            if let Some((node_name, node)) = context.topology.get_node_for_layer(ModelFile::Clip2.name()) {
+            if let Some((node_name, node)) =
+                context.topology.get_node_for_layer(ModelFile::Clip2.name())
+            {
                 info!("node {node_name} will serve clip2");
                 text_model_2 = Some(Box::new(
-                    crate::cake::Client::new(context.device.clone(), &node.host, ModelFile::Clip2.name())
-                        .await?,
+                    crate::cake::Client::new(
+                        context.device.clone(),
+                        &node.host,
+                        ModelFile::Clip2.name(),
+                    )
+                    .await?,
                 ));
             } else {
                 info!("Clip 2 will be served locally");
@@ -242,7 +261,7 @@ impl Generator for SD {
                     &context.device,
                     context.dtype,
                     context.args.model.clone(),
-                    sd_config.clip2.as_ref().unwrap()
+                    sd_config.clip2.as_ref().unwrap(),
                 )?);
             }
 
@@ -254,7 +273,8 @@ impl Generator for SD {
 
         let vae_model: Box<dyn Forwarder>;
 
-        if let Some((node_name, node)) = context.topology.get_node_for_layer(ModelFile::Vae.name()) {
+        if let Some((node_name, node)) = context.topology.get_node_for_layer(ModelFile::Vae.name())
+        {
             info!("node {node_name} will serve VAE");
             vae_model = Box::new(
                 crate::cake::Client::new(context.device.clone(), &node.host, ModelFile::Vae.name())
@@ -279,11 +299,16 @@ impl Generator for SD {
         info!("Loading the UNet.");
 
         let unet_model: Box<dyn Forwarder>;
-        if let Some((node_name, node)) = context.topology.get_node_for_layer(ModelFile::Unet.name()) {
+        if let Some((node_name, node)) = context.topology.get_node_for_layer(ModelFile::Unet.name())
+        {
             info!("node {node_name} will serve UNet");
             unet_model = Box::new(
-                crate::cake::Client::new(context.device.clone(), &node.host, ModelFile::Unet.name())
-                    .await?,
+                crate::cake::Client::new(
+                    context.device.clone(),
+                    &node.host,
+                    ModelFile::Unet.name(),
+                )
+                .await?,
             );
         } else {
             info!("UNet will be served locally");
@@ -319,7 +344,11 @@ impl Generator for SD {
 
 #[async_trait]
 impl ImageGenerator for SD {
-    async fn generate_image<F>(&mut self, args: &ImageGenerationArgs, mut callback: F) -> Result<(), anyhow::Error>
+    async fn generate_image<F>(
+        &mut self,
+        args: &ImageGenerationArgs,
+        mut callback: F,
+    ) -> Result<(), anyhow::Error>
     where
         F: FnMut(Vec<ImageBuffer<Rgb<u8>, Vec<u8>>>) + Send + 'static,
     {
@@ -381,22 +410,16 @@ impl ImageGenerator for SD {
 
         let mut text_embeddings: Vec<Tensor> = Vec::new();
 
-        let text_embeddings_1 = self.text_embeddings(
-            &image_prompt,
-            &uncond_prompt,
-            use_guide_scale,
-            true
-        ).await?;
+        let text_embeddings_1 = self
+            .text_embeddings(&image_prompt, &uncond_prompt, use_guide_scale, true)
+            .await?;
 
         text_embeddings.push(text_embeddings_1);
 
         if let StableDiffusionVersion::Xl | StableDiffusionVersion::Turbo = sd_version {
-            let text_embeddings_2 = self.text_embeddings(
-                &image_prompt,
-                &uncond_prompt,
-                use_guide_scale,
-                false
-            ).await?;
+            let text_embeddings_2 = self
+                .text_embeddings(&image_prompt, &uncond_prompt, use_guide_scale, false)
+                .await?;
 
             text_embeddings.push(text_embeddings_2);
         }
@@ -426,20 +449,21 @@ impl ImageGenerator for SD {
             StableDiffusionVersion::Turbo => 0.13025,
         };
 
-        let safe_scheduler = SafeScheduler{
-            scheduler: self.sd_config.build_scheduler(*n_steps)?
+        let safe_scheduler = SafeScheduler {
+            scheduler: self.sd_config.build_scheduler(*n_steps)?,
         };
 
         for idx in 0..(*num_samples) {
-
             let timesteps = safe_scheduler.scheduler.timesteps();
             let latents = match &init_latent_dist_sample {
-
                 Some(init_latent_dist) => {
-                    let latents = (init_latent_dist * vae_scale)?.to_device(&self.context.device)?;
+                    let latents =
+                        (init_latent_dist * vae_scale)?.to_device(&self.context.device)?;
                     if t_start < timesteps.len() {
                         let noise = latents.randn_like(0f64, 1f64)?;
-                        safe_scheduler.scheduler.add_noise(&latents, noise, timesteps[t_start])?
+                        safe_scheduler
+                            .scheduler
+                            .add_noise(&latents, noise, timesteps[t_start])?
                     } else {
                         latents
                     }
@@ -449,7 +473,12 @@ impl ImageGenerator for SD {
                     let latents = Tensor::randn(
                         0f32,
                         1f32,
-                        (*bsize, 4, self.sd_config.height / 8, self.sd_config.width / 8),
+                        (
+                            *bsize,
+                            4,
+                            self.sd_config.height / 8,
+                            self.sd_config.width / 8,
+                        ),
                         &&self.context.device,
                     )?;
                     // scale the initial noise by the standard deviation required by the scheduler
@@ -462,7 +491,6 @@ impl ImageGenerator for SD {
             debug!("Starting sampling...");
 
             for (timestep_index, &timestep) in timesteps.iter().enumerate() {
-
                 if timestep_index < t_start {
                     continue;
                 }
@@ -473,7 +501,9 @@ impl ImageGenerator for SD {
                     latents.clone()
                 };
 
-                let latent_model_input = safe_scheduler.scheduler.scale_model_input(latent_model_input, timestep)?;
+                let latent_model_input = safe_scheduler
+                    .scheduler
+                    .scale_model_input(latent_model_input, timestep)?;
 
                 debug!("UNet forwarding...");
 
@@ -482,32 +512,36 @@ impl ImageGenerator for SD {
                     latent_model_input,
                     text_embeddings.clone(),
                     timestep,
-                    &mut self.context
-                ).await?;
+                    &mut self.context,
+                )
+                .await?;
 
                 debug!("UNet forwarding completed!");
 
                 let noise_pred = if use_guide_scale {
-
                     debug!("Applying guidance scale...");
-                    
+
                     let noise_pred = noise_pred.chunk(2, 0)?;
                     let (noise_pred_uncond, noise_pred_text) = (&noise_pred[0], &noise_pred[1]);
 
-                    (noise_pred_uncond + ((noise_pred_text - noise_pred_uncond)? * *guidance_scale)?)?
+                    (noise_pred_uncond
+                        + ((noise_pred_text - noise_pred_uncond)? * *guidance_scale)?)?
                 } else {
                     noise_pred
                 };
 
                 debug!("Scheduler stepping...");
-                
-                latents = safe_scheduler.scheduler.step(&noise_pred, timestep, &latents)?;
-                
+
+                latents = safe_scheduler
+                    .scheduler
+                    .step(&noise_pred, timestep, &latents)?;
+
                 let dt = start_time.elapsed().as_secs_f32();
                 info!("step {}/{n_steps} done, {:.2}s", timestep_index + 1, dt);
-                
-                if *intermediary_images != 0 && timestep_index % *intermediary_images == 0{
-                    let intermediary_batched_images = self.split_images(&latents, vae_scale, *bsize).await?;
+
+                if *intermediary_images != 0 && timestep_index % *intermediary_images == 0 {
+                    let intermediary_batched_images =
+                        self.split_images(&latents, vae_scale, *bsize).await?;
                     callback(intermediary_batched_images);
                 }
             }
@@ -518,11 +552,7 @@ impl ImageGenerator for SD {
                 num_samples
             );
 
-            let batched_images = self.split_images(
-                &latents,
-                vae_scale,
-                *bsize,
-            ).await?;
+            let batched_images = self.split_images(&latents, vae_scale, *bsize).await?;
 
             callback(batched_images);
         }
@@ -538,7 +568,6 @@ impl SD {
         vae_scale: f64,
         bsize: usize,
     ) -> Result<Vec<ImageBuffer<image::Rgb<u8>, Vec<u8>>>> {
-
         let mut images_vec = Vec::new();
 
         let scaled = (latents / vae_scale)?;
@@ -558,20 +587,19 @@ impl SD {
                 match ImageBuffer::from_raw(width as u32, height as u32, pixels) {
                     Some(image) => image,
                     None => anyhow::bail!("Error splitting images"),
-            };
+                };
             images_vec.push(image)
         }
         Ok(images_vec)
     }
 
     async fn text_embeddings(
-        & mut self,
+        &mut self,
         prompt: &str,
         uncond_prompt: &str,
         use_guide_scale: bool,
         first: bool,
     ) -> Result<Tensor> {
-
         let tokenizer;
         let text_model;
         let pad_id;
@@ -586,7 +614,12 @@ impl SD {
             tokenizer = self.tokenizer_2.as_ref().unwrap();
             text_model = self.text_model_2.as_mut().unwrap();
             pad_id = self.pad_id_2.unwrap();
-            max_token_embeddings = self.sd_config.clip2.as_ref().unwrap().max_position_embeddings;
+            max_token_embeddings = self
+                .sd_config
+                .clip2
+                .as_ref()
+                .unwrap()
+                .max_position_embeddings;
         }
 
         info!("Running with prompt \"{prompt}\".");
@@ -611,7 +644,9 @@ impl SD {
 
         let tokens = Tensor::new(tokens.as_slice(), &&self.context.device)?.unsqueeze(0)?;
 
-        let text_embeddings = text_model.forward_mut(&tokens, 0, 0, &mut self.context).await?;
+        let text_embeddings = text_model
+            .forward_mut(&tokens, 0, 0, &mut self.context)
+            .await?;
 
         let text_embeddings = if use_guide_scale {
             let mut uncond_tokens = tokenizer
@@ -630,10 +665,13 @@ impl SD {
                 uncond_tokens.push(pad_id)
             }
 
-            let uncond_tokens = Tensor::new(uncond_tokens.as_slice(), &&self.context.device)?.unsqueeze(0)?;
+            let uncond_tokens =
+                Tensor::new(uncond_tokens.as_slice(), &&self.context.device)?.unsqueeze(0)?;
 
             info!("Clip forwarding...");
-            let uncond_embeddings = text_model.forward_mut(&uncond_tokens, 0, 0, &mut self.context).await?;
+            let uncond_embeddings = text_model
+                .forward_mut(&uncond_tokens, 0, 0, &mut self.context)
+                .await?;
 
             Tensor::cat(&[uncond_embeddings, text_embeddings], 0)?.to_dtype(self.context.dtype)?
         } else {

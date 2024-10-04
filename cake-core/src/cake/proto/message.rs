@@ -78,6 +78,8 @@ pub enum Message {
     },
     /// A message to transmit tensors.
     Tensor(RawTensor),
+    /// Last message sent.
+    Goodbye,
 }
 
 #[inline]
