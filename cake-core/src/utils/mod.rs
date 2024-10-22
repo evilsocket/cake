@@ -1,6 +1,6 @@
 //! Utility functions and abstractions.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use candle_core::{
     utils::{cuda_is_available, metal_is_available},
@@ -29,12 +29,9 @@ pub fn get_inference_device(force_cpu: bool, ordinal: usize) -> Result<Device> {
     }
 }
 
-pub fn load_safetensors_from_model(
-    tensors_index_json_filename: PathBuf,
-) -> Result<Vec<std::path::PathBuf>> {
+pub fn load_safetensors_from_model(path: &Path) -> Result<Vec<std::path::PathBuf>> {
     log::info!("loading tensors from {} ...", "model.safetensors");
-    let parent_dir = tensors_index_json_filename.parent().unwrap();
-    let result = vec![parent_dir.join("model.safetensors")];
+    let result = vec![path.join("model.safetensors")];
     Ok(result)
 }
 
@@ -87,13 +84,11 @@ pub fn load_var_builder_from_index<'a>(
     dtype: DType,
     device: Device,
 ) -> Result<VarBuilder<'a>> {
-    log::info!("loading tensors in {}", tensor_index.display());
-
     let filenames: Vec<std::path::PathBuf> = if tensor_index.exists() {
         load_safetensors_paths_from_index(tensor_index)
             .map_err(|e| anyhow!("can't load tensors index: {:?}", e))?
     } else {
-        load_safetensors_from_model(tensor_index)
+        load_safetensors_from_model(tensor_index.parent().unwrap())
             .map_err(|e| anyhow!("can't load tensors index: {:?}", e))?
     };
 
