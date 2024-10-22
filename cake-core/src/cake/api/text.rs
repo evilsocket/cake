@@ -1,12 +1,12 @@
-use std::io::Write;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
-use actix_web::{HttpRequest, HttpResponse, Responder, web};
-use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
 use crate::cake::Master;
 use crate::models::chat::Message;
 use crate::models::{ImageGenerator, TextGenerator};
+use actix_web::{web, HttpRequest, HttpResponse, Responder};
+use serde::{Deserialize, Serialize};
+use std::io::Write;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::RwLock;
 
 #[derive(Deserialize)]
 pub struct ChatRequest {

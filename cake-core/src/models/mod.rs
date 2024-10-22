@@ -38,7 +38,6 @@ impl std::fmt::Display for Token {
 /// A model must implement this trait in order to be usable by the Cake framework.
 #[async_trait]
 pub trait Generator {
-
     /// This associated type determines which part of the model can be sharded.
     type Shardable: Forwarder;
 
@@ -51,7 +50,6 @@ pub trait Generator {
 
 #[async_trait]
 pub trait TextGenerator: Generator {
-
     /// Add a message to the chat.
     fn add_message(&mut self, message: Message) -> Result<()>;
     /// Clear chat history.
@@ -67,7 +65,11 @@ pub trait TextGenerator: Generator {
 
 #[async_trait]
 pub trait ImageGenerator: Generator {
-    async fn generate_image<F>(&mut self, args: &ImageGenerationArgs, mut callback: F) -> Result<(), anyhow::Error>
+    async fn generate_image<F>(
+        &mut self,
+        args: &ImageGenerationArgs,
+        mut callback: F,
+    ) -> Result<(), anyhow::Error>
     where
         F: FnMut(Vec<ImageBuffer<Rgb<u8>, Vec<u8>>>) + Send + 'static;
 }

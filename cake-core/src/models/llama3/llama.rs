@@ -5,12 +5,12 @@ use candle_nn::{linear_no_bias as linear, Embedding, Linear, Module, RmsNorm};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
 use tokenizers::Tokenizer;
 
+use super::{transformer::Transformer, History};
+use crate::models::TextGenerator;
 use crate::{
     cake::{Context, Forwarder},
     models::{chat::Message, Generator, Token},
 };
-use crate::models::TextGenerator;
-use super::{transformer::Transformer, History};
 
 /// Default end of stream token if not found in configuration.
 const DEFAULT_EOS_TOKEN: &str = "</s>";
@@ -24,7 +24,9 @@ fn load_tokenizer(ctx: &Context) -> Result<(Tokenizer, Option<u32>)> {
     let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(anyhow::Error::msg)?;
 
     let eos_token_id = ctx
-        .config.as_ref().expect("No config specified")
+        .config
+        .as_ref()
+        .expect("No config specified")
         .eos_token_id
         .or_else(|| tokenizer.token_to_id(DEFAULT_EOS_TOKEN));
 
@@ -166,14 +168,13 @@ impl LLama {
     }
 }
 
- #[async_trait]
+#[async_trait]
 impl Generator for LLama {
     type Shardable = Transformer;
     const MODEL_NAME: &'static str = "llama3";
 
     /// Load this model from the context.
     async fn load(ctx: &mut Context) -> Result<Option<Box<Self>>> {
-
         let config = ctx.config.as_ref().expect("No config specified");
         let var_builder = ctx.var_builder.as_ref().expect("No var_builder specified");
 
@@ -212,10 +213,7 @@ impl Generator for LLama {
                 ));
             } else {
                 log::debug!("{} will be served locally", &block_layer_name);
-                blocks.push(Transformer::load(
-                    block_layer_name.clone(),
-                    &ctx,
-                )?);
+                blocks.push(Transformer::load(block_layer_name.clone(), &ctx)?);
             }
         }
 
@@ -256,7 +254,6 @@ impl Generator for LLama {
 
 #[async_trait]
 impl TextGenerator for LLama {
-
     /// Add a message to the chat history.
     fn add_message(&mut self, message: Message) -> Result<()> {
         self.history.push(message);
@@ -296,7 +293,14 @@ impl TextGenerator for LLama {
         }
 
         let num_tokens = self.tokens.len();
-        let (context_size, context_index) = if self.ctx.cache.as_ref().expect("No cache specified").with_kv_cache() && index > 0 {
+        let (context_size, context_index) = if self
+            .ctx
+            .cache
+            .as_ref()
+            .expect("No cache specified")
+            .with_kv_cache()
+            && index > 0
+        {
             (1, self.index_pos)
         } else {
             (num_tokens, 0)

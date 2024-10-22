@@ -4,28 +4,38 @@ use crate::models::{chat::Message, ImageGenerator, TextGenerator};
 
 use super::{api, Context};
 
+use crate::{ImageGenerationArgs, ModelType};
 use anyhow::Result;
 use image::{ImageBuffer, Rgb};
-use crate::{ImageGenerationArgs, ModelType};
 
 /// A master connects to, communicates with and orchestrates the workers.
 pub struct Master<TG, IG> {
     pub ctx: Context,
     pub llm_model: Option<Box<TG>>,
-    pub sd_model: Option<Box<IG>>
+    pub sd_model: Option<Box<IG>>,
 }
 
-impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync + 'static> Master<TG, IG> {
+impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync + 'static>
+    Master<TG, IG>
+{
     /// Create a new instance.
     pub async fn new(mut ctx: Context) -> Result<Self> {
         match ctx.args.model_type {
             ModelType::ImageModel => {
                 let sd_model = IG::load(&mut ctx).await?;
-                Ok(Self { ctx, sd_model, llm_model: None })
-            },
+                Ok(Self {
+                    ctx,
+                    sd_model,
+                    llm_model: None,
+                })
+            }
             ModelType::TextModel => {
                 let llm_model = TG::load(&mut ctx).await?;
-                Ok(Self { ctx, llm_model, sd_model: None })
+                Ok(Self {
+                    ctx,
+                    llm_model,
+                    sd_model: None,
+                })
             }
         }
     }
@@ -37,7 +47,6 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
         } else {
             // if running in cli mode, pre add system and user prompts
             if self.ctx.args.model_type == ModelType::TextModel {
-
                 let llm_model = self.llm_model.as_mut().expect("LLM model not found");
                 llm_model.add_message(Message::system(self.ctx.args.system_prompt.clone()))?;
                 llm_model.add_message(Message::user(self.ctx.args.prompt.clone()))?;
@@ -56,15 +65,16 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
                 let mut step_num = 0;
 
                 self.generate_image(self.ctx.args.sd_img_gen_args.clone(), move |images| {
-
                     let mut batched_num = 0;
                     for image in images {
-                        image.save(format!("images/image_{}_{}.png", batched_num, step_num)).expect("Error saving image to disk");
-                        batched_num+=1;
+                        image
+                            .save(format!("images/image_{}_{}.png", batched_num, step_num))
+                            .expect("Error saving image to disk");
+                        batched_num += 1;
                     }
-                    step_num+=1;
-
-                }).await?;
+                    step_num += 1;
+                })
+                .await?;
             }
         }
 
@@ -73,7 +83,10 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
 
     /// Reset the master state for a new inference.
     pub fn reset(&mut self) -> Result<()> {
-        self.llm_model.as_mut().expect("LLM model not found").reset()
+        self.llm_model
+            .as_mut()
+            .expect("LLM model not found")
+            .reset()
     }
 
     /// clear worker kv cache
@@ -134,7 +147,7 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
 
     pub async fn generate_image<F>(&mut self, args: ImageGenerationArgs, callback: F) -> Result<()>
     where
-        F: FnMut(Vec<ImageBuffer<Rgb<u8>, Vec<u8>>>) + Send + 'static
+        F: FnMut(Vec<ImageBuffer<Rgb<u8>, Vec<u8>>>) + Send + 'static,
     {
         let sd_model = self.sd_model.as_mut().expect("SD model not found");
         sd_model.generate_image(&args, callback).await
