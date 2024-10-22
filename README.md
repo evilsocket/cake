@@ -86,7 +86,16 @@ cake-cli --model /path/to/Meta-Llama-3-8B \ # model path
          --topology topology.yml            # topology file
 ```
 
-Where `topology.yml` determines which layers are served by which worker (you can find a list of all the layers of a model in its [tensor index file](https://huggingface.co/meta-llama/Meta-Llama-3-70B/blob/main/model.safetensors.index.json)):
+You can also omit the topology file to load the entire model in a single instance of cake:
+
+```sh
+cake-cli --model /path/to/Meta-Llama-3-8B \ # model path
+         --api 0.0.0.0:8080                # API bind address
+```
+
+### Topology
+
+The `topology.yml` determines which layers are served by which worker (you can find a list of all the layers of a model in its [tensor index file](https://huggingface.co/meta-llama/Meta-Llama-3-70B/blob/main/model.safetensors.index.json)):
 
 ```yaml
 linux_server_1:

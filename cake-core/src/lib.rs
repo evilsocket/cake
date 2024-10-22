@@ -40,8 +40,8 @@ pub struct Args {
     #[arg(long, default_value = "./cake-data/Meta-Llama-3-8B/")]
     pub model: String,
     /// Topology file.
-    #[arg(long, default_value = "./cake-data/topology.yml")]
-    pub topology: String,
+    #[arg(long)]
+    pub topology: Option<String>,
     /// The initial prompt.
     #[arg(long, default_value = "The sky is blue because ")]
     pub prompt: String,

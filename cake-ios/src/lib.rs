@@ -25,7 +25,7 @@ pub fn start_worker(name: String, model_path: String, topology_path: String, mod
         mode: Mode::Worker,
         name: Some(name),
         model: model_path,
-        topology: topology_path,
+        topology: Some(topology_path),
         model_type: model_type_arg,
         ..Default::default()
     };

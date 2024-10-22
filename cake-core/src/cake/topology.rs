@@ -38,6 +38,11 @@ impl Node {
 pub struct Topology(HashMap<String, Node>);
 
 impl Topology {
+    /// Create a new empty topology.
+    pub fn new() -> Self {
+        Self(HashMap::new())
+    }
+
     /// Load the topology from a yaml file.
     pub fn from_path(path: &str, model_type: &ModelType) -> Result<Self> {
         log::info!("loading topology from {}", path);

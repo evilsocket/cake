@@ -74,7 +74,13 @@ impl Context {
         );
 
         let data_path = PathBuf::from(&args.model);
-        let topology = Topology::from_path(&args.topology, &args.model_type)?;
+
+        let topology = if let Some(path) = &args.topology {
+            Topology::from_path(path, &args.model_type)?
+        } else {
+            log::warn!("no topology file specified, the entire model will be loaded");
+            Topology::new()
+        };
 
         let mut config: Option<Config> = None;
         let mut cache: Option<Cache> = None;
