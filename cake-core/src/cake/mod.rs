@@ -74,6 +74,9 @@ impl Context {
         );
 
         let data_path = PathBuf::from(&args.model);
+        if !data_path.exists() {
+            bail!("model path does not exist: {}", data_path.display());
+        }
 
         let topology = if let Some(path) = &args.topology {
             Topology::from_path(path, &args.model_type)?
