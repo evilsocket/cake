@@ -91,6 +91,7 @@ where
         .unwrap();
 
     let response = ChatResponse::from_assistant_response(TG::MODEL_NAME.to_string(), resp);
+    master.goodbye().await.unwrap();
 
     HttpResponse::Ok().json(response)
 }

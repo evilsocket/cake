@@ -56,6 +56,8 @@ pub trait TextGenerator: Generator {
     fn add_message(&mut self, message: Message) -> Result<()>;
     /// Clear chat history.
     fn reset(&mut self) -> Result<()>;
+    /// clear worker kv cache
+    async fn goodbye(&mut self) -> Result<()>;
 
     /// Return the next token.
     async fn next_token(&mut self, index: usize) -> Result<Token>;
