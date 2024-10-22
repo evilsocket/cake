@@ -136,6 +136,10 @@ pub trait Forwarder: Debug + Send + Sync + Display {
         unimplemented!()
     }
 
+    async fn goodbye(&mut self) -> Result<()> {
+        unimplemented!()
+    }
+
     /// Return the layer name.
     fn layer_name(&self) -> &str;
 

@@ -76,6 +76,15 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
         self.llm_model.as_mut().expect("LLM model not found").reset()
     }
 
+    /// clear worker kv cache
+    pub async fn goodbye(&mut self) -> Result<()> {
+        self.llm_model
+            .as_mut()
+            .expect("LLM model not found")
+            .goodbye()
+            .await
+    }
+
     /// Start the generation loop and call the stream function for every token.
     pub async fn generate_text<S>(&mut self, mut stream: S) -> Result<()>
     where
@@ -88,7 +97,7 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
 
         log::debug!("  ctx.args.sample_len = {}", self.ctx.args.sample_len);
 
-        stream(&self.ctx.args.prompt);
+        // stream(&self.ctx.args.prompt);
 
         let mut start_gen = std::time::Instant::now();
         let llm_model = self.llm_model.as_mut().expect("LLM model not found");

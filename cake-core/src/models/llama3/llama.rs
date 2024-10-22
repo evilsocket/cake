@@ -273,6 +273,19 @@ impl TextGenerator for LLama {
         Ok(())
     }
 
+    async fn goodbye(&mut self) -> Result<()> {
+        let num_blocks = self.blocks.len();
+        let mut block_idx = 0;
+        while block_idx < num_blocks {
+            self.blocks[block_idx]
+                .goodbye()
+                .await
+                .map_err(|e| anyhow!("error in reset operation for block {block_idx}: {e}"))?;
+            block_idx += 1;
+        }
+        Ok(())
+    }
+
     /// Return the next token.
     async fn next_token(&mut self, index: usize) -> Result<Token> {
         log::trace!("model.next_token({index})");

@@ -208,6 +208,28 @@ impl<G: Generator + 'static> Worker<G> {
         while let Ok((read_time, read_size, op_message)) =
             Self::read_message_timed(&mut socket).await
         {
+            if matches!(op_message, Message::Goodbye) {
+                log::info!("[{}] goodbye", &client);
+                context
+                    .context
+                    .cache
+                    .as_mut()
+                    .expect("No cache specified")
+                    .clear();
+
+                // send info
+                if let Err(e) = Self::write_message_timed(
+                    &mut socket,
+                    Message::WorkerInfo(context.to_info(read_time.as_millis())),
+                )
+                .await
+                {
+                    return Err(anyhow!("[{}] could not send worker info: {:?}", &client, e));
+                }
+
+                continue;
+            }
+
             let (x, ops) = match op_message {
                 // single block operation
                 Message::SingleOp {
