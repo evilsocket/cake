@@ -50,10 +50,7 @@ impl<F: Forwarder> WorkerContext<F> {
 
     /// Create a copy of self with new kv-cache.
     fn get_client_context(&self) -> Self {
-        let cache = match &self.context.cache {
-            None => None,
-            Some(cache) => Some(cache.as_new()),
-        };
+        let cache = self.context.cache.as_ref().map(|cache| cache.as_new());
 
         let mut cloned_context = self.context.clone();
         cloned_context.cache = cache;
@@ -115,7 +112,7 @@ impl<G: Generator + 'static> Worker<G> {
                 );
             }
 
-            let block = G::Shardable::load(block_layer_name.to_string(), &ctx)?;
+            let block = G::Shardable::load(block_layer_name.to_string(), ctx)?;
 
             blocks.insert(block_layer_name.to_string(), block);
         }

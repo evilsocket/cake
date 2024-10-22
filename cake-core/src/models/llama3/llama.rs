@@ -213,7 +213,7 @@ impl Generator for LLama {
                 ));
             } else {
                 log::debug!("{} will be served locally", &block_layer_name);
-                blocks.push(Transformer::load(block_layer_name.clone(), &ctx)?);
+                blocks.push(Transformer::load(block_layer_name.clone(), ctx)?);
             }
         }
 
@@ -221,11 +221,11 @@ impl Generator for LLama {
             log::info!("  {}", block)
         }
 
-        let (tokenizer, eos_token_id) = load_tokenizer(&ctx)?;
+        let (tokenizer, eos_token_id) = load_tokenizer(ctx)?;
         let tokens = vec![];
         let history = History::new();
 
-        let logits_processor = create_logits_processor(&ctx);
+        let logits_processor = create_logits_processor(ctx);
         let index_pos = 0;
 
         log::info!(

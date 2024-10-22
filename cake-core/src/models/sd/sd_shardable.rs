@@ -82,10 +82,10 @@ impl Forwarder for SDShardable {
     }
 
     fn layer_name(&self) -> &str {
-        &*self.layer_name
+        &self.layer_name
     }
 
     fn ident(&self) -> &str {
-        &*self.layer_name
+        &self.layer_name
     }
 }

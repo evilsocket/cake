@@ -411,14 +411,14 @@ impl ImageGenerator for SD {
         let mut text_embeddings: Vec<Tensor> = Vec::new();
 
         let text_embeddings_1 = self
-            .text_embeddings(&image_prompt, &uncond_prompt, use_guide_scale, true)
+            .text_embeddings(image_prompt, uncond_prompt, use_guide_scale, true)
             .await?;
 
         text_embeddings.push(text_embeddings_1);
 
         if let StableDiffusionVersion::Xl | StableDiffusionVersion::Turbo = sd_version {
             let text_embeddings_2 = self
-                .text_embeddings(&image_prompt, &uncond_prompt, use_guide_scale, false)
+                .text_embeddings(image_prompt, uncond_prompt, use_guide_scale, false)
                 .await?;
 
             text_embeddings.push(text_embeddings_2);
@@ -479,7 +479,7 @@ impl ImageGenerator for SD {
                             self.sd_config.height / 8,
                             self.sd_config.width / 8,
                         ),
-                        &&self.context.device,
+                        &self.context.device,
                     )?;
                     // scale the initial noise by the standard deviation required by the scheduler
                     (latents * safe_scheduler.scheduler.init_noise_sigma())?
@@ -642,7 +642,7 @@ impl SD {
             tokens.push(pad_id)
         }
 
-        let tokens = Tensor::new(tokens.as_slice(), &&self.context.device)?.unsqueeze(0)?;
+        let tokens = Tensor::new(tokens.as_slice(), &self.context.device)?.unsqueeze(0)?;
 
         let text_embeddings = text_model
             .forward_mut(&tokens, 0, 0, &mut self.context)
@@ -666,7 +666,7 @@ impl SD {
             }
 
             let uncond_tokens =
-                Tensor::new(uncond_tokens.as_slice(), &&self.context.device)?.unsqueeze(0)?;
+                Tensor::new(uncond_tokens.as_slice(), &self.context.device)?.unsqueeze(0)?;
 
             info!("Clip forwarding...");
             let uncond_embeddings = text_model

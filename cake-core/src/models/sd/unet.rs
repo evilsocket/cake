@@ -53,7 +53,7 @@ impl Forwarder for UNet {
 
         let timestep_tensor = &unpacked_tensors[2];
         let timestep_vec = timestep_tensor.to_vec1()?;
-        let timestep_f32: &f32 = timestep_vec.get(0).expect("Error retrieving timestep");
+        let timestep_f32: &f32 = timestep_vec.first().expect("Error retrieving timestep");
 
         info!("UNet model forwarding...");
 
@@ -93,7 +93,7 @@ impl UNet {
         Self: Sized,
     {
         let unet_weights = ModelFile::Unet.get(name, version, use_f16, cache_dir)?;
-        let unet = config.build_unet(unet_weights, &device, 4, use_flash_attn, dtype)?;
+        let unet = config.build_unet(unet_weights, device, 4, use_flash_attn, dtype)?;
 
         info!("Loading UNet model...");
 
@@ -113,6 +113,6 @@ impl UNet {
         let tensors = Vec::from([latent_model_input, text_embeddings, timestep_tensor]);
 
         let combined_tensor = pack_tensors(tensors, &ctx.device)?;
-        Ok(forwarder.forward_mut(&combined_tensor, 0, 0, ctx).await?)
+        forwarder.forward_mut(&combined_tensor, 0, 0, ctx).await
     }
 }

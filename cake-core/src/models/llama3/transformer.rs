@@ -63,7 +63,7 @@ impl Forwarder for Transformer {
                 &x,
                 index_pos,
                 block_idx,
-                &mut ctx.cache.as_mut().expect("No cache specified"),
+                ctx.cache.as_mut().expect("No cache specified"),
             )
             .map_err(|e| anyhow!("attention: {e}"))?
             + residual)

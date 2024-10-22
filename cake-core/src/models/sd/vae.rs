@@ -52,8 +52,7 @@ impl Forwarder for VAE {
 
         let direction_tensor = &unpacked_tensors[0];
         let direction_vec = direction_tensor.to_vec1()?;
-        let direction_f32: f32 = *direction_vec
-            .get(0)
+        let direction_f32: f32 = *direction_vec.first()
             .expect("Error retrieving direction info");
 
         let input = &unpacked_tensors[1].to_dtype(ctx.dtype)?;
@@ -61,10 +60,10 @@ impl Forwarder for VAE {
         debug!("VAE tensors decoded.");
 
         if direction_f32 == 1.0 {
-            let dist = self.vae_model.encode(&input)?;
+            let dist = self.vae_model.encode(input)?;
             Ok(dist.sample()?)
         } else {
-            Ok(self.vae_model.decode(&input)?)
+            Ok(self.vae_model.decode(input)?)
         }
     }
 
@@ -113,7 +112,7 @@ impl VAE {
 
         let combined_tensor = pack_tensors(tensors, &ctx.device)?;
 
-        Ok(forwarder.forward_mut(&combined_tensor, 0, 0, ctx).await?)
+        forwarder.forward_mut(&combined_tensor, 0, 0, ctx).await
     }
 
     pub async fn decode(
