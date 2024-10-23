@@ -220,6 +220,37 @@ curl http://master-ip:8080/api/v1/image \                                       
 More control arguments could be found [inside the codes](./cake-core/src/lib.rs).
 
 
+## Using w/ Docker
+Splitting the Model:
+
+```sh
+docker run --rm -v /path/to/data:/data ghcr.io/evilsocket/cake \
+  cake-split-model --model-path /data/Meta-Llama-3-8B \   # source model to split
+                   --topology /data/topology.yml \        # topology file
+                   --output /data/output-folder-name      # output folder
+```
+
+Run a worker node:
+
+```sh
+docker run --rm --network host -v /path/to/data:/data ghcr.io/evilsocket/cake \
+  cake-cli --model /data/Meta-Llama-3-8B \    # model path
+           --mode worker \                    # run as worker
+           --name worker0 \                   # worker name in topology file
+           --topology /data/topology.yml \    # topology
+           --address 0.0.0.0:10128            # bind address
+```
+
+Run a master node with an OpenAI compatible REST API:
+
+```sh
+docker run --rm --network host -v /path/to/data:/data ghcr.io/evilsocket/cake \
+  cake-cli --model /data/Meta-Llama-3-8B \    # model path
+           --api 0.0.0.0:8080 \               # API bind address
+           --topology /data/topology.yml      # topology file
+```
+
+
 ## License
 
 Released under the GPL 3 license. To see the licenses of the project dependencies, install cargo license with `cargo install cargo-license` and then run `cargo license`.
