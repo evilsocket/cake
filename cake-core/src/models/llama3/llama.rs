@@ -186,11 +186,16 @@ impl Generator for LLama {
         )?;
 
         log::info!("loading lm_head ...");
-        let lm_head = linear(
-            config.hidden_size,
-            config.vocab_size,
-            var_builder.pp("lm_head"),
-        )?;
+
+        let lm_head = if config.tie_word_embeddings.unwrap_or(false) {
+            candle_nn::Linear::new(embedding.embeddings().clone(), None)
+        } else {
+            linear(
+                config.hidden_size,
+                config.vocab_size,
+                var_builder.pp("lm_head"),
+            )?
+        };
 
         log::info!("loading model.norm ...");
         let ln_f = candle_nn::rms_norm(
@@ -213,7 +218,10 @@ impl Generator for LLama {
                 ));
             } else {
                 log::debug!("{} will be served locally", &block_layer_name);
-                blocks.push(Transformer::load(block_layer_name.clone(), ctx)?);
+                blocks.push(
+                    Transformer::load(block_layer_name.clone(), ctx)
+                        .map_err(|e| anyhow!("error loading block {block_layer_name}: {e}"))?,
+                );
             }
         }
 

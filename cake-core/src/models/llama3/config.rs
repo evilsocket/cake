@@ -23,6 +23,10 @@ pub struct LlamaConfig {
     pub rope_theta: f32,
     pub bos_token_id: Option<u32>,
     pub eos_token_id: Option<u32>,
+    pub max_position_embeddings: Option<usize>,
+    pub tie_word_embeddings: Option<bool>,
+    pub rope_scaling: Option<RopeConfig>,
+    pub rope_type: Option<RopeType>,
 }
 
 impl LlamaConfig {
@@ -43,6 +47,7 @@ impl LlamaConfig {
 
     /// Return a generalized Config object.
     pub fn into_config(self) -> Config {
+        // TODO: this is retarded
         Config {
             hidden_size: self.hidden_size,
             intermediate_size: self.intermediate_size,
@@ -54,8 +59,31 @@ impl LlamaConfig {
             rope_theta: self.rope_theta,
             bos_token_id: self.bos_token_id,
             eos_token_id: self.eos_token_id,
+            max_position_embeddings: self.max_position_embeddings.unwrap_or(2048),
+            tie_word_embeddings: self.tie_word_embeddings,
+            rope_scaling: self.rope_scaling,
         }
     }
+}
+
+/// Rope scaling type.
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+pub enum RopeType {
+    #[serde(rename = "llama3")]
+    Llama3,
+    #[default]
+    #[serde(rename = "default")]
+    Default,
+}
+
+// Rope scaling configuration
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+pub struct RopeConfig {
+    pub factor: f32,
+    pub low_freq_factor: f32,
+    pub high_freq_factor: f32,
+    pub original_max_position_embeddings: usize,
+    pub rope_type: RopeType,
 }
 
 /// Generalized LLama/LLM configuration.
@@ -71,4 +99,7 @@ pub struct Config {
     pub rope_theta: f32,
     pub bos_token_id: Option<u32>,
     pub eos_token_id: Option<u32>,
+    pub rope_scaling: Option<RopeConfig>,
+    pub max_position_embeddings: usize,
+    pub tie_word_embeddings: Option<bool>,
 }
