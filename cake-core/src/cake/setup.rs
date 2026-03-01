@@ -406,12 +406,21 @@ async fn push_model_data(
             if total_size > MODEL_DATA_CHUNK_SIZE as u64 {
                 let elapsed = file_start.elapsed().as_secs_f64();
                 let speed = offset as f64 / elapsed;
+                let pct = (offset as f64 / total_size as f64) * 100.0;
+                let remaining = total_size - offset;
+                let eta_secs = if speed > 0.0 {
+                    remaining as f64 / speed
+                } else {
+                    0.0
+                };
                 log::info!(
-                    "[{}]   {}/{} — {}/s",
+                    "[{}]   {}/{} ({:.1}%) — {}/s — ETA {:.0}s",
                     worker_name,
                     human_bytes::human_bytes(offset as f64),
                     human_bytes::human_bytes(total_size as f64),
-                    human_bytes::human_bytes(speed)
+                    pct,
+                    human_bytes::human_bytes(speed),
+                    eta_secs
                 );
             }
         }
@@ -626,11 +635,20 @@ async fn receive_model_data(stream: &mut TcpStream, cache_dir: &Path) -> Result<
                     if let Some((_, _, ref start, _)) = current_file {
                         let elapsed = start.elapsed().as_secs_f64();
                         let speed = written as f64 / elapsed;
+                        let pct = (written as f64 / total_size as f64) * 100.0;
+                        let remaining = total_size - written;
+                        let eta_secs = if speed > 0.0 {
+                            remaining as f64 / speed
+                        } else {
+                            0.0
+                        };
                         log::info!(
-                            "  {}/{} — {}/s",
+                            "  {}/{} ({:.1}%) — {}/s — ETA {:.0}s",
                             human_bytes::human_bytes(written as f64),
                             human_bytes::human_bytes(total_size as f64),
-                            human_bytes::human_bytes(speed)
+                            pct,
+                            human_bytes::human_bytes(speed),
+                            eta_secs
                         );
                     }
                 }

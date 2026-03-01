@@ -3,6 +3,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod chat;
+
 use cake_core::{
     cake::{self, Context, Mode, Worker},
     utils, Args, ModelType, TextModelArch,
@@ -37,6 +39,12 @@ enum Commands {
     },
     /// List locally available models and their status
     Models,
+    /// Interactive chat with the cluster
+    Chat {
+        /// Master API endpoint
+        #[arg(long, default_value = "http://localhost:8086")]
+        server: String,
+    },
     /// Split a model into per-worker bundles
     Split {
         /// Input model path
@@ -94,6 +102,9 @@ async fn main() -> Result<()> {
                 println!("{} model(s) found.", models.len());
             }
             Ok(())
+        }
+        Commands::Chat { server } => {
+            chat::run(&server).await
         }
         Commands::Download { model } => {
             if utils::hf::looks_like_hf_repo(&model) {
