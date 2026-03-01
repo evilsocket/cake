@@ -51,6 +51,7 @@ struct LayerDetail {
 #[derive(Serialize)]
 struct TopologyResponse {
     model: String,
+    model_id: String,
     dtype: String,
     num_layers: usize,
     memory_bytes: u64,
@@ -155,6 +156,7 @@ where
 
     let response = TopologyResponse {
         model: TG::MODEL_NAME.to_string(),
+        model_id: ctx.args.model.clone(),
         dtype: format!("{:?}", ctx.dtype),
         num_layers,
         memory_bytes,

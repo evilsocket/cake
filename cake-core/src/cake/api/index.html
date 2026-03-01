@@ -89,6 +89,10 @@ nav .model-name {
     background: var(--color-surface-100);
     padding: 0.2rem 0.5rem;
     border-radius: 0.25rem;
+    max-width: 24rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 nav .nav-links { display: flex; gap: 1.5rem; margin-left: auto; }
@@ -118,52 +122,34 @@ nav .mem-info {
 .view { display: none; flex: 1; overflow: hidden; }
 .view.active { display: flex; flex-direction: column; }
 
-/* ── Cluster Tree ───────────────────────────── */
+/* ── Cluster Chain ─────────────────────────────── */
 #cluster { flex: 1; overflow: auto; }
 
 #cluster-tree {
     padding: 2rem;
     display: flex;
-    flex-direction: column;
-    align-items: center;
+    align-items: flex-start;
     gap: 0;
     min-height: 100%;
-}
-
-.model-root-card {
-    background: var(--color-surface-50);
-    border: 1px solid var(--color-surface-200);
-    border-radius: 1rem;
-    padding: 1rem 2rem;
-    text-align: center;
-}
-
-.model-root-card .model-title {
-    font-size: 1rem;
-    font-weight: 700;
-    font-family: var(--font-mono);
-    color: var(--color-surface-700);
-}
-
-.model-root-card .model-meta {
-    font-size: 0.75rem;
-    font-family: var(--font-mono);
-    color: var(--color-surface-400);
-    margin-top: 0.25rem;
-}
-
-.tree-connector {
-    width: 2px;
-    height: 1.5rem;
-    background: var(--color-surface-300);
-}
-
-.tree-nodes {
-    display: flex;
-    flex-wrap: wrap;
+    overflow-x: auto;
     justify-content: center;
-    gap: 1.5rem;
-    align-items: flex-start;
+}
+
+.chain-endpoint {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--color-surface-400);
+    flex-shrink: 0;
+    margin-top: 28px;
+}
+
+.chain-link {
+    flex-shrink: 0;
+    margin-top: 22px;
+    color: var(--color-surface-300);
+    display: flex;
+    align-items: center;
 }
 
 /* ── Node Card ──────────────────────────────── */
@@ -174,13 +160,14 @@ nav .mem-info {
     width: 360px;
     display: flex;
     flex-direction: column;
+    flex-shrink: 0;
 }
 
 .node-header {
     display: flex;
     align-items: center;
     gap: 0.75rem;
-    padding: 0.875rem 1rem;
+    padding: 0.75rem 1rem;
     border-bottom: 1px solid var(--color-surface-200);
 }
 
@@ -201,6 +188,9 @@ nav .mem-info {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
 }
 
 .node-badge {
@@ -246,16 +236,79 @@ nav .mem-info {
     transition: width 0.3s;
 }
 
-/* ── Model Group ────────────────────────────── */
+/* ── Model Group (expandable) ──────────────── */
+.model-group {}
+
 .model-group-header {
-    font-size: 0.6875rem;
-    font-family: var(--font-mono);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.1s;
+}
+
+.model-group-header:hover { background: var(--color-surface-100); }
+
+.model-group-header .chevron {
+    font-size: 0.5rem;
     color: var(--color-surface-400);
-    padding: 0.5rem 1rem 0.25rem;
-    letter-spacing: 0.02em;
+    transition: transform 0.15s;
+    width: 0.75rem;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.model-group-header .chevron.open { transform: rotate(90deg); }
+
+.model-group-name {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    color: var(--color-surface-600);
+    flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.model-ratio {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-shrink: 0;
+}
+
+.model-ratio-bar {
+    width: 48px;
+    height: 5px;
+    background: var(--color-surface-100);
+    border-radius: 2.5px;
+    overflow: hidden;
+}
+
+.model-ratio-fill {
+    height: 100%;
+    border-radius: 2.5px;
+}
+
+.model-ratio-text {
+    font-size: 0.625rem;
+    font-family: var(--font-mono);
+    color: var(--color-surface-400);
+    white-space: nowrap;
+}
+
+.model-group-content {
+    overflow: hidden;
+    max-height: 5000px;
+    transition: max-height 0.3s ease-out;
+}
+
+.model-group-content.collapsed {
+    max-height: 0;
 }
 
 /* ── Layer Item ─────────────────────────────── */
@@ -269,7 +322,7 @@ nav .mem-info {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    padding: 0.4rem 1rem;
+    padding: 0.35rem 1rem 0.35rem 1.75rem;
     cursor: pointer;
     user-select: none;
     transition: background 0.1s;
@@ -278,10 +331,10 @@ nav .mem-info {
 .layer-header:hover { background: var(--color-surface-100); }
 
 .layer-header .chevron {
-    font-size: 0.5rem;
+    font-size: 0.4375rem;
     color: var(--color-surface-400);
     transition: transform 0.15s;
-    width: 0.75rem;
+    width: 0.625rem;
     text-align: center;
     flex-shrink: 0;
 }
@@ -289,15 +342,15 @@ nav .mem-info {
 .layer-header .chevron.open { transform: rotate(90deg); }
 
 .layer-header .layer-label {
-    font-size: 0.8125rem;
+    font-size: 0.75rem;
     font-family: var(--font-mono);
-    color: var(--color-surface-600);
+    color: var(--color-surface-500);
     font-weight: 500;
 }
 
 .layer-header .layer-size {
     margin-left: auto;
-    font-size: 0.6875rem;
+    font-size: 0.625rem;
     font-family: var(--font-mono);
     color: var(--color-surface-400);
     flex-shrink: 0;
@@ -305,7 +358,7 @@ nav .mem-info {
 
 /* ── Tensor List ────────────────────────────── */
 .tensor-list {
-    padding: 0 1rem 0.25rem 2rem;
+    padding: 0 1rem 0.25rem 2.75rem;
     overflow: hidden;
     max-height: 2000px;
     transition: max-height 0.2s ease-out, padding 0.2s;
@@ -570,20 +623,6 @@ nav .mem-info {
         return (b / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + u[i];
     }
 
-    function layerRange(layers) {
-        if (!layers.length) return 'none';
-        const nums = layers.map(l => parseInt(l.replace('model.layers.', ''))).sort((a, b) => a - b);
-        if (nums.length === 1) return '' + nums[0];
-        const ranges = [];
-        let start = nums[0], end = nums[0];
-        for (let i = 1; i < nums.length; i++) {
-            if (nums[i] === end + 1) end = nums[i];
-            else { ranges.push(start === end ? '' + start : start + '-' + end); start = end = nums[i]; }
-        }
-        ranges.push(start === end ? '' + start : start + '-' + end);
-        return ranges.join(', ');
-    }
-
     function inferDevice(desc) {
         if (!desc) return 'cpu';
         const d = desc.toLowerCase();
@@ -592,81 +631,69 @@ nav .mem-info {
         return 'cpu';
     }
 
-    function osIconSVG(os, size) {
-        const s = size || 16;
-        let inner = '';
-        const o = (os || '').toLowerCase();
-        if (o === 'linux') {
-            // Tux penguin (simplified)
-            inner = '<path d="M0-8C-3-8-5-5-5-1C-5 2-4.5 4-3.5 6C-3 7-2 8-1 8.5L-1 9.5C-1 10 0 10 0 10C0 10 1 10 1 9.5L1 8.5C2 8 3 7 3.5 6C4.5 4 5 2 5-1C5-5 3-8 0-8Z" fill="#F5C518"/>'
-                  + '<circle cx="-1.8" cy="-3.5" r="0.8" fill="#333"/>'
-                  + '<circle cx="1.8" cy="-3.5" r="0.8" fill="#333"/>'
-                  + '<ellipse cx="0" cy="-1" rx="1.2" ry="0.6" fill="#E8A500"/>'
-                  + '<path d="M-2.5 1C-2.5 1-1.5 3 0 3C1.5 3 2.5 1 2.5 1" fill="none" stroke="#333" stroke-width="0.6"/>';
-        } else if (o === 'macos') {
-            // Apple logo
-            inner = '<path d="M0-7.5C-1-7.5-2.3-6.8-3.1-5.9-1.4-5.9-.4-6.9 0-7.5Z'
-                  + 'M3.5-4.5C3.3-4.3.8-2.8.8-.1.8 3.2 3.8 4.3 3.9 4.4 3.9 4.4 3.2 6.7 1.5 7.5'
-                  + '-.2 7.5-1.2 7.5-2.2 7.1-2.9 7.1-3.7 7.1-4.6 7.5-5.2 7.5-7-4.6-8.3-4.6-6.6'
-                  + '-8.3-5.5-8.3-4.4-7.4-.5-7.4.2-7.4.9-7.8 1.2-8 1.6-8.1 2.3-8.2 3.5-4.5Z" fill="#A2AAAD"/>';
-        } else if (o === 'windows') {
-            // Windows logo
-            inner = '<rect x="-8" y="-8" width="7.5" height="7.5" rx="0.5" fill="#0078D4"/>'
-                  + '<rect x="0.5" y="-8" width="7.5" height="7.5" rx="0.5" fill="#0078D4"/>'
-                  + '<rect x="-8" y="0.5" width="7.5" height="7.5" rx="0.5" fill="#0078D4"/>'
-                  + '<rect x="0.5" y="0.5" width="7.5" height="7.5" rx="0.5" fill="#0078D4"/>';
-        } else {
-            // Generic server icon
-            inner = '<rect x="-7" y="-8" width="14" height="6" rx="1.5" fill="none" stroke="#7C8DB0" stroke-width="1.2"/>'
-                  + '<circle cx="4" cy="-5" r="1" fill="#7C8DB0"/>'
-                  + '<rect x="-7" y="1" width="14" height="6" rx="1.5" fill="none" stroke="#7C8DB0" stroke-width="1.2"/>'
-                  + '<circle cx="4" cy="4" r="1" fill="#7C8DB0"/>';
-        }
-        return '<svg width="'+s+'" height="'+s+'" viewBox="-10 -10 20 20" style="vertical-align:middle">'+inner+'</svg>';
-    }
+    // ── SVG Icons (Simple Icons / Bootstrap Icons) ──
+    const SVG_PATHS = {
+        nvidia: 'M8.948 8.798v-1.43a6.7 6.7 0 0 1 .424-.018c3.922-.124 6.493 3.374 6.493 3.374s-2.774 3.851-5.75 3.851c-.398 0-.787-.062-1.158-.185v-4.346c1.528.185 1.837.857 2.747 2.385l2.04-1.714s-1.492-1.952-4-1.952a6.016 6.016 0 0 0-.796.035m0-4.735v2.138l.424-.027c5.45-.185 9.01 4.47 9.01 4.47s-4.08 4.964-8.33 4.964c-.37 0-.733-.035-1.095-.097v1.325c.3.035.61.062.91.062 3.957 0 6.82-2.023 9.593-4.408.459.371 2.34 1.263 2.73 1.652-2.633 2.208-8.772 3.984-12.253 3.984-.335 0-.653-.018-.971-.053v1.864H24V4.063zm0 10.326v1.131c-3.657-.654-4.673-4.46-4.673-4.46s1.758-1.944 4.673-2.262v1.237H8.94c-1.528-.186-2.73 1.245-2.73 1.245s.68 2.412 2.739 3.11M2.456 10.9s2.164-3.197 6.5-3.533V6.201C4.153 6.59 0 10.653 0 10.653s2.35 6.802 8.948 7.42v-1.237c-4.84-.6-6.492-5.936-6.492-5.936z',
+        apple: 'M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701',
+        windows: 'M0,0H11.377V11.372H0ZM12.623,0H24V11.372H12.623ZM0,12.623H11.377V24H0Zm12.623,0H24V24H12.623',
+        linux: 'M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 00-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.2 1.91.135 2.774.6.926.466 1.866.67 2.616.47.526-.116.97-.464 1.208-.946.587-.003 1.23-.269 2.26-.334.699-.058 1.574.267 2.577.2.025.134.063.198.114.333l.003.003c.391.778 1.113 1.132 1.884 1.071.771-.06 1.592-.536 2.257-1.306.631-.765 1.683-1.084 2.378-1.503.348-.199.629-.469.649-.853.023-.4-.2-.811-.714-1.376v-.097l-.003-.003c-.17-.2-.25-.535-.338-.926-.085-.401-.182-.786-.492-1.046h-.003c-.059-.054-.123-.067-.188-.135a.357.357 0 00-.19-.064c.431-1.278.264-2.55-.173-3.694-.533-1.41-1.465-2.638-2.175-3.483-.796-1.005-1.576-1.957-1.56-3.368.026-2.152.236-6.133-3.544-6.139z'
+    };
 
     function deviceIconSVG(device, size) {
-        const s = size || 48;
-        let inner = '';
+        const s = size || 36;
+        let path = '', color = '#7C8DB0', vb = '0 0 24 24';
         if (device === 'cuda') {
-            // NVIDIA stylized GPU icon
-            inner = '<rect x="-10" y="-7" width="20" height="14" rx="2" fill="none" stroke="#76B900" stroke-width="1.5"/>'
-                  + '<rect x="-7" y="-4.5" width="5" height="4" rx="0.5" fill="#76B900"/>'
-                  + '<rect x="-7" y="1" width="5" height="4" rx="0.5" fill="#76B900"/>'
-                  + '<rect x="0" y="-4.5" width="5" height="9.5" rx="0.5" fill="#76B900"/>'
-                  + '<line x1="-10" y1="-9" x2="-10" y2="-7" stroke="#76B900" stroke-width="1.2"/>'
-                  + '<line x1="-6" y1="-9" x2="-6" y2="-7" stroke="#76B900" stroke-width="1.2"/>'
-                  + '<line x1="-2" y1="-9" x2="-2" y2="-7" stroke="#76B900" stroke-width="1.2"/>'
-                  + '<line x1="2" y1="-9" x2="2" y2="-7" stroke="#76B900" stroke-width="1.2"/>'
-                  + '<line x1="6" y1="-9" x2="6" y2="-7" stroke="#76B900" stroke-width="1.2"/>'
-                  + '<line x1="10" y1="-9" x2="10" y2="-7" stroke="#76B900" stroke-width="1.2"/>'
-                  + '<line x1="-10" y1="7" x2="-10" y2="9" stroke="#76B900" stroke-width="1.2"/>'
-                  + '<line x1="-6" y1="7" x2="-6" y2="9" stroke="#76B900" stroke-width="1.2"/>'
-                  + '<line x1="-2" y1="7" x2="-2" y2="9" stroke="#76B900" stroke-width="1.2"/>'
-                  + '<line x1="2" y1="7" x2="2" y2="9" stroke="#76B900" stroke-width="1.2"/>'
-                  + '<line x1="6" y1="7" x2="6" y2="9" stroke="#76B900" stroke-width="1.2"/>'
-                  + '<line x1="10" y1="7" x2="10" y2="9" stroke="#76B900" stroke-width="1.2"/>';
+            path = SVG_PATHS.nvidia;
+            color = '#76B900';
         } else if (device === 'metal') {
-            // Apple logo
-            inner = '<path d="M0-9C-1.2-9-2.8-8.2-3.7-7.1-1.7-7.1-.5-8.3 0-9Z'
-                  + 'M4.2-5.4C4-5.2 1-3.4 1-.1 1 3.8 4.6 5.2 4.7 5.3 4.7 5.3 3.8 8.1 1.8 9'
-                  + '-0.2 9.1-1.4 9.1-2.6 8.5-3.5 8.5-4.5 8.5-5.5 9.1-6.2 9.1-8.4 9-10-5.5-10-3.1'
-                  + '-10-1.7-8.9-.6-8.9.3-8.9 1.1-9.4 1.5-9.6 1.9-9.7 2.8-9.9 4.2-5.4Z" fill="#A2AAAD"/>';
+            path = SVG_PATHS.apple;
+            color = '#cccccc';
         } else {
-            // CPU chip
-            inner = '<rect x="-7" y="-7" width="14" height="14" rx="2.5" fill="none" stroke="#7C8DB0" stroke-width="1.5"/>'
-                  + '<rect x="-4" y="-4" width="8" height="8" rx="1.5" fill="#7C8DB0"/>';
-            [-4, 0, 4].forEach(p => {
-                inner += '<line x1="'+p+'" y1="-7" x2="'+p+'" y2="-10" stroke="#7C8DB0" stroke-width="1.3"/>'
-                       + '<line x1="'+p+'" y1="7" x2="'+p+'" y2="10" stroke="#7C8DB0" stroke-width="1.3"/>'
-                       + '<line x1="-7" y1="'+p+'" x2="-10" y2="'+p+'" stroke="#7C8DB0" stroke-width="1.3"/>'
-                       + '<line x1="7" y1="'+p+'" x2="10" y2="'+p+'" stroke="#7C8DB0" stroke-width="1.3"/>';
-            });
+            // CPU chip (Bootstrap Icons)
+            vb = '0 0 16 16';
+            path = 'M5 0a.5.5 0 0 1 .5.5V2h1V.5a.5.5 0 0 1 1 0V2h1V.5a.5.5 0 0 1 1 0V2h1V.5a.5.5 0 0 1 1 0V2A2.5 2.5 0 0 1 14 4.5h1.5a.5.5 0 0 1 0 1H14v1h1.5a.5.5 0 0 1 0 1H14v1h1.5a.5.5 0 0 1 0 1H14v1h1.5a.5.5 0 0 1 0 1H14a2.5 2.5 0 0 1-2.5 2.5v1.5a.5.5 0 0 1-1 0V14h-1v1.5a.5.5 0 0 1-1 0V14h-1v1.5a.5.5 0 0 1-1 0V14h-1v1.5a.5.5 0 0 1-1 0V14A2.5 2.5 0 0 1 2 11.5H.5a.5.5 0 0 1 0-1H2v-1H.5a.5.5 0 0 1 0-1H2v-1H.5a.5.5 0 0 1 0-1H2v-1H.5a.5.5 0 0 1 0-1H2A2.5 2.5 0 0 1 4.5 2V.5A.5.5 0 0 1 5 0m-.5 3A1.5 1.5 0 0 0 3 4.5v7A1.5 1.5 0 0 0 4.5 13h7a1.5 1.5 0 0 0 1.5-1.5v-7A1.5 1.5 0 0 0 11.5 3zM5 6.5A1.5 1.5 0 0 1 6.5 5h3A1.5 1.5 0 0 1 11 6.5v3A1.5 1.5 0 0 1 9.5 11h-3A1.5 1.5 0 0 1 5 9.5zM6.5 6a.5.5 0 0 0-.5.5v3a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-3a.5.5 0 0 0-.5-.5z';
+            color = '#7C8DB0';
         }
-        return '<svg class="device-icon" width="'+s+'" height="'+s+'" viewBox="-12 -12 24 24">'+inner+'</svg>';
+        return '<svg class="device-icon" width="'+s+'" height="'+s+'" viewBox="'+vb+'"><path d="'+path+'" fill="'+color+'"/></svg>';
     }
 
-    // ── Cluster Tree ────────────────────────────
+    function osIconSVG(os, size) {
+        const s = size || 14;
+        const o = (os || '').toLowerCase();
+        let path = '', color = '#A2AAAD', vb = '0 0 24 24';
+        if (o === 'linux') {
+            path = SVG_PATHS.linux;
+            color = '#FCC624';
+        } else if (o === 'macos') {
+            path = SVG_PATHS.apple;
+            color = '#cccccc';
+        } else if (o === 'windows') {
+            path = SVG_PATHS.windows;
+            color = '#0078D4';
+        } else {
+            return '';
+        }
+        return '<svg width="'+s+'" height="'+s+'" viewBox="'+vb+'" style="vertical-align:middle;flex-shrink:0"><path d="'+path+'" fill="'+color+'"/></svg>';
+    }
+
+    // ── Chain helpers ────────────────────────────
+    function chainDot() {
+        return el('div', 'chain-endpoint');
+    }
+
+    function chainArrow() {
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('class', 'chain-link');
+        svg.setAttribute('width', '36');
+        svg.setAttribute('height', '12');
+        svg.setAttribute('viewBox', '0 0 36 12');
+        svg.innerHTML = '<line x1="0" y1="6" x2="28" y2="6" stroke="currentColor" stroke-width="1.5"/>'
+            + '<polygon points="28,1.5 36,6 28,10.5" fill="currentColor"/>';
+        return svg;
+    }
+
+    // ── Cluster Graph ───────────────────────────
+    let expandedModels = new Set();
     let expandedLayers = new Set();
 
     async function loadTopology() {
@@ -674,8 +701,10 @@ nav .mem-info {
             const resp = await fetch('/api/v1/topology');
             if (!resp.ok) return;
             const data = await resp.json();
-            document.getElementById('nav-model').textContent = data.model;
-            document.getElementById('nav-mem').textContent = humanBytes(data.memory_bytes);
+            const modelId = data.model_id || data.model;
+            document.getElementById('nav-model').textContent = modelId;
+            const totalGB = ((data.layer_size_bytes || 0) * data.num_layers / (1024*1024*1024)).toFixed(1);
+            document.getElementById('nav-mem').textContent = data.num_layers + ' layers \u00b7 ' + data.dtype + ' \u00b7 ' + totalGB + ' GiB';
             renderGraph(data);
         } catch (e) {
             console.error('topology fetch failed:', e);
@@ -685,7 +714,16 @@ nav .mem-info {
     function renderGraph(data) {
         const tree = document.getElementById('cluster-tree');
 
-        // Save expand state before re-render (collapsed by default)
+        // Save expand state before re-render
+        tree.querySelectorAll('.model-group').forEach(mg => {
+            const content = mg.querySelector('.model-group-content');
+            const nodeId = mg.dataset.nodeId;
+            if (nodeId && content && !content.classList.contains('collapsed')) {
+                expandedModels.add(nodeId);
+            } else if (nodeId) {
+                expandedModels.delete(nodeId);
+            }
+        });
         tree.querySelectorAll('.layer-item').forEach(item => {
             const tl = item.querySelector('.tensor-list');
             const name = item.dataset.layer;
@@ -697,16 +735,6 @@ nav .mem-info {
         });
 
         tree.innerHTML = '';
-        const layerBytes = data.layer_size_bytes || 0;
-        const totalModelGB = (layerBytes * data.num_layers / (1024*1024*1024)).toFixed(1);
-
-        // ── Model root card ──
-        const mc = el('div', 'model-root-card');
-        mc.innerHTML = '<div class="model-title">' + esc(data.model) + '</div>'
-            + '<div class="model-meta">' + data.num_layers + ' layers &middot; '
-            + esc(data.dtype) + ' &middot; ' + totalModelGB + ' GiB</div>';
-        tree.appendChild(mc);
-        tree.appendChild(el('div', 'tree-connector'));
 
         // ── Build all nodes ──
         const allNodes = [{
@@ -735,11 +763,14 @@ nav .mem-info {
         }
         allNodes.sort((a, b) => minLayerIdx(a.layers) - minLayerIdx(b.layers));
 
-        const nodesContainer = el('div', 'tree-nodes');
+        // ── Build chain: ● → [Node] → [Node] → ... → ● ──
+        tree.appendChild(chainDot());
         allNodes.forEach(node => {
-            nodesContainer.appendChild(buildNodeCard(node, data));
+            tree.appendChild(chainArrow());
+            tree.appendChild(buildNodeCard(node, data));
         });
-        tree.appendChild(nodesContainer);
+        tree.appendChild(chainArrow());
+        tree.appendChild(chainDot());
     }
 
     function buildNodeCard(node, data) {
@@ -750,18 +781,17 @@ nav .mem-info {
         const nodeGB = (usedBytes / (1024*1024*1024)).toFixed(1);
         const totalGB = (node.vram / (1024*1024*1024)).toFixed(1);
         const pct = (usageRatio * 100).toFixed(0);
-        const barColor = usageRatio > 0.85 ? 'var(--color-danger)'
-            : (node.isMaster ? 'var(--color-brand-500)' : 'var(--color-accent-500)');
+        const barColor = node.isMaster ? 'var(--color-brand-500)' : 'var(--color-accent-500)';
 
         // Header
         const header = el('div', 'node-header');
         const hostLine = node.hostname ? node.hostname : '';
-        const subLine = node.sub + (hostLine ? ' &middot; ' + esc(hostLine) : '');
-        const osIcon = node.os ? osIconSVG(node.os, 14) + ' ' : '';
-        header.innerHTML = deviceIconSVG(node.device, 42)
+        const subText = node.sub + (hostLine ? ' \u00b7 ' + esc(hostLine) : '');
+        const osIcon = node.os ? osIconSVG(node.os, 13) : '';
+        header.innerHTML = deviceIconSVG(node.device, 36)
             + '<div class="node-info">'
             + '<div class="node-name">' + esc(node.label) + '</div>'
-            + '<div class="node-sub">' + osIcon + subLine + '</div>'
+            + '<div class="node-sub">' + osIcon + '<span>' + subText + '</span></div>'
             + '</div>'
             + '<span class="node-badge ' + (node.isMaster ? 'master' : 'worker') + '">'
             + (node.isMaster ? 'Master' : 'Worker') + '</span>';
@@ -774,20 +804,52 @@ nav .mem-info {
             + '<div class="vram-bar"><div class="vram-bar-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div>';
         card.appendChild(vs);
 
-        // Model group
-        const mgh = el('div', 'model-group-header');
-        mgh.textContent = data.model;
-        card.appendChild(mgh);
+        // Model group (expandable)
+        const modelId = data.model_id || data.model;
+        const numLayersTotal = data.num_layers;
+        const numLayersNode = node.layers.length;
+        const modelRatio = numLayersTotal > 0 ? numLayersNode / numLayersTotal : 0;
+        const isModelExpanded = expandedModels.has(node.id);
 
-        // Layers
+        const modelGroup = el('div', 'model-group');
+        modelGroup.dataset.nodeId = node.id;
+
+        const modelHeader = el('div', 'model-group-header');
+        const modelChevron = el('span', 'chevron' + (isModelExpanded ? ' open' : ''));
+        modelChevron.innerHTML = '&#9654;';
+        const modelName = el('span', 'model-group-name');
+        modelName.textContent = modelId;
+        modelName.title = modelId;
+
+        const ratioDiv = el('div', 'model-ratio');
+        ratioDiv.innerHTML = '<div class="model-ratio-bar"><div class="model-ratio-fill" style="width:'
+            + (modelRatio * 100).toFixed(0) + '%;background:' + barColor + '"></div></div>'
+            + '<span class="model-ratio-text">' + numLayersNode + '/' + numLayersTotal + '</span>';
+
+        modelHeader.appendChild(modelChevron);
+        modelHeader.appendChild(modelName);
+        modelHeader.appendChild(ratioDiv);
+
+        const modelContent = el('div', 'model-group-content' + (isModelExpanded ? '' : ' collapsed'));
+
+        // Layers inside model content
         const sortedLayers = [...node.layers].sort((a, b) => {
             return parseInt(a.replace('model.layers.', '')) - parseInt(b.replace('model.layers.', ''));
         });
 
         sortedLayers.forEach(layerName => {
             const detail = data.layer_details ? data.layer_details[layerName] : null;
-            card.appendChild(buildLayerItem(layerName, detail, node));
+            modelContent.appendChild(buildLayerItem(layerName, detail, node));
         });
+
+        modelHeader.addEventListener('click', () => {
+            modelContent.classList.toggle('collapsed');
+            modelChevron.classList.toggle('open');
+        });
+
+        modelGroup.appendChild(modelHeader);
+        modelGroup.appendChild(modelContent);
+        card.appendChild(modelGroup);
 
         return card;
     }
@@ -817,7 +879,6 @@ nav .mem-info {
         const barColor = node.isMaster ? 'var(--color-brand-500)' : 'var(--color-accent-500)';
 
         if (detail && detail.tensors) {
-            // Find the largest tensor in this layer for proportional bars
             const maxBytes = Math.max(...detail.tensors.map(t => t.size_bytes), 1);
 
             detail.tensors.forEach(t => {
@@ -827,7 +888,7 @@ nav .mem-info {
                 const row = el('div', 'tensor-row');
                 const name = el('span', 'tensor-name');
                 name.textContent = t.short_name;
-                name.title = t.dtype + ' [' + t.shape.join(', ') + '] — ' + t.name;
+                name.title = t.dtype + ' [' + t.shape.join(', ') + '] \u2014 ' + t.name;
 
                 const sz = el('span', 'tensor-meta');
                 sz.textContent = humanBytes(t.size_bytes);
