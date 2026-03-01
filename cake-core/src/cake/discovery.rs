@@ -49,51 +49,63 @@ pub fn cluster_hash(cluster_key: &str) -> String {
     hex::encode(&result[..4])
 }
 
-/// Detect available GPUs on this system.
+/// Detect available compute devices on this system.
+///
+/// Only reports NVIDIA GPUs when the `cuda` feature is compiled in,
+/// and Metal on macOS when the `metal` feature is compiled in.
+/// Otherwise falls back to CPU with system RAM.
 pub fn detect_gpus() -> Vec<GpuInfo> {
-    // Try NVIDIA first
-    if let Ok(output) = std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=name,memory.total",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
+    // Only probe NVIDIA GPUs if built with CUDA support
+    #[cfg(feature = "cuda")]
     {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let gpus: Vec<GpuInfo> = stdout
-                .lines()
-                .filter_map(|line| {
-                    let parts: Vec<&str> = line.splitn(2, ',').collect();
-                    if parts.len() == 2 {
-                        let name = parts[0].trim().to_string();
-                        let vram_mb: u64 = parts[1].trim().parse().ok()?;
-                        Some(GpuInfo {
-                            name,
-                            vram_bytes: vram_mb * 1024 * 1024,
-                        })
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+        if let Ok(output) = std::process::Command::new("nvidia-smi")
+            .args([
+                "--query-gpu=name,memory.total",
+                "--format=csv,noheader,nounits",
+            ])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let gpus: Vec<GpuInfo> = stdout
+                    .lines()
+                    .filter_map(|line| {
+                        let parts: Vec<&str> = line.splitn(2, ',').collect();
+                        if parts.len() == 2 {
+                            let name = parts[0].trim().to_string();
+                            let vram_mb: u64 = parts[1].trim().parse().ok()?;
+                            Some(GpuInfo {
+                                name,
+                                vram_bytes: vram_mb * 1024 * 1024,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
 
-            if !gpus.is_empty() {
-                return gpus;
+                if !gpus.is_empty() {
+                    return gpus;
+                }
             }
         }
     }
 
-    // Fallback: report system memory as a single "CPU" or "Metal" device
-    let name = if cfg!(target_os = "macos") {
-        format!("Apple Silicon ({})", std::env::consts::ARCH)
-    } else {
-        format!("CPU ({})", std::env::consts::ARCH)
-    };
+    // Report Metal on macOS when built with metal support
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    {
+        let name = format!("Apple Silicon ({})", std::env::consts::ARCH);
+        let vram_bytes = detect_system_memory();
+        return vec![GpuInfo { name, vram_bytes }];
+    }
 
-    let vram_bytes = detect_system_memory();
-
-    vec![GpuInfo { name, vram_bytes }]
+    // Fallback: CPU with system RAM
+    #[allow(unreachable_code)]
+    {
+        let name = format!("CPU ({})", std::env::consts::ARCH);
+        let vram_bytes = detect_system_memory();
+        vec![GpuInfo { name, vram_bytes }]
+    }
 }
 
 /// Detect total system memory in bytes.
