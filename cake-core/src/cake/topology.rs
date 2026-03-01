@@ -24,6 +24,12 @@ pub struct Node {
     /// Approximate FP16 TFLOPS for this node.
     #[serde(default)]
     pub tflops: f64,
+    /// Hostname of the node.
+    #[serde(default)]
+    pub hostname: String,
+    /// Operating system (e.g. "linux", "macos", "windows").
+    #[serde(default)]
+    pub os: String,
 }
 
 impl Node {

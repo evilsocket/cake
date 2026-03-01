@@ -34,6 +34,8 @@ pub struct DiscoveredWorker {
     pub host: String,
     pub port: u16,
     pub gpus: Vec<GpuInfo>,
+    pub hostname: String,
+    pub os: String,
 }
 
 impl DiscoveredWorker {
@@ -158,6 +160,19 @@ pub fn detect_gpus() -> Vec<GpuInfo> {
     }
 }
 
+/// Detect the system hostname.
+pub fn detect_hostname() -> String {
+    if let Ok(output) = std::process::Command::new("hostname").output() {
+        if output.status.success() {
+            let h = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !h.is_empty() {
+                return h;
+            }
+        }
+    }
+    "unknown".to_string()
+}
+
 /// Detect total system memory in bytes.
 fn detect_system_memory() -> u64 {
     // On macOS, use sysctl for a reliable reading
@@ -214,6 +229,10 @@ struct DiscoveryResponse {
     worker_name: String,
     port: u16,
     gpus: Vec<GpuInfo>,
+    #[serde(default)]
+    hostname: String,
+    #[serde(default)]
+    os: String,
 }
 
 fn encode_packet(payload: &[u8]) -> Vec<u8> {
@@ -249,11 +268,14 @@ pub fn advertise_worker(
     gpus: &[GpuInfo],
 ) -> Result<DiscoveryListener> {
     let hash = cluster_hash(cluster_key);
+    let hostname = detect_hostname();
     let response = DiscoveryResponse {
         cluster_hash: hash.clone(),
         worker_name: worker_name.to_string(),
         port,
         gpus: gpus.to_vec(),
+        hostname,
+        os: std::env::consts::OS.to_string(),
     };
     let response_json = serde_json::to_vec(&response)?;
     let response_pkt = encode_packet(&response_json);
@@ -446,6 +468,8 @@ pub async fn discover_workers(
                                     host,
                                     port: resp.port,
                                     gpus: resp.gpus,
+                                    hostname: resp.hostname,
+                                    os: resp.os,
                                 });
                             }
                         }

@@ -66,6 +66,8 @@ struct MasterInfo {
     layers: Vec<String>,
     vram_bytes: u64,
     tflops: f64,
+    hostname: String,
+    os: String,
 }
 
 #[derive(Serialize)]
@@ -76,6 +78,8 @@ struct WorkerTopologyInfo {
     layers: Vec<String>,
     vram_bytes: u64,
     tflops: f64,
+    hostname: String,
+    os: String,
 }
 
 /// Return cluster topology as JSON.
@@ -120,6 +124,8 @@ where
             layers: node.layers.clone(),
             vram_bytes: node.vram_bytes,
             tflops: node.tflops,
+            hostname: node.hostname.clone(),
+            os: node.os.clone(),
         });
     }
 
@@ -158,6 +164,8 @@ where
             layers: master_layers,
             vram_bytes: master_vram,
             tflops: master_tflops,
+            hostname: discovery::detect_hostname(),
+            os: std::env::consts::OS.to_string(),
         },
         workers,
         layer_details,

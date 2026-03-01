@@ -592,6 +592,39 @@ nav .mem-info {
         return 'cpu';
     }
 
+    function osIconSVG(os, size) {
+        const s = size || 16;
+        let inner = '';
+        const o = (os || '').toLowerCase();
+        if (o === 'linux') {
+            // Tux penguin (simplified)
+            inner = '<path d="M0-8C-3-8-5-5-5-1C-5 2-4.5 4-3.5 6C-3 7-2 8-1 8.5L-1 9.5C-1 10 0 10 0 10C0 10 1 10 1 9.5L1 8.5C2 8 3 7 3.5 6C4.5 4 5 2 5-1C5-5 3-8 0-8Z" fill="#F5C518"/>'
+                  + '<circle cx="-1.8" cy="-3.5" r="0.8" fill="#333"/>'
+                  + '<circle cx="1.8" cy="-3.5" r="0.8" fill="#333"/>'
+                  + '<ellipse cx="0" cy="-1" rx="1.2" ry="0.6" fill="#E8A500"/>'
+                  + '<path d="M-2.5 1C-2.5 1-1.5 3 0 3C1.5 3 2.5 1 2.5 1" fill="none" stroke="#333" stroke-width="0.6"/>';
+        } else if (o === 'macos') {
+            // Apple logo
+            inner = '<path d="M0-7.5C-1-7.5-2.3-6.8-3.1-5.9-1.4-5.9-.4-6.9 0-7.5Z'
+                  + 'M3.5-4.5C3.3-4.3.8-2.8.8-.1.8 3.2 3.8 4.3 3.9 4.4 3.9 4.4 3.2 6.7 1.5 7.5'
+                  + '-.2 7.5-1.2 7.5-2.2 7.1-2.9 7.1-3.7 7.1-4.6 7.5-5.2 7.5-7-4.6-8.3-4.6-6.6'
+                  + '-8.3-5.5-8.3-4.4-7.4-.5-7.4.2-7.4.9-7.8 1.2-8 1.6-8.1 2.3-8.2 3.5-4.5Z" fill="#A2AAAD"/>';
+        } else if (o === 'windows') {
+            // Windows logo
+            inner = '<rect x="-8" y="-8" width="7.5" height="7.5" rx="0.5" fill="#0078D4"/>'
+                  + '<rect x="0.5" y="-8" width="7.5" height="7.5" rx="0.5" fill="#0078D4"/>'
+                  + '<rect x="-8" y="0.5" width="7.5" height="7.5" rx="0.5" fill="#0078D4"/>'
+                  + '<rect x="0.5" y="0.5" width="7.5" height="7.5" rx="0.5" fill="#0078D4"/>';
+        } else {
+            // Generic server icon
+            inner = '<rect x="-7" y="-8" width="14" height="6" rx="1.5" fill="none" stroke="#7C8DB0" stroke-width="1.2"/>'
+                  + '<circle cx="4" cy="-5" r="1" fill="#7C8DB0"/>'
+                  + '<rect x="-7" y="1" width="14" height="6" rx="1.5" fill="none" stroke="#7C8DB0" stroke-width="1.2"/>'
+                  + '<circle cx="4" cy="4" r="1" fill="#7C8DB0"/>';
+        }
+        return '<svg width="'+s+'" height="'+s+'" viewBox="-10 -10 20 20" style="vertical-align:middle">'+inner+'</svg>';
+    }
+
     function deviceIconSVG(device, size) {
         const s = size || 48;
         let inner = '';
@@ -680,14 +713,18 @@ nav .mem-info {
             id: 'master', label: 'master', device: inferDevice(data.master.device),
             layers: data.master.layers, isMaster: true,
             vram: data.master.vram_bytes || 0, tflops: data.master.tflops || 0,
-            sub: data.master.device
+            sub: data.master.device,
+            hostname: data.master.hostname || '',
+            os: data.master.os || ''
         }];
         data.workers.forEach(w => {
             allNodes.push({
                 id: w.name, label: w.name, device: inferDevice(w.description || w.host),
                 layers: w.layers, isMaster: false,
                 vram: w.vram_bytes || 0, tflops: w.tflops || 0,
-                sub: w.description || w.host
+                sub: w.description || w.host,
+                hostname: w.hostname || '',
+                os: w.os || ''
             });
         });
 
@@ -718,10 +755,13 @@ nav .mem-info {
 
         // Header
         const header = el('div', 'node-header');
+        const hostLine = node.hostname ? node.hostname : '';
+        const subLine = node.sub + (hostLine ? ' &middot; ' + esc(hostLine) : '');
+        const osIcon = node.os ? osIconSVG(node.os, 14) + ' ' : '';
         header.innerHTML = deviceIconSVG(node.device, 42)
             + '<div class="node-info">'
             + '<div class="node-name">' + esc(node.label) + '</div>'
-            + '<div class="node-sub">' + esc(node.sub) + '</div>'
+            + '<div class="node-sub">' + osIcon + subLine + '</div>'
             + '</div>'
             + '<span class="node-badge ' + (node.isMaster ? 'master' : 'worker') + '">'
             + (node.isMaster ? 'Master' : 'Worker') + '</span>';

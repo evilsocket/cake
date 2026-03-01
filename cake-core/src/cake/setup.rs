@@ -256,6 +256,8 @@ pub async fn master_setup(
                 layers: layers.clone(),
                 vram_bytes: worker.total_vram(),
                 tflops: worker.total_tflops(),
+                hostname: worker.hostname.clone(),
+                os: worker.os.clone(),
             },
         );
     }
@@ -443,9 +445,10 @@ pub async fn worker_setup(
     log::info!("detected {} GPU(s):", gpus.len());
     for gpu in &gpus {
         log::info!(
-            "  {} — {}",
+            "  {} — {} (~{:.1} TFLOPS)",
             &gpu.name,
-            human_bytes::human_bytes(gpu.vram_bytes as f64)
+            human_bytes::human_bytes(gpu.vram_bytes as f64),
+            gpu.tflops
         );
     }
 
