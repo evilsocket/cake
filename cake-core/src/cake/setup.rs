@@ -359,6 +359,33 @@ async fn push_model_data(
     Ok(())
 }
 
+/// Check whether a cache directory contains a valid model.
+fn has_valid_model_cache(cache_dir: &Path) -> bool {
+    if !cache_dir.join("config.json").exists() {
+        return false;
+    }
+    // Single safetensors file
+    if cache_dir.join("model.safetensors").exists() {
+        return true;
+    }
+    // Sharded model: need index + at least one shard
+    let index_path = cache_dir.join("model.safetensors.index.json");
+    if index_path.exists() {
+        if let Ok(data) = std::fs::read_to_string(&index_path) {
+            if let Ok(index) = serde_json::from_str::<serde_json::Value>(&data) {
+                if let Some(weight_map) = index.get("weight_map").and_then(|v| v.as_object()) {
+                    // Check that at least one referenced shard file exists
+                    return weight_map.values().any(|v| {
+                        v.as_str()
+                            .is_some_and(|f| cache_dir.join(f).exists())
+                    });
+                }
+            }
+        }
+    }
+    false
+}
+
 // ── Worker setup ────────────────────────────────────────────────────────────
 
 /// Run the zero-config worker setup.
@@ -425,8 +452,9 @@ pub async fn worker_setup(
     let cache_dir = model_cache_dir.join(&hash);
     std::fs::create_dir_all(&cache_dir)?;
 
-    // Check if we already have the model data cached
-    let needs_data = !cache_dir.join("config.json").exists();
+    // Check if we already have a valid model data cache.
+    // Needs config.json + either model.safetensors or the index + at least one shard.
+    let needs_data = !has_valid_model_cache(&cache_dir);
 
     let ack = Message::LayerAssignmentAck { needs_data };
     ack.to_writer(&mut stream).await?;

@@ -165,14 +165,10 @@ async fn main() -> Result<()> {
                 None
             };
 
+            // Drop the setup listener so Worker::new() can rebind the port
+            drop(listener_override);
             let mut ctx = Context::from_args(args)?;
-            let ret = if let Some(_listener) = listener_override {
-                // TODO: pass the pre-bound listener to Worker to avoid rebinding
-                // For now, the setup connection is dropped and Worker::new() rebinds
-                run_worker(&mut ctx).await
-            } else {
-                run_worker(&mut ctx).await
-            };
+            let ret = run_worker(&mut ctx).await;
             if ret.is_err() {
                 println!();
             }
