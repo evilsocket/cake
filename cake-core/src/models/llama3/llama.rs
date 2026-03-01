@@ -5,7 +5,7 @@ use candle_nn::{linear_no_bias as linear, Embedding, Linear, Module, RmsNorm};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
 use tokenizers::Tokenizer;
 
-use super::{transformer::Transformer, History};
+use super::{transformer::Transformer, EosTokenId, History};
 use crate::models::TextGenerator;
 use crate::{
     cake::{Context, Forwarder},
@@ -13,22 +13,26 @@ use crate::{
 };
 
 /// Default end of stream token if not found in configuration.
-const DEFAULT_EOS_TOKEN: &str = "</s>";
+const DEFAULT_EOS_TOKEN: &str = "<|eot_id|>";
 
-/// Load the tokenizer and return the first tokens from the prompt in context.
-fn load_tokenizer(ctx: &Context) -> Result<(Tokenizer, Option<u32>)> {
+/// Load the tokenizer and return the EOS token ID(s) from the context.
+fn load_tokenizer(ctx: &Context) -> Result<(Tokenizer, Option<EosTokenId>)> {
     let tokenizer_filename = ctx.data_path.join("tokenizer.json");
 
     log::info!("loading tokenizer from {}", tokenizer_filename.display());
 
     let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(anyhow::Error::msg)?;
 
-    let eos_token_id = ctx
-        .config
-        .as_ref()
-        .expect("No config specified")
-        .eos_token_id
-        .or_else(|| tokenizer.token_to_id(DEFAULT_EOS_TOKEN));
+    let config = ctx.config.as_ref().expect("No config specified");
+
+    let eos_token_id = if config.eos_token_id.is_some() {
+        config.eos_token_id.clone()
+    } else {
+        // Fallback: try to resolve from tokenizer vocabulary
+        tokenizer
+            .token_to_id(DEFAULT_EOS_TOKEN)
+            .map(EosTokenId::Single)
+    };
 
     Ok((tokenizer, eos_token_id))
 }
@@ -55,9 +59,10 @@ pub struct LLama {
 
     tokenizer: Tokenizer,
     embedding: Embedding,
-    eos_token_id: Option<u32>,
+    eos_token_id: Option<EosTokenId>,
     index_pos: usize,
     generated: usize,
+    prompt_len: usize,
 
     blocks: Vec<Box<dyn Forwarder>>,
 
@@ -164,6 +169,9 @@ impl LLama {
 
         log::debug!("history tokens: {}", self.tokens.len());
 
+        // Track prompt length for repeat penalty scoping
+        self.prompt_len = self.tokens.len();
+
         Ok(())
     }
 }
@@ -186,11 +194,16 @@ impl Generator for LLama {
         )?;
 
         log::info!("loading lm_head ...");
-        let lm_head = linear(
-            config.hidden_size,
-            config.vocab_size,
-            var_builder.pp("lm_head"),
-        )?;
+        let lm_head = if config.tie_word_embeddings {
+            log::info!("  using tied word embeddings (lm_head = embed_tokens)");
+            Linear::new(embedding.embeddings().clone(), None)
+        } else {
+            linear(
+                config.hidden_size,
+                config.vocab_size,
+                var_builder.pp("lm_head"),
+            )?
+        };
 
         log::info!("loading model.norm ...");
         let ln_f = candle_nn::rms_norm(
@@ -242,6 +255,7 @@ impl Generator for LLama {
             history,
             eos_token_id,
             index_pos,
+            prompt_len: 0,
             ctx: ctx.clone(),
             embedding,
             blocks,
@@ -267,6 +281,7 @@ impl TextGenerator for LLama {
         self.ctx.cache.as_mut().expect("No cache specified").clear();
         self.index_pos = 0;
         self.generated = 0;
+        self.prompt_len = 0;
         Ok(())
     }
 
@@ -325,15 +340,22 @@ impl TextGenerator for LLama {
             .squeeze(0)
             .map_err(|e| anyhow!("error squeezing logits: {e}"))?;
 
+        // Apply repeat penalty only to generated tokens (not prompt tokens)
         let logits = if self.ctx.args.repeat_penalty == 1. {
             logits
         } else {
-            let start_at = num_tokens.saturating_sub(self.ctx.args.repeat_last_n);
-            candle_transformers::utils::apply_repeat_penalty(
-                &logits,
-                self.ctx.args.repeat_penalty,
-                &self.tokens[start_at..],
-            )?
+            let generated_start = self.prompt_len;
+            let penalty_tokens = &self.tokens[generated_start..];
+            if penalty_tokens.is_empty() {
+                logits
+            } else {
+                let start_at = penalty_tokens.len().saturating_sub(self.ctx.args.repeat_last_n);
+                candle_transformers::utils::apply_repeat_penalty(
+                    &logits,
+                    self.ctx.args.repeat_penalty,
+                    &penalty_tokens[start_at..],
+                )?
+            }
         };
         self.index_pos += num_context_tokens;
 
@@ -344,6 +366,11 @@ impl TextGenerator for LLama {
         self.generated += 1;
         self.tokens.push(next_token);
 
+        let is_end_of_stream = self
+            .eos_token_id
+            .as_ref()
+            .map_or(false, |eos| eos.is_eos(next_token));
+
         Ok(Token {
             id: next_token,
             text: match self.tokenizer.decode(&[next_token], false) {
@@ -353,7 +380,7 @@ impl TextGenerator for LLama {
                     None
                 }
             },
-            is_end_of_stream: Some(next_token) == self.eos_token_id,
+            is_end_of_stream,
         })
     }
 
