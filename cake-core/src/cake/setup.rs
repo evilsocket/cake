@@ -25,10 +25,44 @@ use super::topology::{Node, Topology};
 /// Maximum chunk size for model data transfer (128 MB).
 const MODEL_DATA_CHUNK_SIZE: usize = 128 * 1024 * 1024;
 
+/// Estimate average layer size in bytes from safetensors files.
+fn estimate_layer_size(model_path: &Path, num_layers: usize) -> u64 {
+    if num_layers == 0 {
+        return 0;
+    }
+
+    // Try sharded model first
+    let index_path = model_path.join("model.safetensors.index.json");
+    if let Ok(data) = std::fs::read_to_string(&index_path) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&data) {
+            if let Some(weight_map) = json.get("weight_map").and_then(|v| v.as_object()) {
+                let shards: HashSet<&str> =
+                    weight_map.values().filter_map(|v| v.as_str()).collect();
+                let total: u64 = shards
+                    .iter()
+                    .filter_map(|s| std::fs::metadata(model_path.join(s)).ok())
+                    .map(|m| m.len())
+                    .sum();
+                return total / num_layers as u64;
+            }
+        }
+    }
+
+    // Single safetensors file
+    let single = model_path.join("model.safetensors");
+    if let Ok(m) = std::fs::metadata(&single) {
+        return m.len() / num_layers as u64;
+    }
+
+    0
+}
+
 // ── Layer assignment ────────────────────────────────────────────────────────
 
 /// Compute layer assignments proportional to each worker's estimated TFLOPS,
 /// accounting for the master's own compute so it retains its fair share of layers.
+/// When `layer_size_bytes` > 0, each worker's assignment is capped by its
+/// per-GPU VRAM to prevent out-of-memory errors on multi-GPU nodes.
 ///
 /// Returns a vec of `(worker_index, layer_names)`.
 /// Workers are sorted by TFLOPS descending, and layers are assigned as
@@ -37,6 +71,7 @@ pub fn compute_layer_assignments(
     workers: &[DiscoveredWorker],
     num_layers: usize,
     master_tflops: f64,
+    layer_size_bytes: u64,
 ) -> Vec<(usize, Vec<String>)> {
     if workers.is_empty() || num_layers == 0 {
         return vec![];
@@ -100,7 +135,7 @@ pub fn compute_layer_assignments(
             break;
         }
 
-        let count = if pos == indices.len() - 1 {
+        let mut count = if pos == indices.len() - 1 {
             remaining_layers
         } else {
             let worker_tflops = workers[worker_idx].total_tflops();
@@ -108,6 +143,21 @@ pub fn compute_layer_assignments(
                 (worker_tflops / remaining_tflops * remaining_layers as f64).round() as usize;
             proportional.max(1).min(remaining_layers)
         };
+
+        // Cap by per-GPU VRAM to avoid OOM on multi-GPU workers
+        if layer_size_bytes > 0 {
+            let max_layers = workers[worker_idx].max_layers_for_size(layer_size_bytes);
+            if count > max_layers {
+                log::info!(
+                    "  {} capped from {} to {} layers (VRAM limit: {} per layer)",
+                    &workers[worker_idx].name,
+                    count,
+                    max_layers,
+                    human_bytes::human_bytes(layer_size_bytes as f64)
+                );
+                count = max_layers;
+            }
+        }
 
         let layers: Vec<String> = (offset..offset + count)
             .map(|l| format!("model.layers.{l}"))
@@ -171,8 +221,18 @@ pub async fn master_setup(
     let master_gpus = discovery::detect_gpus();
     let master_tflops: f64 = master_gpus.iter().map(|g| g.tflops as f64).sum();
 
-    // Compute assignments based on TFLOPS
-    let assignments = compute_layer_assignments(&workers, num_layers, master_tflops);
+    // Estimate per-layer size for VRAM-aware capping
+    let layer_size_bytes = estimate_layer_size(model_path, num_layers);
+    if layer_size_bytes > 0 {
+        log::info!(
+            "estimated layer size: {}",
+            human_bytes::human_bytes(layer_size_bytes as f64)
+        );
+    }
+
+    // Compute assignments based on TFLOPS, capped by per-GPU VRAM
+    let assignments =
+        compute_layer_assignments(&workers, num_layers, master_tflops, layer_size_bytes);
 
     log::info!("layer assignments:");
     for (worker_idx, layers) in &assignments {

@@ -45,6 +45,21 @@ impl DiscoveredWorker {
         self.gpus.iter().map(|g| g.vram_bytes).sum()
     }
 
+    /// Maximum number of layers this worker can fit, based on per-GPU VRAM.
+    /// Reserves ~15% of each GPU's VRAM for CUDA runtime overhead.
+    pub fn max_layers_for_size(&self, layer_size_bytes: u64) -> usize {
+        if layer_size_bytes == 0 || self.gpus.is_empty() {
+            return usize::MAX;
+        }
+        self.gpus
+            .iter()
+            .map(|g| {
+                let usable = (g.vram_bytes as f64 * 0.85) as u64;
+                (usable / layer_size_bytes) as usize
+            })
+            .sum()
+    }
+
     /// Total estimated TFLOPS across all GPUs.
     /// Falls back to a VRAM-based estimate when workers report 0 (old binaries).
     pub fn total_tflops(&self) -> f64 {
