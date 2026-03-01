@@ -192,63 +192,80 @@ pub async fn master_setup(
         );
     }
 
-    // Connect to each worker, authenticate, assign layers, push data
-    let mut topology = Topology::new();
+    // Connect to all workers concurrently: authenticate, assign layers, push data
+    let mut handles = Vec::new();
 
     for (worker_idx, layers) in &assignments {
-        let worker = &workers[*worker_idx];
+        let worker = workers[*worker_idx].clone();
         if layers.is_empty() {
             continue;
         }
 
-        log::info!("connecting to worker '{}' at {} ...", &worker.name, &worker.host);
+        let layers = layers.clone();
+        let cluster_key = cluster_key.to_string();
+        let model_hash = model_hash.clone();
+        let model_path = model_path.to_path_buf();
 
-        let mut stream = TcpStream::connect(&worker.host)
-            .await
-            .map_err(|e| anyhow!("can't connect to {}: {}", &worker.host, e))?;
-
-        // Mutual authentication
-        auth::authenticate_as_master(&mut stream, cluster_key).await?;
-        log::info!("[{}] authenticated", &worker.name);
-
-        // Send layer assignment
-        let msg = Message::LayerAssignment {
-            layers: layers.clone(),
-            model_hash: model_hash.clone(),
-        };
-        msg.to_writer(&mut stream).await?;
-
-        // Read ack
-        let (_, ack) = Message::from_reader(&mut stream).await?;
-        let needs_data = match ack {
-            Message::LayerAssignmentAck { needs_data } => needs_data,
-            other => {
-                return Err(anyhow!(
-                    "[{}] unexpected response to LayerAssignment: {:?}",
-                    &worker.name,
-                    other
-                ))
-            }
-        };
-
-        if needs_data {
-            push_model_data(&mut stream, model_path, layers, &worker.name).await?;
-        } else {
-            log::info!("[{}] worker has model data cached", &worker.name);
-        }
-
-        // Wait for WorkerReady
-        let (_, ready) = Message::from_reader(&mut stream).await?;
-        if !matches!(ready, Message::WorkerReady) {
-            return Err(anyhow!(
-                "[{}] expected WorkerReady, got {:?}",
+        handles.push(tokio::spawn(async move {
+            log::info!(
+                "connecting to worker '{}' at {} ...",
                 &worker.name,
-                ready
-            ));
-        }
-        log::info!("[{}] worker ready", &worker.name);
+                &worker.host
+            );
 
-        // Add to topology
+            let mut stream = TcpStream::connect(&worker.host)
+                .await
+                .map_err(|e| anyhow!("can't connect to {}: {}", &worker.host, e))?;
+
+            // Mutual authentication
+            auth::authenticate_as_master(&mut stream, &cluster_key).await?;
+            log::info!("[{}] authenticated", &worker.name);
+
+            // Send layer assignment
+            let msg = Message::LayerAssignment {
+                layers: layers.clone(),
+                model_hash,
+            };
+            msg.to_writer(&mut stream).await?;
+
+            // Read ack
+            let (_, ack) = Message::from_reader(&mut stream).await?;
+            let needs_data = match ack {
+                Message::LayerAssignmentAck { needs_data } => needs_data,
+                other => {
+                    return Err(anyhow!(
+                        "[{}] unexpected response to LayerAssignment: {:?}",
+                        &worker.name,
+                        other
+                    ))
+                }
+            };
+
+            if needs_data {
+                push_model_data(&mut stream, &model_path, &layers, &worker.name).await?;
+            } else {
+                log::info!("[{}] worker has model data cached", &worker.name);
+            }
+
+            // Wait for WorkerReady
+            let (_, ready) = Message::from_reader(&mut stream).await?;
+            if !matches!(ready, Message::WorkerReady) {
+                return Err(anyhow!(
+                    "[{}] expected WorkerReady, got {:?}",
+                    &worker.name,
+                    ready
+                ));
+            }
+            log::info!("[{}] worker ready", &worker.name);
+
+            Ok::<_, anyhow::Error>((worker, layers))
+        }));
+    }
+
+    // Collect results
+    let mut topology = Topology::new();
+    for handle in handles {
+        let (worker, layers) = handle.await??;
         topology.insert(
             worker.name.clone(),
             Node {
@@ -261,7 +278,7 @@ pub async fn master_setup(
                         .collect::<Vec<_>>()
                         .join(", "),
                 ),
-                layers: layers.clone(),
+                layers,
                 vram_bytes: worker.total_vram(),
                 tflops: worker.total_tflops(),
                 backend: worker.backend.clone(),
@@ -292,28 +309,40 @@ async fn push_model_data(
 
     // Determine which safetensors shard files contain the assigned layers
     let index_path = model_path.join("model.safetensors.index.json");
+    let mut filtered_index: Option<Vec<u8>> = None;
     if index_path.exists() {
         files_to_send.push(index_path.clone());
-
         let index_data = std::fs::read(&index_path)?;
-        let index_json: serde_json::Value = serde_json::from_slice(&index_data)?;
+        let mut index_json: serde_json::Value = serde_json::from_slice(&index_data)?;
         let weight_map = index_json
             .get("weight_map")
             .and_then(|v| v.as_object())
-            .ok_or_else(|| anyhow!("no weight_map in model.safetensors.index.json"))?;
+            .ok_or_else(|| anyhow!("no weight_map in model.safetensors.index.json"))?
+            .clone();
 
         // Find shard files that contain tensors for the assigned layers
         let mut needed_shards: HashSet<String> = HashSet::new();
-        for (tensor_name, shard_file) in weight_map {
-            // Check if this tensor belongs to any assigned layer
+        let mut needed_weights: serde_json::Map<String, serde_json::Value> =
+            serde_json::Map::new();
+        for (tensor_name, shard_file) in &weight_map {
             for layer in layers {
                 if tensor_name.starts_with(&format!("{}.", layer)) {
                     if let Some(filename) = shard_file.as_str() {
                         needed_shards.insert(filename.to_string());
                     }
+                    needed_weights.insert(tensor_name.clone(), shard_file.clone());
                 }
             }
         }
+
+        // Build a filtered index.json that only references the pushed shards
+        if let Some(obj) = index_json.as_object_mut() {
+            obj.insert(
+                "weight_map".to_string(),
+                serde_json::Value::Object(needed_weights),
+            );
+        }
+        filtered_index = Some(serde_json::to_vec_pretty(&index_json)?);
 
         log::info!(
             "[{}] pushing {} shard file(s) + config + tokenizer + index",
@@ -340,8 +369,18 @@ async fn push_model_data(
             .to_string_lossy()
             .to_string();
 
-        let file_data = std::fs::read(file_path)
-            .map_err(|e| anyhow!("failed to read {}: {}", file_path.display(), e))?;
+        // Use filtered index if this is the index file
+        let file_data = if filename == "model.safetensors.index.json" {
+            if let Some(ref data) = filtered_index {
+                data.clone()
+            } else {
+                std::fs::read(file_path)
+                    .map_err(|e| anyhow!("failed to read {}: {}", file_path.display(), e))?
+            }
+        } else {
+            std::fs::read(file_path)
+                .map_err(|e| anyhow!("failed to read {}: {}", file_path.display(), e))?
+        };
         let total_size = file_data.len() as u64;
         let file_start = Instant::now();
         let mut offset: u64 = 0;
