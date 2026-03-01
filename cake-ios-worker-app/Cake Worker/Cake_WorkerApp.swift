@@ -1,6 +1,6 @@
 //
 //  Cake_WorkerApp.swift
-//  Cake Worker
+//  Cake
 //
 //  Created by Simone Margaritelli on 07/07/24.
 //
@@ -12,6 +12,7 @@ struct Cake_WorkerApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .preferredColorScheme(.dark)
         }
     }
 }

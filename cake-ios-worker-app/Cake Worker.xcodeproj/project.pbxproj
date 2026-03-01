@@ -16,6 +16,7 @@
 		887646942C3B07A7007A32E0 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 887646932C3B07A7007A32E0 /* Metal.framework */; };
 		887646972C3B08B3007A32E0 /* MetalPerformanceShadersGraph.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 887646952C3B08B3007A32E0 /* MetalPerformanceShadersGraph.framework */; };
 		887646982C3B08B3007A32E0 /* MetalPerformanceShaders.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 887646962C3B08B3007A32E0 /* MetalPerformanceShaders.framework */; };
+		AA0001012C3B0000000000AA /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0001002C3B0000000000AA /* Theme.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -31,6 +32,7 @@
 		887646952C3B08B3007A32E0 /* MetalPerformanceShadersGraph.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalPerformanceShadersGraph.framework; path = System/Library/Frameworks/MetalPerformanceShadersGraph.framework; sourceTree = SDKROOT; };
 		887646962C3B08B3007A32E0 /* MetalPerformanceShaders.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalPerformanceShaders.framework; path = System/Library/Frameworks/MetalPerformanceShaders.framework; sourceTree = SDKROOT; };
 		88811B6C2C45F2AF0010390A /* Cake Worker.entitlements */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.entitlements; path = "Cake Worker.entitlements"; sourceTree = SOURCE_ROOT; };
+		AA0001002C3B0000000000AA /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -73,6 +75,7 @@
 				8830A1172C3B019800BA42B5 /* Cake_WorkerApp.swift */,
 				8876468C2C3B0261007A32E0 /* Cake.swift */,
 				8830A1192C3B019800BA42B5 /* ContentView.swift */,
+				AA0001002C3B0000000000AA /* Theme.swift */,
 				8830A11B2C3B019900BA42B5 /* Assets.xcassets */,
 				8830A11D2C3B019900BA42B5 /* Preview Content */,
 			);
@@ -171,6 +174,7 @@
 				8830A11A2C3B019800BA42B5 /* ContentView.swift in Sources */,
 				8876468D2C3B0261007A32E0 /* Cake.swift in Sources */,
 				8830A1182C3B019800BA42B5 /* Cake_WorkerApp.swift in Sources */,
+				AA0001012C3B0000000000AA /* Theme.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
