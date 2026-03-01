@@ -540,26 +540,44 @@ async fn push_model_data(
     Ok(())
 }
 
-/// Check whether a cache directory contains a valid model.
-fn has_valid_model_cache(cache_dir: &Path) -> bool {
+/// Check whether a cache directory contains valid model data for the given layers.
+///
+/// For sharded models, verifies that the cached index's weight_map references all
+/// assigned layers and that the shard files containing those layers exist on disk.
+fn has_valid_model_cache(cache_dir: &Path, layers: &[String]) -> bool {
     if !cache_dir.join("config.json").exists() {
         return false;
     }
-    // Single safetensors file
+    // Single safetensors file — if it exists, assume it has everything
     if cache_dir.join("model.safetensors").exists() {
         return true;
     }
-    // Sharded model: need index + at least one shard
+    // Sharded model: need index + shard files for all assigned layers
     let index_path = cache_dir.join("model.safetensors.index.json");
     if index_path.exists() {
         if let Ok(data) = std::fs::read_to_string(&index_path) {
             if let Ok(index) = serde_json::from_str::<serde_json::Value>(&data) {
                 if let Some(weight_map) = index.get("weight_map").and_then(|v| v.as_object()) {
-                    // Check that at least one referenced shard file exists
-                    return weight_map.values().any(|v| {
-                        v.as_str()
-                            .is_some_and(|f| cache_dir.join(f).exists())
-                    });
+                    // For each assigned layer, check that at least one tensor exists
+                    // in the weight_map and its shard file is present on disk.
+                    for layer in layers {
+                        let prefix = format!("{}.", layer);
+                        let has_layer = weight_map.iter().any(|(tensor_name, shard_file)| {
+                            tensor_name.starts_with(&prefix)
+                                && shard_file
+                                    .as_str()
+                                    .is_some_and(|f| cache_dir.join(f).exists())
+                        });
+                        if !has_layer {
+                            log::debug!(
+                                "cache miss: {} not found in {}",
+                                layer,
+                                cache_dir.display()
+                            );
+                            return false;
+                        }
+                    }
+                    return true;
                 }
             }
         }
@@ -643,9 +661,8 @@ pub async fn worker_setup(
     };
     std::fs::create_dir_all(&cache_dir)?;
 
-    // Check if we already have a valid model data cache.
-    // Needs config.json + either model.safetensors or the index + at least one shard.
-    let needs_data = !has_valid_model_cache(&cache_dir);
+    // Check if we already have a valid model data cache for the assigned layers.
+    let needs_data = !has_valid_model_cache(&cache_dir, &layers);
 
     let ack = Message::LayerAssignmentAck { needs_data };
     ack.to_writer(&mut stream).await?;
