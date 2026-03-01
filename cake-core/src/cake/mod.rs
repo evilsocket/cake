@@ -140,7 +140,8 @@ impl Context {
             };
 
             let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
-            let worker_layers = topology.all_worker_layers();
+            let is_master = matches!(args.mode, Mode::Master);
+            let worker_layers = if is_master { topology.all_worker_layers() } else { std::collections::HashSet::new() };
             var_builder = Some(if worker_layers.is_empty() {
                 utils::load_var_builder_from_index(
                     model_tensors_index,
