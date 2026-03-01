@@ -27,28 +27,33 @@ const MODEL_DATA_CHUNK_SIZE: usize = 128 * 1024 * 1024;
 
 // ── Layer assignment ────────────────────────────────────────────────────────
 
-/// Compute layer assignments proportional to each worker's total VRAM.
+/// Compute layer assignments proportional to each worker's total VRAM,
+/// accounting for the master's own GPU so it retains its fair share of layers.
 ///
 /// Returns a vec of `(worker_index, layer_names)`.
 /// Workers are sorted by total VRAM descending, and layers are assigned as
-/// contiguous ranges.
+/// contiguous ranges starting from layer 0. Unassigned layers remain on master.
 pub fn compute_layer_assignments(
     workers: &[DiscoveredWorker],
     num_layers: usize,
+    master_vram: u64,
 ) -> Vec<(usize, Vec<String>)> {
     if workers.is_empty() || num_layers == 0 {
         return vec![];
     }
 
-    let total_vram: u64 = workers.iter().map(|w| w.total_vram()).sum();
+    // Include master VRAM in total so layers are split proportionally
+    let total_vram: u64 = workers.iter().map(|w| w.total_vram()).sum::<u64>() + master_vram;
+
     if total_vram == 0 {
-        // Equal distribution if no VRAM info
-        let per_worker = num_layers / workers.len();
+        // No VRAM info anywhere — give half to workers, half to master
+        let worker_layers = num_layers / 2;
+        let per_worker = worker_layers / workers.len();
         let mut assignments = vec![];
         let mut offset = 0;
         for (i, _) in workers.iter().enumerate() {
             let count = if i == workers.len() - 1 {
-                num_layers - offset
+                worker_layers - offset
             } else {
                 per_worker
             };
@@ -61,14 +66,28 @@ pub fn compute_layer_assignments(
         return assignments;
     }
 
-    // Sort indices by VRAM descending for deterministic assignment
+    // Sort worker indices by VRAM descending
     let mut indices: Vec<usize> = (0..workers.len()).collect();
     indices.sort_by(|a, b| workers[*b].total_vram().cmp(&workers[*a].total_vram()));
 
+    // Total layers for all workers combined (master keeps its share)
+    let workers_vram: u64 = workers.iter().map(|w| w.total_vram()).sum();
+    let total_worker_layers =
+        (workers_vram as f64 / total_vram as f64 * num_layers as f64).round() as usize;
+    let total_worker_layers = total_worker_layers.min(num_layers);
+
+    log::info!(
+        "master VRAM: {} — workers VRAM: {} — assigning {} of {} layers to workers",
+        human_bytes::human_bytes(master_vram as f64),
+        human_bytes::human_bytes(workers_vram as f64),
+        total_worker_layers,
+        num_layers
+    );
+
     let mut assignments = vec![];
     let mut offset = 0;
-    let mut remaining_layers = num_layers;
-    let mut remaining_vram = total_vram;
+    let mut remaining_layers = total_worker_layers;
+    let mut remaining_vram = workers_vram;
 
     for (pos, &worker_idx) in indices.iter().enumerate() {
         if remaining_layers == 0 {
@@ -76,7 +95,6 @@ pub fn compute_layer_assignments(
         }
 
         let count = if pos == indices.len() - 1 {
-            // Last worker gets all remaining
             remaining_layers
         } else {
             let worker_vram = workers[worker_idx].total_vram();
@@ -130,8 +148,12 @@ pub async fn master_setup(
         return Ok(Topology::new());
     }
 
+    // Detect master GPU for proportional split
+    let master_gpus = discovery::detect_gpus();
+    let master_vram: u64 = master_gpus.iter().map(|g| g.vram_bytes).sum();
+
     // Compute assignments
-    let assignments = compute_layer_assignments(&workers, num_layers);
+    let assignments = compute_layer_assignments(&workers, num_layers, master_vram);
 
     log::info!("layer assignments:");
     for (worker_idx, layers) in &assignments {

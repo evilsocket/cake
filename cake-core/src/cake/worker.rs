@@ -177,7 +177,7 @@ impl<G: Generator + 'static> Worker<G> {
             super::auth::authenticate_as_worker(&mut socket, cluster_key)
                 .await
                 .map_err(|e| anyhow!("[{}] authentication failed: {}", &client, e))?;
-            log::info!("[{}] authenticated", &client);
+            log::debug!("[{}] authenticated", &client);
         }
 
         // read and validate Hello
@@ -210,7 +210,7 @@ impl<G: Generator + 'static> Worker<G> {
             Self::read_message_timed(&mut socket).await
         {
             if matches!(op_message, Message::Goodbye) {
-                log::info!("[{}] goodbye", &client);
+                log::debug!("[{}] goodbye", &client);
                 context
                     .context
                     .cache
@@ -312,7 +312,7 @@ impl<G: Generator + 'static> Worker<G> {
     /// Run the worker server accept loop.
     pub async fn run(&mut self) -> Result<()> {
         while let Ok((socket, client)) = self.listener.accept().await {
-            log::info!("{} connected", &client);
+            log::debug!("{} connected", &client);
 
             let context = self.context.get_client_context();
             tokio::spawn(async move {
