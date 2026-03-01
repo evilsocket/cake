@@ -74,3 +74,9 @@ fastlane/test_output
 /*.sh
 .vscode/
 /images
+
+# Generated data
+opencode.json
+split-output/
+topology.yml
+*.safetensors
