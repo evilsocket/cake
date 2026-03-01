@@ -285,14 +285,56 @@ pub async fn master_setup(
         );
     }
 
-    // Cap master layers by its own GPU VRAM (reserve extra ~20% for embeddings/lm_head/norm)
+    // Estimate non-layer overhead the master must hold (embeddings + lm_head + norm + CUDA runtime).
+    // embeddings = vocab_size * hidden_size * dtype_bytes
+    // lm_head    = vocab_size * hidden_size * dtype_bytes (unless tied)
+    let dtype_bytes: u64 = 2; // F16
+    let vocab_size = config_json
+        .get("vocab_size")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            config_json
+                .get("text_config")
+                .and_then(|tc| tc.get("vocab_size"))
+                .and_then(|v| v.as_u64())
+        })
+        .unwrap_or(32000);
+    let hidden_size = config_json
+        .get("hidden_size")
+        .and_then(|v| v.as_u64())
+        .or_else(|| {
+            config_json
+                .get("text_config")
+                .and_then(|tc| tc.get("hidden_size"))
+                .and_then(|v| v.as_u64())
+        })
+        .unwrap_or(4096);
+    let tie_embeddings = config_json
+        .get("tie_word_embeddings")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let embed_size = vocab_size * hidden_size * dtype_bytes;
+    let lm_head_size = if tie_embeddings { 0 } else { embed_size };
+    // Add ~512 MiB for CUDA runtime, KV cache, and misc overhead
+    let master_overhead = embed_size + lm_head_size + 512 * 1024 * 1024;
+
+    log::info!(
+        "master overhead: embeddings={} lm_head={} total={}",
+        human_bytes::human_bytes(embed_size as f64),
+        human_bytes::human_bytes(lm_head_size as f64),
+        human_bytes::human_bytes(master_overhead as f64),
+    );
+
+    // Cap master layers by its own GPU VRAM minus the non-layer overhead
     let master_max_layers = if layer_size_bytes > 0 && !master_gpus.is_empty() {
         let master_vram: u64 = master_gpus.iter().map(|g| g.vram_bytes).sum();
-        let usable = (master_vram as f64 * 0.80) as u64; // 20% reserve for embeddings etc.
-        let max = (usable / layer_size_bytes) as usize;
+        let available = master_vram.saturating_sub(master_overhead);
+        let max = (available / layer_size_bytes) as usize;
         log::info!(
-            "master GPU: {} — can fit ~{} layers locally",
+            "master GPU: {} total — {} available for layers — can fit ~{} layers locally",
             human_bytes::human_bytes(master_vram as f64),
+            human_bytes::human_bytes(available as f64),
             max
         );
         max
