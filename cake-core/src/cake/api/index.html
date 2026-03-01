@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cake</title>
+<style>
+:root {
+    --color-brand-50: oklch(0.97 0.02 280);
+    --color-brand-100: oklch(0.93 0.04 280);
+    --color-brand-200: oklch(0.87 0.07 280);
+    --color-brand-300: oklch(0.78 0.12 280);
+    --color-brand-400: oklch(0.68 0.17 275);
+    --color-brand-500: oklch(0.58 0.22 270);
+    --color-brand-600: oklch(0.50 0.22 270);
+    --color-brand-700: oklch(0.43 0.19 270);
+    --color-brand-800: oklch(0.36 0.15 270);
+    --color-brand-900: oklch(0.28 0.11 270);
+    --color-brand-950: oklch(0.20 0.08 270);
+
+    --color-surface-0: oklch(0.13 0.01 270);
+    --color-surface-50: oklch(0.16 0.01 270);
+    --color-surface-100: oklch(0.19 0.01 270);
+    --color-surface-200: oklch(0.23 0.015 270);
+    --color-surface-300: oklch(0.30 0.015 270);
+    --color-surface-400: oklch(0.40 0.015 270);
+    --color-surface-500: oklch(0.55 0.01 270);
+    --color-surface-600: oklch(0.70 0.01 270);
+    --color-surface-700: oklch(0.82 0.005 270);
+    --color-surface-800: oklch(0.90 0.005 270);
+    --color-surface-900: oklch(0.95 0.005 270);
+    --color-surface-950: oklch(0.98 0.002 270);
+
+    --color-accent-400: oklch(0.75 0.18 165);
+    --color-accent-500: oklch(0.68 0.19 165);
+    --color-accent-600: oklch(0.60 0.17 165);
+
+    --color-success: oklch(0.72 0.19 145);
+    --color-warning: oklch(0.80 0.18 80);
+    --color-danger: oklch(0.65 0.22 25);
+
+    --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+
+body {
+    background: var(--color-surface-0);
+    color: var(--color-surface-800);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+::selection { background-color: var(--color-brand-500); color: white; }
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-surface-300); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-surface-400); }
+code { font-family: var(--font-mono); }
+
+/* ── Nav ─────────────────────────────────────── */
+nav {
+    background: var(--color-surface-50);
+    border-bottom: 1px solid var(--color-surface-200);
+    padding: 0 1.5rem;
+    display: flex;
+    align-items: center;
+    height: 3.5rem;
+    gap: 1.5rem;
+    flex-shrink: 0;
+}
+
+nav .logo {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--color-brand-400);
+    letter-spacing: -0.02em;
+}
+
+nav .model-name {
+    font-size: 0.75rem;
+    color: var(--color-surface-400);
+    font-family: var(--font-mono);
+    background: var(--color-surface-100);
+    padding: 0.2rem 0.5rem;
+    border-radius: 0.25rem;
+}
+
+nav .nav-links { display: flex; gap: 1.5rem; margin-left: auto; }
+
+nav a {
+    color: var(--color-surface-500);
+    text-decoration: none;
+    font-size: 0.875rem;
+    font-weight: 500;
+    padding: 0.5rem 0;
+    border-bottom: 2px solid transparent;
+    transition: color 0.15s, border-color 0.15s;
+}
+
+nav a:hover { color: var(--color-surface-700); }
+nav a.active {
+    color: var(--color-brand-400);
+    border-bottom-color: var(--color-brand-400);
+}
+
+nav .mem-info {
+    font-size: 0.6875rem;
+    color: var(--color-surface-400);
+    font-family: var(--font-mono);
+}
+
+.view { display: none; flex: 1; overflow: hidden; }
+.view.active { display: flex; flex-direction: column; }
+
+/* ── Cluster Graph ───────────────────────────── */
+#cluster {
+    flex: 1;
+    overflow: auto;
+    position: relative;
+}
+
+#graph-canvas {
+    width: 100%;
+    height: 100%;
+    min-height: 500px;
+}
+
+/* ── Chat View ───────────────────────────────── */
+#chat {
+    flex: 1;
+    display: none;
+    flex-direction: column;
+    max-width: 56rem;
+    width: 100%;
+    margin: 0 auto;
+    padding: 0 1.5rem;
+}
+#chat.active { display: flex; }
+
+.messages {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    padding: 1rem 0;
+}
+
+.message {
+    display: flex;
+    gap: 0.75rem;
+    animation: fade-in 0.2s ease-out;
+}
+
+.message .avatar {
+    width: 2rem;
+    height: 2rem;
+    border-radius: 0.5rem;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: white;
+}
+
+.message.user .avatar { background: var(--color-brand-600); }
+.message.assistant .avatar { background: var(--color-accent-600); }
+
+.message .bubble {
+    background: var(--color-surface-50);
+    border: 1px solid var(--color-surface-200);
+    border-radius: 0.75rem;
+    padding: 0.75rem 1rem;
+    font-size: 0.9375rem;
+    line-height: 1.6;
+    color: var(--color-surface-800);
+    max-width: 80%;
+    overflow-wrap: break-word;
+}
+
+.message .bubble pre {
+    background: var(--color-surface-100);
+    border: 1px solid var(--color-surface-200);
+    border-radius: 0.375rem;
+    padding: 0.75rem;
+    margin: 0.5rem 0;
+    overflow-x: auto;
+    font-size: 0.8125rem;
+    line-height: 1.5;
+}
+
+.message .bubble code { font-size: 0.85em; }
+.message .bubble p + p { margin-top: 0.5rem; }
+
+.chat-footer {
+    flex-shrink: 0;
+    padding: 0.75rem 0 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.chat-stats {
+    display: flex;
+    gap: 1rem;
+    font-size: 0.6875rem;
+    font-family: var(--font-mono);
+    color: var(--color-surface-400);
+    min-height: 1rem;
+}
+
+.chat-input {
+    display: flex;
+    gap: 0.75rem;
+}
+
+.chat-input textarea {
+    flex: 1;
+    background: var(--color-surface-50);
+    border: 1px solid var(--color-surface-300);
+    border-radius: 0.75rem;
+    padding: 0.75rem 1rem;
+    font-family: var(--font-sans);
+    font-size: 0.9375rem;
+    color: var(--color-surface-800);
+    resize: none;
+    outline: none;
+    min-height: 2.75rem;
+    max-height: 10rem;
+    transition: border-color 0.15s;
+}
+
+.chat-input textarea:focus { border-color: var(--color-brand-400); }
+.chat-input textarea::placeholder { color: var(--color-surface-400); }
+
+.chat-input button {
+    background: var(--color-brand-500);
+    color: white;
+    border: none;
+    border-radius: 0.75rem;
+    padding: 0 1.25rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+    flex-shrink: 0;
+}
+
+.chat-input button:hover { background: var(--color-brand-600); }
+.chat-input button:disabled { background: var(--color-surface-300); cursor: not-allowed; }
+
+.empty-state {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--color-surface-400);
+    font-size: 0.9375rem;
+}
+
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+</style>
+</head>
+<body>
+
+<nav>
+    <span class="logo">cake</span>
+    <span class="model-name" id="nav-model"></span>
+    <span class="mem-info" id="nav-mem"></span>
+    <div class="nav-links">
+        <a href="#cluster" id="nav-cluster">Cluster</a>
+        <a href="#chat" id="nav-chat">Chat</a>
+    </div>
+</nav>
+
+<div id="cluster" class="view">
+    <svg id="graph-canvas"></svg>
+</div>
+
+<div id="chat" class="view">
+    <div class="messages" id="messages">
+        <div class="empty-state" id="chat-empty">Send a message to start a conversation.</div>
+    </div>
+    <div class="chat-footer">
+        <div class="chat-stats" id="chat-stats"></div>
+        <div class="chat-input">
+            <textarea id="chat-textarea" placeholder="Type a message..." rows="1"></textarea>
+            <button id="send-btn">Send</button>
+        </div>
+    </div>
+</div>
+
+<script>
+(function() {
+    // ── Router ──────────────────────────────────
+    const views = { cluster: document.getElementById('cluster'), chat: document.getElementById('chat') };
+    const navLinks = { cluster: document.getElementById('nav-cluster'), chat: document.getElementById('nav-chat') };
+
+    function route() {
+        const hash = location.hash.replace('#', '') || 'cluster';
+        Object.keys(views).forEach(k => {
+            views[k].classList.toggle('active', k === hash);
+            navLinks[k].classList.toggle('active', k === hash);
+        });
+        if (hash === 'cluster') loadTopology();
+    }
+
+    window.addEventListener('hashchange', route);
+    route();
+
+    // ── Helpers ─────────────────────────────────
+    function esc(s) {
+        const d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    }
+
+    function humanBytes(b) {
+        if (b === 0) return '0 B';
+        const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+        const i = Math.floor(Math.log(b) / Math.log(1024));
+        return (b / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + u[i];
+    }
+
+    function layerRange(layers) {
+        if (!layers.length) return 'none';
+        const nums = layers.map(l => parseInt(l.replace('model.layers.', ''))).sort((a, b) => a - b);
+        if (nums.length === 1) return '' + nums[0];
+        const ranges = [];
+        let start = nums[0], end = nums[0];
+        for (let i = 1; i < nums.length; i++) {
+            if (nums[i] === end + 1) end = nums[i];
+            else { ranges.push(start === end ? '' + start : start + '-' + end); start = end = nums[i]; }
+        }
+        ranges.push(start === end ? '' + start : start + '-' + end);
+        return ranges.join(', ');
+    }
+
+    // ── SVG Graph ───────────────────────────────
+    const svg = document.getElementById('graph-canvas');
+    const ns = 'http://www.w3.org/2000/svg';
+
+    function svgEl(tag, attrs) {
+        const el = document.createElementNS(ns, tag);
+        for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
+        return el;
+    }
+
+    function svgText(x, y, text, attrs) {
+        const el = svgEl('text', { x, y, ...attrs });
+        el.textContent = text;
+        return el;
+    }
+
+    async function loadTopology() {
+        try {
+            const resp = await fetch('/api/v1/topology');
+            if (!resp.ok) return;
+            const data = await resp.json();
+            document.getElementById('nav-model').textContent = data.model;
+            document.getElementById('nav-mem').textContent = humanBytes(data.memory_bytes);
+            renderGraph(data);
+        } catch (e) {
+            console.error('topology fetch failed:', e);
+        }
+    }
+
+    function renderGraph(data) {
+        svg.innerHTML = '';
+        const rect = svg.parentElement.getBoundingClientRect();
+        const W = Math.max(rect.width, 800);
+        const H = Math.max(rect.height, 520);
+        svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+
+        const brandFill = 'oklch(0.50 0.22 270)';
+        const brandStroke = 'oklch(0.58 0.22 270)';
+        const accentFill = 'oklch(0.60 0.17 165)';
+        const accentStroke = 'oklch(0.68 0.19 165)';
+        const surfaceFill = 'oklch(0.19 0.01 270)';
+        const surfaceStroke = 'oklch(0.30 0.015 270)';
+        const textColor = 'oklch(0.82 0.005 270)';
+        const dimText = 'oklch(0.55 0.01 270)';
+        const leafFill = 'oklch(0.16 0.01 270)';
+        const lineColor = 'oklch(0.30 0.015 270)';
+
+        const layerBytes = data.layer_size_bytes || 0;
+        const totalModelGB = (layerBytes * data.num_layers / (1024*1024*1024)).toFixed(1);
+
+        // Layout
+        const modelY = 50;
+        const nodeY = 190;
+        const leafY = 360;
+        const centerX = W / 2;
+
+        // All compute nodes
+        const allNodes = [
+            { id: 'master', label: 'master', sub: data.master.device, layers: data.master.layers, isMaster: true }
+        ];
+        data.workers.forEach(w => {
+            allNodes.push({ id: w.name, label: w.name, sub: w.description || w.host, layers: w.layers, isMaster: false });
+        });
+
+        const nodeCount = allNodes.length;
+        const nodeSpacing = Math.min(300, (W - 200) / Math.max(nodeCount, 1));
+        const nodesStartX = centerX - ((nodeCount - 1) * nodeSpacing) / 2;
+
+        // ── Model root ──
+        const modelLabel = data.model;
+        const modelSub = data.num_layers + ' layers \u00b7 ' + data.dtype + ' \u00b7 ' + totalModelGB + ' GiB';
+
+        svg.appendChild(svgEl('rect', {
+            x: centerX - 180, y: modelY - 22, width: 360, height: 44,
+            rx: 22, fill: surfaceFill, stroke: surfaceStroke, 'stroke-width': 1.5
+        }));
+        svg.appendChild(svgText(centerX, modelY - 2, modelLabel, {
+            fill: textColor, 'text-anchor': 'middle', 'font-size': '13', 'font-family': 'var(--font-mono)', 'font-weight': '600'
+        }));
+        svg.appendChild(svgText(centerX, modelY + 14, modelSub, {
+            fill: dimText, 'text-anchor': 'middle', 'font-size': '10', 'font-family': 'var(--font-mono)'
+        }));
+
+        // ── Compute nodes ──
+        allNodes.forEach((node, i) => {
+            const nx = nodesStartX + i * nodeSpacing;
+            const fill = node.isMaster ? brandFill : accentFill;
+            const stroke = node.isMaster ? brandStroke : accentStroke;
+
+            const nodeGB = (node.layers.length * layerBytes / (1024*1024*1024)).toFixed(1);
+            const layerStr = node.layers.length + ' layers [' + layerRange(node.layers) + ']';
+            const sizeStr = nodeGB + ' GiB';
+
+            // Edge: model → node
+            svg.appendChild(svgEl('line', {
+                x1: centerX, y1: modelY + 22, x2: nx, y2: nodeY - 38,
+                stroke: lineColor, 'stroke-width': 1.5, 'stroke-dasharray': '4,3'
+            }));
+
+            // Node box
+            const boxW = 200, boxH = 74;
+            svg.appendChild(svgEl('rect', {
+                x: nx - boxW/2, y: nodeY - boxH/2, width: boxW, height: boxH,
+                rx: 12, fill: surfaceFill, stroke: stroke, 'stroke-width': 1.5
+            }));
+
+            // Status dot + name
+            svg.appendChild(svgEl('circle', {
+                cx: nx - boxW/2 + 16, cy: nodeY - 16, r: 4, fill: 'oklch(0.72 0.19 145)'
+            }));
+            svg.appendChild(svgText(nx - boxW/2 + 26, nodeY - 12, node.label, {
+                fill: textColor, 'font-size': '13', 'font-weight': '600', 'font-family': 'var(--font-sans)'
+            }));
+
+            // Badge
+            const badgeText = node.isMaster ? 'MASTER' : 'WORKER';
+            const tmpTxt = svgText(0, 0, badgeText, { 'font-size': '9', 'font-weight': '700', 'font-family': 'var(--font-sans)' });
+            svg.appendChild(tmpTxt);
+            const badgeW = tmpTxt.getComputedTextLength() + 12;
+            svg.removeChild(tmpTxt);
+
+            svg.appendChild(svgEl('rect', {
+                x: nx + boxW/2 - badgeW - 10, y: nodeY - 26, width: badgeW, height: 18,
+                rx: 9, fill: fill
+            }));
+            svg.appendChild(svgText(nx + boxW/2 - badgeW/2 - 10, nodeY - 14, badgeText, {
+                fill: 'white', 'text-anchor': 'middle', 'font-size': '9', 'font-weight': '700',
+                'font-family': 'var(--font-sans)', 'letter-spacing': '0.05em'
+            }));
+
+            // Device/host sub
+            svg.appendChild(svgText(nx, nodeY + 4, node.sub, {
+                fill: dimText, 'text-anchor': 'middle', 'font-size': '10', 'font-family': 'var(--font-mono)'
+            }));
+
+            // Size line
+            svg.appendChild(svgText(nx, nodeY + 20, sizeStr, {
+                fill: textColor, 'text-anchor': 'middle', 'font-size': '11', 'font-weight': '600', 'font-family': 'var(--font-mono)'
+            }));
+
+            // ── Layer leaf ──
+            const leafW = Math.max(170, layerStr.length * 7);
+
+            // Edge: node → leaf
+            svg.appendChild(svgEl('line', {
+                x1: nx, y1: nodeY + boxH/2, x2: nx, y2: leafY - 16,
+                stroke: lineColor, 'stroke-width': 1.5, 'stroke-dasharray': '4,3'
+            }));
+
+            // Leaf pill
+            svg.appendChild(svgEl('rect', {
+                x: nx - leafW/2, y: leafY - 14, width: leafW, height: 28,
+                rx: 14, fill: leafFill, stroke: surfaceStroke, 'stroke-width': 1
+            }));
+            svg.appendChild(svgText(nx, leafY + 4, layerStr, {
+                fill: dimText, 'text-anchor': 'middle', 'font-size': '11', 'font-family': 'var(--font-mono)'
+            }));
+        });
+    }
+
+    // Auto-refresh topology every 10s
+    setInterval(() => {
+        if (location.hash === '#cluster' || !location.hash) loadTopology();
+    }, 10000);
+
+    // Resize handler for graph
+    window.addEventListener('resize', () => {
+        if (location.hash === '#cluster' || !location.hash) loadTopology();
+    });
+
+    // ── Chat View ───────────────────────────────
+    const messagesEl = document.getElementById('messages');
+    const emptyEl = document.getElementById('chat-empty');
+    const textarea = document.getElementById('chat-textarea');
+    const sendBtn = document.getElementById('send-btn');
+    const statsEl = document.getElementById('chat-stats');
+    let chatHistory = [];
+    let generating = false;
+
+    textarea.addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+    });
+
+    textarea.addEventListener('input', () => {
+        textarea.style.height = 'auto';
+        textarea.style.height = Math.min(textarea.scrollHeight, 160) + 'px';
+    });
+
+    sendBtn.addEventListener('click', sendMessage);
+
+    async function sendMessage() {
+        const text = textarea.value.trim();
+        if (!text || generating) return;
+
+        emptyEl.style.display = 'none';
+        generating = true;
+        sendBtn.disabled = true;
+        textarea.value = '';
+        textarea.style.height = 'auto';
+        statsEl.textContent = '';
+
+        chatHistory.push({ role: 'user', content: text });
+        appendMessage('user', text);
+
+        const { bubble } = appendMessage('assistant', '');
+        let fullContent = '';
+        let tokenCount = 0;
+        let firstTokenTime = null;
+        let lastTokenTime = null;
+
+        try {
+            const resp = await fetch('/v1/chat/completions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ messages: chatHistory, stream: true, max_tokens: 4096 }),
+            });
+
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    const payload = line.slice(6).trim();
+                    if (payload === '[DONE]') continue;
+                    try {
+                        const chunk = JSON.parse(payload);
+                        const delta = chunk.choices?.[0]?.delta;
+                        if (delta?.content) {
+                            const now = performance.now();
+                            if (firstTokenTime === null) firstTokenTime = now;
+                            lastTokenTime = now;
+                            tokenCount++;
+                            fullContent += delta.content;
+                            bubble.innerHTML = renderMarkdown(fullContent);
+                            messagesEl.scrollTop = messagesEl.scrollHeight;
+
+                            // Update tok/s live
+                            if (tokenCount > 1) {
+                                const elapsed = (lastTokenTime - firstTokenTime) / 1000;
+                                const tps = ((tokenCount - 1) / elapsed).toFixed(1);
+                                statsEl.textContent = tokenCount + ' tokens \u00b7 ' + tps + ' tok/s';
+                            }
+                        }
+                    } catch {}
+                }
+            }
+
+            chatHistory.push({ role: 'assistant', content: fullContent });
+
+            // Final stats
+            if (tokenCount > 1 && firstTokenTime !== null) {
+                const elapsed = (lastTokenTime - firstTokenTime) / 1000;
+                const tps = ((tokenCount - 1) / elapsed).toFixed(1);
+                statsEl.textContent = tokenCount + ' tokens \u00b7 ' + tps + ' tok/s \u00b7 ' + elapsed.toFixed(1) + 's';
+            }
+        } catch (e) {
+            bubble.innerHTML = '<span style="color:var(--color-danger)">Error: ' + esc(e.message) + '</span>';
+        }
+
+        generating = false;
+        sendBtn.disabled = false;
+        textarea.focus();
+    }
+
+    function appendMessage(role, content) {
+        const msg = document.createElement('div');
+        msg.className = 'message ' + role;
+
+        const avatar = document.createElement('div');
+        avatar.className = 'avatar';
+        avatar.textContent = role === 'user' ? 'U' : 'AI';
+
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        bubble.innerHTML = content ? renderMarkdown(content) : '';
+
+        msg.appendChild(avatar);
+        msg.appendChild(bubble);
+        messagesEl.appendChild(msg);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+        return { msg, bubble };
+    }
+
+    function renderMarkdown(text) {
+        let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => '<pre><code>' + code + '</code></pre>');
+        html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+        html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        html = html.replace(/\n\n/g, '</p><p>');
+        html = html.replace(/\n/g, '<br>');
+        return '<p>' + html + '</p>';
+    }
+})();
+</script>
+
+</body>
+</html>

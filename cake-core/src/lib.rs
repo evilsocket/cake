@@ -95,6 +95,10 @@ pub struct Args {
     #[arg(long, default_value_t = 10)]
     pub discovery_timeout: u64,
 
+    /// Optional basic auth for the web UI (format: "user:pass").
+    #[arg(long)]
+    pub ui_auth: Option<String>,
+
     /// Topology built during zero-config setup (not a CLI arg).
     #[arg(skip)]
     pub topology_override: Option<cake::Topology>,

@@ -1,5 +1,6 @@
 mod image;
 pub mod text;
+mod ui;
 
 use std::sync::Arc;
 
@@ -77,6 +78,8 @@ where
                 )
                 .route("/v1/models", web::get().to(list_models::<TG, IG>))
                 .route("/api/v1/image", web::post().to(generate_image::<TG, IG>))
+                .route("/api/v1/topology", web::get().to(ui::topology::<TG, IG>))
+                .route("/", web::get().to(ui::index::<TG, IG>))
                 .default_service(web::route().to(not_found))
         }, //.wrap(actix_web::middleware::Logger::default()))
     )
