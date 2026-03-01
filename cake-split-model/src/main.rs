@@ -71,10 +71,37 @@ pub struct Args {
 
 fn load_index(data_path: &Path) -> Result<Index> {
     let tensors_index_path = data_path.join("model.safetensors.index.json");
-    let tensors_index_data = std::fs::read_to_string(tensors_index_path)?;
-    let tensors_index: Index = serde_json::from_str(&tensors_index_data)?;
 
-    Ok(tensors_index)
+    if tensors_index_path.exists() {
+        // Sharded model: read the existing index
+        let tensors_index_data = std::fs::read_to_string(tensors_index_path)?;
+        let tensors_index: Index = serde_json::from_str(&tensors_index_data)?;
+        Ok(tensors_index)
+    } else {
+        // Single-file model: generate index from safetensors metadata
+        let single_path = data_path.join("model.safetensors");
+        if !single_path.exists() {
+            anyhow::bail!(
+                "neither model.safetensors.index.json nor model.safetensors found in {}",
+                data_path.display()
+            );
+        }
+
+        println!("no index file found, generating from model.safetensors ...");
+
+        let file = File::open(&single_path)?;
+        let buffer = unsafe { memmap2::MmapOptions::new().map(&file)? };
+        let tensors = SafeTensors::deserialize(&buffer)?;
+
+        let mut index = Index::new();
+        for (name, _) in tensors.tensors() {
+            index
+                .weight_map
+                .insert(name.to_string(), "model.safetensors".to_string());
+        }
+
+        Ok(index)
+    }
 }
 
 fn reduce_for_worker(
@@ -198,7 +225,7 @@ fn main() {
             new_tensors_path.display()
         );
 
-        safetensors::serialize_to_file(metadata, &None, &new_tensors_path).unwrap();
+        safetensors::serialize_to_file(metadata, None, &new_tensors_path).unwrap();
 
         let loaded = utils::load_safetensors_paths_from_index(new_index_path).unwrap();
 
