@@ -2,15 +2,13 @@ use serde::{Deserialize, Serialize};
 
 /// The role of a message in a chat.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum MessageRole {
     /// System prompt.
-    #[serde(alias = "system")]
     System,
     /// User prompt.
-    #[serde(alias = "user")]
     User,
     /// Assistant response.
-    #[serde(alias = "assistant")]
     Assistant,
 }
 
