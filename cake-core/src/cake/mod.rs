@@ -13,7 +13,7 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 
 #[cfg(feature = "master")]
-mod api;
+pub mod api;
 #[cfg(feature = "master")]
 mod master;
 
@@ -152,7 +152,7 @@ pub trait Forwarder: Debug + Send + Sync + Display {
     }
 
     async fn goodbye(&mut self) -> Result<()> {
-        unimplemented!()
+        Ok(())
     }
 
     /// Return the layer name.
