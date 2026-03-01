@@ -1,0 +1,117 @@
+# =============================================================================
+# Cake Distributed Cluster — Example Docker Compose
+# =============================================================================
+#
+# Prerequisites:
+#   - NVIDIA Container Toolkit installed (https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/)
+#   - Model data in ./cake-data/<model-name>/
+#   - Topology file at ./topology-docker.yml mapping layers to worker-1/worker-2
+#
+# Usage:
+#   docker compose up --build
+#
+# Example topology-docker.yml for LLaMA 3.2 1B (16 layers per worker):
+#
+#   worker-1:
+#     host: 'worker-1:10128'
+#     description: 'CUDA Worker 1'
+#     layers:
+#       - 'model.layers.0-15'
+#
+#   worker-2:
+#     host: 'worker-2:10128'
+#     description: 'CUDA Worker 2'
+#     layers:
+#       - 'model.layers.16-31'
+#
+# Note: Docker on macOS cannot access Metal GPUs. For Apple Silicon,
+# build and run natively with: cargo build --release --features metal
+# =============================================================================
+
+services:
+  master:
+    build: .
+    image: cake
+    command:
+      - --model
+      - /model
+      - --topology
+      - /config/topology.yml
+      - --api
+      - 0.0.0.0:8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./cake-data/${CAKE_MODEL:-Llama-3.2-1B-Instruct}:/model:ro
+      - ./topology-docker.yml:/config/topology.yml:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: on-failure
+    depends_on:
+      - worker-1
+      - worker-2
+    networks:
+      - cake-net
+
+  worker-1:
+    build: .
+    image: cake
+    command:
+      - --model
+      - /model
+      - --mode
+      - worker
+      - --name
+      - worker-1
+      - --topology
+      - /config/topology.yml
+      - --address
+      - 0.0.0.0:10128
+    volumes:
+      - ./cake-data/${CAKE_MODEL:-Llama-3.2-1B-Instruct}:/model:ro
+      - ./topology-docker.yml:/config/topology.yml:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - cake-net
+
+  worker-2:
+    build: .
+    image: cake
+    command:
+      - --model
+      - /model
+      - --mode
+      - worker
+      - --name
+      - worker-2
+      - --topology
+      - /config/topology.yml
+      - --address
+      - 0.0.0.0:10128
+    volumes:
+      - ./cake-data/${CAKE_MODEL:-Llama-3.2-1B-Instruct}:/model:ro
+      - ./topology-docker.yml:/config/topology.yml:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    networks:
+      - cake-net
+
+networks:
+  cake-net:
+    driver: bridge

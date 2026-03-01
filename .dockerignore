@@ -1,0 +1,11 @@
+target/
+cake-data/
+split-output/
+.git/
+.github/
+.DS_Store
+*.sh
+images/
+models/
+cake-ios-worker-app/
+opencode.json
