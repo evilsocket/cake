@@ -739,7 +739,7 @@ nav .mem-info {
             id: 'master', label: 'master', device: inferDevice(data.master.device),
             layers: data.master.layers, isMaster: true,
             vram: data.master.vram_bytes || 0, tflops: data.master.tflops || 0,
-            sub: data.master.device,
+            sub: data.master.backend || data.master.device,
             hostname: data.master.hostname || '',
             os: data.master.os || ''
         }];
@@ -748,7 +748,7 @@ nav .mem-info {
                 id: w.name, label: w.name, device: inferDevice(w.description || w.host),
                 layers: w.layers, isMaster: false,
                 vram: w.vram_bytes || 0, tflops: w.tflops || 0,
-                sub: w.description || w.host,
+                sub: w.backend || w.description || w.host,
                 hostname: w.hostname || '',
                 os: w.os || ''
             });

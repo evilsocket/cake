@@ -24,6 +24,9 @@ pub struct Node {
     /// Approximate FP16 TFLOPS for this node.
     #[serde(default)]
     pub tflops: f64,
+    /// Backend description (e.g. "CUDA 12.4", "Apple M2 Max", "CPU").
+    #[serde(default)]
+    pub backend: String,
     /// Hostname of the node.
     #[serde(default)]
     pub hostname: String,

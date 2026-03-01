@@ -64,6 +64,7 @@ struct TopologyResponse {
 #[derive(Serialize)]
 struct MasterInfo {
     device: String,
+    backend: String,
     layers: Vec<String>,
     vram_bytes: u64,
     tflops: f64,
@@ -79,6 +80,7 @@ struct WorkerTopologyInfo {
     layers: Vec<String>,
     vram_bytes: u64,
     tflops: f64,
+    backend: String,
     hostname: String,
     os: String,
 }
@@ -125,6 +127,7 @@ where
             layers: node.layers.clone(),
             vram_bytes: node.vram_bytes,
             tflops: node.tflops,
+            backend: node.backend.clone(),
             hostname: node.hostname.clone(),
             os: node.os.clone(),
         });
@@ -152,6 +155,15 @@ where
     let master_vram: u64 = master_gpus.iter().map(|g| g.vram_bytes).sum();
     let master_tflops: f64 = master_gpus.iter().map(|g| g.tflops as f64).sum();
 
+    let backend = if ctx.device.is_cuda() {
+        discovery::detect_cuda_version().unwrap_or_else(|| "CUDA".to_string())
+    } else if ctx.device.is_metal() {
+        // Use GPU name which now contains Apple chip model
+        master_gpus.first().map(|g| g.name.clone()).unwrap_or_else(|| "Metal".to_string())
+    } else {
+        "CPU".to_string()
+    };
+
     let layer_details = read_layer_tensor_details(&ctx.data_path, num_layers);
 
     let response = TopologyResponse {
@@ -173,6 +185,7 @@ where
         layer_size_bytes,
         master: MasterInfo {
             device: device.to_string(),
+            backend,
             layers: master_layers,
             vram_bytes: master_vram,
             tflops: master_tflops,

@@ -256,6 +256,7 @@ pub async fn master_setup(
                 layers: layers.clone(),
                 vram_bytes: worker.total_vram(),
                 tflops: worker.total_tflops(),
+                backend: worker.backend.clone(),
                 hostname: worker.hostname.clone(),
                 os: worker.os.clone(),
             },

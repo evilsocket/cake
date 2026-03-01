@@ -34,6 +34,7 @@ pub struct DiscoveredWorker {
     pub host: String,
     pub port: u16,
     pub gpus: Vec<GpuInfo>,
+    pub backend: String,
     pub hostname: String,
     pub os: String,
 }
@@ -137,11 +138,11 @@ pub fn detect_gpus() -> Vec<GpuInfo> {
     // Report Metal on macOS when built with metal support
     #[cfg(all(target_os = "macos", feature = "metal"))]
     {
-        let name = format!("Apple Silicon ({})", std::env::consts::ARCH);
+        let chip = detect_apple_chip().unwrap_or_else(|| format!("Apple Silicon ({})", std::env::consts::ARCH));
         let vram_bytes = detect_system_memory();
         let tflops = vram_bytes as f32 / (1024.0 * 1024.0 * 1024.0) * 0.4;
         return vec![GpuInfo {
-            name,
+            name: chip,
             vram_bytes,
             tflops,
         }];
@@ -171,6 +172,64 @@ pub fn detect_hostname() -> String {
         }
     }
     "unknown".to_string()
+}
+
+/// Detect the compute backend description for this node.
+pub fn detect_backend() -> String {
+    #[cfg(feature = "cuda")]
+    {
+        if let Some(ver) = detect_cuda_version() {
+            return ver;
+        }
+    }
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    {
+        if let Some(chip) = detect_apple_chip() {
+            return chip;
+        }
+        return "Metal".to_string();
+    }
+    #[allow(unreachable_code)]
+    "CPU".to_string()
+}
+
+/// Detect the CUDA toolkit version via nvcc.
+pub fn detect_cuda_version() -> Option<String> {
+    let output = std::process::Command::new("nvcc")
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Look for "release X.Y" in output like "Cuda compilation tools, release 12.4, V12.4.131"
+    for line in stdout.lines() {
+        if let Some(idx) = line.find("release ") {
+            let rest = &line[idx + 8..];
+            let ver = rest.split(',').next().unwrap_or(rest).trim();
+            if !ver.is_empty() {
+                return Some(format!("CUDA {}", ver));
+            }
+        }
+    }
+    None
+}
+
+/// Detect the Apple Silicon chip model (e.g. "Apple M2 Max").
+#[cfg(target_os = "macos")]
+fn detect_apple_chip() -> Option<String> {
+    let output = std::process::Command::new("sysctl")
+        .args(["-n", "machdep.cpu.brand_string"])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !s.is_empty() {
+            return Some(s);
+        }
+    }
+    None
 }
 
 /// Detect total system memory in bytes.
@@ -230,6 +289,8 @@ struct DiscoveryResponse {
     port: u16,
     gpus: Vec<GpuInfo>,
     #[serde(default)]
+    backend: String,
+    #[serde(default)]
     hostname: String,
     #[serde(default)]
     os: String,
@@ -269,11 +330,13 @@ pub fn advertise_worker(
 ) -> Result<DiscoveryListener> {
     let hash = cluster_hash(cluster_key);
     let hostname = detect_hostname();
+    let backend = detect_backend();
     let response = DiscoveryResponse {
         cluster_hash: hash.clone(),
         worker_name: worker_name.to_string(),
         port,
         gpus: gpus.to_vec(),
+        backend,
         hostname,
         os: std::env::consts::OS.to_string(),
     };
@@ -468,6 +531,7 @@ pub async fn discover_workers(
                                     host,
                                     port: resp.port,
                                     gpus: resp.gpus,
+                                    backend: resp.backend,
                                     hostname: resp.hostname,
                                     os: resp.os,
                                 });

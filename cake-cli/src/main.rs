@@ -269,6 +269,7 @@ fn build_worker_topology(
             layers: layers.to_vec(),
             vram_bytes: 0,
             tflops: 0.0,
+            backend: String::new(),
             hostname: String::new(),
             os: String::new(),
         },
