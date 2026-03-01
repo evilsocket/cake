@@ -20,7 +20,14 @@ pub struct Client {
 impl Client {
     /// Connects to the given worker address.
     /// NOTE: device and layer_name here are only passed for std::fmt::Display.
-    pub async fn new(device: Device, address: &str, layer_name: &str) -> Result<Self> {
+    /// If `cluster_key` is provided, mutual PSK authentication is performed
+    /// before any protocol messages.
+    pub async fn new(
+        device: Device,
+        address: &str,
+        layer_name: &str,
+        cluster_key: Option<&str>,
+    ) -> Result<Self> {
         let address = address.to_string();
         let layer_name = layer_name.to_string();
         let stream = TcpStream::connect(&address)
@@ -35,6 +42,11 @@ impl Client {
             layer_name,
             info: worker_info,
         };
+
+        // Authenticate if cluster key is set
+        if let Some(key) = cluster_key {
+            super::auth::authenticate_as_master(&mut client.stream, key).await?;
+        }
 
         let resp = client.request(Message::Hello).await?;
         client.info = if let Message::WorkerInfo(info) = resp {

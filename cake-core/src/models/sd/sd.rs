@@ -214,6 +214,7 @@ impl Generator for SD {
                     context.device.clone(),
                     &node.host,
                     ModelFile::Clip.name(),
+                    context.args.cluster_key.as_deref(),
                 )
                 .await?,
             );
@@ -248,6 +249,7 @@ impl Generator for SD {
                         context.device.clone(),
                         &node.host,
                         ModelFile::Clip2.name(),
+                        context.args.cluster_key.as_deref(),
                     )
                     .await?,
                 ));
@@ -277,7 +279,7 @@ impl Generator for SD {
         {
             info!("node {node_name} will serve VAE");
             vae_model = Box::new(
-                crate::cake::Client::new(context.device.clone(), &node.host, ModelFile::Vae.name())
+                crate::cake::Client::new(context.device.clone(), &node.host, ModelFile::Vae.name(), context.args.cluster_key.as_deref())
                     .await?,
             );
         } else {
@@ -307,6 +309,7 @@ impl Generator for SD {
                     context.device.clone(),
                     &node.host,
                     ModelFile::Unet.name(),
+                    context.args.cluster_key.as_deref(),
                 )
                 .await?,
             );

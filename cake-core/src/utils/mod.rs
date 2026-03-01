@@ -1,6 +1,7 @@
 //! Utility functions and abstractions.
 
 pub mod hf;
+pub mod models;
 pub mod split;
 
 use std::path::{Path, PathBuf};

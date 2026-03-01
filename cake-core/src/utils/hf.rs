@@ -30,16 +30,16 @@ pub fn ensure_model_downloaded(repo_id: &str) -> Result<PathBuf> {
 
     // Download config.json first — validates repo access (fails fast on auth errors).
     log::info!("downloading config.json ...");
-    repo.get("config.json")
+    repo.download("config.json")
         .map_err(|e| anyhow!("failed to download config.json from '{}': {}", repo_id, e))?;
 
     // Download tokenizer.
     log::info!("downloading tokenizer.json ...");
-    repo.get("tokenizer.json")
+    repo.download("tokenizer.json")
         .map_err(|e| anyhow!("failed to download tokenizer.json from '{}': {}", repo_id, e))?;
 
     // Try sharded model first (model.safetensors.index.json), fall back to single file.
-    let snapshot_dir = if let Ok(index_path) = repo.get("model.safetensors.index.json") {
+    let snapshot_dir = if let Ok(index_path) = repo.download("model.safetensors.index.json") {
         log::info!("found sharded model, parsing index...");
 
         let index_data = std::fs::read(&index_path)?;
@@ -57,9 +57,9 @@ pub fn ensure_model_downloaded(repo_id: &str) -> Result<PathBuf> {
         }
 
         log::info!("downloading {} shard files...", shard_files.len());
-        for shard in &shard_files {
-            log::info!("downloading {} ...", shard);
-            repo.get(shard).map_err(|e| {
+        for (i, shard) in shard_files.iter().enumerate() {
+            log::info!("[{}/{}] downloading {} ...", i + 1, shard_files.len(), shard);
+            repo.download(shard).map_err(|e| {
                 anyhow!(
                     "failed to download shard '{}' from '{}': {}",
                     shard,
@@ -72,7 +72,7 @@ pub fn ensure_model_downloaded(repo_id: &str) -> Result<PathBuf> {
         index_path.parent().unwrap().to_path_buf()
     } else {
         log::info!("downloading model.safetensors ...");
-        let model_path = repo.get("model.safetensors").map_err(|e| {
+        let model_path = repo.download("model.safetensors").map_err(|e| {
             anyhow!(
                 "failed to download model from '{}': no index.json and no model.safetensors found: {}",
                 repo_id,

@@ -17,8 +17,11 @@ pub mod api;
 #[cfg(feature = "master")]
 mod master;
 
+pub mod auth;
 mod client;
+pub mod discovery;
 mod proto;
+pub mod setup;
 mod topology;
 mod worker;
 
@@ -55,7 +58,7 @@ pub struct Context {
 
 impl Context {
     /// Create the context from the parsed command line arguments.
-    pub fn from_args(args: Args) -> Result<Self> {
+    pub fn from_args(mut args: Args) -> Result<Self> {
         let dtype: DType = match args.dtype.as_deref() {
             Some("f16") => DType::F16,
             Some("bf16") => DType::BF16,
@@ -86,7 +89,10 @@ impl Context {
             data_path
         };
 
-        let topology = if let Some(path) = &args.topology {
+        let topology = if let Some(topo) = args.topology_override.take() {
+            // Zero-config setup already built the topology
+            topo
+        } else if let Some(path) = &args.topology {
             Topology::from_path(path, &args.model_type)?
         } else {
             log::warn!("no topology file specified, the entire model will be loaded");

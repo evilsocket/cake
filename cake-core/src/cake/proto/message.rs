@@ -80,6 +80,24 @@ pub enum Message {
     Tensor(RawTensor),
     /// Last message sent.
     Goodbye,
+
+    // ── Zero-config setup messages ──────────────────────────────
+
+    /// Master tells worker which layers to serve.
+    LayerAssignment { layers: Vec<String> },
+    /// Worker tells master whether it needs model data.
+    LayerAssignmentAck { needs_data: bool },
+    /// Chunk of model file data from master to worker.
+    ModelDataChunk {
+        filename: String,
+        offset: u64,
+        total_size: u64,
+        data: Vec<u8>,
+    },
+    /// All model files have been sent.
+    ModelDataDone,
+    /// Worker has loaded all assigned layers and is ready for inference.
+    WorkerReady,
 }
 
 #[inline]

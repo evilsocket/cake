@@ -1,7 +1,10 @@
 //! This is the cake command line utility.
 
+use std::path::PathBuf;
+use std::time::Duration;
+
 use cake_core::{
-    cake::{Context, Mode, Worker},
+    cake::{self, Context, Mode, Worker},
     utils, Args, ModelType, TextModelArch,
 };
 
@@ -32,6 +35,8 @@ enum Commands {
         /// HuggingFace repo ID (e.g., Qwen/Qwen2.5-Coder-1.5B-Instruct)
         model: String,
     },
+    /// List locally available models and their status
+    Models,
     /// Split a model into per-worker bundles
     Split {
         /// Input model path
@@ -65,6 +70,31 @@ async fn main() -> Result<()> {
         .init();
 
     match cli.command {
+        Commands::Models => {
+            let models = utils::models::list_models()?;
+            if models.is_empty() {
+                println!("No models found.");
+                println!();
+                println!("Download a model with:");
+                println!("  cake download <org/model-name>");
+            } else {
+                println!(
+                    "{:<50} {:<15} {:<15} {}",
+                    "MODEL", "STATUS", "SIZE", "SOURCE"
+                );
+                println!("{}", "-".repeat(95));
+                for m in &models {
+                    let size = human_bytes::human_bytes(m.size_bytes as f64);
+                    println!(
+                        "{:<50} {:<15} {:<15} {}",
+                        &m.name, m.status, size, m.source,
+                    );
+                }
+                println!();
+                println!("{} model(s) found.", models.len());
+            }
+            Ok(())
+        }
         Commands::Download { model } => {
             if utils::hf::looks_like_hf_repo(&model) {
                 let path = utils::hf::ensure_model_downloaded(&model)?;
@@ -89,6 +119,20 @@ async fn main() -> Result<()> {
         }
         Commands::Master { mut args } => {
             args.mode = Mode::Master;
+
+            // Zero-config: discover workers, assign layers, push model data
+            if args.cluster_key.is_some() && args.topology.is_none() {
+                let model_path = resolve_model_path(&args.model)?;
+                let timeout = Duration::from_secs(args.discovery_timeout);
+                let topology = cake::setup::master_setup(
+                    args.cluster_key.as_ref().unwrap(),
+                    &model_path,
+                    timeout,
+                )
+                .await?;
+                args.topology_override = Some(topology);
+            }
+
             let ctx = Context::from_args(args)?;
             let ret = run_master(ctx).await;
             if ret.is_err() {
@@ -98,8 +142,37 @@ async fn main() -> Result<()> {
         }
         Commands::Worker { mut args } => {
             args.mode = Mode::Worker;
+
+            // Zero-config: wait for master assignment + model data
+            let listener_override = if args.cluster_key.is_some() && args.topology.is_none() {
+                let worker_name = args.name.as_deref().unwrap_or("worker");
+                let cache_dir = cache_base_dir();
+                let (layers, model_path, listener) = cake::setup::worker_setup(
+                    worker_name,
+                    args.cluster_key.as_ref().unwrap(),
+                    &args.address,
+                    &cache_dir,
+                )
+                .await?;
+                args.model = model_path.to_string_lossy().to_string();
+                args.topology_override = Some(build_worker_topology(
+                    worker_name,
+                    &args.address,
+                    &layers,
+                ));
+                Some(listener)
+            } else {
+                None
+            };
+
             let mut ctx = Context::from_args(args)?;
-            let ret = run_worker(&mut ctx).await;
+            let ret = if let Some(_listener) = listener_override {
+                // TODO: pass the pre-bound listener to Worker to avoid rebinding
+                // For now, the setup connection is dropped and Worker::new() rebinds
+                run_worker(&mut ctx).await
+            } else {
+                run_worker(&mut ctx).await
+            };
             if ret.is_err() {
                 println!();
             }
@@ -170,4 +243,41 @@ async fn run_worker(ctx: &mut Context) -> Result<()> {
                 .await
         }
     }
+}
+
+/// Resolve a model path, downloading from HuggingFace if it looks like a repo ID.
+fn resolve_model_path(model: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(model);
+    if path.exists() {
+        Ok(path)
+    } else if utils::hf::looks_like_hf_repo(model) {
+        utils::hf::ensure_model_downloaded(model)
+    } else {
+        anyhow::bail!("model path does not exist: {}", path.display())
+    }
+}
+
+/// Build a minimal Topology for a single worker from assigned layers.
+fn build_worker_topology(
+    worker_name: &str,
+    address: &str,
+    layers: &[String],
+) -> cake::Topology {
+    let mut topology = cake::Topology::new();
+    topology.insert(
+        worker_name.to_string(),
+        cake::Node {
+            host: address.to_string(),
+            description: None,
+            layers: layers.to_vec(),
+        },
+    );
+    topology
+}
+
+/// Return the base cache directory for zero-config model data.
+fn cache_base_dir() -> PathBuf {
+    dirs::cache_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join("cake")
 }

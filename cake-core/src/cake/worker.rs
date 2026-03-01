@@ -165,6 +165,14 @@ impl<G: Generator + 'static> Worker<G> {
         client: SocketAddr,
         mut context: WorkerContext<G::Shardable>,
     ) -> Result<()> {
+        // Authenticate if cluster key is set
+        if let Some(ref cluster_key) = context.context.args.cluster_key {
+            super::auth::authenticate_as_worker(&mut socket, cluster_key)
+                .await
+                .map_err(|e| anyhow!("[{}] authentication failed: {}", &client, e))?;
+            log::info!("[{}] authenticated", &client);
+        }
+
         // read and validate Hello
         let (latency, _size, hello) = Self::read_message_timed(&mut socket).await?;
         if !matches!(hello, Message::Hello) {

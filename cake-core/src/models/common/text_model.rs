@@ -117,8 +117,13 @@ impl TextModelBase {
             if let Some((node_name, node)) = ctx.topology.get_node_for_layer(&block_layer_name) {
                 log::debug!("node {node_name} will serve {}", &block_layer_name);
                 blocks.push(Box::new(
-                    crate::cake::Client::new(ctx.device.clone(), &node.host, &block_layer_name)
-                        .await?,
+                    crate::cake::Client::new(
+                        ctx.device.clone(),
+                        &node.host,
+                        &block_layer_name,
+                        ctx.args.cluster_key.as_deref(),
+                    )
+                    .await?,
                 ));
             } else {
                 log::debug!("{} will be served locally", &block_layer_name);

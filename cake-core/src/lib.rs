@@ -85,6 +85,20 @@ pub struct Args {
     #[arg(long)]
     pub dtype: Option<String>,
 
+    /// Cluster key for zero-config mDNS discovery and PSK authentication.
+    /// When set on both master and workers, enables automatic discovery,
+    /// layer assignment, and model data push without topology files.
+    #[arg(long, env = "CAKE_CLUSTER_KEY")]
+    pub cluster_key: Option<String>,
+
+    /// How long to wait for worker discovery (seconds). 0 = skip discovery.
+    #[arg(long, default_value_t = 10)]
+    pub discovery_timeout: u64,
+
+    /// Topology built during zero-config setup (not a CLI arg).
+    #[arg(skip)]
+    pub topology_override: Option<cake::Topology>,
+
     /// Run on CPU rather than on GPU.
     #[arg(long, default_value_t = false)]
     pub cpu: bool,

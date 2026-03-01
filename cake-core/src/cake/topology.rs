@@ -11,7 +11,7 @@ lazy_static! {
 }
 
 /// A single node (worker).
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Node {
     /// Address and port of the worker.
     pub host: String,
@@ -34,7 +34,7 @@ impl Node {
 }
 
 /// The topology is a worker-name -> worker-info map.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Topology(HashMap<String, Node>);
 
 impl Topology {
