@@ -156,7 +156,17 @@ where
 
     let response = TopologyResponse {
         model: TG::MODEL_NAME.to_string(),
-        model_id: ctx.args.model.clone(),
+        model_id: {
+            let m = ctx.args.model.trim_end_matches('/');
+            // If it looks like a HF repo ID (org/name, no dots or path seps at start), keep as-is
+            let parts: Vec<&str> = m.split('/').collect();
+            if parts.len() == 2 && !m.starts_with('.') && !m.starts_with('/') {
+                m.to_string()
+            } else {
+                // Local path: extract just the last component
+                parts.last().unwrap_or(&m).to_string()
+            }
+        },
         dtype: format!("{:?}", ctx.dtype),
         num_layers,
         memory_bytes,
