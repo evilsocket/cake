@@ -390,8 +390,8 @@ pub async fn worker_setup(
     let port = listener.local_addr()?.port();
     log::info!("listening on {} (setup mode)", bind_address);
 
-    // Advertise via mDNS
-    let _mdns = discovery::advertise_worker(worker_name, port, cluster_key, &gpus)?;
+    // Advertise via UDP broadcast
+    let _discovery = discovery::advertise_worker(worker_name, port, cluster_key, &gpus)?;
 
     log::info!("waiting for master to connect and assign layers...");
 

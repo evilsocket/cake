@@ -1,16 +1,19 @@
-//! mDNS service discovery and GPU detection for zero-config clustering.
+//! UDP broadcast service discovery and GPU detection for zero-config clustering.
 
 use std::collections::HashMap;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::time::Duration;
 
 use anyhow::Result;
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use speedy::{Readable, Writable};
 
-/// The mDNS service type for Cake workers.
-const SERVICE_TYPE: &str = "_cake._tcp.local.";
+/// UDP broadcast port for Cake discovery.
+const DISCOVERY_PORT: u16 = 10127;
+
+/// Magic bytes to identify Cake discovery packets.
+const MAGIC: &[u8; 4] = b"CAKE";
 
 /// Default discovery timeout.
 pub const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -22,7 +25,7 @@ pub struct GpuInfo {
     pub vram_bytes: u64,
 }
 
-/// A worker discovered via mDNS.
+/// A worker discovered via broadcast.
 #[derive(Debug, Clone)]
 pub struct DiscoveredWorker {
     pub name: String,
@@ -38,7 +41,7 @@ impl DiscoveredWorker {
     }
 }
 
-/// Compute the first 8 hex chars of SHA-256(cluster_key) for mDNS filtering.
+/// Compute the first 8 hex chars of SHA-256(cluster_key) for filtering.
 pub fn cluster_hash(cluster_key: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(cluster_key.as_bytes());
@@ -134,67 +137,112 @@ fn detect_system_memory() -> u64 {
         .unwrap_or(0)
 }
 
-/// Advertise this worker via mDNS.
+// ── Discovery packet format ────────────────────────────────────────────────
+
+/// A discovery query broadcast by the master.
+#[derive(Serialize, Deserialize)]
+struct DiscoveryQuery {
+    cluster_hash: String,
+}
+
+/// A discovery response sent by workers (unicast back to master).
+#[derive(Serialize, Deserialize)]
+struct DiscoveryResponse {
+    cluster_hash: String,
+    worker_name: String,
+    port: u16,
+    gpus: Vec<GpuInfo>,
+}
+
+fn encode_packet(payload: &[u8]) -> Vec<u8> {
+    let mut pkt = Vec::with_capacity(4 + payload.len());
+    pkt.extend_from_slice(MAGIC);
+    pkt.extend_from_slice(payload);
+    pkt
+}
+
+fn decode_packet(data: &[u8]) -> Option<&[u8]> {
+    if data.len() > 4 && data[..4] == *MAGIC {
+        Some(&data[4..])
+    } else {
+        None
+    }
+}
+
+// ── Worker advertisement (listen for queries, respond) ─────────────────────
+
+/// Handle for a running discovery listener.
+/// Must be kept alive for the worker to respond to discovery queries.
+pub struct DiscoveryListener {
+    _handle: std::thread::JoinHandle<()>,
+}
+
+/// Start listening for discovery queries and responding with worker info.
 ///
-/// Returns the `ServiceDaemon` handle — it **must** be kept alive for the
-/// advertisement to persist on the network.
+/// Spawns a background thread. Returns a handle that must be kept alive.
 pub fn advertise_worker(
-    instance_name: &str,
+    worker_name: &str,
     port: u16,
     cluster_key: &str,
     gpus: &[GpuInfo],
-) -> Result<ServiceDaemon> {
-    let mdns = ServiceDaemon::new().map_err(|e| anyhow!("failed to create mDNS daemon: {}", e))?;
-
-    let gpus_json = serde_json::to_string(gpus)?;
+) -> Result<DiscoveryListener> {
     let hash = cluster_hash(cluster_key);
-
-    let properties: HashMap<String, String> = [
-        ("cluster".to_string(), hash),
-        ("gpus".to_string(), gpus_json),
-        ("version".to_string(), env!("CARGO_PKG_VERSION").to_string()),
-    ]
-    .into_iter()
-    .collect();
-
-    let hostname = hostname::get()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let host_label = if hostname.ends_with(".local.") {
-        hostname
-    } else if hostname.ends_with(".local") {
-        format!("{}.", hostname)
-    } else {
-        format!("{}.local.", hostname)
-    };
-
-    let service = ServiceInfo::new(
-        SERVICE_TYPE,
-        instance_name,
-        &host_label,
-        "",
+    let response = DiscoveryResponse {
+        cluster_hash: hash.clone(),
+        worker_name: worker_name.to_string(),
         port,
-        properties,
-    )
-    .map_err(|e| anyhow!("failed to create mDNS service info: {}", e))?
-    .enable_addr_auto();
+        gpus: gpus.to_vec(),
+    };
+    let response_json = serde_json::to_vec(&response)?;
+    let response_pkt = encode_packet(&response_json);
 
-    mdns.register(service)
-        .map_err(|e| anyhow!("failed to register mDNS service: {}", e))?;
+    let sock = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, DISCOVERY_PORT))
+        .map_err(|e| anyhow!("failed to bind discovery UDP socket on port {}: {}", DISCOVERY_PORT, e))?;
+    sock.set_broadcast(true)?;
+    sock.set_read_timeout(Some(Duration::from_secs(1)))?;
 
     log::info!(
-        "advertising worker '{}' via mDNS on port {}",
-        instance_name,
-        port
+        "listening for discovery queries on UDP port {}",
+        DISCOVERY_PORT
     );
 
-    Ok(mdns)
+    let handle = std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        loop {
+            match sock.recv_from(&mut buf) {
+                Ok((len, src)) => {
+                    if let Some(payload) = decode_packet(&buf[..len]) {
+                        if let Ok(query) = serde_json::from_slice::<DiscoveryQuery>(payload) {
+                            if query.cluster_hash == hash {
+                                // Respond directly to the master
+                                if let Err(e) = sock.send_to(&response_pkt, src) {
+                                    log::warn!("failed to send discovery response to {}: {}", src, e);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    // Normal timeout, keep listening
+                }
+                Err(e) => {
+                    log::warn!("discovery listener error: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+
+    Ok(DiscoveryListener { _handle: handle })
 }
+
+// ── Master browsing (broadcast query, collect responses) ──────────────────
 
 /// Browse for workers on the network matching the given cluster key.
 ///
-/// Blocks for up to `timeout`, collecting all discovered workers.
+/// Sends periodic UDP broadcast queries, collects responses until timeout.
 pub async fn discover_workers(
     cluster_key: &str,
     timeout: Duration,
@@ -202,89 +250,99 @@ pub async fn discover_workers(
     let expected_hash = cluster_hash(cluster_key);
 
     log::info!(
-        "discovering workers via mDNS (timeout: {}s)...",
+        "discovering workers (timeout: {}s)...",
         timeout.as_secs()
     );
 
-    // Run the entire browse loop in a blocking thread to avoid
-    // event loss between async iterations.
     let workers = tokio::task::spawn_blocking(move || {
-        let mdns = ServiceDaemon::new().map_err(|e| anyhow!("failed to create mDNS daemon: {}", e))?;
-        let receiver = mdns
-            .browse(SERVICE_TYPE)
-            .map_err(|e| anyhow!("failed to browse mDNS: {}", e))?;
+        let sock = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
+            .map_err(|e| anyhow!("failed to bind discovery socket: {}", e))?;
+        sock.set_broadcast(true)?;
+        sock.set_read_timeout(Some(Duration::from_millis(500)))?;
+
+        let query = DiscoveryQuery {
+            cluster_hash: expected_hash.clone(),
+        };
+        let query_json = serde_json::to_vec(&query)?;
+        let query_pkt = encode_packet(&query_json);
+
+        let broadcast_addr = SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::BROADCAST,
+            DISCOVERY_PORT,
+        ));
 
         let mut workers: HashMap<String, DiscoveredWorker> = HashMap::new();
         let deadline = std::time::Instant::now() + timeout;
+        let mut last_query = std::time::Instant::now() - Duration::from_secs(10);
+        let query_interval = Duration::from_secs(1);
+        let mut buf = [0u8; 65535];
 
         loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
+            let now = std::time::Instant::now();
+            if now >= deadline {
                 break;
             }
 
-            let recv_timeout = remaining.min(Duration::from_secs(1));
-            match receiver.recv_timeout(recv_timeout) {
-                Ok(ServiceEvent::ServiceResolved(info)) => {
-                    // Check cluster hash
-                    let cluster = info.get_property_val_str("cluster")
-                        .unwrap_or_default();
-                    if cluster != expected_hash {
-                        continue;
-                    }
-
-                    // Parse GPU info
-                    let gpus_json = info.get_property_val_str("gpus")
-                        .unwrap_or("[]");
-                    let gpus: Vec<GpuInfo> = serde_json::from_str(gpus_json)
-                        .unwrap_or_default();
-
-                    let port = info.get_port();
-                    // Get the first address
-                    let addrs = info.get_addresses();
-                    let ip = if let Some(addr) = addrs.iter().next() {
-                        addr.to_string()
-                    } else {
-                        continue;
-                    };
-
-                    let host = format!("{}:{}", ip, port);
-                    let name = info.get_fullname().to_string();
-
-                    // Use the service instance name as the worker name
-                    let instance_name = name
-                        .strip_suffix(&format!(".{}", SERVICE_TYPE))
-                        .unwrap_or(&name)
-                        .to_string();
-
-                    log::info!(
-                        "discovered worker '{}' at {} with {} GPU(s)",
-                        &instance_name,
-                        &host,
-                        gpus.len()
-                    );
-
-                    for gpu in &gpus {
-                        log::info!(
-                            "  {} — {}",
-                            &gpu.name,
-                            human_bytes::human_bytes(gpu.vram_bytes as f64)
-                        );
-                    }
-
-                    workers.insert(instance_name.clone(), DiscoveredWorker {
-                        name: instance_name,
-                        host,
-                        port,
-                        gpus,
-                    });
+            // Send periodic broadcast queries
+            if now.duration_since(last_query) >= query_interval {
+                if let Err(e) = sock.send_to(&query_pkt, broadcast_addr) {
+                    log::warn!("failed to send discovery broadcast: {}", e);
                 }
-                Ok(_) => {} // other events
-                Err(_) => {} // timeout on recv, loop again
+                last_query = now;
+            }
+
+            // Listen for responses
+            match sock.recv_from(&mut buf) {
+                Ok((len, src)) => {
+                    if let Some(payload) = decode_packet(&buf[..len]) {
+                        if let Ok(resp) = serde_json::from_slice::<DiscoveryResponse>(payload) {
+                            if resp.cluster_hash != expected_hash {
+                                continue;
+                            }
+
+                            let src_ip = match src {
+                                SocketAddr::V4(a) => a.ip().to_string(),
+                                SocketAddr::V6(a) => a.ip().to_string(),
+                            };
+                            let host = format!("{}:{}", src_ip, resp.port);
+
+                            if !workers.contains_key(&resp.worker_name) {
+                                log::info!(
+                                    "discovered worker '{}' at {} with {} GPU(s)",
+                                    &resp.worker_name,
+                                    &host,
+                                    resp.gpus.len()
+                                );
+
+                                for gpu in &resp.gpus {
+                                    log::info!(
+                                        "  {} — {}",
+                                        &gpu.name,
+                                        human_bytes::human_bytes(gpu.vram_bytes as f64)
+                                    );
+                                }
+
+                                workers.insert(resp.worker_name.clone(), DiscoveredWorker {
+                                    name: resp.worker_name,
+                                    host,
+                                    port: resp.port,
+                                    gpus: resp.gpus,
+                                });
+                            }
+                        }
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    // Normal timeout, loop again
+                }
+                Err(e) => {
+                    log::warn!("discovery recv error: {}", e);
+                }
             }
         }
 
-        let _ = mdns.shutdown();
         Ok::<_, anyhow::Error>(workers)
     }).await??;
 
