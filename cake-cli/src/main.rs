@@ -165,9 +165,10 @@ async fn main() -> Result<()> {
                 None
             };
 
-            // Drop the setup listener so Worker::new() can rebind the port
-            drop(listener_override);
             let mut ctx = Context::from_args(args)?;
+            if let Some(listener) = listener_override {
+                *ctx.listener_override.lock().unwrap() = Some(listener);
+            }
             let ret = run_worker(&mut ctx).await;
             if ret.is_err() {
                 println!();

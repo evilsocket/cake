@@ -112,7 +112,14 @@ impl<G: Generator + 'static> Worker<G> {
 
         let blocks = Arc::new(blocks);
 
-        let listener = TcpListener::bind(&ctx.args.address).await?;
+        let listener = {
+            let taken = ctx.listener_override.lock().unwrap().take();
+            if let Some(existing) = taken {
+                existing
+            } else {
+                TcpListener::bind(&ctx.args.address).await?
+            }
+        };
 
         log::info!(
             "listening on {} (mem:{}) ...",

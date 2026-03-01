@@ -1,7 +1,9 @@
 use std::{
     fmt::{Debug, Display},
     path::PathBuf,
+    sync::{Arc, Mutex},
 };
+use tokio::net::TcpListener;
 
 use crate::{
     models::common::{detect_text_model_arch, Cache, Config},
@@ -54,6 +56,8 @@ pub struct Context {
     pub var_builder: Option<VarBuilder<'static>>,
     /// Resolved text model architecture.
     pub text_model_arch: TextModelArch,
+    /// Pre-bound TCP listener from setup phase (taken once by Worker::new).
+    pub listener_override: Arc<Mutex<Option<TcpListener>>>,
 }
 
 impl Context {
@@ -155,6 +159,7 @@ impl Context {
             cache,
             var_builder,
             text_model_arch,
+            listener_override: Arc::new(Mutex::new(None)),
         })
     }
 }
