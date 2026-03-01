@@ -449,12 +449,12 @@ impl ImageGenerator for SD {
             StableDiffusionVersion::Turbo => 0.13025,
         };
 
-        let safe_scheduler = SafeScheduler {
+        let mut safe_scheduler = SafeScheduler {
             scheduler: self.sd_config.build_scheduler(*n_steps)?,
         };
 
         for idx in 0..(*num_samples) {
-            let timesteps = safe_scheduler.scheduler.timesteps();
+            let timesteps = safe_scheduler.scheduler.timesteps().to_vec();
             let latents = match &init_latent_dist_sample {
                 Some(init_latent_dist) => {
                     let latents =
