@@ -58,6 +58,39 @@ cargo build --release --no-default-features --features qwen2
 
 CUDA >= 12.2 is required for CUDA accelerated systems.
 
+## Docker (Linux/NVIDIA)
+
+For Linux systems with NVIDIA GPUs, you can run Cake via Docker. The [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/) is required.
+
+Build the image:
+
+```sh
+docker build -t cake .
+```
+
+Set `CUDA_COMPUTE_CAP` to match your GPU ([common values](https://developer.nvidia.com/cuda-gpus): 75 for RTX 2000, 80 for A100, 86 for RTX 3000, 89 for RTX 4000, 90 for H100):
+
+```sh
+docker build -t cake --build-arg CUDA_COMPUTE_CAP=86 .
+```
+
+Run a standalone instance (no cluster, loads entire model):
+
+```sh
+docker run --rm --gpus all \
+  -v /path/to/model:/model:ro \
+  -p 8080:8080 \
+  cake --model /model --api 0.0.0.0:8080
+```
+
+A `docker-compose.yml` is provided as an example for running a multi-worker cluster. Create a `topology-docker.yml` mapping layers to the `worker-1` / `worker-2` service names, place your model data in `./cake-data/`, and run:
+
+```sh
+docker compose up --build
+```
+
+**Note:** Docker on macOS cannot access Metal GPUs. For Apple Silicon, build and run natively with `cargo build --release --features metal`.
+
 ## Compile
 
 With [Rust installed](https://www.rust-lang.org/tools/install), you can build the core library and the CLI utilities with different accelerations.
