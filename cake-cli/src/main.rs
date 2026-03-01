@@ -267,6 +267,8 @@ fn build_worker_topology(
             host: address.to_string(),
             description: None,
             layers: layers.to_vec(),
+            vram_bytes: 0,
+            tflops: 0.0,
         },
     );
     topology

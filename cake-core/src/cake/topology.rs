@@ -15,9 +15,15 @@ lazy_static! {
 pub struct Node {
     /// Address and port of the worker.
     pub host: String,
-    /// Optional descriptioon.
+    /// Optional description.
     pub description: Option<String>,
     pub layers: Vec<String>,
+    /// Total VRAM (or system RAM) in bytes available on this node.
+    #[serde(default)]
+    pub vram_bytes: u64,
+    /// Approximate FP16 TFLOPS for this node.
+    #[serde(default)]
+    pub tflops: f64,
 }
 
 impl Node {

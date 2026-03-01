@@ -27,26 +27,27 @@ const MODEL_DATA_CHUNK_SIZE: usize = 128 * 1024 * 1024;
 
 // ── Layer assignment ────────────────────────────────────────────────────────
 
-/// Compute layer assignments proportional to each worker's total VRAM,
-/// accounting for the master's own GPU so it retains its fair share of layers.
+/// Compute layer assignments proportional to each worker's estimated TFLOPS,
+/// accounting for the master's own compute so it retains its fair share of layers.
 ///
 /// Returns a vec of `(worker_index, layer_names)`.
-/// Workers are sorted by total VRAM descending, and layers are assigned as
+/// Workers are sorted by TFLOPS descending, and layers are assigned as
 /// contiguous ranges starting from layer 0. Unassigned layers remain on master.
 pub fn compute_layer_assignments(
     workers: &[DiscoveredWorker],
     num_layers: usize,
-    master_vram: u64,
+    master_tflops: f64,
 ) -> Vec<(usize, Vec<String>)> {
     if workers.is_empty() || num_layers == 0 {
         return vec![];
     }
 
-    // Include master VRAM in total so layers are split proportionally
-    let total_vram: u64 = workers.iter().map(|w| w.total_vram()).sum::<u64>() + master_vram;
+    // Include master TFLOPS in total so layers are split proportionally
+    let total_tflops: f64 =
+        workers.iter().map(|w| w.total_tflops()).sum::<f64>() + master_tflops;
 
-    if total_vram == 0 {
-        // No VRAM info anywhere — give half to workers, half to master
+    if total_tflops <= 0.0 {
+        // No compute info — give half to workers, half to master
         let worker_layers = num_layers / 2;
         let per_worker = worker_layers / workers.len();
         let mut assignments = vec![];
@@ -66,20 +67,25 @@ pub fn compute_layer_assignments(
         return assignments;
     }
 
-    // Sort worker indices by VRAM descending
+    // Sort worker indices by TFLOPS descending
     let mut indices: Vec<usize> = (0..workers.len()).collect();
-    indices.sort_by(|a, b| workers[*b].total_vram().cmp(&workers[*a].total_vram()));
+    indices.sort_by(|a, b| {
+        workers[*b]
+            .total_tflops()
+            .partial_cmp(&workers[*a].total_tflops())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Total layers for all workers combined (master keeps its share)
-    let workers_vram: u64 = workers.iter().map(|w| w.total_vram()).sum();
+    let workers_tflops: f64 = workers.iter().map(|w| w.total_tflops()).sum();
     let total_worker_layers =
-        (workers_vram as f64 / total_vram as f64 * num_layers as f64).round() as usize;
+        (workers_tflops / total_tflops * num_layers as f64).round() as usize;
     let total_worker_layers = total_worker_layers.min(num_layers);
 
     log::info!(
-        "master VRAM: {} — workers VRAM: {} — assigning {} of {} layers to workers",
-        human_bytes::human_bytes(master_vram as f64),
-        human_bytes::human_bytes(workers_vram as f64),
+        "master: {:.1} TFLOPS — workers: {:.1} TFLOPS — assigning {} of {} layers to workers",
+        master_tflops,
+        workers_tflops,
         total_worker_layers,
         num_layers
     );
@@ -87,7 +93,7 @@ pub fn compute_layer_assignments(
     let mut assignments = vec![];
     let mut offset = 0;
     let mut remaining_layers = total_worker_layers;
-    let mut remaining_vram = workers_vram;
+    let mut remaining_tflops = workers_tflops;
 
     for (pos, &worker_idx) in indices.iter().enumerate() {
         if remaining_layers == 0 {
@@ -97,10 +103,9 @@ pub fn compute_layer_assignments(
         let count = if pos == indices.len() - 1 {
             remaining_layers
         } else {
-            let worker_vram = workers[worker_idx].total_vram();
+            let worker_tflops = workers[worker_idx].total_tflops();
             let proportional =
-                (worker_vram as f64 / remaining_vram as f64 * remaining_layers as f64).round()
-                    as usize;
+                (worker_tflops / remaining_tflops * remaining_layers as f64).round() as usize;
             proportional.max(1).min(remaining_layers)
         };
 
@@ -111,7 +116,7 @@ pub fn compute_layer_assignments(
         assignments.push((worker_idx, layers));
         offset += count;
         remaining_layers -= count;
-        remaining_vram -= workers[worker_idx].total_vram();
+        remaining_tflops -= workers[worker_idx].total_tflops();
     }
 
     assignments
@@ -137,6 +142,13 @@ pub async fn master_setup(
     let num_layers = config_json
         .get("num_hidden_layers")
         .and_then(|v| v.as_u64())
+        .or_else(|| {
+            // Some models (e.g. Qwen3.5) nest config under text_config
+            config_json
+                .get("text_config")
+                .and_then(|tc| tc.get("num_hidden_layers"))
+                .and_then(|v| v.as_u64())
+        })
         .ok_or_else(|| anyhow!("num_hidden_layers not found in config.json"))? as usize;
 
     log::info!("model has {} transformer layers", num_layers);
@@ -150,10 +162,10 @@ pub async fn master_setup(
 
     // Detect master GPU for proportional split
     let master_gpus = discovery::detect_gpus();
-    let master_vram: u64 = master_gpus.iter().map(|g| g.vram_bytes).sum();
+    let master_tflops: f64 = master_gpus.iter().map(|g| g.tflops as f64).sum();
 
-    // Compute assignments
-    let assignments = compute_layer_assignments(&workers, num_layers, master_vram);
+    // Compute assignments based on TFLOPS
+    let assignments = compute_layer_assignments(&workers, num_layers, master_tflops);
 
     log::info!("layer assignments:");
     for (worker_idx, layers) in &assignments {
@@ -164,9 +176,10 @@ pub async fn master_setup(
             format!("{} — {}", layers.first().unwrap(), layers.last().unwrap())
         };
         log::info!(
-            "  {} ({}) → {} layers [{}]",
+            "  {} ({}, {:.1} TFLOPS) → {} layers [{}]",
             &w.name,
             human_bytes::human_bytes(w.total_vram() as f64),
+            w.total_tflops(),
             layers.len(),
             range
         );
@@ -241,6 +254,8 @@ pub async fn master_setup(
                         .join(", "),
                 ),
                 layers: layers.clone(),
+                vram_bytes: worker.total_vram(),
+                tflops: worker.total_tflops(),
             },
         );
     }

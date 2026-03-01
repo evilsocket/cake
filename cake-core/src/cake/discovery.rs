@@ -23,6 +23,8 @@ pub const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct GpuInfo {
     pub name: String,
     pub vram_bytes: u64,
+    #[serde(default)]
+    pub tflops: f32,
 }
 
 /// A worker discovered via broadcast.
@@ -38,6 +40,35 @@ impl DiscoveredWorker {
     /// Total VRAM across all GPUs.
     pub fn total_vram(&self) -> u64 {
         self.gpus.iter().map(|g| g.vram_bytes).sum()
+    }
+
+    /// Total estimated TFLOPS across all GPUs.
+    /// Falls back to a VRAM-based estimate when workers report 0 (old binaries).
+    pub fn total_tflops(&self) -> f64 {
+        let reported: f64 = self.gpus.iter().map(|g| g.tflops as f64).sum();
+        if reported > 0.0 {
+            return reported;
+        }
+        // Fallback: estimate from VRAM and device name
+        self.gpus
+            .iter()
+            .map(|g| {
+                let vram_gb = g.vram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+                let name_lower = g.name.to_lowercase();
+                if name_lower.contains("nvidia")
+                    || name_lower.contains("geforce")
+                    || name_lower.contains("rtx")
+                    || name_lower.contains("gtx")
+                    || name_lower.contains("tesla")
+                {
+                    vram_gb * 3.0 // CUDA GPU fallback
+                } else if name_lower.contains("apple") || name_lower.contains("silicon") {
+                    vram_gb * 0.4 // Metal fallback
+                } else {
+                    2.0 // CPU fallback
+                }
+            })
+            .sum()
     }
 }
 
@@ -60,7 +91,7 @@ pub fn detect_gpus() -> Vec<GpuInfo> {
     {
         if let Ok(output) = std::process::Command::new("nvidia-smi")
             .args([
-                "--query-gpu=name,memory.total",
+                "--query-gpu=name,memory.total,clocks.max.graphics",
                 "--format=csv,noheader,nounits",
             ])
             .output()
@@ -70,13 +101,23 @@ pub fn detect_gpus() -> Vec<GpuInfo> {
                 let gpus: Vec<GpuInfo> = stdout
                     .lines()
                     .filter_map(|line| {
-                        let parts: Vec<&str> = line.splitn(2, ',').collect();
-                        if parts.len() == 2 {
+                        let parts: Vec<&str> = line.splitn(3, ',').collect();
+                        if parts.len() >= 2 {
                             let name = parts[0].trim().to_string();
                             let vram_mb: u64 = parts[1].trim().parse().ok()?;
+                            let vram_gb = vram_mb as f32 / 1024.0;
+                            // Estimate FP16 TFLOPS from VRAM tier and max clock
+                            let tflops = if parts.len() >= 3 {
+                                let clock_mhz: f32 =
+                                    parts[2].trim().parse().unwrap_or(1500.0);
+                                vram_gb * (clock_mhz / 1000.0) * 1.5
+                            } else {
+                                vram_gb * 3.0
+                            };
                             Some(GpuInfo {
                                 name,
                                 vram_bytes: vram_mb * 1024 * 1024,
+                                tflops,
                             })
                         } else {
                             None
@@ -96,7 +137,12 @@ pub fn detect_gpus() -> Vec<GpuInfo> {
     {
         let name = format!("Apple Silicon ({})", std::env::consts::ARCH);
         let vram_bytes = detect_system_memory();
-        return vec![GpuInfo { name, vram_bytes }];
+        let tflops = vram_bytes as f32 / (1024.0 * 1024.0 * 1024.0) * 0.4;
+        return vec![GpuInfo {
+            name,
+            vram_bytes,
+            tflops,
+        }];
     }
 
     // Fallback: CPU with system RAM
@@ -104,7 +150,11 @@ pub fn detect_gpus() -> Vec<GpuInfo> {
     {
         let name = format!("CPU ({})", std::env::consts::ARCH);
         let vram_bytes = detect_system_memory();
-        vec![GpuInfo { name, vram_bytes }]
+        vec![GpuInfo {
+            name,
+            vram_bytes,
+            tflops: 2.0,
+        }]
     }
 }
 
@@ -384,9 +434,10 @@ pub async fn discover_workers(
 
                                 for gpu in &resp.gpus {
                                     log::info!(
-                                        "  {} — {}",
+                                        "  {} — {} (~{:.1} TFLOPS)",
                                         &gpu.name,
-                                        human_bytes::human_bytes(gpu.vram_bytes as f64)
+                                        human_bytes::human_bytes(gpu.vram_bytes as f64),
+                                        gpu.tflops
                                     );
                                 }
 

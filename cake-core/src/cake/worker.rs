@@ -180,14 +180,32 @@ impl<G: Generator + 'static> Worker<G> {
             log::debug!("[{}] authenticated", &client);
         }
 
-        // read and validate Hello
-        let (latency, _size, hello) = Self::read_message_timed(&mut socket).await?;
-        if !matches!(hello, Message::Hello) {
-            return Err(anyhow!(
-                "[{}] unpexpected message instead of hello: {:?}",
-                &client,
-                hello
-            ));
+        // read first message: expect Hello, but handle LayerAssignment for master restarts
+        let (latency, _size, first_msg) = Self::read_message_timed(&mut socket).await?;
+        match first_msg {
+            Message::Hello => { /* normal inference handshake, continue below */ }
+            Message::LayerAssignment { ref layers } => {
+                // Master restarted and is re-running setup against an already-running worker.
+                // Ack the assignment (we already have cached data) and signal ready,
+                // then close this connection so the master can reconnect for inference.
+                log::info!(
+                    "[{}] master re-setup: accepting {} layer assignment(s)",
+                    &client,
+                    layers.len()
+                );
+                let ack = Message::LayerAssignmentAck { needs_data: false };
+                ack.to_writer(&mut socket).await?;
+                Message::WorkerReady.to_writer(&mut socket).await?;
+                log::info!("[{}] re-setup complete, closing setup connection", &client);
+                return Ok(());
+            }
+            other => {
+                return Err(anyhow!(
+                    "[{}] unexpected first message (expected Hello): {:?}",
+                    &client,
+                    other
+                ));
+            }
         }
 
         // send info

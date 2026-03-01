@@ -118,17 +118,251 @@ nav .mem-info {
 .view { display: none; flex: 1; overflow: hidden; }
 .view.active { display: flex; flex-direction: column; }
 
-/* ── Cluster Graph ───────────────────────────── */
-#cluster {
-    flex: 1;
-    overflow: auto;
-    position: relative;
+/* ── Cluster Tree ───────────────────────────── */
+#cluster { flex: 1; overflow: auto; }
+
+#cluster-tree {
+    padding: 2rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+    min-height: 100%;
 }
 
-#graph-canvas {
+.model-root-card {
+    background: var(--color-surface-50);
+    border: 1px solid var(--color-surface-200);
+    border-radius: 1rem;
+    padding: 1rem 2rem;
+    text-align: center;
+}
+
+.model-root-card .model-title {
+    font-size: 1rem;
+    font-weight: 700;
+    font-family: var(--font-mono);
+    color: var(--color-surface-700);
+}
+
+.model-root-card .model-meta {
+    font-size: 0.75rem;
+    font-family: var(--font-mono);
+    color: var(--color-surface-400);
+    margin-top: 0.25rem;
+}
+
+.tree-connector {
+    width: 2px;
+    height: 1.5rem;
+    background: var(--color-surface-300);
+}
+
+.tree-nodes {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 1.5rem;
+    align-items: flex-start;
+}
+
+/* ── Node Card ──────────────────────────────── */
+.node-card {
+    background: var(--color-surface-50);
+    border: 1px solid var(--color-surface-200);
+    border-radius: 0.75rem;
+    width: 360px;
+    display: flex;
+    flex-direction: column;
+}
+
+.node-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.875rem 1rem;
+    border-bottom: 1px solid var(--color-surface-200);
+}
+
+.node-header .device-icon { flex-shrink: 0; }
+
+.node-info { flex: 1; min-width: 0; }
+
+.node-info .node-name {
+    font-size: 0.9375rem;
+    font-weight: 700;
+    color: var(--color-surface-700);
+}
+
+.node-info .node-sub {
+    font-size: 0.6875rem;
+    font-family: var(--font-mono);
+    color: var(--color-surface-400);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.node-badge {
+    font-size: 0.5625rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    padding: 0.2rem 0.5rem;
+    border-radius: 9999px;
+    color: white;
+    flex-shrink: 0;
+    text-transform: uppercase;
+}
+
+.node-badge.master { background: var(--color-brand-600); }
+.node-badge.worker { background: var(--color-accent-600); }
+
+/* VRAM bar */
+.vram-section {
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--color-surface-200);
+}
+
+.vram-label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.6875rem;
+    font-family: var(--font-mono);
+    color: var(--color-surface-500);
+    margin-bottom: 0.35rem;
+}
+
+.vram-bar {
     width: 100%;
+    height: 6px;
+    background: var(--color-surface-100);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.vram-bar-fill {
     height: 100%;
-    min-height: 500px;
+    border-radius: 3px;
+    transition: width 0.3s;
+}
+
+/* ── Model Group ────────────────────────────── */
+.model-group-header {
+    font-size: 0.6875rem;
+    font-family: var(--font-mono);
+    color: var(--color-surface-400);
+    padding: 0.5rem 1rem 0.25rem;
+    letter-spacing: 0.02em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ── Layer Item ─────────────────────────────── */
+.layer-item {
+    border-bottom: 1px solid var(--color-surface-100);
+}
+
+.layer-item:last-child { border-bottom: none; }
+
+.layer-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 1rem;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.1s;
+}
+
+.layer-header:hover { background: var(--color-surface-100); }
+
+.layer-header .chevron {
+    font-size: 0.5rem;
+    color: var(--color-surface-400);
+    transition: transform 0.15s;
+    width: 0.75rem;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.layer-header .chevron.open { transform: rotate(90deg); }
+
+.layer-header .layer-label {
+    font-size: 0.8125rem;
+    font-family: var(--font-mono);
+    color: var(--color-surface-600);
+    font-weight: 500;
+}
+
+.layer-header .layer-size {
+    margin-left: auto;
+    font-size: 0.6875rem;
+    font-family: var(--font-mono);
+    color: var(--color-surface-400);
+    flex-shrink: 0;
+}
+
+/* ── Tensor List ────────────────────────────── */
+.tensor-list {
+    padding: 0 1rem 0.25rem 2rem;
+    overflow: hidden;
+    max-height: 2000px;
+    transition: max-height 0.2s ease-out, padding 0.2s;
+}
+
+.tensor-list.collapsed {
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+}
+
+.tensor-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.2rem 0;
+    font-size: 0.6875rem;
+    font-family: var(--font-mono);
+    color: var(--color-surface-500);
+}
+
+.tensor-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tensor-meta {
+    font-size: 0.625rem;
+    color: var(--color-surface-400);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.tensor-bar {
+    width: 50px;
+    height: 5px;
+    background: var(--color-surface-100);
+    border-radius: 2.5px;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+.tensor-bar-fill {
+    height: 100%;
+    border-radius: 2.5px;
+    background: var(--color-brand-500);
+}
+
+.tensor-pct {
+    font-size: 0.5625rem;
+    color: var(--color-surface-400);
+    width: 2.5rem;
+    text-align: right;
+    flex-shrink: 0;
 }
 
 /* ── Chat View ───────────────────────────────── */
@@ -282,7 +516,7 @@ nav .mem-info {
 </nav>
 
 <div id="cluster" class="view">
-    <svg id="graph-canvas"></svg>
+    <div id="cluster-tree"></div>
 </div>
 
 <div id="chat" class="view">
@@ -323,6 +557,12 @@ nav .mem-info {
         return d.innerHTML;
     }
 
+    function el(tag, cls) {
+        const e = document.createElement(tag);
+        if (cls) e.className = cls;
+        return e;
+    }
+
     function humanBytes(b) {
         if (b === 0) return '0 B';
         const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
@@ -344,21 +584,57 @@ nav .mem-info {
         return ranges.join(', ');
     }
 
-    // ── SVG Graph ───────────────────────────────
-    const svg = document.getElementById('graph-canvas');
-    const ns = 'http://www.w3.org/2000/svg';
-
-    function svgEl(tag, attrs) {
-        const el = document.createElementNS(ns, tag);
-        for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
-        return el;
+    function inferDevice(desc) {
+        if (!desc) return 'cpu';
+        const d = desc.toLowerCase();
+        if (d.includes('nvidia') || d.includes('geforce') || d.includes('titan') || d.includes('rtx') || d.includes('gtx') || d === 'cuda') return 'cuda';
+        if (d.includes('apple') || d.includes('metal') || d.includes('silicon')) return 'metal';
+        return 'cpu';
     }
 
-    function svgText(x, y, text, attrs) {
-        const el = svgEl('text', { x, y, ...attrs });
-        el.textContent = text;
-        return el;
+    function deviceIconSVG(device, size) {
+        const s = size || 48;
+        let inner = '';
+        if (device === 'cuda') {
+            // NVIDIA stylized GPU icon
+            inner = '<rect x="-10" y="-7" width="20" height="14" rx="2" fill="none" stroke="#76B900" stroke-width="1.5"/>'
+                  + '<rect x="-7" y="-4.5" width="5" height="4" rx="0.5" fill="#76B900"/>'
+                  + '<rect x="-7" y="1" width="5" height="4" rx="0.5" fill="#76B900"/>'
+                  + '<rect x="0" y="-4.5" width="5" height="9.5" rx="0.5" fill="#76B900"/>'
+                  + '<line x1="-10" y1="-9" x2="-10" y2="-7" stroke="#76B900" stroke-width="1.2"/>'
+                  + '<line x1="-6" y1="-9" x2="-6" y2="-7" stroke="#76B900" stroke-width="1.2"/>'
+                  + '<line x1="-2" y1="-9" x2="-2" y2="-7" stroke="#76B900" stroke-width="1.2"/>'
+                  + '<line x1="2" y1="-9" x2="2" y2="-7" stroke="#76B900" stroke-width="1.2"/>'
+                  + '<line x1="6" y1="-9" x2="6" y2="-7" stroke="#76B900" stroke-width="1.2"/>'
+                  + '<line x1="10" y1="-9" x2="10" y2="-7" stroke="#76B900" stroke-width="1.2"/>'
+                  + '<line x1="-10" y1="7" x2="-10" y2="9" stroke="#76B900" stroke-width="1.2"/>'
+                  + '<line x1="-6" y1="7" x2="-6" y2="9" stroke="#76B900" stroke-width="1.2"/>'
+                  + '<line x1="-2" y1="7" x2="-2" y2="9" stroke="#76B900" stroke-width="1.2"/>'
+                  + '<line x1="2" y1="7" x2="2" y2="9" stroke="#76B900" stroke-width="1.2"/>'
+                  + '<line x1="6" y1="7" x2="6" y2="9" stroke="#76B900" stroke-width="1.2"/>'
+                  + '<line x1="10" y1="7" x2="10" y2="9" stroke="#76B900" stroke-width="1.2"/>';
+        } else if (device === 'metal') {
+            // Apple logo
+            inner = '<path d="M0-9C-1.2-9-2.8-8.2-3.7-7.1-1.7-7.1-.5-8.3 0-9Z'
+                  + 'M4.2-5.4C4-5.2 1-3.4 1-.1 1 3.8 4.6 5.2 4.7 5.3 4.7 5.3 3.8 8.1 1.8 9'
+                  + '-0.2 9.1-1.4 9.1-2.6 8.5-3.5 8.5-4.5 8.5-5.5 9.1-6.2 9.1-8.4 9-10-5.5-10-3.1'
+                  + '-10-1.7-8.9-.6-8.9.3-8.9 1.1-9.4 1.5-9.6 1.9-9.7 2.8-9.9 4.2-5.4Z" fill="#A2AAAD"/>';
+        } else {
+            // CPU chip
+            inner = '<rect x="-7" y="-7" width="14" height="14" rx="2.5" fill="none" stroke="#7C8DB0" stroke-width="1.5"/>'
+                  + '<rect x="-4" y="-4" width="8" height="8" rx="1.5" fill="#7C8DB0"/>';
+            [-4, 0, 4].forEach(p => {
+                inner += '<line x1="'+p+'" y1="-7" x2="'+p+'" y2="-10" stroke="#7C8DB0" stroke-width="1.3"/>'
+                       + '<line x1="'+p+'" y1="7" x2="'+p+'" y2="10" stroke="#7C8DB0" stroke-width="1.3"/>'
+                       + '<line x1="-7" y1="'+p+'" x2="-10" y2="'+p+'" stroke="#7C8DB0" stroke-width="1.3"/>'
+                       + '<line x1="7" y1="'+p+'" x2="10" y2="'+p+'" stroke="#7C8DB0" stroke-width="1.3"/>';
+            });
+        }
+        return '<svg class="device-icon" width="'+s+'" height="'+s+'" viewBox="-12 -12 24 24">'+inner+'</svg>';
     }
+
+    // ── Cluster Tree ────────────────────────────
+    let expandedLayers = new Set();
 
     async function loadTopology() {
         try {
@@ -374,145 +650,176 @@ nav .mem-info {
     }
 
     function renderGraph(data) {
-        svg.innerHTML = '';
-        const rect = svg.parentElement.getBoundingClientRect();
-        const W = Math.max(rect.width, 800);
-        const H = Math.max(rect.height, 520);
-        svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+        const tree = document.getElementById('cluster-tree');
 
-        const brandFill = 'oklch(0.50 0.22 270)';
-        const brandStroke = 'oklch(0.58 0.22 270)';
-        const accentFill = 'oklch(0.60 0.17 165)';
-        const accentStroke = 'oklch(0.68 0.19 165)';
-        const surfaceFill = 'oklch(0.19 0.01 270)';
-        const surfaceStroke = 'oklch(0.30 0.015 270)';
-        const textColor = 'oklch(0.82 0.005 270)';
-        const dimText = 'oklch(0.55 0.01 270)';
-        const leafFill = 'oklch(0.16 0.01 270)';
-        const lineColor = 'oklch(0.30 0.015 270)';
+        // Save expand state before re-render (collapsed by default)
+        tree.querySelectorAll('.layer-item').forEach(item => {
+            const tl = item.querySelector('.tensor-list');
+            const name = item.dataset.layer;
+            if (name && tl && !tl.classList.contains('collapsed')) {
+                expandedLayers.add(name);
+            } else if (name) {
+                expandedLayers.delete(name);
+            }
+        });
 
+        tree.innerHTML = '';
         const layerBytes = data.layer_size_bytes || 0;
         const totalModelGB = (layerBytes * data.num_layers / (1024*1024*1024)).toFixed(1);
 
-        // Layout
-        const modelY = 50;
-        const nodeY = 190;
-        const leafY = 360;
-        const centerX = W / 2;
+        // ── Model root card ──
+        const mc = el('div', 'model-root-card');
+        mc.innerHTML = '<div class="model-title">' + esc(data.model) + '</div>'
+            + '<div class="model-meta">' + data.num_layers + ' layers &middot; '
+            + esc(data.dtype) + ' &middot; ' + totalModelGB + ' GiB</div>';
+        tree.appendChild(mc);
+        tree.appendChild(el('div', 'tree-connector'));
 
-        // All compute nodes
-        const allNodes = [
-            { id: 'master', label: 'master', sub: data.master.device, layers: data.master.layers, isMaster: true }
-        ];
+        // ── Build all nodes ──
+        const allNodes = [{
+            id: 'master', label: 'master', device: inferDevice(data.master.device),
+            layers: data.master.layers, isMaster: true,
+            vram: data.master.vram_bytes || 0, tflops: data.master.tflops || 0,
+            sub: data.master.device
+        }];
         data.workers.forEach(w => {
-            allNodes.push({ id: w.name, label: w.name, sub: w.description || w.host, layers: w.layers, isMaster: false });
+            allNodes.push({
+                id: w.name, label: w.name, device: inferDevice(w.description || w.host),
+                layers: w.layers, isMaster: false,
+                vram: w.vram_bytes || 0, tflops: w.tflops || 0,
+                sub: w.description || w.host
+            });
         });
 
-        const nodeCount = allNodes.length;
-        const nodeSpacing = Math.min(300, (W - 200) / Math.max(nodeCount, 1));
-        const nodesStartX = centerX - ((nodeCount - 1) * nodeSpacing) / 2;
+        // Sort nodes by minimum layer index so the model reads left-to-right
+        function minLayerIdx(layers) {
+            if (!layers.length) return Infinity;
+            return Math.min(...layers.map(l => parseInt(l.replace('model.layers.', '')) || 0));
+        }
+        allNodes.sort((a, b) => minLayerIdx(a.layers) - minLayerIdx(b.layers));
 
-        // ── Model root ──
-        const modelLabel = data.model;
-        const modelSub = data.num_layers + ' layers \u00b7 ' + data.dtype + ' \u00b7 ' + totalModelGB + ' GiB';
-
-        svg.appendChild(svgEl('rect', {
-            x: centerX - 180, y: modelY - 22, width: 360, height: 44,
-            rx: 22, fill: surfaceFill, stroke: surfaceStroke, 'stroke-width': 1.5
-        }));
-        svg.appendChild(svgText(centerX, modelY - 2, modelLabel, {
-            fill: textColor, 'text-anchor': 'middle', 'font-size': '13', 'font-family': 'var(--font-mono)', 'font-weight': '600'
-        }));
-        svg.appendChild(svgText(centerX, modelY + 14, modelSub, {
-            fill: dimText, 'text-anchor': 'middle', 'font-size': '10', 'font-family': 'var(--font-mono)'
-        }));
-
-        // ── Compute nodes ──
-        allNodes.forEach((node, i) => {
-            const nx = nodesStartX + i * nodeSpacing;
-            const fill = node.isMaster ? brandFill : accentFill;
-            const stroke = node.isMaster ? brandStroke : accentStroke;
-
-            const nodeGB = (node.layers.length * layerBytes / (1024*1024*1024)).toFixed(1);
-            const layerStr = node.layers.length + ' layers [' + layerRange(node.layers) + ']';
-            const sizeStr = nodeGB + ' GiB';
-
-            // Edge: model → node
-            svg.appendChild(svgEl('line', {
-                x1: centerX, y1: modelY + 22, x2: nx, y2: nodeY - 38,
-                stroke: lineColor, 'stroke-width': 1.5, 'stroke-dasharray': '4,3'
-            }));
-
-            // Node box
-            const boxW = 200, boxH = 74;
-            svg.appendChild(svgEl('rect', {
-                x: nx - boxW/2, y: nodeY - boxH/2, width: boxW, height: boxH,
-                rx: 12, fill: surfaceFill, stroke: stroke, 'stroke-width': 1.5
-            }));
-
-            // Status dot + name
-            svg.appendChild(svgEl('circle', {
-                cx: nx - boxW/2 + 16, cy: nodeY - 16, r: 4, fill: 'oklch(0.72 0.19 145)'
-            }));
-            svg.appendChild(svgText(nx - boxW/2 + 26, nodeY - 12, node.label, {
-                fill: textColor, 'font-size': '13', 'font-weight': '600', 'font-family': 'var(--font-sans)'
-            }));
-
-            // Badge
-            const badgeText = node.isMaster ? 'MASTER' : 'WORKER';
-            const tmpTxt = svgText(0, 0, badgeText, { 'font-size': '9', 'font-weight': '700', 'font-family': 'var(--font-sans)' });
-            svg.appendChild(tmpTxt);
-            const badgeW = tmpTxt.getComputedTextLength() + 12;
-            svg.removeChild(tmpTxt);
-
-            svg.appendChild(svgEl('rect', {
-                x: nx + boxW/2 - badgeW - 10, y: nodeY - 26, width: badgeW, height: 18,
-                rx: 9, fill: fill
-            }));
-            svg.appendChild(svgText(nx + boxW/2 - badgeW/2 - 10, nodeY - 14, badgeText, {
-                fill: 'white', 'text-anchor': 'middle', 'font-size': '9', 'font-weight': '700',
-                'font-family': 'var(--font-sans)', 'letter-spacing': '0.05em'
-            }));
-
-            // Device/host sub
-            svg.appendChild(svgText(nx, nodeY + 4, node.sub, {
-                fill: dimText, 'text-anchor': 'middle', 'font-size': '10', 'font-family': 'var(--font-mono)'
-            }));
-
-            // Size line
-            svg.appendChild(svgText(nx, nodeY + 20, sizeStr, {
-                fill: textColor, 'text-anchor': 'middle', 'font-size': '11', 'font-weight': '600', 'font-family': 'var(--font-mono)'
-            }));
-
-            // ── Layer leaf ──
-            const leafW = Math.max(170, layerStr.length * 7);
-
-            // Edge: node → leaf
-            svg.appendChild(svgEl('line', {
-                x1: nx, y1: nodeY + boxH/2, x2: nx, y2: leafY - 16,
-                stroke: lineColor, 'stroke-width': 1.5, 'stroke-dasharray': '4,3'
-            }));
-
-            // Leaf pill
-            svg.appendChild(svgEl('rect', {
-                x: nx - leafW/2, y: leafY - 14, width: leafW, height: 28,
-                rx: 14, fill: leafFill, stroke: surfaceStroke, 'stroke-width': 1
-            }));
-            svg.appendChild(svgText(nx, leafY + 4, layerStr, {
-                fill: dimText, 'text-anchor': 'middle', 'font-size': '11', 'font-family': 'var(--font-mono)'
-            }));
+        const nodesContainer = el('div', 'tree-nodes');
+        allNodes.forEach(node => {
+            nodesContainer.appendChild(buildNodeCard(node, data));
         });
+        tree.appendChild(nodesContainer);
+    }
+
+    function buildNodeCard(node, data) {
+        const card = el('div', 'node-card');
+        const layerBytes = data.layer_size_bytes || 0;
+        const usedBytes = node.layers.length * layerBytes;
+        const usageRatio = node.vram > 0 ? Math.min(usedBytes / node.vram, 1.0) : 0;
+        const nodeGB = (usedBytes / (1024*1024*1024)).toFixed(1);
+        const totalGB = (node.vram / (1024*1024*1024)).toFixed(1);
+        const pct = (usageRatio * 100).toFixed(0);
+        const barColor = usageRatio > 0.85 ? 'var(--color-danger)'
+            : (node.isMaster ? 'var(--color-brand-500)' : 'var(--color-accent-500)');
+
+        // Header
+        const header = el('div', 'node-header');
+        header.innerHTML = deviceIconSVG(node.device, 42)
+            + '<div class="node-info">'
+            + '<div class="node-name">' + esc(node.label) + '</div>'
+            + '<div class="node-sub">' + esc(node.sub) + '</div>'
+            + '</div>'
+            + '<span class="node-badge ' + (node.isMaster ? 'master' : 'worker') + '">'
+            + (node.isMaster ? 'Master' : 'Worker') + '</span>';
+        card.appendChild(header);
+
+        // VRAM bar + TFLOPS
+        const tflopsStr = node.tflops > 0 ? '~' + node.tflops.toFixed(1) + ' TFLOPS' : '';
+        const vs = el('div', 'vram-section');
+        vs.innerHTML = '<div class="vram-label"><span>' + nodeGB + ' / ' + totalGB + ' GiB</span><span>' + tflopsStr + '</span></div>'
+            + '<div class="vram-bar"><div class="vram-bar-fill" style="width:' + pct + '%;background:' + barColor + '"></div></div>';
+        card.appendChild(vs);
+
+        // Model group
+        const mgh = el('div', 'model-group-header');
+        mgh.textContent = data.model;
+        card.appendChild(mgh);
+
+        // Layers
+        const sortedLayers = [...node.layers].sort((a, b) => {
+            return parseInt(a.replace('model.layers.', '')) - parseInt(b.replace('model.layers.', ''));
+        });
+
+        sortedLayers.forEach(layerName => {
+            const detail = data.layer_details ? data.layer_details[layerName] : null;
+            card.appendChild(buildLayerItem(layerName, detail, node));
+        });
+
+        return card;
+    }
+
+    function buildLayerItem(layerName, detail, node) {
+        const item = el('div', 'layer-item');
+        item.dataset.layer = layerName;
+        const layerNum = layerName.replace('model.layers.', '');
+        const totalBytes = detail ? detail.total_bytes : 0;
+        const isExpanded = expandedLayers.has(layerName);
+
+        // Header
+        const header = el('div', 'layer-header');
+        const chevron = el('span', 'chevron' + (isExpanded ? ' open' : ''));
+        chevron.innerHTML = '&#9654;';
+        const label = el('span', 'layer-label');
+        label.textContent = 'Layer ' + layerNum;
+        const size = el('span', 'layer-size');
+        size.textContent = humanBytes(totalBytes);
+
+        header.appendChild(chevron);
+        header.appendChild(label);
+        header.appendChild(size);
+
+        // Tensor list (collapsed by default)
+        const tensorList = el('div', 'tensor-list' + (isExpanded ? '' : ' collapsed'));
+        const barColor = node.isMaster ? 'var(--color-brand-500)' : 'var(--color-accent-500)';
+
+        if (detail && detail.tensors) {
+            // Find the largest tensor in this layer for proportional bars
+            const maxBytes = Math.max(...detail.tensors.map(t => t.size_bytes), 1);
+
+            detail.tensors.forEach(t => {
+                const pctOfLayer = totalBytes > 0 ? (t.size_bytes / totalBytes * 100).toFixed(1) : '0.0';
+                const barPct = (t.size_bytes / maxBytes * 100).toFixed(1);
+
+                const row = el('div', 'tensor-row');
+                const name = el('span', 'tensor-name');
+                name.textContent = t.short_name;
+                name.title = t.dtype + ' [' + t.shape.join(', ') + '] — ' + t.name;
+
+                const sz = el('span', 'tensor-meta');
+                sz.textContent = humanBytes(t.size_bytes);
+
+                const bar = el('div', 'tensor-bar');
+                bar.innerHTML = '<div class="tensor-bar-fill" style="width:' + barPct + '%;background:' + barColor + '"></div>';
+
+                const pctEl = el('span', 'tensor-pct');
+                pctEl.textContent = pctOfLayer + '%';
+
+                row.appendChild(name);
+                row.appendChild(sz);
+                row.appendChild(bar);
+                row.appendChild(pctEl);
+                tensorList.appendChild(row);
+            });
+        }
+
+        header.addEventListener('click', () => {
+            tensorList.classList.toggle('collapsed');
+            chevron.classList.toggle('open');
+        });
+
+        item.appendChild(header);
+        item.appendChild(tensorList);
+        return item;
     }
 
     // Auto-refresh topology every 10s
     setInterval(() => {
         if (location.hash === '#cluster' || !location.hash) loadTopology();
     }, 10000);
-
-    // Resize handler for graph
-    window.addEventListener('resize', () => {
-        if (location.hash === '#cluster' || !location.hash) loadTopology();
-    });
 
     // ── Chat View ───────────────────────────────
     const messagesEl = document.getElementById('messages');
@@ -589,7 +896,6 @@ nav .mem-info {
                             bubble.innerHTML = renderMarkdown(fullContent);
                             messagesEl.scrollTop = messagesEl.scrollHeight;
 
-                            // Update tok/s live
                             if (tokenCount > 1) {
                                 const elapsed = (lastTokenTime - firstTokenTime) / 1000;
                                 const tps = ((tokenCount - 1) / elapsed).toFixed(1);
@@ -602,7 +908,6 @@ nav .mem-info {
 
             chatHistory.push({ role: 'assistant', content: fullContent });
 
-            // Final stats
             if (tokenCount > 1 && firstTokenTime !== null) {
                 const elapsed = (lastTokenTime - firstTokenTime) / 1000;
                 const tps = ((tokenCount - 1) / elapsed).toFixed(1);
