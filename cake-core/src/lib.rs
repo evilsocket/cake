@@ -43,7 +43,7 @@ pub struct Args {
     #[arg(long)]
     pub name: Option<String>,
     /// Binding address and port for workers.
-    #[arg(long, default_value = "127.0.0.1:10128")]
+    #[arg(long, default_value = "0.0.0.0:10128")]
     pub address: String,
     /// Enable OpenAI compatible chat completion API.
     #[arg(long)]

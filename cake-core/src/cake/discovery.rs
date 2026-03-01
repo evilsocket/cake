@@ -200,91 +200,92 @@ pub async fn discover_workers(
 ) -> Result<Vec<DiscoveredWorker>> {
     let expected_hash = cluster_hash(cluster_key);
 
-    let mdns =
-        ServiceDaemon::new().map_err(|e| anyhow!("failed to create mDNS daemon: {}", e))?;
-    let receiver = mdns
-        .browse(SERVICE_TYPE)
-        .map_err(|e| anyhow!("failed to browse mDNS: {}", e))?;
-
-    let mut workers: HashMap<String, DiscoveredWorker> = HashMap::new();
-    let deadline = tokio::time::Instant::now() + timeout;
-
     log::info!(
         "discovering workers via mDNS (timeout: {}s)...",
         timeout.as_secs()
     );
 
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep_until(deadline) => break,
-            event = tokio::task::spawn_blocking({
-                let receiver = receiver.clone();
-                move || receiver.recv_timeout(Duration::from_millis(500))
-            }) => {
-                match event {
-                    Ok(Ok(ServiceEvent::ServiceResolved(info))) => {
-                        // Check cluster hash
-                        let cluster = info.get_property_val_str("cluster")
-                            .unwrap_or_default();
-                        if cluster != expected_hash {
-                            continue;
-                        }
+    // Run the entire browse loop in a blocking thread to avoid
+    // event loss between async iterations.
+    let workers = tokio::task::spawn_blocking(move || {
+        let mdns = ServiceDaemon::new().map_err(|e| anyhow!("failed to create mDNS daemon: {}", e))?;
+        let receiver = mdns
+            .browse(SERVICE_TYPE)
+            .map_err(|e| anyhow!("failed to browse mDNS: {}", e))?;
 
-                        // Parse GPU info
-                        let gpus_json = info.get_property_val_str("gpus")
-                            .unwrap_or("[]");
-                        let gpus: Vec<GpuInfo> = serde_json::from_str(gpus_json)
-                            .unwrap_or_default();
+        let mut workers: HashMap<String, DiscoveredWorker> = HashMap::new();
+        let deadline = std::time::Instant::now() + timeout;
 
-                        let port = info.get_port();
-                        // Get the first address
-                        let addrs = info.get_addresses();
-                        let ip = if let Some(addr) = addrs.iter().next() {
-                            addr.to_string()
-                        } else {
-                            continue;
-                        };
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
 
-                        let host = format!("{}:{}", ip, port);
-                        let name = info.get_fullname().to_string();
-
-                        // Use the service instance name as the worker name
-                        let instance_name = name
-                            .strip_suffix(&format!(".{}", SERVICE_TYPE))
-                            .unwrap_or(&name)
-                            .to_string();
-
-                        log::info!(
-                            "discovered worker '{}' at {} with {} GPU(s)",
-                            &instance_name,
-                            &host,
-                            gpus.len()
-                        );
-
-                        for gpu in &gpus {
-                            log::info!(
-                                "  {} — {}",
-                                &gpu.name,
-                                human_bytes::human_bytes(gpu.vram_bytes as f64)
-                            );
-                        }
-
-                        workers.insert(instance_name.clone(), DiscoveredWorker {
-                            name: instance_name,
-                            host,
-                            port,
-                            gpus,
-                        });
+            let recv_timeout = remaining.min(Duration::from_secs(1));
+            match receiver.recv_timeout(recv_timeout) {
+                Ok(ServiceEvent::ServiceResolved(info)) => {
+                    // Check cluster hash
+                    let cluster = info.get_property_val_str("cluster")
+                        .unwrap_or_default();
+                    if cluster != expected_hash {
+                        continue;
                     }
-                    Ok(Ok(_)) => {} // other events
-                    Ok(Err(_)) => {} // timeout on recv
-                    Err(_) => break, // spawn_blocking failed
+
+                    // Parse GPU info
+                    let gpus_json = info.get_property_val_str("gpus")
+                        .unwrap_or("[]");
+                    let gpus: Vec<GpuInfo> = serde_json::from_str(gpus_json)
+                        .unwrap_or_default();
+
+                    let port = info.get_port();
+                    // Get the first address
+                    let addrs = info.get_addresses();
+                    let ip = if let Some(addr) = addrs.iter().next() {
+                        addr.to_string()
+                    } else {
+                        continue;
+                    };
+
+                    let host = format!("{}:{}", ip, port);
+                    let name = info.get_fullname().to_string();
+
+                    // Use the service instance name as the worker name
+                    let instance_name = name
+                        .strip_suffix(&format!(".{}", SERVICE_TYPE))
+                        .unwrap_or(&name)
+                        .to_string();
+
+                    log::info!(
+                        "discovered worker '{}' at {} with {} GPU(s)",
+                        &instance_name,
+                        &host,
+                        gpus.len()
+                    );
+
+                    for gpu in &gpus {
+                        log::info!(
+                            "  {} — {}",
+                            &gpu.name,
+                            human_bytes::human_bytes(gpu.vram_bytes as f64)
+                        );
+                    }
+
+                    workers.insert(instance_name.clone(), DiscoveredWorker {
+                        name: instance_name,
+                        host,
+                        port,
+                        gpus,
+                    });
                 }
+                Ok(_) => {} // other events
+                Err(_) => {} // timeout on recv, loop again
             }
         }
-    }
 
-    let _ = mdns.shutdown();
+        let _ = mdns.shutdown();
+        Ok::<_, anyhow::Error>(workers)
+    }).await??;
 
     log::info!("discovery complete: {} worker(s) found", workers.len());
     Ok(workers.into_values().collect())
