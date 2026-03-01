@@ -140,11 +140,21 @@ impl Context {
             };
 
             let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
-            var_builder = Some(utils::load_var_builder_from_index(
-                model_tensors_index,
-                dtype,
-                device.clone(),
-            )?);
+            let worker_layers = topology.all_worker_layers();
+            var_builder = Some(if worker_layers.is_empty() {
+                utils::load_var_builder_from_index(
+                    model_tensors_index,
+                    dtype,
+                    device.clone(),
+                )?
+            } else {
+                utils::load_var_builder_for_local_layers(
+                    model_tensors_index,
+                    dtype,
+                    device.clone(),
+                    &worker_layers,
+                )?
+            });
             cache = Some(Cache::new(true, dtype, &config_internal, &device)?);
             config = Some(config_internal);
         }

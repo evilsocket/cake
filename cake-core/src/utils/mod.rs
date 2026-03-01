@@ -102,6 +102,70 @@ pub fn load_var_builder_from_index<'a>(
     }
 }
 
+/// Create a VarBuilder that only loads safetensors shards needed for the given
+/// local layers. Shards containing only remote-worker tensors are excluded,
+/// reducing GPU memory usage on the master.
+pub fn load_var_builder_for_local_layers<'a>(
+    tensor_index: PathBuf,
+    dtype: DType,
+    device: Device,
+    worker_layers: &std::collections::HashSet<String>,
+) -> Result<VarBuilder<'a>> {
+    if !tensor_index.exists() {
+        // Single safetensors file — can't filter, load all
+        return load_var_builder_from_index(tensor_index, dtype, device);
+    }
+
+    if worker_layers.is_empty() {
+        // No workers — load everything
+        return load_var_builder_from_index(tensor_index, dtype, device);
+    }
+
+    let parent_dir = tensor_index.parent().unwrap();
+    let json_data = std::fs::read_to_string(&tensor_index)
+        .map_err(|e| anyhow!("can't read {}: {:?}", tensor_index.display(), e))?;
+    let json: serde_json::Value = serde_json::from_str(&json_data)
+        .map_err(|e| anyhow!("can't parse {}: {:?}", tensor_index.display(), e))?;
+    let weight_map = json
+        .get("weight_map")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| anyhow!("no weight_map in {}", tensor_index.display()))?;
+
+    // Find shard files that contain at least one tensor NOT belonging to a worker layer.
+    // A tensor belongs to a worker layer if its name starts with "<layer_name>."
+    let mut needed_shards: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (tensor_name, shard_file) in weight_map {
+        let is_worker_tensor = worker_layers
+            .iter()
+            .any(|layer| tensor_name.starts_with(&format!("{}.", layer)));
+        if !is_worker_tensor {
+            if let Some(filename) = shard_file.as_str() {
+                needed_shards.insert(filename.to_string());
+            }
+        }
+    }
+
+    let filenames: Vec<PathBuf> = needed_shards
+        .iter()
+        .map(|f| parent_dir.join(f))
+        .collect();
+
+    log::info!(
+        "loading {} of {} shard file(s) for local layers",
+        filenames.len(),
+        weight_map
+            .values()
+            .filter_map(|v| v.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    );
+
+    unsafe {
+        VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)
+            .map_err(|e| anyhow!("can't create varbuilder from tensors: {:?}", e))
+    }
+}
+
 /// Nasty hack to debug NaN in tensors.
 #[allow(dead_code)]
 pub(crate) fn panic_on_nan(t: &Tensor, name: &str) {

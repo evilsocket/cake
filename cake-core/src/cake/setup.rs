@@ -63,6 +63,7 @@ fn estimate_layer_size(model_path: &Path, num_layers: usize) -> u64 {
 /// accounting for the master's own compute so it retains its fair share of layers.
 /// When `layer_size_bytes` > 0, each worker's assignment is capped by its
 /// per-GPU VRAM to prevent out-of-memory errors on multi-GPU nodes.
+/// The master's local layers are also capped by `master_max_layers` to avoid OOM.
 ///
 /// Returns a vec of `(worker_index, layer_names)`.
 /// Workers are sorted by TFLOPS descending, and layers are assigned as
@@ -72,6 +73,7 @@ pub fn compute_layer_assignments(
     num_layers: usize,
     master_tflops: f64,
     layer_size_bytes: u64,
+    master_max_layers: usize,
 ) -> Vec<(usize, Vec<String>)> {
     if workers.is_empty() || num_layers == 0 {
         return vec![];
@@ -169,6 +171,59 @@ pub fn compute_layer_assignments(
         remaining_tflops -= workers[worker_idx].total_tflops();
     }
 
+    // Check if master would be left with more layers than it can hold.
+    // The master keeps all layers from `offset` to `num_layers - 1`.
+    let master_layers = num_layers - offset;
+    if master_max_layers < usize::MAX && master_layers > master_max_layers {
+        let deficit = master_layers - master_max_layers;
+        log::info!(
+            "master has {} local layers but can fit {} — redistributing {} to workers",
+            master_layers,
+            master_max_layers,
+            deficit
+        );
+
+        // Try to push excess layers to workers that have spare VRAM capacity.
+        let mut extra_needed = deficit;
+        for (worker_idx, layers) in assignments.iter_mut() {
+            if extra_needed == 0 {
+                break;
+            }
+            let current = layers.len();
+            let max = if layer_size_bytes > 0 {
+                workers[*worker_idx].max_layers_for_size(layer_size_bytes)
+            } else {
+                usize::MAX
+            };
+            let spare = max.saturating_sub(current);
+            if spare > 0 {
+                let take = spare.min(extra_needed);
+                // Extend this worker's range (layers are at the end)
+                let new_start = offset;
+                for l in new_start..new_start + take {
+                    layers.push(format!("model.layers.{l}"));
+                }
+                offset += take;
+                extra_needed -= take;
+                log::info!(
+                    "  {} takes {} extra layer(s) ({} → {} total)",
+                    &workers[*worker_idx].name,
+                    take,
+                    current,
+                    layers.len()
+                );
+            }
+        }
+
+        if extra_needed > 0 {
+            log::warn!(
+                "cluster cannot fit all {} layers — {} layer(s) unassignable (master VRAM too small, workers full)",
+                num_layers,
+                extra_needed
+            );
+        }
+    }
+
     assignments
 }
 
@@ -230,9 +285,29 @@ pub async fn master_setup(
         );
     }
 
+    // Cap master layers by its own GPU VRAM (reserve extra ~20% for embeddings/lm_head/norm)
+    let master_max_layers = if layer_size_bytes > 0 && !master_gpus.is_empty() {
+        let master_vram: u64 = master_gpus.iter().map(|g| g.vram_bytes).sum();
+        let usable = (master_vram as f64 * 0.80) as u64; // 20% reserve for embeddings etc.
+        let max = (usable / layer_size_bytes) as usize;
+        log::info!(
+            "master GPU: {} — can fit ~{} layers locally",
+            human_bytes::human_bytes(master_vram as f64),
+            max
+        );
+        max
+    } else {
+        usize::MAX
+    };
+
     // Compute assignments based on TFLOPS, capped by per-GPU VRAM
-    let assignments =
-        compute_layer_assignments(&workers, num_layers, master_tflops, layer_size_bytes);
+    let assignments = compute_layer_assignments(
+        &workers,
+        num_layers,
+        master_tflops,
+        layer_size_bytes,
+        master_max_layers,
+    );
 
     log::info!("layer assignments:");
     for (worker_idx, layers) in &assignments {

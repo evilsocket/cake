@@ -96,6 +96,17 @@ impl Topology {
         Ok(topology)
     }
 
+    /// Return a set of all layer names assigned to workers in this topology.
+    pub fn all_worker_layers(&self) -> std::collections::HashSet<String> {
+        let mut layers = std::collections::HashSet::new();
+        for node in self.0.values() {
+            for layer in &node.layers {
+                layers.insert(layer.clone());
+            }
+        }
+        layers
+    }
+
     /// Return the node serving the specified layer, or None if not found.
     pub fn get_node_for_layer(&self, layer_name: &str) -> Option<(&str, &Node)> {
         for (node_name, node) in &self.0 {
