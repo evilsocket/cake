@@ -33,6 +33,7 @@ services:
     build: .
     image: cake
     command:
+      - master
       - --model
       - /model
       - --topology
@@ -62,10 +63,9 @@ services:
     build: .
     image: cake
     command:
+      - worker
       - --model
       - /model
-      - --mode
-      - worker
       - --name
       - worker-1
       - --topology
@@ -89,10 +89,9 @@ services:
     build: .
     image: cake
     command:
+      - worker
       - --model
       - /model
-      - --mode
-      - worker
       - --name
       - worker-2
       - --topology

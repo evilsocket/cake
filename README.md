@@ -80,7 +80,7 @@ Run a standalone instance (no cluster, loads entire model):
 docker run --rm --gpus all \
   -v /path/to/model:/model:ro \
   -p 8080:8080 \
-  cake --model /model --api 0.0.0.0:8080
+  cake master --model /model --api 0.0.0.0:8080
 ```
 
 A `docker-compose.yml` is provided as an example for running a multi-worker cluster. Create a `topology-docker.yml` mapping layers to the `worker-1` / `worker-2` service names, place your model data in `./cake-data/`, and run:
@@ -121,29 +121,52 @@ make ios
 
 ## Using
 
+### Downloading Models
+
+You can pass a HuggingFace repo ID as the `--model` argument and Cake will download the model automatically (with progress bars). Files are cached in `~/.cache/huggingface/hub/` — subsequent runs skip the download.
+
+```sh
+cake master --model Qwen/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080
+```
+
+To pre-download a model without running inference:
+
+```sh
+cake download Qwen/Qwen2.5-Coder-1.5B-Instruct
+```
+
+For gated models (like LLaMA 3), set the `HF_TOKEN` environment variable with your HuggingFace token.
+
+Of course you can also pass a local path to a model directory as usual:
+
+```sh
+cake master --model /path/to/Meta-Llama-3-8B --api 0.0.0.0:8080
+```
+
+### Running a Cluster
+
 Run a worker node:
 
 ```sh
-cake-cli --model /path/to/Meta-Llama-3-8B \ # model path, read below on how to optimize model size for workers
-         --mode worker \                    # run as worker
-         --name worker0 \                   # worker name in topology file
-         --topology topology.yml \          # topology
-         --address 0.0.0.0:10128            # bind address
+cake worker --model /path/to/Meta-Llama-3-8B \ # model path, read below on how to optimize model size for workers
+            --name worker0 \                   # worker name in topology file
+            --topology topology.yml \          # topology
+            --address 0.0.0.0:10128            # bind address
 ```
 
 Run a master node with an OpenAI compatible REST API:
 
 ```sh
-cake-cli --model /path/to/Meta-Llama-3-8B \ # model path
-         --api 0.0.0.0:8080               \ # API bind address
-         --topology topology.yml            # topology file
+cake master --model /path/to/Meta-Llama-3-8B \ # model path
+            --api 0.0.0.0:8080 \               # API bind address
+            --topology topology.yml             # topology file
 ```
 
 You can also omit the topology file to load the entire model in a single instance of cake:
 
 ```sh
-cake-cli --model /path/to/Meta-Llama-3-8B \ # model path
-         --api 0.0.0.0:8080                # API bind address
+cake master --model /path/to/Meta-Llama-3-8B \ # model path
+            --api 0.0.0.0:8080                 # API bind address
 ```
 
 ### Topology
@@ -185,7 +208,7 @@ macbook:
 You can now interact with the cluster by:
 
 ```sh
-curl http://master-ip:8080/api/v1/chat/completions \                                                                                                                           ~
+curl http://master-ip:8080/api/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "messages": [
@@ -203,12 +226,12 @@ curl http://master-ip:8080/api/v1/chat/completions \                            
 
 ### Splitting the Model
 
-As a memory and disk space optimization, you might want to give the worker only the data it actually needs from the model instead of the whole folder, in which case you can use the `cake-split-model` utility. For instance to generate a smaller version of the llama3 safetensors, you can:
+As a memory and disk space optimization, you might want to give the worker only the data it actually needs from the model instead of the whole folder. Use the `split` subcommand to generate per-worker bundles:
 
 ```sh
-cake-split-model --model-path path/to/Meta-Llama-3-8B \ # source model to split
-                 --topology path/to/topology.yml \      # topology file
-                 --output output-folder-name            # output folder where all the workers data bundles will be saved
+cake split --model-path path/to/Meta-Llama-3-8B \ # source model to split
+           --topology path/to/topology.yml \       # topology file
+           --output output-folder-name             # output folder where all the workers data bundles will be saved
 ```
 
 This will create a smaller folder with only the required layers tensors and the topology file for the specific worker. Remember to also copy other model contents (config.json, tokenizer.json, etc) in the worker bundle before deploying it.
@@ -235,12 +258,11 @@ macbook:
 Run a worker node:
 
 ```sh
-cake-cli --model /path/to/hf/cache \        # The cache dir for huggingface models
-         --mode worker \                    # run as worker
-         --name wsl2_on_windows \           # worker name in topology file
-         --model-type image-model \         # use image-model for SD, text-model or skip for LLM
-         --topology topology.yml \          # topology
-         --address 0.0.0.0:10128            # bind address
+cake worker --model /path/to/hf/cache \        # The cache dir for huggingface models
+            --name wsl2_on_windows \            # worker name in topology file
+            --model-type image-model \          # use image-model for SD, text-model or skip for LLM
+            --topology topology.yml \           # topology
+            --address 0.0.0.0:10128             # bind address
 ```
 
 The model could be switched between SD1.5, SD2.1, SDXL and SDXL Turbo by specifying [more command line arguments](./cake-core/src/lib.rs).
@@ -250,16 +272,16 @@ The model files will be downloaded from Huggingface automatically if not found i
 Run a master node with REST API:
 
 ```sh
-cake-cli --model /path/to/hf/cache \        # The cache dir for huggingface models
-         --api 0.0.0.0:8080 \               # API bind address
-         --model-type image-model \         # use image-model for SD, text-model or skip for LLM
-         --topology topology.yml            # topology file
+cake master --model /path/to/hf/cache \        # The cache dir for huggingface models
+            --api 0.0.0.0:8080 \               # API bind address
+            --model-type image-model \          # use image-model for SD, text-model or skip for LLM
+            --topology topology.yml             # topology file
 ```
 
 Generate images using the cluster:
 
 ```sh
-curl http://master-ip:8080/api/v1/image \                                                                                                                           ~
+curl http://master-ip:8080/api/v1/image \
   -H "Content-Type: application/json" \
   -d '{
     "image_args": {

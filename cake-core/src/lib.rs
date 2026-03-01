@@ -36,8 +36,8 @@ pub struct Args {
     /// GPU device index.
     #[arg(long, default_value_t = 0)]
     pub device: usize,
-    /// Mode.
-    #[arg(long, default_value_t, value_enum)]
+    /// Mode (set by subcommand, not directly by user).
+    #[arg(skip)]
     pub mode: Mode,
     /// Worker name.
     #[arg(long)]
@@ -48,7 +48,7 @@ pub struct Args {
     /// Enable OpenAI compatible chat completion API.
     #[arg(long)]
     pub api: Option<String>,
-    /// Llama3 model data path.
+    /// Path to model directory, or HuggingFace repo ID (e.g., Qwen/Qwen2.5-Coder-1.5B-Instruct).
     #[arg(long, default_value = "./cake-data/Meta-Llama-3-8B/")]
     pub model: String,
     /// Topology file.

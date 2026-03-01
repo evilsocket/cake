@@ -1,5 +1,8 @@
 //! Utility functions and abstractions.
 
+pub mod hf;
+pub mod split;
+
 use std::path::{Path, PathBuf};
 
 use candle_core::{

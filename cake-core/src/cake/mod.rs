@@ -76,9 +76,15 @@ impl Context {
         );
 
         let data_path = PathBuf::from(&args.model);
-        if !data_path.exists() {
-            bail!("model path does not exist: {}", data_path.display());
-        }
+        let data_path = if !data_path.exists() {
+            if utils::hf::looks_like_hf_repo(&args.model) {
+                utils::hf::ensure_model_downloaded(&args.model)?
+            } else {
+                bail!("model path does not exist: {}", data_path.display());
+            }
+        } else {
+            data_path
+        };
 
         let topology = if let Some(path) = &args.topology {
             Topology::from_path(path, &args.model_type)?

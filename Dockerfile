@@ -2,7 +2,7 @@
 # Cake: Distributed LLM Inference - Docker Build (NVIDIA CUDA)
 # =============================================================================
 # Build:  docker build -t cake .
-# Run:    docker run --rm --gpus all -v /path/to/model:/model:ro cake --model /model
+# Run:    docker run --rm --gpus all cake master --model /model --api 0.0.0.0:8080
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -51,14 +51,14 @@ ARG CUDA_COMPUTE_CAP=80
 
 # Cook dependencies — this layer is cached until Cargo.toml/Cargo.lock change
 ENV CUDA_COMPUTE_CAP=${CUDA_COMPUTE_CAP}
-RUN cargo chef cook --release --recipe-path recipe.json -p cake-cli -p cake-split-model --features cuda
+RUN cargo chef cook --release --recipe-path recipe.json -p cake-cli --features cuda
 
 # Copy full source and build
 COPY . .
-RUN cargo build --release -p cake-cli -p cake-split-model --features cuda
+RUN cargo build --release -p cake-cli --features cuda
 
 # ---------------------------------------------------------------------------
-# Stage 4: Runtime — minimal image with just the binaries
+# Stage 4: Runtime — minimal image with just the binary
 # ---------------------------------------------------------------------------
 FROM nvidia/cuda:12.6.0-runtime-ubuntu24.04 AS runtime
 
@@ -70,8 +70,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libonig5 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/cake-cli /usr/local/bin/cake
-COPY --from=builder /app/target/release/cake-split-model /usr/local/bin/cake-split-model
+COPY --from=builder /app/target/release/cake /usr/local/bin/cake
 
 # Worker port
 EXPOSE 10128
