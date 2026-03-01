@@ -25,6 +25,8 @@ struct WorkerContext<F> {
     device_idx: usize,
     dtype: DType,
     blocks: Arc<HashMap<String, Box<F>>>,
+    /// Maps each layer name to the device it was loaded on.
+    layer_devices: Arc<HashMap<String, Device>>,
     context: Context,
 }
 
@@ -60,6 +62,7 @@ impl<F: Forwarder> WorkerContext<F> {
             device_idx: self.device_idx,
             dtype: self.dtype,
             blocks: self.blocks.clone(),
+            layer_devices: self.layer_devices.clone(),
             // each client loop gets a new cache
             context: cloned_context,
         }
@@ -73,6 +76,23 @@ pub struct Worker<G: Generator> {
 }
 
 impl<G: Generator + 'static> Worker<G> {
+    /// Detect how many CUDA devices are available.
+    fn detect_cuda_device_count() -> usize {
+        #[cfg(feature = "cuda")]
+        {
+            // Try creating devices until one fails
+            let mut count = 0;
+            while Device::new_cuda(count).is_ok() {
+                count += 1;
+            }
+            count
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            0
+        }
+    }
+
     /// Create a new Worker from the context.
     pub async fn new(ctx: &mut Context) -> Result<Self> {
         let worker_name = if let Some(name) = &ctx.args.name {
@@ -97,20 +117,79 @@ impl<G: Generator + 'static> Worker<G> {
             ));
         };
 
+        // Detect available GPUs for multi-GPU support
+        let num_gpus = if ctx.device.is_cuda() {
+            Self::detect_cuda_device_count().max(1)
+        } else {
+            1
+        };
+
+        let use_multi_gpu = num_gpus > 1 && worker_topology.layers.len() > 1;
+
+        if use_multi_gpu {
+            log::info!(
+                "detected {} CUDA devices, splitting {} layers across GPUs",
+                num_gpus,
+                worker_topology.layers.len()
+            );
+        }
+
+        // Pre-create devices and var_builders for each GPU
+        let mut gpu_devices: Vec<Device> = Vec::new();
+        let mut gpu_var_builders: Vec<candle_nn::VarBuilder<'static>> = Vec::new();
+
+        if use_multi_gpu {
+            let model_index = ctx.data_path.join("model.safetensors.index.json");
+            for ordinal in 0..num_gpus {
+                let dev = Device::new_cuda(ordinal)?;
+                let vb =
+                    crate::utils::load_var_builder_from_index(model_index.clone(), ctx.dtype, dev.clone())?;
+                log::info!("  GPU {} ready", ordinal);
+                gpu_devices.push(dev);
+                gpu_var_builders.push(vb);
+            }
+        }
+
         let mut blocks = HashMap::new();
+        let mut layer_devices: HashMap<String, Device> = HashMap::new();
 
-        for block_layer_name in &worker_topology.layers {
-            log::info!("loading {} ...", &block_layer_name);
+        for (i, block_layer_name) in worker_topology.layers.iter().enumerate() {
+            if use_multi_gpu {
+                // Assign layers to GPUs: split evenly
+                let gpu_idx = i * num_gpus / worker_topology.layers.len();
+                let dev = &gpu_devices[gpu_idx];
 
-            // NOTE: Do NOT prefix ctx.var_builder here — Transformer::load
-            // already calls vb.pp(&name) internally, so passing the root
-            // var_builder is correct.
-            let block = G::Shardable::load(block_layer_name.to_string(), ctx)?;
+                log::info!("loading {} on cuda:{} ...", &block_layer_name, gpu_idx);
 
-            blocks.insert(block_layer_name.to_string(), block);
+                // Temporarily swap device and var_builder in context
+                let orig_device = ctx.device.clone();
+                let orig_vb = ctx.var_builder.take();
+
+                ctx.device = dev.clone();
+                ctx.var_builder = Some(gpu_var_builders[gpu_idx].clone());
+
+                let block = G::Shardable::load(block_layer_name.to_string(), ctx)?;
+
+                // Restore original context
+                ctx.device = orig_device;
+                ctx.var_builder = orig_vb;
+
+                layer_devices.insert(block_layer_name.to_string(), dev.clone());
+                blocks.insert(block_layer_name.to_string(), block);
+            } else {
+                log::info!("loading {} ...", &block_layer_name);
+
+                // NOTE: Do NOT prefix ctx.var_builder here — Transformer::load
+                // already calls vb.pp(&name) internally, so passing the root
+                // var_builder is correct.
+                let block = G::Shardable::load(block_layer_name.to_string(), ctx)?;
+                layer_devices.insert(block_layer_name.to_string(), ctx.device.clone());
+                blocks.insert(block_layer_name.to_string(), block);
+            }
         }
 
         let blocks = Arc::new(blocks);
+        let layer_devices = Arc::new(layer_devices);
 
         let listener = {
             let taken = ctx.listener_override.lock().unwrap().take();
@@ -136,6 +215,7 @@ impl<G: Generator + 'static> Worker<G> {
             device_idx,
             dtype,
             blocks,
+            layer_devices,
             context: ctx.clone(),
         };
 
@@ -268,13 +348,23 @@ impl<G: Generator + 'static> Worker<G> {
                 }
             };
 
-            // load raw tensor to device
-            let mut x = x.to_tensor(&context.device).unwrap();
+            // load raw tensor to the first block's device
+            let first_device = ops
+                .first()
+                .and_then(|(name, _, _)| context.layer_devices.get(name))
+                .unwrap_or(&context.device);
+            let mut x = x.to_tensor(first_device).unwrap();
+
             let num_ops = ops.len();
             let start_ops = Instant::now();
 
             // for each element in the ops batch
             for (layer_name, index_pos, block_idx) in ops {
+                // move tensor to the block's device if needed (multi-GPU)
+                if let Some(block_device) = context.layer_devices.get(&layer_name) {
+                    x = x.to_device(block_device).unwrap();
+                }
+
                 // get layer block by name
                 if let Some(block) = context.blocks.get(&layer_name) {
                     // run forward pass

@@ -29,8 +29,8 @@ impl CausalSelfAttention {
         cache: &super::Cache,
     ) -> Result<Tensor> {
         let (_batch_size, _, seq_len, _hidden_size) = x.dims4()?;
-        let cos = cache.cosine(index_pos, seq_len)?;
-        let sin = cache.sine(index_pos, seq_len)?;
+        let cos = cache.cosine(index_pos, seq_len, &x.device())?;
+        let sin = cache.sine(index_pos, seq_len, &x.device())?;
         candle_nn::rotary_emb::rope(x, &cos, &sin)
     }
 
@@ -101,7 +101,7 @@ impl CausalSelfAttention {
                 att
             } else {
                 let mask = cache
-                    .mask(seq_len)
+                    .mask(seq_len, &q.device())
                     .map_err(|e| anyhow!("cache.mask({seq_len}) -> {e}"))?
                     .broadcast_as(att.shape())
                     .map_err(|e| anyhow!("mask.broadcast_as({:?}) -> {e}", att.shape()))?;

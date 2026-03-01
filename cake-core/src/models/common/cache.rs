@@ -105,27 +105,28 @@ impl Cache {
     }
 
     /// Return the cached cosine value for the given position and sequence length.
-    pub fn cosine(&self, index_pos: usize, seq_len: usize) -> Result<Tensor> {
-        self.cos.narrow(0, index_pos, seq_len)
+    /// When `device` differs from the cache's own device, the result is copied
+    /// to that device (enables multi-GPU workers).
+    pub fn cosine(&self, index_pos: usize, seq_len: usize, device: &Device) -> Result<Tensor> {
+        self.cos.narrow(0, index_pos, seq_len)?.to_device(device)
     }
 
     /// Return the cached sine value for the given position and sequence length.
-    pub fn sine(&self, index_pos: usize, seq_len: usize) -> Result<Tensor> {
-        self.sin.narrow(0, index_pos, seq_len)
+    pub fn sine(&self, index_pos: usize, seq_len: usize, device: &Device) -> Result<Tensor> {
+        self.sin.narrow(0, index_pos, seq_len)?.to_device(device)
     }
 
     /// Get the attention mask for the given sequence length.
-    pub fn mask(&mut self, seq_len: usize) -> Result<Tensor> {
-        if let Some(mask) = self.masks.get(&seq_len) {
-            Ok(mask.clone())
-        } else {
+    pub fn mask(&mut self, seq_len: usize, device: &Device) -> Result<Tensor> {
+        // Always create/cache on self.device, then copy to target if needed
+        if !self.masks.contains_key(&seq_len) {
             let mask: Vec<_> = (0..seq_len)
                 .flat_map(|i| (0..seq_len).map(move |j| u8::from(j > i)))
                 .collect();
             let mask = Tensor::from_slice(&mask, (seq_len, seq_len), &self.device)?;
-            self.masks.insert(seq_len, mask.clone());
-            Ok(mask)
+            self.masks.insert(seq_len, mask);
         }
+        self.masks.get(&seq_len).unwrap().clone().to_device(device)
     }
 
     /// Process the input k and v by either generating their cache entry or applying a previously cached one.

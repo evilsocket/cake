@@ -113,6 +113,13 @@ With CUDA acceleration:
 cargo build --release --features cuda
 ```
 
+For **pre-Volta NVIDIA GPUs** (Pascal, Maxwell — compute capability < 7.0), the upstream `candle-kernels` crate requires patches. See [`cuda-compat/`](cuda-compat/) for a one-command fix:
+
+```sh
+./cuda-compat/patch.sh
+cargo build --release --features cuda
+```
+
 To generate the iOS bindings in the app that can then be [compiled and deployed via XCode](https://github.com/evilsocket/cake/tree/main/cake-ios-worker-app):
 
 ```sh
