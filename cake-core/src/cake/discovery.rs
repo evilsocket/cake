@@ -88,11 +88,50 @@ pub fn detect_gpus() -> Vec<GpuInfo> {
         format!("CPU ({})", std::env::consts::ARCH)
     };
 
-    let vram_bytes = memory_stats::memory_stats()
-        .map(|s| s.physical_mem as u64)
-        .unwrap_or(0);
+    let vram_bytes = detect_system_memory();
 
     vec![GpuInfo { name, vram_bytes }]
+}
+
+/// Detect total system memory in bytes.
+fn detect_system_memory() -> u64 {
+    // On macOS, use sysctl for a reliable reading
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+        {
+            if output.status.success() {
+                let s = String::from_utf8_lossy(&output.stdout);
+                if let Ok(bytes) = s.trim().parse::<u64>() {
+                    return bytes;
+                }
+            }
+        }
+    }
+
+    // On Linux, read /proc/meminfo
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
+            for line in contents.lines() {
+                if let Some(rest) = line.strip_prefix("MemTotal:") {
+                    let rest = rest.trim();
+                    if let Some(kb_str) = rest.strip_suffix("kB") {
+                        if let Ok(kb) = kb_str.trim().parse::<u64>() {
+                            return kb * 1024;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback to memory_stats
+    memory_stats::memory_stats()
+        .map(|s| s.physical_mem as u64)
+        .unwrap_or(0)
 }
 
 /// Advertise this worker via mDNS.
@@ -122,10 +161,12 @@ pub fn advertise_worker(
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    let host_label = if hostname.ends_with('.') {
+    let host_label = if hostname.ends_with(".local.") {
         hostname
-    } else {
+    } else if hostname.ends_with(".local") {
         format!("{}.", hostname)
+    } else {
+        format!("{}.local.", hostname)
     };
 
     let service = ServiceInfo::new(

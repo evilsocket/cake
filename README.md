@@ -143,7 +143,55 @@ Of course you can also pass a local path to a model directory as usual:
 cake master --model /path/to/Meta-Llama-3-8B --api 0.0.0.0:8080
 ```
 
-### Running a Cluster
+### Zero-Config Cluster (mDNS Discovery)
+
+Cake supports fully automatic cluster setup using mDNS service discovery and pre-shared key authentication. Instead of writing topology files and distributing model data manually, you just start workers and a master with the same `--cluster-key`:
+
+```sh
+# On any machine — start a worker (no model data or topology needed)
+cake worker --cluster-key mysecret --name gpu-server-1
+
+# On another machine
+cake worker --cluster-key mysecret --name macbook
+
+# On the master (has the model)
+cake master --model /path/to/Meta-Llama-3-8B \
+            --cluster-key mysecret \
+            --api 0.0.0.0:8080
+```
+
+The cluster key can also be set via the `CAKE_CLUSTER_KEY` environment variable.
+
+**What happens automatically:**
+
+1. Each worker detects its GPUs (name and VRAM via `nvidia-smi`, or system memory for Metal/CPU) and advertises itself on the local network via mDNS.
+2. The master discovers all workers that share the same cluster key.
+3. Master and each worker perform mutual authentication (see below).
+4. The master assigns transformer layers to workers proportionally to their total GPU VRAM — machines with more memory get more layers.
+5. If a worker doesn't have the model data cached locally, the master streams the required safetensors files over TCP. Transfer speed is logged on both sides. Workers cache received data in `~/.cache/cake/` for future runs.
+6. Once all workers are ready, inference starts normally.
+
+If no workers are discovered within the timeout (default 10 seconds, configurable with `--discovery-timeout`), the master loads all layers locally and serves the API anyway.
+
+**Security model:**
+
+The `--cluster-key` enables mutual HMAC-SHA256 challenge-response authentication. When a connection is established, both sides prove they possess the same key through a two-round-trip nonce exchange *before* any protocol data is transmitted — an unauthenticated peer never sees valid Cake messages.
+
+This prevents unauthorized nodes from joining the cluster or injecting/intercepting inference data. However, the traffic itself is **not encrypted** — the authentication ensures both parties are legitimate, but the tensor data and model weights are sent in plaintext. This is appropriate for trusted local networks (home lab, office LAN, VPN). For untrusted networks, use a VPN or SSH tunnel to provide transport encryption.
+
+The cluster key is hashed (SHA-256, first 8 hex chars) before being included in mDNS advertisements, so the key itself is never broadcast — only a short hash used for filtering during discovery.
+
+### Listing Local Models
+
+List all models available locally (downloaded from HuggingFace or received from a master):
+
+```sh
+cake models
+```
+
+This scans `~/.cache/huggingface/hub/` and `~/.cache/cake/` and shows each model's status (`complete` or `partial`), size, and source.
+
+### Running a Cluster (Manual Topology)
 
 Run a worker node:
 
