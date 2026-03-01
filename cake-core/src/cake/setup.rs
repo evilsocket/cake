@@ -205,6 +205,11 @@ pub async fn master_setup(
         let cluster_key = cluster_key.to_string();
         let model_hash = model_hash.clone();
         let model_path = model_path.to_path_buf();
+        let model_name = model_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
 
         handles.push(tokio::spawn(async move {
             log::info!(
@@ -242,7 +247,7 @@ pub async fn master_setup(
             };
 
             if needs_data {
-                push_model_data(&mut stream, &model_path, &layers, &worker.name).await?;
+                push_model_data(&mut stream, &model_path, &layers, &worker.name, &model_name).await?;
             } else {
                 log::info!("[{}] worker has model data cached", &worker.name);
             }
@@ -297,9 +302,28 @@ async fn push_model_data(
     model_path: &Path,
     layers: &[String],
     worker_name: &str,
+    model_name: &str,
 ) -> Result<()> {
     let overall_start = Instant::now();
     let mut overall_bytes: u64 = 0;
+
+    let layer_range = if layers.is_empty() {
+        "(none)".to_string()
+    } else {
+        format!(
+            "{} — {} ({} layers)",
+            layers.first().unwrap(),
+            layers.last().unwrap(),
+            layers.len()
+        )
+    };
+
+    log::info!(
+        "[{}] pushing {} [{}]",
+        worker_name,
+        model_name,
+        layer_range
+    );
 
     // Always send config.json and tokenizer.json
     let mut files_to_send: Vec<PathBuf> = vec![
@@ -414,8 +438,9 @@ async fn push_model_data(
                     0.0
                 };
                 log::info!(
-                    "[{}]   {}/{} ({:.1}%) — {}/s — ETA {:.0}s",
+                    "[{}] {} — {}/{} ({:.1}%) — {}/s — ETA {:.0}s",
                     worker_name,
+                    &filename,
                     human_bytes::human_bytes(offset as f64),
                     human_bytes::human_bytes(total_size as f64),
                     pct,
@@ -566,7 +591,7 @@ pub async fn worker_setup(
     ack.to_writer(&mut stream).await?;
 
     if needs_data {
-        receive_model_data(&mut stream, &cache_dir).await?;
+        receive_model_data(&mut stream, &cache_dir, &layers).await?;
     } else {
         log::info!("using cached model data from {}", cache_dir.display());
     }
@@ -581,12 +606,27 @@ pub async fn worker_setup(
 }
 
 /// Receive model data from master and write to the cache directory.
-async fn receive_model_data(stream: &mut TcpStream, cache_dir: &Path) -> Result<()> {
+async fn receive_model_data(
+    stream: &mut TcpStream,
+    cache_dir: &Path,
+    layers: &[String],
+) -> Result<()> {
     let overall_start = Instant::now();
     let mut overall_bytes: u64 = 0;
     let mut current_file: Option<(String, std::fs::File, Instant, u64)> = None;
 
-    log::info!("receiving model data...");
+    let layer_range = if layers.is_empty() {
+        "(none)".to_string()
+    } else {
+        format!(
+            "{} — {} ({} layers)",
+            layers.first().unwrap(),
+            layers.last().unwrap(),
+            layers.len()
+        )
+    };
+
+    log::info!("receiving model data [{}] ...", layer_range);
 
     loop {
         let (_, msg) = Message::from_reader(stream).await?;
@@ -643,7 +683,8 @@ async fn receive_model_data(stream: &mut TcpStream, cache_dir: &Path) -> Result<
                             0.0
                         };
                         log::info!(
-                            "  {}/{} ({:.1}%) — {}/s — ETA {:.0}s",
+                            "  {} — {}/{} ({:.1}%) — {}/s — ETA {:.0}s",
+                            &filename,
                             human_bytes::human_bytes(written as f64),
                             human_bytes::human_bytes(total_size as f64),
                             pct,
