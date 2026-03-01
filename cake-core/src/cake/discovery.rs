@@ -177,7 +177,8 @@ pub fn advertise_worker(
         port,
         properties,
     )
-    .map_err(|e| anyhow!("failed to create mDNS service info: {}", e))?;
+    .map_err(|e| anyhow!("failed to create mDNS service info: {}", e))?
+    .enable_addr_auto();
 
     mdns.register(service)
         .map_err(|e| anyhow!("failed to register mDNS service: {}", e))?;
