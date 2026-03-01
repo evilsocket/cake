@@ -134,10 +134,17 @@ pub async fn master_setup(
     model_path: &Path,
     discovery_timeout: Duration,
 ) -> Result<Topology> {
-    // Read num_hidden_layers from config.json
+    // Read config.json and compute a fingerprint for cache keying
     let config_path = model_path.join("config.json");
     let config_data = std::fs::read_to_string(&config_path)
         .map_err(|e| anyhow!("failed to read {}: {}", config_path.display(), e))?;
+    let model_hash = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(config_data.as_bytes());
+        let result = hasher.finalize();
+        hex::encode(&result[..4])
+    };
     let config_json: serde_json::Value = serde_json::from_str(&config_data)?;
     let num_layers = config_json
         .get("num_hidden_layers")
@@ -207,6 +214,7 @@ pub async fn master_setup(
         // Send layer assignment
         let msg = Message::LayerAssignment {
             layers: layers.clone(),
+            model_hash: model_hash.clone(),
         };
         msg.to_writer(&mut stream).await?;
 
@@ -473,8 +481,11 @@ pub async fn worker_setup(
 
     // Receive layer assignment
     let (_, msg) = Message::from_reader(&mut stream).await?;
-    let layers = match msg {
-        Message::LayerAssignment { layers } => layers,
+    let (layers, model_hash) = match msg {
+        Message::LayerAssignment {
+            layers,
+            model_hash,
+        } => (layers, model_hash),
         other => {
             return Err(anyhow!(
                 "expected LayerAssignment, got {:?}",
@@ -488,9 +499,15 @@ pub async fn worker_setup(
         log::info!("  {}", layer);
     }
 
-    // Determine cache directory for this cluster
-    let hash = discovery::cluster_hash(cluster_key);
-    let cache_dir = model_cache_dir.join(&hash);
+    // Determine cache directory: cluster_hash/model_hash
+    // This ensures switching models invalidates the cache.
+    let cluster_id = discovery::cluster_hash(cluster_key);
+    let cache_dir = if model_hash.is_empty() {
+        // Backwards compat with old masters that don't send model_hash
+        model_cache_dir.join(&cluster_id)
+    } else {
+        model_cache_dir.join(format!("{}-{}", cluster_id, model_hash))
+    };
     std::fs::create_dir_all(&cache_dir)?;
 
     // Check if we already have a valid model data cache.

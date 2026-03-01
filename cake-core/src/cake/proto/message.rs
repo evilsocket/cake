@@ -84,7 +84,11 @@ pub enum Message {
     // ── Zero-config setup messages ──────────────────────────────
 
     /// Master tells worker which layers to serve.
-    LayerAssignment { layers: Vec<String> },
+    LayerAssignment {
+        layers: Vec<String>,
+        /// Short hash of model config for cache keying.
+        model_hash: String,
+    },
     /// Worker tells master whether it needs model data.
     LayerAssignmentAck { needs_data: bool },
     /// Chunk of model file data from master to worker.

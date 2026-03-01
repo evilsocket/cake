@@ -184,7 +184,7 @@ impl<G: Generator + 'static> Worker<G> {
         let (latency, _size, first_msg) = Self::read_message_timed(&mut socket).await?;
         match first_msg {
             Message::Hello => { /* normal inference handshake, continue below */ }
-            Message::LayerAssignment { ref layers } => {
+            Message::LayerAssignment { ref layers, .. } => {
                 // Master restarted and is re-running setup against an already-running worker.
                 // Ack the assignment (we already have cached data) and signal ready,
                 // then close this connection so the master can reconnect for inference.
