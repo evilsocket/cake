@@ -200,7 +200,10 @@ impl TextModelBase {
                     .forward_batch(&x, batch, &mut self.ctx)
                     .await
                     .map_err(|e| {
-                        anyhow!("error in forward batch operation for block {block_idx}: {e}")
+                        anyhow!(
+                            "error in forward batch for blocks {first}..{block_idx} on {}: {e}",
+                            &curr_block_id
+                        )
                     })?;
             }
         }

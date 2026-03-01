@@ -74,6 +74,11 @@ impl Client {
         let resp = self.request(req).await?;
         match resp {
             Message::Tensor(raw) => Ok(raw.to_tensor(&self.device)?),
+            Message::WorkerError { message } => Err(anyhow!(
+                "worker {} reported error: {}",
+                &self.address,
+                message
+            )),
             _ => Err(anyhow!("unexpected response {:?}", &resp)),
         }
     }

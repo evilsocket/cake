@@ -353,28 +353,103 @@ impl<G: Generator + 'static> Worker<G> {
                 .first()
                 .and_then(|(name, _, _)| context.layer_devices.get(name))
                 .unwrap_or(&context.device);
-            let mut x = x.to_tensor(first_device).unwrap();
+
+            // Ensure the CUDA context for the target device is active on this thread.
+            #[cfg(feature = "cuda")]
+            if let Device::Cuda(cuda_dev) = first_device {
+                if let Err(e) = cuda_dev.cuda_stream().context().bind_to_thread() {
+                    log::warn!("failed to bind CUDA context: {:?}", e);
+                }
+            }
+
+            let mut x = match x.to_tensor(first_device) {
+                Ok(t) => t,
+                Err(e) => {
+                    let msg = format!("failed to load tensor to device: {e}");
+                    log::error!("[{}] {}", &client, &msg);
+                    let _ = Self::write_message_timed(
+                        &mut socket,
+                        Message::WorkerError { message: msg },
+                    )
+                    .await;
+                    continue;
+                }
+            };
 
             let num_ops = ops.len();
             let start_ops = Instant::now();
+
+            let mut batch_error = false;
 
             // for each element in the ops batch
             for (layer_name, index_pos, block_idx) in ops {
                 // move tensor to the block's device if needed (multi-GPU)
                 if let Some(block_device) = context.layer_devices.get(&layer_name) {
-                    x = x.to_device(block_device).unwrap();
+                    // Bind CUDA context before cross-device transfer
+                    #[cfg(feature = "cuda")]
+                    if let Device::Cuda(cuda_dev) = block_device {
+                        if let Err(e) = cuda_dev.cuda_stream().context().bind_to_thread() {
+                            log::warn!("failed to bind CUDA context for {}: {:?}", &layer_name, e);
+                        }
+                    }
+
+                    x = match x.to_device(block_device) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            let msg = format!(
+                                "failed to move tensor to device for layer {}: {e}",
+                                &layer_name
+                            );
+                            log::error!("[{}] {}", &client, &msg);
+                            let _ = Self::write_message_timed(
+                                &mut socket,
+                                Message::WorkerError { message: msg },
+                            )
+                            .await;
+                            batch_error = true;
+                            break;
+                        }
+                    };
                 }
 
                 // get layer block by name
                 if let Some(block) = context.blocks.get(&layer_name) {
                     // run forward pass
-                    x = block
+                    x = match block
                         .forward(&x, index_pos, block_idx, &mut context.context)
                         .await
-                        .unwrap();
+                    {
+                        Ok(t) => t,
+                        Err(e) => {
+                            let msg = format!(
+                                "forward pass failed for layer {} (block_idx={}): {e}",
+                                &layer_name, block_idx
+                            );
+                            log::error!("[{}] {}", &client, &msg);
+                            let _ = Self::write_message_timed(
+                                &mut socket,
+                                Message::WorkerError { message: msg },
+                            )
+                            .await;
+                            batch_error = true;
+                            break;
+                        }
+                    };
                 } else {
-                    return Err(anyhow!("could not find layer {}", &layer_name));
+                    let msg = format!("could not find layer {}", &layer_name);
+                    log::error!("[{}] {}", &client, &msg);
+                    let _ = Self::write_message_timed(
+                        &mut socket,
+                        Message::WorkerError { message: msg },
+                    )
+                    .await;
+                    batch_error = true;
+                    break;
                 }
+            }
+
+            if batch_error {
+                continue;
             }
 
             let elaps_ops = start_ops.elapsed();

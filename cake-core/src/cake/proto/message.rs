@@ -7,7 +7,7 @@ use speedy::{BigEndian, Readable, Writable};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Represents a tensor in Cake protocol.
-#[derive(Debug, Readable, Writable)]
+#[derive(Readable, Writable)]
 pub struct RawTensor {
     /// Tensor data.
     pub data: Vec<u8>,
@@ -15,6 +15,16 @@ pub struct RawTensor {
     pub dtype: String,
     /// The tensor shape.
     pub shape: Vec<usize>,
+}
+
+impl std::fmt::Debug for RawTensor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawTensor")
+            .field("dtype", &self.dtype)
+            .field("shape", &self.shape)
+            .field("data_len", &self.data.len())
+            .finish()
+    }
 }
 
 impl RawTensor {
@@ -102,6 +112,8 @@ pub enum Message {
     ModelDataDone,
     /// Worker has loaded all assigned layers and is ready for inference.
     WorkerReady,
+    /// Worker encountered an error during inference.
+    WorkerError { message: String },
 }
 
 #[inline]
