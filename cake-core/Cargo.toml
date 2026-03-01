@@ -14,23 +14,24 @@ log = "0.4.22"
 memmap2 = "0.9.4"
 memory-stats = "1.2.0"
 regex = "1.10.5"
-safetensors = "0.4.3"
+safetensors = "0.7"
 serde = { version = "1.0.203", features = ["derive"] }
 serde_json = "1.0.120"
 serde_yaml = "0.9.34"
 speedy = "0.8.7"
-tokenizers = { version = "0.19.1", features = ["onig"] }
+tokenizers = { version = "0.21", features = ["onig"] }
 tokio = { version = "1.38.0", features = ["full"] }
 yoke = { version = "0.7.4", features = ["derive"] }
 
 actix-web = { version = "4.8.0", optional = true }
+async-stream = { version = "0.3", optional = true }
 uuid = { version = "1.10.0", optional = true, features = ["v4"] }
 
-candle-core = { version = "0.7.2" }
-candle-nn = { version = "0.7.2" }
-candle-transformers = { version = "0.7.2" }
+candle-core = { version = "0.9" }
+candle-nn = { version = "0.9" }
+candle-transformers = { version = "0.9" }
 image = "0.25.2"
-hf-hub = "0.3.2"
+hf-hub = "0.5"
 tracing-chrome = "0.7.2"
 tracing-subscriber = "0.3.18"
 base64 = "0.22.1"
@@ -41,4 +42,4 @@ default = ["master"]
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 
-master = ["dep:actix-web", "dep:uuid"]
+master = ["dep:actix-web", "dep:async-stream", "dep:uuid"]
