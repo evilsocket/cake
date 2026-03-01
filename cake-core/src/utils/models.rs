@@ -165,27 +165,7 @@ fn check_model_dir(dir: &Path) -> Option<(ModelStatus, u64)> {
 
 /// Return the HuggingFace hub cache directory if it exists.
 fn hf_cache_dir() -> Option<PathBuf> {
-    // Respect HF_HOME or HF_HUB_CACHE env vars
-    if let Ok(dir) = std::env::var("HF_HUB_CACHE") {
-        let p = PathBuf::from(dir);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    if let Ok(dir) = std::env::var("HF_HOME") {
-        let p = PathBuf::from(dir).join("hub");
-        if p.exists() {
-            return Some(p);
-        }
-    }
-
-    let home = dirs::home_dir()?;
-    let p = home.join(".cache/huggingface/hub");
-    if p.exists() {
-        Some(p)
-    } else {
-        None
-    }
+    super::hf::hf_cache_dir()
 }
 
 /// Return the Cake cluster cache directory if it exists.
