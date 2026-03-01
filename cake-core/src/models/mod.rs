@@ -8,7 +8,11 @@ use crate::cake::{Context, Forwarder};
 use crate::ImageGenerationArgs;
 
 pub mod chat;
+pub mod common;
+#[cfg(feature = "llama")]
 pub mod llama3;
+#[cfg(feature = "qwen2")]
+pub mod qwen2;
 pub mod sd;
 
 /// A token.

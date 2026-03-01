@@ -3,7 +3,7 @@ uniffi::setup_scaffolding!();
 
 use cake_core::{
     cake::{Context, Mode, Worker},
-    Args, ModelType,
+    Args, ModelType, TextModelArch,
 };
 
 #[uniffi::export]
@@ -46,25 +46,7 @@ pub fn start_worker(name: String, model_path: String, topology_path: String, mod
             log::debug!("@ creating worker");
 
             match model_type.as_str() {
-                "text" => {
-                    let mut worker =
-                        match Worker::<cake_core::models::llama3::LLama>::new(&mut ctx).await {
-                            Ok(w) => w,
-                            Err(e) => {
-                                log::error!("ERROR: {}", e);
-                                return;
-                            }
-                        };
-
-                    log::info!("@ running worker for text model...");
-
-                    match worker.run().await {
-                        Ok(_) => log::info!("worker exiting"),
-                        Err(e) => {
-                            log::error!("ERROR: {}", e);
-                        }
-                    }
-                }
+                "text" => run_text_worker(&mut ctx).await,
                 "image" => {
                     let mut worker = match Worker::<cake_core::models::sd::SD>::new(&mut ctx).await
                     {
@@ -89,4 +71,53 @@ pub fn start_worker(name: String, model_path: String, topology_path: String, mod
                 }
             }
         })
+}
+
+async fn run_text_worker(ctx: &mut Context) {
+    match ctx.text_model_arch {
+        #[cfg(feature = "qwen2")]
+        TextModelArch::Qwen2 => {
+            let mut worker =
+                match Worker::<cake_core::models::qwen2::Qwen2>::new(ctx).await {
+                    Ok(w) => w,
+                    Err(e) => {
+                        log::error!("ERROR: {}", e);
+                        return;
+                    }
+                };
+
+            log::info!("@ running worker for Qwen2 text model...");
+
+            match worker.run().await {
+                Ok(_) => log::info!("worker exiting"),
+                Err(e) => {
+                    log::error!("ERROR: {}", e);
+                }
+            }
+        }
+        #[cfg(feature = "llama")]
+        TextModelArch::Llama | TextModelArch::Auto => {
+            let mut worker =
+                match Worker::<cake_core::models::llama3::LLama>::new(ctx).await {
+                    Ok(w) => w,
+                    Err(e) => {
+                        log::error!("ERROR: {}", e);
+                        return;
+                    }
+                };
+
+            log::info!("@ running worker for LLaMA text model...");
+
+            match worker.run().await {
+                Ok(_) => log::info!("worker exiting"),
+                Err(e) => {
+                    log::error!("ERROR: {}", e);
+                }
+            }
+        }
+        #[allow(unreachable_patterns)]
+        _ => {
+            log::error!("ERROR: no text model feature enabled for architecture {:?}", ctx.text_model_arch);
+        }
+    }
 }

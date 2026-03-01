@@ -18,6 +18,18 @@ pub enum ModelType {
     ImageModel,
 }
 
+/// Supported text model architectures.
+#[derive(Copy, Clone, Parser, Default, Debug, Eq, PartialEq, PartialOrd, Ord, ValueEnum)]
+pub enum TextModelArch {
+    /// Auto-detect from config.json
+    #[default]
+    Auto,
+    /// LLaMA family
+    Llama,
+    /// Qwen2/Qwen2.5 family
+    Qwen2,
+}
+
 #[derive(Clone, Parser, Default, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
@@ -79,6 +91,10 @@ pub struct Args {
 
     #[arg(long, default_value = "text-model")]
     pub model_type: ModelType,
+
+    /// Text model architecture (auto-detected from config.json if omitted).
+    #[arg(long, default_value = "auto")]
+    pub text_model_arch: TextModelArch,
 
     #[clap(flatten)]
     pub sd_args: SDArgs,

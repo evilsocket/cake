@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use super::History;
+use super::QwenHistory;
 use crate::models::common::text_model::TextModelBase;
 use crate::models::common::Transformer;
 use crate::models::TextGenerator;
@@ -11,29 +11,29 @@ use crate::{
 };
 
 /// Default end of stream token if not found in configuration.
-const DEFAULT_EOS_TOKEN: &str = "<|eot_id|>";
+const DEFAULT_EOS_TOKEN: &str = "<|endoftext|>";
 
-/// LLama main class.
-pub struct LLama {
+/// Qwen2/Qwen2.5 main class.
+pub struct Qwen2 {
     base: TextModelBase,
-    history: History,
+    history: QwenHistory,
 }
 
 #[async_trait]
-impl Generator for LLama {
+impl Generator for Qwen2 {
     type Shardable = Transformer;
-    const MODEL_NAME: &'static str = "llama3";
+    const MODEL_NAME: &'static str = "qwen2";
 
     /// Load this model from the context.
     async fn load(ctx: &mut Context) -> Result<Option<Box<Self>>> {
         let base = TextModelBase::load(ctx, DEFAULT_EOS_TOKEN).await?;
-        let history = History::new();
+        let history = QwenHistory::new();
         Ok(Some(Box::new(Self { base, history })))
     }
 }
 
 #[async_trait]
-impl TextGenerator for LLama {
+impl TextGenerator for Qwen2 {
     /// Add a message to the chat history.
     fn add_message(&mut self, message: Message) -> Result<()> {
         self.history.push(message);

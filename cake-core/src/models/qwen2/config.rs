@@ -4,24 +4,25 @@ use anyhow::Result;
 
 use crate::models::common::{Config, EosTokenId, RopeScaling};
 
-/// Default max sequence length (LLaMA2 era). Overridden by max_position_embeddings from config.
-const DEFAULT_MAX_SEQ_LEN: usize = 4096;
-
 fn default_rope() -> f32 {
-    500_000.0
+    1_000_000.0
 }
 
 fn default_max_position_embeddings() -> usize {
-    DEFAULT_MAX_SEQ_LEN
+    32768
 }
 
 fn default_false() -> bool {
     false
 }
 
-/// LLama specific configuration (serde deserialization from config.json).
+fn default_true() -> bool {
+    true
+}
+
+/// Qwen2-specific configuration (serde deserialization from config.json).
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct LlamaConfig {
+pub struct QwenConfig {
     pub hidden_size: usize,
     pub intermediate_size: usize,
     pub vocab_size: usize,
@@ -35,16 +36,23 @@ pub struct LlamaConfig {
     pub eos_token_id: Option<EosTokenId>,
     #[serde(default)]
     pub rope_scaling: Option<RopeScaling>,
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub tie_word_embeddings: bool,
     #[serde(default = "default_max_position_embeddings")]
     pub max_position_embeddings: usize,
+    // Qwen2-specific fields (for future sliding window support)
+    #[serde(default)]
+    pub sliding_window: Option<usize>,
+    #[serde(default = "default_false")]
+    pub use_sliding_window: bool,
+    #[serde(default)]
+    pub max_window_layers: Option<usize>,
 }
 
-impl LlamaConfig {
+impl QwenConfig {
     /// Load the configuration from the given path.
     pub fn from_path(path: &Path) -> Result<Self> {
-        log::info!("loading configuration from {}", path.display());
+        log::info!("loading Qwen2 configuration from {}", path.display());
 
         let data =
             std::fs::read(path).map_err(|e| anyhow!("can't read {}: {:?}", path.display(), e))?;
@@ -73,7 +81,7 @@ impl LlamaConfig {
             rope_scaling: self.rope_scaling,
             tie_word_embeddings: self.tie_word_embeddings,
             max_seq_len: self.max_position_embeddings,
-            use_qkv_bias: false, // LLaMA never uses QKV bias
+            use_qkv_bias: true, // Qwen2 always uses QKV bias
         }
     }
 }
@@ -83,64 +91,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_values() {
+    fn test_qwen2_defaults() {
         let json = r#"{
             "hidden_size": 2048,
-            "intermediate_size": 8192,
-            "vocab_size": 128256,
-            "num_hidden_layers": 16,
-            "num_attention_heads": 32,
-            "num_key_value_heads": 8,
-            "rms_norm_eps": 1e-5
+            "intermediate_size": 5504,
+            "vocab_size": 151936,
+            "num_hidden_layers": 24,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 2,
+            "rms_norm_eps": 1e-6
         }"#;
-        let config: LlamaConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.rope_theta, 500_000.0);
-        assert!(!config.tie_word_embeddings);
-        assert_eq!(config.max_position_embeddings, DEFAULT_MAX_SEQ_LEN);
-        assert!(config.rope_scaling.is_none());
-        assert!(config.eos_token_id.is_none());
+        let config: QwenConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.rope_theta, 1_000_000.0);
+        assert!(config.tie_word_embeddings); // default true for Qwen2
+        assert_eq!(config.max_position_embeddings, 32768);
+        assert!(config.sliding_window.is_none());
+        assert!(!config.use_sliding_window);
     }
 
     #[test]
-    fn test_llama_3_1_config() {
+    fn test_qwen2_5_coder_config() {
         let json = r#"{
+            "architectures": ["Qwen2ForCausalLM"],
             "hidden_size": 2048,
-            "intermediate_size": 8192,
-            "vocab_size": 128256,
-            "num_hidden_layers": 16,
-            "num_attention_heads": 32,
-            "num_key_value_heads": 8,
-            "rms_norm_eps": 1e-5,
-            "rope_theta": 500000.0,
-            "bos_token_id": 128000,
-            "eos_token_id": [128001, 128008, 128009],
-            "max_position_embeddings": 131072,
+            "intermediate_size": 5504,
+            "vocab_size": 151936,
+            "num_hidden_layers": 36,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 2,
+            "rms_norm_eps": 1e-6,
+            "rope_theta": 1000000.0,
+            "bos_token_id": 151643,
+            "eos_token_id": [151645, 151643],
+            "max_position_embeddings": 32768,
             "tie_word_embeddings": true,
-            "rope_scaling": {
-                "factor": 8.0,
-                "high_freq_factor": 4.0,
-                "low_freq_factor": 1.0,
-                "original_max_position_embeddings": 8192,
-                "rope_type": "llama3"
-            }
+            "sliding_window": 32768,
+            "use_sliding_window": false,
+            "max_window_layers": 28
         }"#;
-        let config: LlamaConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.rope_theta, 500_000.0);
+        let config: QwenConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.rope_theta, 1_000_000.0);
         assert!(config.tie_word_embeddings);
-        assert_eq!(config.max_position_embeddings, 131072);
+        assert_eq!(config.sliding_window, Some(32768));
+        assert!(!config.use_sliding_window);
+        assert_eq!(config.max_window_layers, Some(28));
 
         let eos = config.eos_token_id.as_ref().unwrap();
-        assert!(eos.is_eos(128001));
-        assert!(eos.is_eos(128008));
-        assert!(eos.is_eos(128009));
-        assert!(!eos.is_eos(0));
-
-        let scaling = config.rope_scaling.as_ref().unwrap();
-        assert_eq!(scaling.factor, 8.0);
+        assert!(eos.is_eos(151645));
+        assert!(eos.is_eos(151643));
 
         let cfg = config.into_config();
-        assert_eq!(cfg.max_seq_len, 131072);
+        assert!(cfg.use_qkv_bias);
         assert!(cfg.tie_word_embeddings);
-        assert!(!cfg.use_qkv_bias);
+        assert_eq!(cfg.max_seq_len, 32768);
     }
 }

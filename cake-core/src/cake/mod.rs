@@ -4,8 +4,8 @@ use std::{
 };
 
 use crate::{
-    models::llama3::{Cache, Config, LlamaConfig},
-    utils, Args, ModelType,
+    models::common::{detect_text_model_arch, Cache, Config},
+    utils, Args, ModelType, TextModelArch,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -46,9 +46,11 @@ pub struct Context {
     pub topology: Topology,
     pub data_path: PathBuf,
     pub device: Device,
-    pub config: Option<Config>, // TODO: decouple
+    pub config: Option<Config>,
     pub cache: Option<Cache>,
     pub var_builder: Option<VarBuilder<'static>>,
+    /// Resolved text model architecture.
+    pub text_model_arch: TextModelArch,
 }
 
 impl Context {
@@ -88,10 +90,39 @@ impl Context {
         let mut config: Option<Config> = None;
         let mut cache: Option<Cache> = None;
         let mut var_builder: Option<VarBuilder> = None;
+        let mut text_model_arch = args.text_model_arch;
 
         if args.model_type == ModelType::TextModel {
             let config_filename = data_path.join("config.json");
-            let config_internal = LlamaConfig::from_path(&config_filename)?.into_config();
+
+            // Auto-detect architecture if needed
+            if text_model_arch == TextModelArch::Auto {
+                let arch_str = detect_text_model_arch(&config_filename).unwrap_or_default();
+                text_model_arch = match arch_str.as_str() {
+                    #[cfg(feature = "qwen2")]
+                    "Qwen2ForCausalLM" => TextModelArch::Qwen2,
+                    _ => TextModelArch::Llama,
+                };
+            }
+
+            log::info!("text model architecture: {:?}", text_model_arch);
+
+            let config_internal = match text_model_arch {
+                #[cfg(feature = "qwen2")]
+                TextModelArch::Qwen2 => {
+                    crate::models::qwen2::QwenConfig::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "llama")]
+                TextModelArch::Llama => {
+                    crate::models::llama3::LlamaConfig::from_path(&config_filename)?.into_config()
+                }
+                _ => {
+                    // Fallback: use a generic config parser approach
+                    // Parse the raw JSON and construct Config directly
+                    bail!("no text model feature enabled for architecture {:?}", text_model_arch)
+                }
+            };
+
             let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
             var_builder = Some(utils::load_var_builder_from_index(
                 model_tensors_index,
@@ -111,6 +142,7 @@ impl Context {
             config,
             cache,
             var_builder,
+            text_model_arch,
         })
     }
 }

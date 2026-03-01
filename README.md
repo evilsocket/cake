@@ -8,7 +8,7 @@
 <hr/>
 
 
-`Cake` is a Rust framework for distributed inference of large models like [LLama3](https://x.com/evilsocket/status/1812110504531259900) and [Stable Diffusion](https://x.com/crynuxai/status/1822085290543960216) based on [Candle](https://github.com/huggingface/candle). The goal of the project is being able to run big (70B+) models by repurposing consumer hardware into an heterogeneous cluster of iOS, Android, macOS, Linux and Windows devices, effectively leveraging [planned obsolescence](https://en.wikipedia.org/wiki/Planned_obsolescence) as a tool to make AI more accessible and democratic.
+`Cake` is a Rust framework for distributed inference of large models like [LLama3](https://x.com/evilsocket/status/1812110504531259900), [Qwen2.5](https://huggingface.co/Qwen) and [Stable Diffusion](https://x.com/crynuxai/status/1822085290543960216) based on [Candle](https://github.com/huggingface/candle). The goal of the project is being able to run big (70B+) models by repurposing consumer hardware into an heterogeneous cluster of iOS, Android, macOS, Linux and Windows devices, effectively leveraging [planned obsolescence](https://en.wikipedia.org/wiki/Planned_obsolescence) as a tool to make AI more accessible and democratic.
 
 <p align="center">
   <strong>
@@ -18,7 +18,27 @@
 
 The idea is to shard the transformer blocks to multiple devices in order to be able to run the inference on models that wouldn't normally fit in the GPU memory of a single device. Inferences over contiguous transformer blocks on the same worker are batched in order to minimize latency due to data transfer.
 
-## Support
+## Models
+
+| Model | Type | Feature Flag | Status |
+|-------|------|-------------|--------|
+| LLaMA 3.x | Text | `llama` (default) | ✅ |
+| Qwen2 / Qwen2.5 | Text | `qwen2` (default) | ✅ |
+| Stable Diffusion (1.5, 2.1, XL, XL Turbo) | Image | - | ✅ |
+
+Text model architecture is auto-detected from `config.json`. You can also explicitly set it with `--text-model-arch auto|llama|qwen2`.
+
+To compile only for specific models, disable default features and enable only what you need:
+
+```sh
+# Only LLaMA support
+cargo build --release --no-default-features --features llama
+
+# Only Qwen2 support
+cargo build --release --no-default-features --features qwen2
+```
+
+## Platform Support
 
 | OS                           | Architectures | Acceleration | Status |
 |----------------------------------|------------------|------------------|------------------|

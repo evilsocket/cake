@@ -1,6 +1,6 @@
 //! Causal self attention implementation.
 use candle_core::{DType, Result, Tensor, D};
-use candle_nn::{linear_no_bias as linear, Linear, Module, VarBuilder};
+use candle_nn::{linear_no_bias, Linear, Module, VarBuilder};
 
 #[derive(Debug, Clone)]
 pub struct CausalSelfAttention {
@@ -43,8 +43,6 @@ impl CausalSelfAttention {
         cache: &mut super::Cache,
     ) -> anyhow::Result<Tensor> {
         let (b_sz, seq_len, hidden_size) = x.dims3().map_err(|e| anyhow!("x.dims3 -> {e}"))?;
-
-        // log::info!("x.dims3 = {:?}", x.dims3().unwrap());
 
         let q = self
             .q_proj
@@ -134,10 +132,24 @@ impl CausalSelfAttention {
         let size_in = cfg.hidden_size;
         let size_q = (cfg.hidden_size / cfg.num_attention_heads) * cfg.num_attention_heads;
         let size_kv = (cfg.hidden_size / cfg.num_attention_heads) * cfg.num_key_value_heads;
-        let q_proj = linear(size_in, size_q, vb.pp("q_proj"))?;
-        let k_proj = linear(size_in, size_kv, vb.pp("k_proj"))?;
-        let v_proj = linear(size_in, size_kv, vb.pp("v_proj"))?;
-        let o_proj = linear(size_q, size_in, vb.pp("o_proj"))?;
+
+        let (q_proj, k_proj, v_proj) = if cfg.use_qkv_bias {
+            (
+                candle_nn::linear(size_in, size_q, vb.pp("q_proj"))?,
+                candle_nn::linear(size_in, size_kv, vb.pp("k_proj"))?,
+                candle_nn::linear(size_in, size_kv, vb.pp("v_proj"))?,
+            )
+        } else {
+            (
+                linear_no_bias(size_in, size_q, vb.pp("q_proj"))?,
+                linear_no_bias(size_in, size_kv, vb.pp("k_proj"))?,
+                linear_no_bias(size_in, size_kv, vb.pp("v_proj"))?,
+            )
+        };
+
+        // o_proj never has bias in either architecture
+        let o_proj = linear_no_bias(size_q, size_in, vb.pp("o_proj"))?;
+
         Ok(Self {
             q_proj,
             k_proj,
