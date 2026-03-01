@@ -316,8 +316,8 @@ pub async fn master_setup(
 
     let embed_size = vocab_size * hidden_size * dtype_bytes;
     let lm_head_size = if tie_embeddings { 0 } else { embed_size };
-    // Add ~512 MiB for CUDA runtime, KV cache, and misc overhead
-    let master_overhead = embed_size + lm_head_size + 512 * 1024 * 1024;
+    // Add ~1 GiB for CUDA runtime/context, KV cache, memory fragmentation, and misc overhead
+    let master_overhead = embed_size + lm_head_size + 1024 * 1024 * 1024;
 
     log::info!(
         "master overhead: embeddings={} lm_head={} total={}",
