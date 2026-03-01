@@ -238,6 +238,62 @@ pub fn advertise_worker(
     Ok(DiscoveryListener { _handle: handle })
 }
 
+// ── Interface enumeration ──────────────────────────────────────────────────
+
+/// Get directed broadcast addresses for all local IPv4 interfaces.
+/// Falls back to 255.255.255.255 if enumeration fails.
+fn get_broadcast_addresses() -> Vec<Ipv4Addr> {
+    let mut addrs = Vec::new();
+
+    // Parse `ip addr` on Linux or `ifconfig` on macOS to find broadcast addresses
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(output) = std::process::Command::new("ip")
+            .args(["-4", "addr", "show"])
+            .output()
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                // Lines like: "    inet 192.168.50.199/24 brd 192.168.50.255 scope global ..."
+                if let Some(brd_idx) = line.find("brd ") {
+                    let rest = &line[brd_idx + 4..];
+                    if let Some(end) = rest.find(' ') {
+                        if let Ok(ip) = rest[..end].parse::<Ipv4Addr>() {
+                            if !ip.is_loopback() {
+                                addrs.push(ip);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = std::process::Command::new("ifconfig").output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                // Lines like: "	inet 192.168.50.32 netmask 0xffffff00 broadcast 192.168.50.255"
+                if let Some(brd_idx) = line.find("broadcast ") {
+                    let rest = &line[brd_idx + 10..];
+                    let addr_str = rest.split_whitespace().next().unwrap_or("");
+                    if let Ok(ip) = addr_str.parse::<Ipv4Addr>() {
+                        if !ip.is_loopback() {
+                            addrs.push(ip);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Always include the limited broadcast as a fallback
+    addrs.push(Ipv4Addr::BROADCAST);
+    addrs.dedup();
+    addrs
+}
+
 // ── Master browsing (broadcast query, collect responses) ──────────────────
 
 /// Browse for workers on the network matching the given cluster key.
@@ -266,10 +322,9 @@ pub async fn discover_workers(
         let query_json = serde_json::to_vec(&query)?;
         let query_pkt = encode_packet(&query_json);
 
-        let broadcast_addr = SocketAddr::V4(SocketAddrV4::new(
-            Ipv4Addr::BROADCAST,
-            DISCOVERY_PORT,
-        ));
+        // Collect broadcast addresses: directed subnet broadcasts are more
+        // reliable than 255.255.255.255 which may not cross interfaces.
+        let broadcast_addrs = get_broadcast_addresses();
 
         let mut workers: HashMap<String, DiscoveredWorker> = HashMap::new();
         let deadline = std::time::Instant::now() + timeout;
@@ -283,10 +338,11 @@ pub async fn discover_workers(
                 break;
             }
 
-            // Send periodic broadcast queries
+            // Send periodic broadcast queries to all known broadcast addresses
             if now.duration_since(last_query) >= query_interval {
-                if let Err(e) = sock.send_to(&query_pkt, broadcast_addr) {
-                    log::warn!("failed to send discovery broadcast: {}", e);
+                for addr in &broadcast_addrs {
+                    let dest = SocketAddr::V4(SocketAddrV4::new(*addr, DISCOVERY_PORT));
+                    let _ = sock.send_to(&query_pkt, dest);
                 }
                 last_query = now;
             }
