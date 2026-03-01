@@ -6,7 +6,7 @@ use std::{
 };
 
 use super::{Context, Forwarder, Message, WorkerInfo};
-use crate::{models::Generator, ModelType};
+use crate::models::Generator;
 
 use anyhow::Result;
 use candle_core::{DType, Device};
@@ -99,25 +99,16 @@ impl<G: Generator + 'static> Worker<G> {
 
         let mut blocks = HashMap::new();
 
-        let vb = ctx.var_builder.clone();
-
         for block_layer_name in &worker_topology.layers {
             log::info!("loading {} ...", &block_layer_name);
 
-            if ctx.args.model_type == ModelType::TextModel {
-                ctx.var_builder = Some(
-                    vb.clone()
-                        .expect("Error retrieving var_builder")
-                        .pp(block_layer_name),
-                );
-            }
-
+            // NOTE: Do NOT prefix ctx.var_builder here — Transformer::load
+            // already calls vb.pp(&name) internally, so passing the root
+            // var_builder is correct.
             let block = G::Shardable::load(block_layer_name.to_string(), ctx)?;
 
             blocks.insert(block_layer_name.to_string(), block);
         }
-
-        ctx.var_builder = vb;
 
         let blocks = Arc::new(blocks);
 
