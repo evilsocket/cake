@@ -41,6 +41,13 @@ cargo build --release --features metal
 cargo build --release --features cuda
 ```
 
+If your system has **multiple CUDA toolkit versions** installed, set `CUDA_HOME` to the
+version supported by your driver to avoid library version mismatches:
+
+```sh
+CUDA_HOME=/usr/local/cuda-12.4 cargo build --release --features cuda
+```
+
 ### Pre-Volta NVIDIA GPUs
 
 For Pascal, Maxwell, or other GPUs with compute capability < 7.0, the upstream `candle-kernels` crate requires patches. See [`cuda-compat/`](../cuda-compat/) for a one-command fix:
