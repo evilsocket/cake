@@ -277,11 +277,11 @@ pub async fn master_setup(
     let master_tflops: f64 = master_gpus.iter().map(|g| g.tflops as f64).sum();
 
     // Estimate per-layer size for VRAM-aware capping
-    let layer_size_bytes = estimate_layer_size(model_path, num_layers);
-    if layer_size_bytes > 0 {
+    let raw_layer_size = estimate_layer_size(model_path, num_layers);
+    if raw_layer_size > 0 {
         log::info!(
-            "estimated layer size: {}",
-            human_bytes::human_bytes(layer_size_bytes as f64)
+            "estimated layer size (raw): {}",
+            human_bytes::human_bytes(raw_layer_size as f64)
         );
     }
 
@@ -318,6 +318,24 @@ pub async fn master_setup(
     let lm_head_size = if tie_embeddings { 0 } else { embed_size };
     // Add ~1 GiB for CUDA runtime/context, KV cache, memory fragmentation, and misc overhead
     let master_overhead = embed_size + lm_head_size + 1024 * 1024 * 1024;
+
+    // Correct layer size estimate: the raw estimate (total_files / num_layers) inflates
+    // by spreading non-layer weights (embeddings, lm_head) across all layers. Subtract
+    // this to get a more accurate per-transformer-layer size.
+    let layer_size_bytes = if raw_layer_size > 0 && num_layers > 0 {
+        let non_layer_per_layer = (embed_size + lm_head_size) / num_layers as u64;
+        let corrected = raw_layer_size.saturating_sub(non_layer_per_layer);
+        if corrected < raw_layer_size {
+            log::info!(
+                "corrected layer size: {} (non-layer overhead: {}/layer)",
+                human_bytes::human_bytes(corrected as f64),
+                human_bytes::human_bytes(non_layer_per_layer as f64),
+            );
+        }
+        corrected
+    } else {
+        raw_layer_size
+    };
 
     log::info!(
         "master overhead: embeddings={} lm_head={} total={}",
