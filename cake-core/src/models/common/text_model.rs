@@ -166,21 +166,30 @@ impl TextModelBase {
 
     /// Forward pass through all blocks.
     pub async fn forward(&mut self, x: &Tensor, idx: usize) -> Result<Tensor> {
+        let forward_start = std::time::Instant::now();
         let (_batch_size, seq_len) = x.dims2()?;
+
+        let emb_start = std::time::Instant::now();
         let mut x = self.embedding.forward(x)?;
+        let emb_elapsed = emb_start.elapsed();
 
         let num_blocks = self.blocks.len();
         let mut block_idx = 0;
+        let mut local_elapsed = std::time::Duration::ZERO;
+        let mut local_count: usize = 0;
 
         while block_idx < num_blocks {
             let curr_block_id = self.blocks[block_idx].ident().to_owned();
             if curr_block_id == "local" {
+                let local_start = std::time::Instant::now();
                 x = self.blocks[block_idx]
                     .forward_mut(&x, idx, block_idx, &mut self.ctx)
                     .await
                     .map_err(|e| {
                         anyhow!("error in forward operation of local block {block_idx}: {e}")
                     })?;
+                local_elapsed += local_start.elapsed();
+                local_count += 1;
 
                 block_idx += 1;
             } else {
@@ -196,6 +205,8 @@ impl TextModelBase {
                     block_idx += 1;
                 }
 
+                let num_layers = batch.len();
+                let batch_start = std::time::Instant::now();
                 x = self.blocks[first]
                     .forward_batch(&x, batch, &mut self.ctx)
                     .await
@@ -205,9 +216,19 @@ impl TextModelBase {
                             &curr_block_id
                         )
                     })?;
+                let batch_elapsed = batch_start.elapsed();
+                log::info!(
+                    "  worker {} layers {}-{} ({} layers): {:.1}ms",
+                    &curr_block_id,
+                    first,
+                    block_idx - 1,
+                    num_layers,
+                    batch_elapsed.as_secs_f64() * 1000.0
+                );
             }
         }
 
+        let head_start = std::time::Instant::now();
         let x = self
             .ln_f
             .forward(&x)
@@ -223,6 +244,17 @@ impl TextModelBase {
             .lm_head
             .forward(&x)
             .map_err(|e| anyhow!("error in lm_head.forward: {e}"))?;
+        let head_elapsed = head_start.elapsed();
+
+        let total_elapsed = forward_start.elapsed();
+        log::info!(
+            "  forward total={:.1}ms emb={:.1}ms local={:.1}ms ({} blocks) head={:.1}ms",
+            total_elapsed.as_secs_f64() * 1000.0,
+            emb_elapsed.as_secs_f64() * 1000.0,
+            local_elapsed.as_secs_f64() * 1000.0,
+            local_count,
+            head_elapsed.as_secs_f64() * 1000.0,
+        );
 
         logits
             .to_dtype(DType::F32)

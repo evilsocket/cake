@@ -121,7 +121,17 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
                 start_gen = std::time::Instant::now()
             }
 
+            let token_start = std::time::Instant::now();
             let token = llm_model.next_token(index).await?;
+            let token_elapsed = token_start.elapsed();
+
+            log::info!(
+                "token {} generated in {:.1}ms ({:.1} tok/s)",
+                index,
+                token_elapsed.as_secs_f64() * 1000.0,
+                1.0 / token_elapsed.as_secs_f64(),
+            );
+
             if token.is_end_of_stream {
                 break;
             } else {
@@ -136,7 +146,7 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
         let generated = llm_model.generated_tokens();
 
         log::info!(
-            "{} tokens generated ({} token/s) - mem={}",
+            "{} tokens generated ({:.2} token/s) - mem={}",
             generated,
             (generated - 1) as f64 / dt.as_secs_f64(),
             human_bytes::human_bytes(memory_stats::memory_stats().unwrap().physical_mem as f64)

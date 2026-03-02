@@ -71,15 +71,34 @@ impl Client {
     }
 
     async fn forward_request(&mut self, req: Message) -> Result<Tensor> {
-        let resp = self.request(req).await?;
-        match resp {
+        let send_start = std::time::Instant::now();
+        req.to_writer(&mut self.stream)
+            .await
+            .map_err(|e| anyhow!("error sending message {:?}: {}", req, e))?;
+        let send_elapsed = send_start.elapsed();
+
+        let recv_start = std::time::Instant::now();
+        let (resp_size, msg) = super::Message::from_reader(&mut self.stream)
+            .await
+            .map_err(|e| anyhow!("error receiving response for {:?}: {}", req, e))?;
+        let recv_elapsed = recv_start.elapsed();
+
+        log::debug!(
+            "    {} send={:.1}ms recv={:.1}ms ({})",
+            &self.address,
+            send_elapsed.as_secs_f64() * 1000.0,
+            recv_elapsed.as_secs_f64() * 1000.0,
+            human_bytes::human_bytes(resp_size as f64),
+        );
+
+        match msg {
             Message::Tensor(raw) => Ok(raw.to_tensor(&self.device)?),
             Message::WorkerError { message } => Err(anyhow!(
                 "worker {} reported error: {}",
                 &self.address,
                 message
             )),
-            _ => Err(anyhow!("unexpected response {:?}", &resp)),
+            _ => Err(anyhow!("unexpected response {:?}", &msg)),
         }
     }
 }
