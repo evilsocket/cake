@@ -61,6 +61,7 @@ pub struct GatedDeltaNet {
     out_proj: Linear,
 
     num_heads: usize,
+    num_key_heads: usize,
     key_head_dim: usize,
     value_head_dim: usize,
     key_dim: usize,
@@ -73,10 +74,11 @@ impl GatedDeltaNet {
         let la = cfg.linear_attn.as_ref().expect("no linear_attn config");
 
         let num_heads = la.num_value_heads;
+        let num_key_heads = la.num_key_heads;
         let key_head_dim = la.key_head_dim;
         let value_head_dim = la.value_head_dim;
-        let key_dim = la.num_key_heads * key_head_dim;
-        let value_dim = la.num_value_heads * value_head_dim;
+        let key_dim = num_key_heads * key_head_dim;
+        let value_dim = num_heads * value_head_dim;
         let conv_dim = key_dim * 2 + value_dim; // Q + K + V
 
         let in_proj_qkv = candle_nn::linear_no_bias(cfg.hidden_size, conv_dim, vb.pp("in_proj_qkv"))?;
@@ -105,6 +107,7 @@ impl GatedDeltaNet {
             norm,
             out_proj,
             num_heads,
+            num_key_heads,
             key_head_dim,
             value_head_dim,
             key_dim,
@@ -181,6 +184,21 @@ impl GatedDeltaNet {
         };
 
         Ok((y, conv_state))
+    }
+
+    /// Repeat key heads to match value head count (GQA-like expansion).
+    /// Input: (batch, seq, num_key_heads, head_dim)
+    /// Output: (batch, seq, num_key_heads * n_rep, head_dim)
+    fn repeat_key_heads(x: &Tensor, n_rep: usize) -> Result<Tensor> {
+        if n_rep == 1 {
+            return Ok(x.clone());
+        }
+        let (b, s, h, d) = x.dims4()?;
+        // Unsqueeze to (b, s, h, 1, d), expand to (b, s, h, n_rep, d), flatten
+        x.unsqueeze(3)?
+            .expand((b, s, h, n_rep, d))?
+            .contiguous()?
+            .reshape((b, s, h * n_rep, d))
     }
 
     /// L2-normalize along the last dimension: x / sqrt(sum(x^2) + eps).
@@ -294,11 +312,23 @@ impl GatedDeltaNet {
         let v = mixed_qkv.narrow(2, self.key_dim * 2, self.value_dim)
             .map_err(|e| anyhow!("split v: {e}"))?;
 
-        // Reshape to (batch, seq_len, num_heads, head_dim)
-        let q = q.reshape((batch, seq_len, self.num_heads, self.key_head_dim))
+        // Reshape Q/K to (batch, seq_len, num_key_heads, key_head_dim).
+        // When num_key_heads < num_heads (GQA-like), repeat key heads to match
+        // the number of recurrent heads (num_heads = num_value_heads).
+        let q = q.reshape((batch, seq_len, self.num_key_heads, self.key_head_dim))
             .map_err(|e| anyhow!("q reshape: {e}"))?;
-        let k = k.reshape((batch, seq_len, self.num_heads, self.key_head_dim))
+        let k = k.reshape((batch, seq_len, self.num_key_heads, self.key_head_dim))
             .map_err(|e| anyhow!("k reshape: {e}"))?;
+        let (q, k) = if self.num_key_heads < self.num_heads {
+            let repeats = self.num_heads / self.num_key_heads;
+            let q = Self::repeat_key_heads(&q, repeats)
+                .map_err(|e| anyhow!("q repeat: {e}"))?;
+            let k = Self::repeat_key_heads(&k, repeats)
+                .map_err(|e| anyhow!("k repeat: {e}"))?;
+            (q, k)
+        } else {
+            (q, k)
+        };
         let v = v.reshape((batch, seq_len, self.num_heads, self.value_head_dim))
             .map_err(|e| anyhow!("v reshape: {e}"))?;
 
