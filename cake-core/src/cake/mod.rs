@@ -74,6 +74,14 @@ impl Context {
         let device = utils::get_inference_device(args.cpu, args.device)
             .map_err(|e| anyhow!("can't attach to device: {:?}", e))?;
 
+        // Disable cudarc event tracking for CUDA devices: cudarc's CudaStream::wait()
+        // rejects events from a different CudaContext, which breaks cross-device tensor
+        // transfers in multi-GPU setups. Safe since we use a single stream per device.
+        #[cfg(feature = "cuda")]
+        if let Device::Cuda(cuda_dev) = &device {
+            unsafe { cuda_dev.disable_event_tracking(); }
+        }
+
         log::info!(
             "[{:?}] dtype={:?} device={:?} mem={}",
             args.mode,
