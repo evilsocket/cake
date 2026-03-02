@@ -487,6 +487,7 @@ pub async fn master_setup(
             let mut stream = TcpStream::connect(&worker.host)
                 .await
                 .map_err(|e| anyhow!("can't connect to {}: {}", &worker.host, e))?;
+            let _ = stream.set_nodelay(true);
 
             // Mutual authentication
             auth::authenticate_as_master(&mut stream, &cluster_key).await?;
@@ -830,6 +831,7 @@ pub async fn worker_setup(
 
     // Accept one setup connection from master
     let (mut stream, client_addr) = listener.accept().await?;
+    let _ = stream.set_nodelay(true);
     log::info!("[{}] master connected", client_addr);
 
     // Authenticate

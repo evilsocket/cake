@@ -30,7 +30,7 @@ impl std::fmt::Debug for RawTensor {
 impl RawTensor {
     /// Convert x into a RawTensor.
     pub fn from_tensor(x: &Tensor) -> Self {
-        let data: Vec<u8> = x.data().to_vec();
+        let data: Vec<u8> = x.data().into_owned();
         let dtype = x.dtype().as_str().to_string();
         let shape = x.shape().clone().into_dims();
         Self { data, dtype, shape }
@@ -116,22 +116,6 @@ pub enum Message {
     WorkerError { message: String },
 }
 
-#[inline]
-async fn read_u32be<R>(reader: &mut R) -> Result<u32>
-where
-    R: AsyncReadExt + Unpin,
-{
-    Ok(u32::from_be(reader.read_u32().await?))
-}
-
-#[inline]
-async fn write_u32be<W>(writer: &mut W, n: u32) -> Result<()>
-where
-    W: AsyncWriteExt + Unpin,
-{
-    Ok(writer.write_u32(n.to_be()).await?)
-}
-
 impl Message {
     /// Create a Message::SingleOp message.
     pub fn single_op(layer_name: &str, x: &Tensor, index_pos: usize, block_idx: usize) -> Self {
@@ -176,12 +160,13 @@ impl Message {
     where
         R: AsyncReadExt + Unpin,
     {
-        let magic = read_u32be(reader).await?;
+        // read_u32() reads 4 bytes as big-endian and returns the native value.
+        let magic = reader.read_u32().await?;
         if magic != super::PROTO_MAGIC {
             return Err(anyhow!("invalid magic value: {magic}"));
         }
 
-        let req_size = read_u32be(reader).await?;
+        let req_size = reader.read_u32().await?;
         if req_size > super::MESSAGE_MAX_SIZE {
             return Err(anyhow!("request size {req_size} > MESSAGE_MAX_SIZE"));
         }
@@ -198,16 +183,302 @@ impl Message {
     where
         W: AsyncWriteExt + Unpin,
     {
-        let req = self.to_bytes()?;
-        let req_size = req.len() as u32;
-        if req_size > super::MESSAGE_MAX_SIZE {
-            return Err(anyhow!("request size {req_size} > MESSAGE_MAX_SIZE"));
+        let payload = self.to_bytes()?;
+        let payload_size = payload.len() as u32;
+        if payload_size > super::MESSAGE_MAX_SIZE {
+            return Err(anyhow!("request size {payload_size} > MESSAGE_MAX_SIZE"));
         }
 
-        write_u32be(writer, super::PROTO_MAGIC).await?;
-        write_u32be(writer, req_size).await?;
-        writer.write_all(&req).await?;
+        // Coalesce header + payload into a single write to avoid Nagle delays.
+        let mut frame = Vec::with_capacity(8 + payload.len());
+        frame.extend_from_slice(&super::PROTO_MAGIC.to_be_bytes());
+        frame.extend_from_slice(&payload_size.to_be_bytes());
+        frame.extend_from_slice(&payload);
+        writer.write_all(&frame).await?;
 
-        Ok(8 + req.len())
+        Ok(frame.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::{DType, Device, Tensor};
+
+    fn make_f32_tensor(shape: &[usize]) -> Tensor {
+        let n: usize = shape.iter().product();
+        let data: Vec<f32> = (0..n).map(|i| i as f32 * 0.1).collect();
+        Tensor::from_vec(data, shape, &Device::Cpu).unwrap()
+    }
+
+    fn make_f16_tensor(shape: &[usize]) -> Tensor {
+        make_f32_tensor(shape).to_dtype(DType::F16).unwrap()
+    }
+
+    // ── RawTensor round-trips ──────────────────────────────────
+
+    #[test]
+    fn test_raw_tensor_roundtrip_f32() {
+        let original = make_f32_tensor(&[2, 64]);
+        let raw = RawTensor::from_tensor(&original);
+        assert_eq!(raw.dtype, "f32");
+        assert_eq!(raw.shape, vec![2, 64]);
+        assert_eq!(raw.data.len(), 2 * 64 * 4);
+
+        let recovered = raw.to_tensor(&Device::Cpu).unwrap();
+        assert_eq!(recovered.dtype(), DType::F32);
+        assert_eq!(recovered.shape().dims(), &[2, 64]);
+    }
+
+    #[test]
+    fn test_raw_tensor_roundtrip_f16() {
+        let original = make_f16_tensor(&[1, 128]);
+        let raw = RawTensor::from_tensor(&original);
+        assert_eq!(raw.dtype, "f16");
+        assert_eq!(raw.shape, vec![1, 128]);
+        assert_eq!(raw.data.len(), 1 * 128 * 2);
+
+        let recovered = raw.to_tensor(&Device::Cpu).unwrap();
+        assert_eq!(recovered.dtype(), DType::F16);
+        assert_eq!(recovered.shape().dims(), &[1, 128]);
+    }
+
+    #[test]
+    fn test_raw_tensor_data_integrity() {
+        let original = make_f16_tensor(&[1, 256]);
+        let orig_bytes: Vec<u8> = original.data().to_vec();
+        let raw = RawTensor::from_tensor(&original);
+        let recovered = raw.to_tensor(&Device::Cpu).unwrap();
+        let recv_bytes: Vec<u8> = recovered.data().to_vec();
+        assert_eq!(orig_bytes, recv_bytes);
+    }
+
+    // ── Message serialization (to_bytes / from_bytes) ──────────
+
+    #[test]
+    fn test_message_hello_roundtrip() {
+        let bytes = Message::Hello.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        assert!(matches!(decoded, Message::Hello));
+    }
+
+    #[test]
+    fn test_message_goodbye_roundtrip() {
+        let bytes = Message::Goodbye.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        assert!(matches!(decoded, Message::Goodbye));
+    }
+
+    #[test]
+    fn test_message_worker_info_roundtrip() {
+        let info = WorkerInfo {
+            version: "0.1.0".into(),
+            dtype: "F16".into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            device: "cuda".into(),
+            device_idx: 2,
+            latency: 42,
+        };
+        let bytes = Message::WorkerInfo(info).to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        match decoded {
+            Message::WorkerInfo(wi) => {
+                assert_eq!(wi.version, "0.1.0");
+                assert_eq!(wi.dtype, "F16");
+                assert_eq!(wi.os, "linux");
+                assert_eq!(wi.arch, "x86_64");
+                assert_eq!(wi.device, "cuda");
+                assert_eq!(wi.device_idx, 2);
+                assert_eq!(wi.latency, 42);
+            }
+            other => panic!("expected WorkerInfo, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_message_tensor_roundtrip() {
+        let tensor = make_f16_tensor(&[1, 64]);
+        let bytes = Message::from_tensor(&tensor).to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        match decoded {
+            Message::Tensor(raw) => {
+                let t = raw.to_tensor(&Device::Cpu).unwrap();
+                assert_eq!(t.dtype(), DType::F16);
+                assert_eq!(t.shape().dims(), &[1, 64]);
+            }
+            other => panic!("expected Tensor, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_message_single_op_roundtrip() {
+        let tensor = make_f16_tensor(&[1, 64]);
+        let msg = Message::single_op("model.layers.5", &tensor, 42, 7);
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        match decoded {
+            Message::SingleOp {
+                layer_name,
+                x,
+                index_pos,
+                block_idx,
+            } => {
+                assert_eq!(layer_name, "model.layers.5");
+                assert_eq!(index_pos, 42);
+                assert_eq!(block_idx, 7);
+                let t = x.to_tensor(&Device::Cpu).unwrap();
+                assert_eq!(t.shape().dims(), &[1, 64]);
+            }
+            other => panic!("expected SingleOp, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_message_batch_roundtrip() {
+        let tensor = make_f16_tensor(&[1, 128]);
+        let batch = vec![
+            ("model.layers.0".into(), 0usize, 0usize),
+            ("model.layers.1".into(), 1, 1),
+            ("model.layers.2".into(), 2, 2),
+        ];
+        let msg = Message::from_batch(&tensor, batch);
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        match decoded {
+            Message::Batch { x, batch } => {
+                assert_eq!(batch.len(), 3);
+                assert_eq!(batch[0].0, "model.layers.0");
+                assert_eq!(batch[1].1, 1);
+                assert_eq!(batch[2].2, 2);
+                let t = x.to_tensor(&Device::Cpu).unwrap();
+                assert_eq!(t.shape().dims(), &[1, 128]);
+            }
+            other => panic!("expected Batch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_message_worker_error_roundtrip() {
+        let msg = Message::WorkerError {
+            message: "layer not found".into(),
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        match decoded {
+            Message::WorkerError { message } => {
+                assert_eq!(message, "layer not found");
+            }
+            other => panic!("expected WorkerError, got {:?}", other),
+        }
+    }
+
+    // ── Wire format (to_writer / from_reader) ──────────────────
+
+    #[tokio::test]
+    async fn test_wire_hello() {
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        let written = Message::Hello.to_writer(&mut writer).await.unwrap();
+        drop(writer);
+
+        let (payload_size, decoded) = Message::from_reader(&mut reader).await.unwrap();
+        assert!(matches!(decoded, Message::Hello));
+        assert_eq!(written, 8 + payload_size);
+    }
+
+    #[tokio::test]
+    async fn test_wire_tensor() {
+        let (mut writer, mut reader) = tokio::io::duplex(64 * 1024);
+        let tensor = make_f16_tensor(&[1, 128]);
+        let orig_bytes: Vec<u8> = tensor.data().to_vec();
+
+        Message::from_tensor(&tensor)
+            .to_writer(&mut writer)
+            .await
+            .unwrap();
+        drop(writer);
+
+        let (_, decoded) = Message::from_reader(&mut reader).await.unwrap();
+        match decoded {
+            Message::Tensor(raw) => {
+                assert_eq!(raw.dtype, "f16");
+                assert_eq!(raw.shape, vec![1, 128]);
+                let t = raw.to_tensor(&Device::Cpu).unwrap();
+                assert_eq!(t.data().to_vec(), orig_bytes);
+            }
+            other => panic!("expected Tensor, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wire_invalid_magic() {
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        writer.write_u32(0xDEADBEEF_u32).await.unwrap();
+        writer.write_u32(4_u32).await.unwrap();
+        writer.write_all(&[0, 0, 0, 0]).await.unwrap();
+        drop(writer);
+
+        let result = Message::from_reader(&mut reader).await;
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("invalid magic"),
+            "should report invalid magic"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wire_oversized_message() {
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        // Write valid magic, then size > MESSAGE_MAX_SIZE
+        // write_u32 already writes in big-endian, so pass native values directly.
+        writer
+            .write_u32(crate::cake::proto::PROTO_MAGIC)
+            .await
+            .unwrap();
+        writer
+            .write_u32(crate::cake::proto::MESSAGE_MAX_SIZE + 1)
+            .await
+            .unwrap();
+        drop(writer);
+
+        let result = Message::from_reader(&mut reader).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("MESSAGE_MAX_SIZE"),
+            "should report oversized message"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wire_multiple_messages() {
+        let (mut writer, mut reader) = tokio::io::duplex(64 * 1024);
+        let tensor = make_f16_tensor(&[1, 32]);
+
+        Message::Hello.to_writer(&mut writer).await.unwrap();
+        Message::single_op("model.layers.0", &tensor, 0, 0)
+            .to_writer(&mut writer)
+            .await
+            .unwrap();
+        Message::from_tensor(&tensor)
+            .to_writer(&mut writer)
+            .await
+            .unwrap();
+        Message::Goodbye.to_writer(&mut writer).await.unwrap();
+        drop(writer);
+
+        let (_, m1) = Message::from_reader(&mut reader).await.unwrap();
+        assert!(matches!(m1, Message::Hello));
+
+        let (_, m2) = Message::from_reader(&mut reader).await.unwrap();
+        assert!(matches!(m2, Message::SingleOp { .. }));
+
+        let (_, m3) = Message::from_reader(&mut reader).await.unwrap();
+        assert!(matches!(m3, Message::Tensor(_)));
+
+        let (_, m4) = Message::from_reader(&mut reader).await.unwrap();
+        assert!(matches!(m4, Message::Goodbye));
     }
 }

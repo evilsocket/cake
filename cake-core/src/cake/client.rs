@@ -33,6 +33,7 @@ impl Client {
         let stream = TcpStream::connect(&address)
             .await
             .map_err(|e| anyhow!("can't connect to {address}: {e}"))?;
+        stream.set_nodelay(true)?;
         let worker_info = WorkerInfo::default();
 
         let mut client = Self {

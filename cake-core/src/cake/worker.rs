@@ -507,6 +507,7 @@ impl<G: Generator + 'static> Worker<G> {
     /// Run the worker server accept loop.
     pub async fn run(&mut self) -> Result<()> {
         while let Ok((socket, client)) = self.listener.accept().await {
+            let _ = socket.set_nodelay(true);
             log::debug!("{} connected", &client);
 
             let context = self.context.get_client_context();
