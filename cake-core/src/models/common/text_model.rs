@@ -234,7 +234,7 @@ impl TextModelBase {
                         )
                     })?;
                 let batch_elapsed = batch_start.elapsed();
-                log::info!(
+                log::debug!(
                     "  worker {} layers {}-{} ({} layers): {:.1}ms",
                     &curr_block_id,
                     first,
