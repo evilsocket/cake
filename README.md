@@ -1,22 +1,50 @@
-<p align="center">
+<div align="center">
+
+# `cake`
+
+[![Documentation](https://img.shields.io/badge/docs-blue)](https://github.com/evilsocket/cake/blob/main/docs/index.md)
+[![License](https://img.shields.io/badge/license-GPL3-brightgreen.svg?style=flat-square)](https://github.com/evilsocket/cake/blob/master/LICENSE.md)
+
   <small>Join the project community on our server!</small>
   <br/><br/>
   <a href="https://discord.gg/https://discord.gg/btZpkp45gQ" target="_blank" title="Join our community!">
     <img src="https://dcbadge.limes.pink/api/server/https://discord.gg/btZpkp45gQ"/>
   </a>
-</p>
-<hr/>
 
+</div>
 
-`Cake` is a Rust framework for distributed inference of large models like [LLama3](https://x.com/evilsocket/status/1812110504531259900), [Qwen2.5](https://huggingface.co/Qwen) and [Stable Diffusion](https://x.com/crynuxai/status/1822085290543960216) based on [Candle](https://github.com/huggingface/candle). The goal of the project is being able to run big (70B+) models by repurposing consumer hardware into an heterogeneous cluster of iOS, Android, macOS, Linux and Windows devices, effectively leveraging [planned obsolescence](https://en.wikipedia.org/wiki/Planned_obsolescence) as a tool to make AI more accessible and democratic.
+Cake is a Rust framework for distributed inference of large language models and image generation models based on [Candle](https://github.com/huggingface/candle). The goal is to run big (70B+) models by repurposing consumer hardware into a heterogeneous cluster of iOS, Android, macOS, Linux and Windows devices, effectively leveraging [planned obsolescence](https://en.wikipedia.org/wiki/Planned_obsolescence) as a tool to make AI more accessible and democratic.
 
 <p align="center">
   <strong>
-  ⚠ This is experimental code that's being actively developed and changed very quickly, expect bugs ⚠
+  This is experimental code that's being actively developed and changed very quickly, expect bugs
   </strong>
 </p>
 
-The idea is to shard the transformer blocks to multiple devices in order to be able to run the inference on models that wouldn't normally fit in the GPU memory of a single device. Inferences over contiguous transformer blocks on the same worker are batched in order to minimize latency due to data transfer.
+## Key Features
+
+- **Distributed Inference** — Shard transformer blocks across multiple devices to run models that don't fit on a single GPU. [Learn more](https://github.com/evilsocket/cake/blob/main/docs/clustering.md).
+- **Multi Model** — Support for [LLaMA 3.x, Qwen2/2.5, Qwen3.5](https://github.com/evilsocket/cake/blob/main/docs/models.md) and [Stable Diffusion](https://github.com/evilsocket/cake/blob/main/docs/stable_diffusion.md).
+- **Multi Platform** — CUDA, Metal, and CPU backends across [Linux, macOS, Windows, iOS, and Android](https://github.com/evilsocket/cake/blob/main/docs/install.md).
+- **Zero-Config Clustering** — mDNS discovery, automatic layer assignment, and model data push with a single `--cluster-key` flag. [Learn more](https://github.com/evilsocket/cake/blob/main/docs/clustering.md#zero-config-cluster-mdns-discovery).
+- **OpenAI-Compatible API** — REST API with streaming support, plus a [built-in web UI and TUI chat client](https://github.com/evilsocket/cake/blob/main/docs/usage.md#web-ui).
+- **Docker** — [Container builds](https://github.com/evilsocket/cake/blob/main/docs/docker.md) for Linux/NVIDIA with docker-compose cluster support.
+
+## Quick Start
+
+```sh
+cargo build --release --features cuda  # or: --features metal
+cake download Qwen/Qwen2.5-Coder-1.5B-Instruct
+cake master --model Qwen/Qwen2.5-Coder-1.5B-Instruct --prompt "Hello!"
+```
+
+To start the API server and web UI:
+
+```sh
+cake master --model Qwen/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080
+```
+
+For the full usage guide and API reference, [check the project documentation](https://github.com/evilsocket/cake/blob/main/docs/index.md).
 
 ## Models
 
@@ -24,331 +52,18 @@ The idea is to shard the transformer blocks to multiple devices in order to be a
 |-------|------|-------------|--------|
 | LLaMA 3.x | Text | `llama` (default) | ✅ |
 | Qwen2 / Qwen2.5 | Text | `qwen2` (default) | ✅ |
+| Qwen3.5 | Text | `qwen3_5` (default) | ✅ |
 | Stable Diffusion (1.5, 2.1, XL, XL Turbo) | Image | - | ✅ |
 
-Text model architecture is auto-detected from `config.json`. You can also explicitly set it with `--text-model-arch auto|llama|qwen2`.
+## Contributors
 
-To compile only for specific models, disable default features and enable only what you need:
+<a href="https://github.com/evilsocket/cake/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=evilsocket/cake" alt="Cake project contributors" />
+</a>
 
-```sh
-# Only LLaMA support
-cargo build --release --no-default-features --features llama
+## Star History
 
-# Only Qwen2 support
-cargo build --release --no-default-features --features qwen2
-```
-
-## Platform Support
-
-| OS                           | Architectures | Acceleration | Status |
-|----------------------------------|------------------|------------------|------------------|
-| GNU/Linux                 | arm, arm64, x86_64 | -                | ✅ |
-| GNU/Linux                 | arm, arm64, x86_64 | CUDA                | ✅ |
-| GNU/Linux                 | arm, arm64, x86_64 | BLAS                | ✅ |
-| Windows                | x86_64 | BLAS                | [untested](https://github.com/evilsocket/cake/issues/7) |
-| Windows                | x86_64 | CUDA                |  ✅ |
-| macOS                 | x86_64 | -                | ✅ |
-| macOS                 | aarch64 | -                | ✅ |
-| macOS                 | aarch64 | Metal                | ✅ |
-| Android                | arm, arm64, x86_64 | - | ✅ |
-| Android                | arm, arm64, x86_64 | CUDA | [untested](https://docs.nvidia.com/gameworks/content/technologies/mobile/cuda_android_main.htm) |
-| iOS / iPadOS                 | aarch64 | -                | ✅ |
-| iOS / iPadOS                 | aarch64 | Metal                | 🛠️  [90% done, WIP](https://github.com/huggingface/candle/issues/2322) |
-| Web                 | - | WebGPU                | [in theory possible, not done](https://onnxruntime.ai/docs/tutorials/web/ep-webgpu.html) |
-
-CUDA >= 12.2 is required for CUDA accelerated systems.
-
-## Docker (Linux/NVIDIA)
-
-For Linux systems with NVIDIA GPUs, you can run Cake via Docker. The [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/) is required.
-
-Build the image:
-
-```sh
-docker build -t cake .
-```
-
-Set `CUDA_COMPUTE_CAP` to match your GPU ([common values](https://developer.nvidia.com/cuda-gpus): 75 for RTX 2000, 80 for A100, 86 for RTX 3000, 89 for RTX 4000, 90 for H100):
-
-```sh
-docker build -t cake --build-arg CUDA_COMPUTE_CAP=86 .
-```
-
-Run a standalone instance (no cluster, loads entire model):
-
-```sh
-docker run --rm --gpus all \
-  -v /path/to/model:/model:ro \
-  -p 8080:8080 \
-  cake master --model /model --api 0.0.0.0:8080
-```
-
-A `docker-compose.yml` is provided as an example for running a multi-worker cluster. Create a `topology-docker.yml` mapping layers to the `worker-1` / `worker-2` service names, place your model data in `./cake-data/`, and run:
-
-```sh
-docker compose up --build
-```
-
-**Note:** Docker on macOS cannot access Metal GPUs. For Apple Silicon, build and run natively with `cargo build --release --features metal`.
-
-## Compile
-
-With [Rust installed](https://www.rust-lang.org/tools/install), you can build the core library and the CLI utilities with different accelerations.
-
-Without acceleration (will use CPU):
-
-```sh
-cargo build --release
-```
-
-With Metal acceleration for Apple Silicon:
-
-```sh
-cargo build --release --features metal
-```
-
-With CUDA acceleration:
-
-```sh
-cargo build --release --features cuda
-```
-
-For **pre-Volta NVIDIA GPUs** (Pascal, Maxwell — compute capability < 7.0), the upstream `candle-kernels` crate requires patches. See [`cuda-compat/`](cuda-compat/) for a one-command fix:
-
-```sh
-./cuda-compat/patch.sh
-cargo build --release --features cuda
-```
-
-To generate the iOS bindings in the app that can then be [compiled and deployed via XCode](https://github.com/evilsocket/cake/tree/main/cake-ios-worker-app):
-
-```sh
-make ios
-```
-
-## Using
-
-### Downloading Models
-
-You can pass a HuggingFace repo ID as the `--model` argument and Cake will download the model automatically (with progress bars). Files are cached in `~/.cache/huggingface/hub/` — subsequent runs skip the download.
-
-```sh
-cake master --model Qwen/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080
-```
-
-To pre-download a model without running inference:
-
-```sh
-cake download Qwen/Qwen2.5-Coder-1.5B-Instruct
-```
-
-For gated models (like LLaMA 3), set the `HF_TOKEN` environment variable with your HuggingFace token.
-
-Of course you can also pass a local path to a model directory as usual:
-
-```sh
-cake master --model /path/to/Meta-Llama-3-8B --api 0.0.0.0:8080
-```
-
-### Zero-Config Cluster (mDNS Discovery)
-
-Cake supports fully automatic cluster setup using mDNS service discovery and pre-shared key authentication. Instead of writing topology files and distributing model data manually, you just start workers and a master with the same `--cluster-key`:
-
-```sh
-# On any machine — start a worker (no model data or topology needed)
-cake worker --cluster-key mysecret --name gpu-server-1
-
-# On another machine
-cake worker --cluster-key mysecret --name macbook
-
-# On the master (has the model)
-cake master --model /path/to/Meta-Llama-3-8B \
-            --cluster-key mysecret \
-            --api 0.0.0.0:8080
-```
-
-The cluster key can also be set via the `CAKE_CLUSTER_KEY` environment variable.
-
-**What happens automatically:**
-
-1. Each worker detects its GPUs (name and VRAM via `nvidia-smi`, or system memory for Metal/CPU) and advertises itself on the local network via mDNS.
-2. The master discovers all workers that share the same cluster key.
-3. Master and each worker perform mutual authentication (see below).
-4. The master assigns transformer layers to workers proportionally to their total GPU VRAM — machines with more memory get more layers.
-5. If a worker doesn't have the model data cached locally, the master streams the required safetensors files over TCP. Transfer speed is logged on both sides. Workers cache received data in `~/.cache/cake/` for future runs.
-6. Once all workers are ready, inference starts normally.
-
-If no workers are discovered within the timeout (default 10 seconds, configurable with `--discovery-timeout`), the master loads all layers locally and serves the API anyway.
-
-**Security model:**
-
-The `--cluster-key` enables mutual HMAC-SHA256 challenge-response authentication. When a connection is established, both sides prove they possess the same key through a two-round-trip nonce exchange *before* any protocol data is transmitted — an unauthenticated peer never sees valid Cake messages.
-
-This prevents unauthorized nodes from joining the cluster or injecting/intercepting inference data. However, the traffic itself is **not encrypted** — the authentication ensures both parties are legitimate, but the tensor data and model weights are sent in plaintext. This is appropriate for trusted local networks (home lab, office LAN, VPN). For untrusted networks, use a VPN or SSH tunnel to provide transport encryption.
-
-The cluster key is hashed (SHA-256, first 8 hex chars) before being included in mDNS advertisements, so the key itself is never broadcast — only a short hash used for filtering during discovery.
-
-### Listing Local Models
-
-List all models available locally (downloaded from HuggingFace or received from a master):
-
-```sh
-cake models
-```
-
-This scans `~/.cache/huggingface/hub/` and `~/.cache/cake/` and shows each model's status (`complete` or `partial`), size, and source.
-
-### Running a Cluster (Manual Topology)
-
-Run a worker node:
-
-```sh
-cake worker --model /path/to/Meta-Llama-3-8B \ # model path, read below on how to optimize model size for workers
-            --name worker0 \                   # worker name in topology file
-            --topology topology.yml \          # topology
-            --address 0.0.0.0:10128            # bind address
-```
-
-Run a master node with an OpenAI compatible REST API:
-
-```sh
-cake master --model /path/to/Meta-Llama-3-8B \ # model path
-            --api 0.0.0.0:8080 \               # API bind address
-            --topology topology.yml             # topology file
-```
-
-You can also omit the topology file to load the entire model in a single instance of cake:
-
-```sh
-cake master --model /path/to/Meta-Llama-3-8B \ # model path
-            --api 0.0.0.0:8080                 # API bind address
-```
-
-### Topology
-
-The `topology.yml` determines which layers are served by which worker (you can find a list of all the layers of a model in its [tensor index file](https://huggingface.co/meta-llama/Meta-Llama-3-70B/blob/main/model.safetensors.index.json)):
-
-```yaml
-linux_server_1:
-  host: 'linux_server.host:10128'
-  description: 'NVIDIA Titan X Pascal (12GB)'
-  layers:
-    - 'model.layers.0-5'
-
-linux_server_2:
-  host: 'linux_server2.host:10128'
-  description: 'NVIDIA GeForce 3080 (10GB)'
-  layers:
-    - 'model.layers.6-16'
-
-iphone:
-  host: 'iphone.host:10128'
-  description: 'iPhone 15 Pro Max'
-  layers:
-    - 'model.layers.17'
-
-ipad:
-  host: 'ipad.host:10128'
-  description: 'iPad'
-  layers:
-    - 'model.layers.18-19'
-
-macbook:
-  host: 'macbook.host:10128'
-  description: 'M1 Max'
-  layers:
-    - 'model.layers.20-31'
-```
-
-You can now interact with the cluster by:
-
-```sh
-curl http://master-ip:8080/api/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [
-        {
-            "role": "system",
-            "content": "You are a helpful AI assistant."
-        },
-        {
-            "role": "user",
-            "content": "Why is the sky blue?"
-        }
-    ]
-}'
-```
-
-### Splitting the Model
-
-As a memory and disk space optimization, you might want to give the worker only the data it actually needs from the model instead of the whole folder. Use the `split` subcommand to generate per-worker bundles:
-
-```sh
-cake split --model-path path/to/Meta-Llama-3-8B \ # source model to split
-           --topology path/to/topology.yml \       # topology file
-           --output output-folder-name             # output folder where all the workers data bundles will be saved
-```
-
-This will create a smaller folder with only the required layers tensors and the topology file for the specific worker. Remember to also copy other model contents (config.json, tokenizer.json, etc) in the worker bundle before deploying it.
-
-### Stable Diffusion Image Generation
-
-Define the model parts inside `topology.yml`:
-
-```yaml
-wsl2_on_windows:
-  host: 192.168.1.2:10128
-  description: NVIDIA RTX 4090 24GB
-  layers:
-  - unet
-
-macbook:
-  host: 192.168.1.3:10128
-  description: Macbook M2
-  layers:
-  - clip
-  - vae
-```
-
-Run a worker node:
-
-```sh
-cake worker --model /path/to/hf/cache \        # The cache dir for huggingface models
-            --name wsl2_on_windows \            # worker name in topology file
-            --model-type image-model \          # use image-model for SD, text-model or skip for LLM
-            --topology topology.yml \           # topology
-            --address 0.0.0.0:10128             # bind address
-```
-
-The model could be switched between SD1.5, SD2.1, SDXL and SDXL Turbo by specifying [more command line arguments](./cake-core/src/lib.rs).
-
-The model files will be downloaded from Huggingface automatically if not found in the local cache directory.
-
-Run a master node with REST API:
-
-```sh
-cake master --model /path/to/hf/cache \        # The cache dir for huggingface models
-            --api 0.0.0.0:8080 \               # API bind address
-            --model-type image-model \          # use image-model for SD, text-model or skip for LLM
-            --topology topology.yml             # topology file
-```
-
-Generate images using the cluster:
-
-```sh
-curl http://master-ip:8080/api/v1/image \
-  -H "Content-Type: application/json" \
-  -d '{
-    "image_args": {
-      "sd-image-prompt": "An old man sitting on the chair at seaside",
-      "sd-num-samples": 1,
-      "sd-image-seed": 2439383
-    }
-}'
-```
-
-More control arguments could be found [inside the codes](./cake-core/src/lib.rs).
-
+[![Star History Chart](https://api.star-history.com/svg?repos=evilsocket/cake&type=Timeline)](https://www.github.com/evilsocket/cake&Timeline)
 
 ## License
 

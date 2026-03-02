@@ -82,6 +82,11 @@ impl QwenConfig {
             tie_word_embeddings: self.tie_word_embeddings,
             max_seq_len: self.max_position_embeddings,
             use_qkv_bias: true, // Qwen2 always uses QKV bias
+            model_prefix: "model".into(),
+            head_dim: None,
+            partial_rotary_factor: 1.0,
+            linear_attn: None,
+            residual_rms_norm: false,
         }
     }
 }

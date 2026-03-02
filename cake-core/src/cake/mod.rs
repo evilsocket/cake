@@ -125,6 +125,8 @@ impl Context {
                 text_model_arch = match arch_str.as_str() {
                     #[cfg(feature = "qwen2")]
                     "Qwen2ForCausalLM" => TextModelArch::Qwen2,
+                    #[cfg(feature = "qwen3_5")]
+                    "Qwen3_5ForConditionalGeneration" => TextModelArch::Qwen3_5,
                     _ => TextModelArch::Llama,
                 };
             }
@@ -135,6 +137,10 @@ impl Context {
                 #[cfg(feature = "qwen2")]
                 TextModelArch::Qwen2 => {
                     crate::models::qwen2::QwenConfig::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "qwen3_5")]
+                TextModelArch::Qwen3_5 => {
+                    crate::models::qwen3_5::Qwen3_5Config::from_path(&config_filename)?.into_config()
                 }
                 #[cfg(feature = "llama")]
                 TextModelArch::Llama => {

@@ -22,6 +22,21 @@ use super::discovery::{self, DiscoveredWorker};
 use super::proto::Message;
 use super::topology::{Node, Topology};
 
+/// Derive the layer name prefix from config.json.
+/// Returns e.g. "model.language_model.layers" for Qwen3.5, "model.layers" otherwise.
+fn layer_prefix_for_config(config_json: &serde_json::Value) -> String {
+    if let Some(archs) = config_json.get("architectures").and_then(|v| v.as_array()) {
+        for arch in archs {
+            if let Some(s) = arch.as_str() {
+                if s == "Qwen3_5ForConditionalGeneration" {
+                    return "model.language_model.layers".to_string();
+                }
+            }
+        }
+    }
+    "model.layers".to_string()
+}
+
 /// Maximum chunk size for model data transfer (128 MB).
 const MODEL_DATA_CHUNK_SIZE: usize = 128 * 1024 * 1024;
 
@@ -96,6 +111,7 @@ pub fn compute_layer_assignments(
     master_tflops: f64,
     layer_size_bytes: u64,
     master_max_layers: usize,
+    layer_prefix: &str,
 ) -> Vec<(usize, Vec<String>)> {
     if workers.is_empty() || num_layers == 0 {
         return vec![];
@@ -118,7 +134,7 @@ pub fn compute_layer_assignments(
                 per_worker
             };
             let layers: Vec<String> = (offset..offset + count)
-                .map(|l| format!("model.layers.{l}"))
+                .map(|l| format!("{layer_prefix}.{l}"))
                 .collect();
             assignments.push((i, layers));
             offset += count;
@@ -184,7 +200,7 @@ pub fn compute_layer_assignments(
         }
 
         let layers: Vec<String> = (offset..offset + count)
-            .map(|l| format!("model.layers.{l}"))
+            .map(|l| format!("{layer_prefix}.{l}"))
             .collect();
 
         assignments.push((worker_idx, layers));
@@ -223,7 +239,7 @@ pub fn compute_layer_assignments(
                 // Extend this worker's range (layers are at the end)
                 let new_start = offset;
                 for l in new_start..new_start + take {
-                    layers.push(format!("model.layers.{l}"));
+                    layers.push(format!("{layer_prefix}.{l}"));
                 }
                 offset += take;
                 extra_needed -= take;
@@ -394,6 +410,10 @@ pub async fn master_setup(
         usize::MAX
     };
 
+    // Derive layer naming prefix from architecture
+    let layer_prefix = layer_prefix_for_config(&config_json);
+    log::info!("layer prefix: {}", &layer_prefix);
+
     // Compute assignments based on TFLOPS, capped by per-GPU VRAM
     let assignments = compute_layer_assignments(
         &workers,
@@ -401,6 +421,7 @@ pub async fn master_setup(
         master_tflops,
         layer_size_bytes,
         master_max_layers,
+        &layer_prefix,
     );
 
     log::info!("layer assignments:");

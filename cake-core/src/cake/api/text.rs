@@ -149,7 +149,7 @@ where
     let mut finish_reason = "length".to_string();
 
     let gen_result = master
-        .generate_text(|data| {
+        .generate_text(request.max_tokens, |data| {
             if data.is_empty() {
                 finish_reason = "stop".to_string();
             } else {
@@ -222,7 +222,7 @@ where
         }
 
         if let Err(e) = master
-            .generate_text(|data| {
+            .generate_text(request.max_tokens, |data| {
                 if data.is_empty() {
                     let _ = tx.send(None);
                 } else {

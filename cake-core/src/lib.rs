@@ -28,6 +28,8 @@ pub enum TextModelArch {
     Llama,
     /// Qwen2/Qwen2.5 family
     Qwen2,
+    /// Qwen3.5 hybrid linear/full attention
+    Qwen3_5,
 }
 
 #[derive(Clone, Parser, Default, Debug)]
@@ -64,7 +66,7 @@ pub struct Args {
     #[arg(long, default_value_t = 299792458)]
     pub seed: u64,
     /// The length of the sample to generate (in tokens).
-    #[arg(short = 'n', long, default_value_t = 100)]
+    #[arg(short = 'n', long, default_value_t = 2048)]
     pub sample_len: usize,
     /// The temperature used to generate samples.
     #[arg(long, default_value_t = 1.0)]

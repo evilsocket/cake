@@ -1,39 +1,40 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use super::QwenHistory;
+use crate::models::common::chatml_history::ChatMLHistory;
 use crate::models::common::text_model::TextModelBase;
-use crate::models::common::Transformer;
 use crate::models::TextGenerator;
 use crate::{
     cake::Context,
     models::{chat::Message, Generator, Token},
 };
 
-/// Default end of stream token if not found in configuration.
-const DEFAULT_EOS_TOKEN: &str = "<|endoftext|>";
+use super::block::Qwen3_5Block;
 
-/// Qwen2/Qwen2.5 main class.
-pub struct Qwen2 {
+/// Default end of stream token if not found in configuration.
+const DEFAULT_EOS_TOKEN: &str = "<|im_end|>";
+
+/// Qwen3.5 main class.
+pub struct Qwen3_5 {
     base: TextModelBase,
-    history: QwenHistory,
+    history: ChatMLHistory,
 }
 
 #[async_trait]
-impl Generator for Qwen2 {
-    type Shardable = Transformer;
-    const MODEL_NAME: &'static str = "qwen2";
+impl Generator for Qwen3_5 {
+    type Shardable = Qwen3_5Block;
+    const MODEL_NAME: &'static str = "qwen3_5";
 
     /// Load this model from the context.
     async fn load(ctx: &mut Context) -> Result<Option<Box<Self>>> {
-        let base = TextModelBase::load::<Transformer>(ctx, DEFAULT_EOS_TOKEN).await?;
-        let history = QwenHistory::new();
+        let base = TextModelBase::load::<Qwen3_5Block>(ctx, DEFAULT_EOS_TOKEN).await?;
+        let history = ChatMLHistory::new();
         Ok(Some(Box::new(Self { base, history })))
     }
 }
 
 #[async_trait]
-impl TextGenerator for Qwen2 {
+impl TextGenerator for Qwen3_5 {
     /// Add a message to the chat history.
     fn add_message(&mut self, message: Message) -> Result<()> {
         self.history.push(message);

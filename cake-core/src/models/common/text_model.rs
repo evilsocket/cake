@@ -4,7 +4,7 @@ use candle_nn::{linear_no_bias as linear, Embedding, Linear, Module, RmsNorm};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
 use tokenizers::Tokenizer;
 
-use super::{transformer::Transformer, EosTokenId};
+use super::EosTokenId;
 use crate::{
     cake::{Context, Forwarder},
     models::Token,
@@ -13,7 +13,10 @@ use crate::{
 /// Load the tokenizer and resolve EOS token ID(s).
 /// `default_eos_token` is the model-specific fallback (e.g. "<|eot_id|>" for LLaMA,
 /// "<|endoftext|>" for Qwen2).
-pub fn load_tokenizer(ctx: &Context, default_eos_token: &str) -> Result<(Tokenizer, Option<EosTokenId>)> {
+pub fn load_tokenizer(
+    ctx: &Context,
+    default_eos_token: &str,
+) -> Result<(Tokenizer, Option<EosTokenId>)> {
     let tokenizer_filename = ctx.data_path.join("tokenizer.json");
 
     log::info!("loading tokenizer from {}", tokenizer_filename.display());
@@ -50,7 +53,7 @@ pub fn create_logits_processor(ctx: &Context) -> LogitsProcessor {
     LogitsProcessor::from_sampling(ctx.args.seed, sampling)
 }
 
-/// Shared base for decoder-only text models (LLaMA, Qwen2, etc.).
+/// Shared base for decoder-only text models (LLaMA, Qwen2, Qwen3.5, etc.).
 ///
 /// Contains all the state and logic that is identical across model architectures:
 /// embedding, transformer blocks, final norm, lm_head, tokenizer, sampling, and
@@ -78,15 +81,20 @@ pub struct TextModelBase {
 impl TextModelBase {
     /// Load the shared model structure from the context.
     /// `default_eos_token` is the model-specific fallback EOS string.
-    pub async fn load(ctx: &mut Context, default_eos_token: &str) -> Result<Self> {
+    /// The type parameter `B` determines which block type to use for local layers.
+    pub async fn load<B: Forwarder + 'static>(
+        ctx: &mut Context,
+        default_eos_token: &str,
+    ) -> Result<Self> {
         let config = ctx.config.as_ref().expect("No config specified");
         let var_builder = ctx.var_builder.as_ref().expect("No var_builder specified");
+        let prefix = &config.model_prefix;
 
-        log::info!("loading embeddings ...");
+        log::info!("loading embeddings (prefix={}) ...", prefix);
         let embedding: Embedding = candle_nn::embedding(
             config.vocab_size,
             config.hidden_size,
-            var_builder.pp("model.embed_tokens"),
+            var_builder.pp(format!("{prefix}.embed_tokens")),
         )?;
 
         log::info!("loading lm_head ...");
@@ -94,18 +102,27 @@ impl TextModelBase {
             log::info!("  using tied word embeddings (lm_head = embed_tokens)");
             Linear::new(embedding.embeddings().clone(), None)
         } else {
-            linear(
+            // Try root-level lm_head first (LLaMA/Qwen2), then prefixed (Qwen3.5)
+            match linear(
                 config.hidden_size,
                 config.vocab_size,
                 var_builder.pp("lm_head"),
-            )?
+            ) {
+                Ok(l) => l,
+                Err(_) => linear(
+                    config.hidden_size,
+                    config.vocab_size,
+                    var_builder.pp(format!("{prefix}.lm_head")),
+                )?,
+            }
         };
 
-        log::info!("loading model.norm ...");
-        let ln_f = candle_nn::rms_norm(
+        log::info!("loading {prefix}.norm ...");
+        let ln_f = crate::models::common::load_rms_norm(
             config.hidden_size,
             config.rms_norm_eps,
-            var_builder.pp("model.norm"),
+            config.residual_rms_norm,
+            var_builder.pp(format!("{prefix}.norm")),
         )?;
 
         log::info!("loading {} blocks ...", config.num_hidden_layers);
@@ -113,7 +130,7 @@ impl TextModelBase {
         let mut blocks: Vec<Box<dyn Forwarder>> = vec![];
 
         for i in 0..config.num_hidden_layers {
-            let block_layer_name = format!("model.layers.{i}");
+            let block_layer_name = format!("{prefix}.layers.{i}");
             if let Some((node_name, node)) = ctx.topology.get_node_for_layer(&block_layer_name) {
                 log::debug!("node {node_name} will serve {}", &block_layer_name);
                 blocks.push(Box::new(
@@ -127,7 +144,7 @@ impl TextModelBase {
                 ));
             } else {
                 log::debug!("{} will be served locally", &block_layer_name);
-                blocks.push(Transformer::load(block_layer_name.clone(), ctx)?);
+                blocks.push(B::load(block_layer_name.clone(), ctx)?);
             }
         }
 
@@ -247,7 +264,7 @@ impl TextModelBase {
         let head_elapsed = head_start.elapsed();
 
         let total_elapsed = forward_start.elapsed();
-        log::info!(
+        log::debug!(
             "  forward total={:.1}ms emb={:.1}ms local={:.1}ms ({} blocks) head={:.1}ms",
             total_elapsed.as_secs_f64() * 1000.0,
             emb_elapsed.as_secs_f64() * 1000.0,
@@ -331,7 +348,9 @@ impl TextModelBase {
             if penalty_tokens.is_empty() {
                 logits
             } else {
-                let start_at = penalty_tokens.len().saturating_sub(self.ctx.args.repeat_last_n);
+                let start_at = penalty_tokens
+                    .len()
+                    .saturating_sub(self.ctx.args.repeat_last_n);
                 candle_transformers::utils::apply_repeat_penalty(
                     &logits,
                     self.ctx.args.repeat_penalty,

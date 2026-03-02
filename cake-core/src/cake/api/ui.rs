@@ -133,9 +133,16 @@ where
         });
     }
 
+    // Derive layer prefix from config
+    let layer_prefix = ctx
+        .config
+        .as_ref()
+        .map(|c| format!("{}.layers", c.model_prefix))
+        .unwrap_or_else(|| "model.layers".to_string());
+
     // Master layers = all layers not assigned to workers
     let master_layers: Vec<String> = (0..num_layers)
-        .map(|i| format!("model.layers.{i}"))
+        .map(|i| format!("{layer_prefix}.{i}"))
         .filter(|l| !worker_layer_set.contains(l))
         .collect();
 
@@ -164,7 +171,7 @@ where
         "CPU".to_string()
     };
 
-    let layer_details = read_layer_tensor_details(&ctx.data_path, num_layers);
+    let layer_details = read_layer_tensor_details(&ctx.data_path, num_layers, &layer_prefix);
 
     let response = TopologyResponse {
         model: TG::MODEL_NAME.to_string(),
@@ -204,6 +211,7 @@ where
 fn read_layer_tensor_details(
     data_path: &std::path::Path,
     num_layers: usize,
+    layer_prefix: &str,
 ) -> HashMap<String, LayerDetail> {
     // Collect safetensors shard files
     let index_path = data_path.join("model.safetensors.index.json");
@@ -264,8 +272,8 @@ fn read_layer_tensor_details(
     let result: HashMap<String, LayerDetail> = (0..num_layers)
         .into_par_iter()
         .filter_map(|layer_idx| {
-            let layer_prefix = format!("model.layers.{layer_idx}");
-            let dot_prefix = format!("{}.", layer_prefix);
+            let layer_name = format!("{layer_prefix}.{layer_idx}");
+            let dot_prefix = format!("{layer_name}.");
 
             let mut tensors: Vec<TensorDetail> = Vec::new();
             let mut total_bytes: u64 = 0;
@@ -289,7 +297,7 @@ fn read_layer_tensor_details(
             if tensors.is_empty() {
                 None
             } else {
-                Some((layer_prefix, LayerDetail { total_bytes, tensors }))
+                Some((layer_name, LayerDetail { total_bytes, tensors }))
             }
         })
         .collect();

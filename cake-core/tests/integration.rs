@@ -53,7 +53,7 @@ where
 
     let mut response = String::new();
     master
-        .generate_text(|data| {
+        .generate_text(None, |data| {
             if !data.is_empty() {
                 response.push_str(data);
             }
@@ -224,7 +224,7 @@ macro_rules! model_test_suite {
 
                 let mut received_eos = false;
                 master
-                    .generate_text(|data| {
+                    .generate_text(None, |data| {
                         if data.is_empty() {
                             received_eos = true;
                         }
@@ -445,7 +445,7 @@ macro_rules! model_test_suite {
 
                 let mut response = String::new();
                 master
-                    .generate_text(|data| {
+                    .generate_text(None, |data| {
                         if !data.is_empty() {
                             response.push_str(data);
                         }

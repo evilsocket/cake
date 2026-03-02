@@ -15,6 +15,13 @@ pub struct Cache {
     kvs: Vec<Option<(Tensor, Tensor)>>,
     max_seq_len: usize,
 
+    /// Recurrent state matrices for linear attention layers (Gated DeltaNet).
+    /// Shape per entry: (batch=1, num_heads, key_dim, value_dim).
+    recurrent_states: Vec<Option<Tensor>>,
+    /// Conv1d history for linear attention layers.
+    /// Shape per entry: (batch=1, channels, kernel_size-1).
+    conv_states: Vec<Option<Tensor>>,
+
     device: Device,
 }
 
@@ -22,16 +29,20 @@ impl Cache {
     /// Creates a new cache instance with the provided configuration.
     /// Set `use_kv_cache` to false to disable kv-caching.
     pub fn new(use_kv_cache: bool, dtype: DType, config: &Config, device: &Device) -> Result<Self> {
-        // precompute freqs_cis
-        let n_elem = config.hidden_size / config.num_attention_heads;
+        // Compute rotary dimension, respecting partial_rotary_factor
+        let head_dim = config
+            .head_dim
+            .unwrap_or(config.hidden_size / config.num_attention_heads);
+        let rotary_dim = (head_dim as f32 * config.partial_rotary_factor) as usize;
         let max_seq_len = config.max_seq_len;
 
-        log::debug!("cache::n_elem = {n_elem}");
+        log::debug!("cache::head_dim = {head_dim}");
+        log::debug!("cache::rotary_dim = {rotary_dim}");
         log::debug!("cache::max_seq_len = {max_seq_len}");
 
-        let mut theta: Vec<_> = (0..n_elem)
+        let mut theta: Vec<_> = (0..rotary_dim)
             .step_by(2)
-            .map(|i| 1f32 / config.rope_theta.powf(i as f32 / n_elem as f32))
+            .map(|i| 1f32 / config.rope_theta.powf(i as f32 / rotary_dim as f32))
             .collect();
 
         // Apply LLaMA3 RoPE frequency scaling if configured
@@ -88,11 +99,15 @@ impl Cache {
         log::debug!("cache::cos = {}", &cos);
         log::debug!("cache::sin = {}", &sin);
 
+        let num_layers = config.num_hidden_layers;
+
         Ok(Self {
             masks: HashMap::new(),
             use_kv_cache,
-            kvs: vec![None; config.num_hidden_layers],
+            kvs: vec![None; num_layers],
             max_seq_len,
+            recurrent_states: vec![None; num_layers],
+            conv_states: vec![None; num_layers],
             device: device.clone(),
             cos,
             sin,
@@ -164,6 +179,26 @@ impl Cache {
         Ok((k, v))
     }
 
+    /// Get the recurrent state for a linear attention layer.
+    pub fn get_recurrent_state(&self, block_idx: usize) -> Option<&Tensor> {
+        self.recurrent_states[block_idx].as_ref()
+    }
+
+    /// Set the recurrent state for a linear attention layer.
+    pub fn set_recurrent_state(&mut self, block_idx: usize, state: Tensor) {
+        self.recurrent_states[block_idx] = Some(state);
+    }
+
+    /// Get the conv state for a linear attention layer.
+    pub fn get_conv_state(&self, block_idx: usize) -> Option<&Tensor> {
+        self.conv_states[block_idx].as_ref()
+    }
+
+    /// Set the conv state for a linear attention layer.
+    pub fn set_conv_state(&mut self, block_idx: usize, state: Tensor) {
+        self.conv_states[block_idx] = Some(state);
+    }
+
     /// Return a copy of this cache with the same state but new kv table.
     pub fn as_new(&self) -> Self {
         let mut copy = self.clone();
@@ -175,5 +210,7 @@ impl Cache {
     pub fn clear(&mut self) {
         self.masks.clear();
         self.kvs = vec![None; self.kvs.len()];
+        self.recurrent_states = vec![None; self.recurrent_states.len()];
+        self.conv_states = vec![None; self.conv_states.len()];
     }
 }

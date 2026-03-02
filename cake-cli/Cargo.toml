@@ -23,9 +23,10 @@ serde_json = "1"
 tokio = { version = "1.38.0", features = ["full"] }
 
 [features]
-default = ["master", "llama", "qwen2"]
+default = ["master", "llama", "qwen2", "qwen3_5"]
 llama = ["cake-core/llama"]
 qwen2 = ["cake-core/qwen2"]
+qwen3_5 = ["cake-core/qwen3_5"]
 cuda = ["cake-core/cuda"]
 metal = ["cake-core/metal"]
 master = ["cake-core/master"]

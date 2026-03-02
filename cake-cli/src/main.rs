@@ -204,6 +204,13 @@ async fn run_master(ctx: Context) -> Result<()> {
                 .run()
                 .await
         }
+        #[cfg(feature = "qwen3_5")]
+        TextModelArch::Qwen3_5 => {
+            Master::<cake_core::models::qwen3_5::Qwen3_5, cake_core::models::sd::SD>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
         #[cfg(feature = "llama")]
         TextModelArch::Llama | TextModelArch::Auto => {
             Master::<cake_core::models::llama3::LLama, cake_core::models::sd::SD>::new(ctx)
@@ -230,6 +237,13 @@ async fn run_worker(ctx: &mut Context) -> Result<()> {
             #[cfg(feature = "qwen2")]
             TextModelArch::Qwen2 => {
                 Worker::<cake_core::models::qwen2::Qwen2>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(feature = "qwen3_5")]
+            TextModelArch::Qwen3_5 => {
+                Worker::<cake_core::models::qwen3_5::Qwen3_5>::new(ctx)
                     .await?
                     .run()
                     .await

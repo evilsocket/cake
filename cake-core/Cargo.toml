@@ -43,7 +43,7 @@ tracing-subscriber = "0.3.18"
 base64 = "0.22.1"
 
 [features]
-default = ["master", "llama", "qwen2"]
+default = ["master", "llama", "qwen2", "qwen3_5"]
 
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
@@ -52,3 +52,4 @@ master = ["dep:actix-web", "dep:async-stream", "dep:uuid"]
 
 llama = []
 qwen2 = []
+qwen3_5 = []

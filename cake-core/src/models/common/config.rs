@@ -65,6 +65,23 @@ pub struct RopeScaling {
     pub rope_type: Option<String>,
 }
 
+/// Configuration for linear (recurrent) attention layers (e.g. Gated DeltaNet in Qwen3.5).
+#[derive(Debug, Clone)]
+pub struct LinearAttnConfig {
+    /// Per-layer type: "linear_attention" or "full_attention".
+    pub layer_types: Vec<String>,
+    /// Conv1d kernel size for short convolution preprocessing.
+    pub conv_kernel_dim: usize,
+    /// Number of key heads in linear attention.
+    pub num_key_heads: usize,
+    /// Per-head key dimension in linear attention.
+    pub key_head_dim: usize,
+    /// Number of value heads in linear attention.
+    pub num_value_heads: usize,
+    /// Per-head value dimension in linear attention.
+    pub value_head_dim: usize,
+}
+
 /// Generalized LLM configuration shared by all decoder-only text models.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -83,6 +100,34 @@ pub struct Config {
     pub max_seq_len: usize,
     /// Whether Q/K/V projections use bias (true for Qwen2, false for LLaMA).
     pub use_qkv_bias: bool,
+    /// Weight tensor prefix for the transformer stack (e.g. "model" or "model.language_model").
+    pub model_prefix: String,
+    /// Explicit head dimension when it differs from hidden_size / num_attention_heads.
+    pub head_dim: Option<usize>,
+    /// Fraction of head dims to apply rotary embeddings to (1.0 = all, 0.25 = first quarter).
+    pub partial_rotary_factor: f32,
+    /// Linear attention configuration (None for pure softmax-attention models).
+    pub linear_attn: Option<LinearAttnConfig>,
+    /// Whether RMS norm uses residual weight: `(1 + weight) * norm(x)` instead of `weight * norm(x)`.
+    /// True for Qwen3.5 whose norm weights are initialized to zero with +1 applied at runtime.
+    pub residual_rms_norm: bool,
+}
+
+/// Load an RMS norm, optionally applying the residual weight pattern `(1 + weight)`.
+/// When `residual` is true (Qwen3.5), the stored weight is treated as a residual and 1.0 is added.
+pub fn load_rms_norm(
+    size: usize,
+    eps: f64,
+    residual: bool,
+    vb: candle_nn::VarBuilder,
+) -> candle_core::Result<candle_nn::RmsNorm> {
+    let weight = vb.get(size, "weight")?;
+    let weight = if residual {
+        (weight + 1.0)?
+    } else {
+        weight
+    };
+    Ok(candle_nn::RmsNorm::new(weight, eps))
 }
 
 /// Auto-detect text model architecture from config.json's "architectures" field.

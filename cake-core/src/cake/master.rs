@@ -52,7 +52,7 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
                 llm_model.add_message(Message::user(self.ctx.args.prompt.clone()))?;
 
                 // just run one generation to stdout
-                self.generate_text(|data| {
+                self.generate_text(None, |data| {
                     if data.is_empty() {
                         println!();
                     } else {
@@ -99,7 +99,8 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
     }
 
     /// Start the generation loop and call the stream function for every token.
-    pub async fn generate_text<S>(&mut self, mut stream: S) -> Result<()>
+    /// `max_tokens` overrides the default sample length if provided.
+    pub async fn generate_text<S>(&mut self, max_tokens: Option<usize>, mut stream: S) -> Result<()>
     where
         S: FnMut(&str),
     {
@@ -108,14 +109,15 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
             human_bytes::human_bytes(memory_stats::memory_stats().unwrap().physical_mem as f64)
         );
 
-        log::debug!("  ctx.args.sample_len = {}", self.ctx.args.sample_len);
+        let sample_len = max_tokens.unwrap_or(self.ctx.args.sample_len);
+        log::debug!("  sample_len = {}", sample_len);
 
         // stream(&self.ctx.args.prompt);
 
         let mut start_gen = std::time::Instant::now();
         let llm_model = self.llm_model.as_mut().expect("LLM model not found");
 
-        for index in 0..self.ctx.args.sample_len {
+        for index in 0..sample_len {
             if index == 1 {
                 // record start time again since the first token is the warmup
                 start_gen = std::time::Instant::now()
@@ -125,7 +127,7 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
             let token = llm_model.next_token(index).await?;
             let token_elapsed = token_start.elapsed();
 
-            log::info!(
+            log::debug!(
                 "token {} generated in {:.1}ms ({:.1} tok/s)",
                 index,
                 token_elapsed.as_secs_f64() * 1000.0,

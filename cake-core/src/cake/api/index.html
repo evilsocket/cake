@@ -709,6 +709,11 @@ nav .mem-info {
         }
     }
 
+    function layerNum(name) {
+        const m = name.match(/\.(\d+)$/);
+        return m ? parseInt(m[1], 10) : 0;
+    }
+
     function renderGraph(data) {
         const tree = document.getElementById('cluster-tree');
 
@@ -757,7 +762,7 @@ nav .mem-info {
         // Sort nodes by minimum layer index so the model reads left-to-right
         function minLayerIdx(layers) {
             if (!layers.length) return Infinity;
-            return Math.min(...layers.map(l => parseInt(l.replace('model.layers.', '')) || 0));
+            return Math.min(...layers.map(l => layerNum(l)));
         }
         allNodes.sort((a, b) => minLayerIdx(a.layers) - minLayerIdx(b.layers));
 
@@ -832,7 +837,7 @@ nav .mem-info {
 
         // Layers inside model content
         const sortedLayers = [...node.layers].sort((a, b) => {
-            return parseInt(a.replace('model.layers.', '')) - parseInt(b.replace('model.layers.', ''));
+            return layerNum(a) - layerNum(b);
         });
 
         sortedLayers.forEach(layerName => {
@@ -855,7 +860,7 @@ nav .mem-info {
     function buildLayerItem(layerName, detail, node) {
         const item = el('div', 'layer-item');
         item.dataset.layer = layerName;
-        const layerNum = layerName.replace('model.layers.', '');
+        const layerIdx = layerNum(layerName);
         const totalBytes = detail ? detail.total_bytes : 0;
         const isExpanded = expandedLayers.has(layerName);
 
@@ -864,7 +869,7 @@ nav .mem-info {
         const chevron = el('span', 'chevron' + (isExpanded ? ' open' : ''));
         chevron.innerHTML = '&#9654;';
         const label = el('span', 'layer-label');
-        label.textContent = 'Layer ' + layerNum;
+        label.textContent = 'Layer ' + layerIdx;
         const size = el('span', 'layer-size');
         size.textContent = humanBytes(totalBytes);
 

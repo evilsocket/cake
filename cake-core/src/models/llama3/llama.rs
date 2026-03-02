@@ -26,7 +26,7 @@ impl Generator for LLama {
 
     /// Load this model from the context.
     async fn load(ctx: &mut Context) -> Result<Option<Box<Self>>> {
-        let base = TextModelBase::load(ctx, DEFAULT_EOS_TOKEN).await?;
+        let base = TextModelBase::load::<Transformer>(ctx, DEFAULT_EOS_TOKEN).await?;
         let history = History::new();
         Ok(Some(Box::new(Self { base, history })))
     }
