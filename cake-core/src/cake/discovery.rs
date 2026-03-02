@@ -47,10 +47,12 @@ impl DiscoveredWorker {
 
     /// Maximum number of layers this worker can fit, based on per-GPU VRAM.
     ///
-    /// For dedicated GPUs (CUDA), reserves ~15% for driver/runtime overhead.
-    /// For unified-memory devices (Apple Silicon), reserves at least 6 GiB
-    /// for macOS + inference working memory, since model weights compete with
-    /// the OS for the same physical memory.
+    /// For dedicated GPUs (CUDA), reserves ~5% for driver/runtime overhead
+    /// (typically 200–600 MiB for CUDA context + cuBLAS workspace).
+    /// For unified-memory devices (Apple Silicon), reserves 28% of total
+    /// (minimum 6 GiB) for macOS + inference working memory, since model
+    /// weights compete with the OS for the same physical RAM and insufficient
+    /// headroom causes catastrophic memory-compressor thrashing.
     pub fn max_layers_for_size(&self, layer_size_bytes: u64) -> usize {
         if layer_size_bytes == 0 || self.gpus.is_empty() {
             return usize::MAX;
@@ -60,12 +62,17 @@ impl DiscoveredWorker {
             .map(|g| {
                 let is_unified = g.name.to_lowercase().contains("apple");
                 let usable = if is_unified {
-                    // Unified memory: reserve at least 6 GiB for OS + working memory
-                    let os_reserve = 6u64 * 1024 * 1024 * 1024;
+                    // Unified memory: reserve 28% of total (min 6 GiB) for OS +
+                    // Metal working memory. At 30 layers on a 36 GiB M3 Pro,
+                    // only 8 GiB remained and macOS memory compressor caused
+                    // 100+ sec/forward-pass thrashing; 28% keeps ~10 GiB free.
+                    let min_reserve = 6u64 * 1024 * 1024 * 1024;
+                    let pct_reserve = (g.vram_bytes as f64 * 0.28) as u64;
+                    let os_reserve = pct_reserve.max(min_reserve);
                     g.vram_bytes.saturating_sub(os_reserve)
                 } else {
-                    // Dedicated VRAM: 15% overhead for CUDA/driver runtime
-                    (g.vram_bytes as f64 * 0.85) as u64
+                    // Dedicated VRAM: 5% overhead for CUDA/driver runtime
+                    (g.vram_bytes as f64 * 0.95) as u64
                 };
                 (usable / layer_size_bytes) as usize
             })
