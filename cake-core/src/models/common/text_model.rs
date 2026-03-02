@@ -1,5 +1,5 @@
 use anyhow::Result;
-use candle_core::{DType, IndexOp, Tensor};
+use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{linear_no_bias as linear, Embedding, Linear, Module, RmsNorm};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
 use tokenizers::Tokenizer;
@@ -341,6 +341,16 @@ impl TextModelBase {
         self.index_pos = 0;
         self.generated = 0;
         self.prompt_len = 0;
+
+        // Clear any stale CUDA error state left by tensor cleanup (CudaSlice drops).
+        // cudarc's error_state is an atomic that gets poisoned by internal operations
+        // (e.g. SyncOnDrop event recording, async memory frees) and causes the NEXT
+        // inference request to fail via check_err(). Clearing it here prevents the
+        // alternating success/failure pattern.
+        #[cfg(feature = "cuda")]
+        if let Device::Cuda(cuda_dev) = &self.ctx.device {
+            let _ = cuda_dev.cuda_stream().context().bind_to_thread();
+        }
     }
 
     /// Notify all remote blocks of session end (clears their KV caches).
