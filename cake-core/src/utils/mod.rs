@@ -1,5 +1,6 @@
 //! Utility functions and abstractions.
 
+pub mod fp8;
 pub mod hf;
 pub mod models;
 pub mod split;
@@ -87,6 +88,7 @@ pub fn load_var_builder_from_index<'a>(
     tensor_index: PathBuf,
     dtype: DType,
     device: Device,
+    fp8: bool,
 ) -> Result<VarBuilder<'a>> {
     let filenames: Vec<std::path::PathBuf> = if tensor_index.exists() {
         load_safetensors_paths_from_index(tensor_index)
@@ -96,9 +98,16 @@ pub fn load_var_builder_from_index<'a>(
             .map_err(|e| anyhow!("can't load tensors index: {:?}", e))?
     };
 
-    unsafe {
-        VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)
-            .map_err(|e| anyhow!("can't create varbuilder from tensors: {:?}", e))
+    if fp8 {
+        unsafe {
+            fp8::load_fp8_var_builder(&filenames, dtype, &device)
+                .map_err(|e| anyhow!("can't create fp8 varbuilder from tensors: {:?}", e))
+        }
+    } else {
+        unsafe {
+            VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)
+                .map_err(|e| anyhow!("can't create varbuilder from tensors: {:?}", e))
+        }
     }
 }
 
@@ -110,15 +119,16 @@ pub fn load_var_builder_for_local_layers<'a>(
     dtype: DType,
     device: Device,
     worker_layers: &std::collections::HashSet<String>,
+    fp8: bool,
 ) -> Result<VarBuilder<'a>> {
     if !tensor_index.exists() {
         // Single safetensors file — can't filter, load all
-        return load_var_builder_from_index(tensor_index, dtype, device);
+        return load_var_builder_from_index(tensor_index, dtype, device, fp8);
     }
 
     if worker_layers.is_empty() {
         // No workers — load everything
-        return load_var_builder_from_index(tensor_index, dtype, device);
+        return load_var_builder_from_index(tensor_index, dtype, device, fp8);
     }
 
     let parent_dir = tensor_index.parent().unwrap();
@@ -160,9 +170,16 @@ pub fn load_var_builder_for_local_layers<'a>(
             .len()
     );
 
-    unsafe {
-        VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)
-            .map_err(|e| anyhow!("can't create varbuilder from tensors: {:?}", e))
+    if fp8 {
+        unsafe {
+            fp8::load_fp8_var_builder(&filenames, dtype, &device)
+                .map_err(|e| anyhow!("can't create fp8 varbuilder from tensors: {:?}", e))
+        }
+    } else {
+        unsafe {
+            VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)
+                .map_err(|e| anyhow!("can't create varbuilder from tensors: {:?}", e))
+        }
     }
 }
 

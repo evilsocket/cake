@@ -56,6 +56,8 @@ pub struct Context {
     pub var_builder: Option<VarBuilder<'static>>,
     /// Resolved text model architecture.
     pub text_model_arch: TextModelArch,
+    /// True if the model uses FP8 block-wise quantization.
+    pub fp8: bool,
     /// Pre-bound TCP listener from setup phase (taken once by Worker::new).
     pub listener_override: Arc<Mutex<Option<TcpListener>>>,
 }
@@ -115,6 +117,7 @@ impl Context {
         let mut cache: Option<Cache> = None;
         let mut var_builder: Option<VarBuilder> = None;
         let mut text_model_arch = args.text_model_arch;
+        let mut fp8 = false;
 
         if args.model_type == ModelType::TextModel {
             let config_filename = data_path.join("config.json");
@@ -154,6 +157,10 @@ impl Context {
             };
 
             let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
+            fp8 = utils::fp8::is_fp8_quantized(&config_filename);
+            if fp8 {
+                log::info!("model uses FP8 quantization — weights will be dequantized at load time");
+            }
             let is_master = matches!(args.mode, Mode::Master);
             let worker_layers = if is_master { topology.all_worker_layers() } else { std::collections::HashSet::new() };
             var_builder = Some(if worker_layers.is_empty() {
@@ -161,6 +168,7 @@ impl Context {
                     model_tensors_index,
                     dtype,
                     device.clone(),
+                    fp8,
                 )?
             } else {
                 utils::load_var_builder_for_local_layers(
@@ -168,6 +176,7 @@ impl Context {
                     dtype,
                     device.clone(),
                     &worker_layers,
+                    fp8,
                 )?
             });
             cache = Some(Cache::new(true, dtype, &config_internal, &device)?);
@@ -184,6 +193,7 @@ impl Context {
             cache,
             var_builder,
             text_model_arch,
+            fp8,
             listener_override: Arc::new(Mutex::new(None)),
         })
     }

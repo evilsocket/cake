@@ -155,7 +155,7 @@ impl<G: Generator + 'static> Worker<G> {
                 }
 
                 let vb =
-                    crate::utils::load_var_builder_from_index(model_index.clone(), ctx.dtype, dev.clone())?;
+                    crate::utils::load_var_builder_from_index(model_index.clone(), ctx.dtype, dev.clone(), ctx.fp8)?;
                 log::info!("  GPU {} ready", ordinal);
                 gpu_devices.push(dev);
                 gpu_var_builders.push(vb);
