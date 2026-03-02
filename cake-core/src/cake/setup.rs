@@ -375,6 +375,22 @@ pub async fn master_setup(
         raw_layer_size
     };
 
+    // FP8 models store weights at 1 byte per element on disk, but after dequantization
+    // they expand to the target dtype (F16 = 2 bytes, BF16 = 2 bytes). Scale the layer
+    // size estimate so VRAM-based capping uses the actual in-memory size.
+    let is_fp8 = crate::utils::fp8::is_fp8_quantized(&config_path);
+    let layer_size_bytes = if is_fp8 && layer_size_bytes > 0 {
+        let expanded = layer_size_bytes * dtype_bytes; // FP8 is 1 byte, target is dtype_bytes
+        log::info!(
+            "FP8 model: layer size after dequantization: {} ({}x expansion)",
+            human_bytes::human_bytes(expanded as f64),
+            dtype_bytes,
+        );
+        expanded
+    } else {
+        layer_size_bytes
+    };
+
     log::info!(
         "master overhead: embeddings={} lm_head={} total={}",
         human_bytes::human_bytes(embed_size as f64),
