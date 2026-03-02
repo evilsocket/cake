@@ -414,6 +414,30 @@ impl<G: Generator + 'static> Worker<G> {
                             break;
                         }
                     };
+
+                    // Synchronize after cross-device transfer to flush any async CUDA errors
+                    #[cfg(feature = "cuda")]
+                    if let Device::Cuda(cuda_dev) = block_device {
+                        log::debug!("[{client}] synchronizing cuda:{:?} after to_device for {}", cuda_dev.id(), &layer_name);
+                        if let Err(e) = cuda_dev.cuda_stream().synchronize() {
+                            let msg = format!(
+                                "CUDA sync after to_device failed for layer {} (cuda:{:?}): {:?}",
+                                &layer_name, cuda_dev.id(), e
+                            );
+                            log::error!("[{}] {}", &client, &msg);
+                            let _ = Self::write_message_timed(
+                                &mut socket,
+                                Message::WorkerError { message: msg },
+                            )
+                            .await;
+                            batch_error = true;
+                            break;
+                        }
+                        log::debug!("[{client}] sync ok, re-binding context for forward pass on {}", &layer_name);
+                        if let Err(e) = cuda_dev.cuda_stream().context().bind_to_thread() {
+                            log::error!("[{client}] re-bind failed for {}: {:?}", &layer_name, e);
+                        }
+                    }
                 }
 
                 // get layer block by name
