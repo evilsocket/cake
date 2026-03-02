@@ -358,7 +358,7 @@ impl<G: Generator + 'static> Worker<G> {
             #[cfg(feature = "cuda")]
             if let Device::Cuda(cuda_dev) = first_device {
                 let thread_id = std::thread::current().id();
-                log::debug!("[{client}] binding CUDA context for first_device (cuda:{}) on thread {thread_id:?}", cuda_dev.id());
+                log::debug!("[{client}] binding CUDA context for first_device (cuda:{:?}) on thread {thread_id:?}", cuda_dev.id());
                 match cuda_dev.cuda_stream().context().bind_to_thread() {
                     Ok(()) => log::debug!("[{client}] CUDA context bound successfully"),
                     Err(e) => log::error!("[{client}] failed to bind CUDA context: {:?}", e),
@@ -391,7 +391,7 @@ impl<G: Generator + 'static> Worker<G> {
                     // Bind CUDA context before cross-device transfer
                     #[cfg(feature = "cuda")]
                     if let Device::Cuda(cuda_dev) = block_device {
-                        log::debug!("[{client}] binding CUDA context for layer {} (cuda:{})", &layer_name, cuda_dev.id());
+                        log::debug!("[{client}] binding CUDA context for layer {} (cuda:{:?})", &layer_name, cuda_dev.id());
                         if let Err(e) = cuda_dev.cuda_stream().context().bind_to_thread() {
                             log::error!("[{client}] failed to bind CUDA context for {}: {:?}", &layer_name, e);
                         }
