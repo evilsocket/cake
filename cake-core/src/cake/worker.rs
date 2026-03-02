@@ -142,6 +142,18 @@ impl<G: Generator + 'static> Worker<G> {
             let model_index = ctx.data_path.join("model.safetensors.index.json");
             for ordinal in 0..num_gpus {
                 let dev = Device::new_cuda(ordinal)?;
+
+                // Disable cudarc event tracking for multi-GPU: cudarc's CudaStream::wait()
+                // rejects events from a different CudaContext (returns CUDA_ERROR_INVALID_CONTEXT).
+                // When cross-device transfers call device_ptr(), the source events belong to
+                // a different context, poisoning the destination context's error state.
+                // Disabling event tracking prevents events from being created on CudaSlices,
+                // which is safe since we use a single stream per device.
+                #[cfg(feature = "cuda")]
+                if let Device::Cuda(cuda_dev) = &dev {
+                    unsafe { cuda_dev.disable_event_tracking(); }
+                }
+
                 let vb =
                     crate::utils::load_var_builder_from_index(model_index.clone(), ctx.dtype, dev.clone())?;
                 log::info!("  GPU {} ready", ordinal);
@@ -357,11 +369,8 @@ impl<G: Generator + 'static> Worker<G> {
             // Ensure the CUDA context for the target device is active on this thread.
             #[cfg(feature = "cuda")]
             if let Device::Cuda(cuda_dev) = first_device {
-                let thread_id = std::thread::current().id();
-                log::debug!("[{client}] binding CUDA context for first_device (cuda:{:?}) on thread {thread_id:?}", cuda_dev.id());
-                match cuda_dev.cuda_stream().context().bind_to_thread() {
-                    Ok(()) => log::debug!("[{client}] CUDA context bound successfully"),
-                    Err(e) => log::error!("[{client}] failed to bind CUDA context: {:?}", e),
+                if let Err(e) = cuda_dev.cuda_stream().context().bind_to_thread() {
+                    log::error!("[{client}] failed to bind CUDA context: {:?}", e);
                 }
             }
 
@@ -391,7 +400,6 @@ impl<G: Generator + 'static> Worker<G> {
                     // Bind CUDA context before cross-device transfer
                     #[cfg(feature = "cuda")]
                     if let Device::Cuda(cuda_dev) = block_device {
-                        log::debug!("[{client}] binding CUDA context for layer {} (cuda:{:?})", &layer_name, cuda_dev.id());
                         if let Err(e) = cuda_dev.cuda_stream().context().bind_to_thread() {
                             log::error!("[{client}] failed to bind CUDA context for {}: {:?}", &layer_name, e);
                         }
@@ -414,30 +422,6 @@ impl<G: Generator + 'static> Worker<G> {
                             break;
                         }
                     };
-
-                    // Synchronize after cross-device transfer to flush any async CUDA errors
-                    #[cfg(feature = "cuda")]
-                    if let Device::Cuda(cuda_dev) = block_device {
-                        log::debug!("[{client}] synchronizing cuda:{:?} after to_device for {}", cuda_dev.id(), &layer_name);
-                        if let Err(e) = cuda_dev.cuda_stream().synchronize() {
-                            let msg = format!(
-                                "CUDA sync after to_device failed for layer {} (cuda:{:?}): {:?}",
-                                &layer_name, cuda_dev.id(), e
-                            );
-                            log::error!("[{}] {}", &client, &msg);
-                            let _ = Self::write_message_timed(
-                                &mut socket,
-                                Message::WorkerError { message: msg },
-                            )
-                            .await;
-                            batch_error = true;
-                            break;
-                        }
-                        log::debug!("[{client}] sync ok, re-binding context for forward pass on {}", &layer_name);
-                        if let Err(e) = cuda_dev.cuda_stream().context().bind_to_thread() {
-                            log::error!("[{client}] re-bind failed for {}: {:?}", &layer_name, e);
-                        }
-                    }
                 }
 
                 // get layer block by name
