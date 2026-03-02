@@ -25,6 +25,28 @@ use super::topology::{Node, Topology};
 /// Maximum chunk size for model data transfer (128 MB).
 const MODEL_DATA_CHUNK_SIZE: usize = 128 * 1024 * 1024;
 
+/// Query actual free GPU memory via nvidia-smi (CUDA only).
+/// Returns 0 if unavailable.
+fn detect_free_gpu_memory() -> u64 {
+    #[cfg(feature = "cuda")]
+    {
+        if let Ok(output) = std::process::Command::new("nvidia-smi")
+            .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                return stdout
+                    .lines()
+                    .filter_map(|line| line.trim().parse::<u64>().ok())
+                    .map(|mb| mb * 1024 * 1024)
+                    .sum();
+            }
+        }
+    }
+    0
+}
+
 /// Estimate average layer size in bytes from safetensors files.
 fn estimate_layer_size(model_path: &Path, num_layers: usize) -> u64 {
     if num_layers == 0 {
@@ -344,14 +366,26 @@ pub async fn master_setup(
         human_bytes::human_bytes(master_overhead as f64),
     );
 
-    // Cap master layers by its own GPU VRAM minus the non-layer overhead
+    // Cap master layers by its own GPU VRAM minus the non-layer overhead.
+    // Use actual free VRAM (from nvidia-smi) when available, as total VRAM
+    // overestimates on systems with display servers or other GPU consumers.
     let master_max_layers = if layer_size_bytes > 0 && !master_gpus.is_empty() {
         let master_vram: u64 = master_gpus.iter().map(|g| g.vram_bytes).sum();
-        let available = master_vram.saturating_sub(master_overhead);
+        let master_free = detect_free_gpu_memory();
+        let effective_vram = if master_free > 0 && master_free < master_vram {
+            log::info!(
+                "master GPU: {} total, {} free",
+                human_bytes::human_bytes(master_vram as f64),
+                human_bytes::human_bytes(master_free as f64),
+            );
+            master_free
+        } else {
+            master_vram
+        };
+        let available = effective_vram.saturating_sub(master_overhead);
         let max = (available / layer_size_bytes) as usize;
         log::info!(
-            "master GPU: {} total — {} available for layers — can fit ~{} layers locally",
-            human_bytes::human_bytes(master_vram as f64),
+            "master GPU: {} available for layers — can fit ~{} layers locally",
             human_bytes::human_bytes(available as f64),
             max
         );
