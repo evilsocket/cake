@@ -156,7 +156,10 @@ async fn main() -> Result<()> {
 
             // Zero-config: wait for master assignment + model data
             let listener_override = if args.cluster_key.is_some() && args.topology.is_none() {
-                let worker_name = args.name.as_deref().unwrap_or("worker");
+                if args.name.is_none() {
+                    args.name = Some("worker".to_string());
+                }
+                let worker_name = args.name.as_deref().unwrap();
                 let cache_dir = cache_base_dir();
                 let (layers, model_path, listener) = cake::setup::worker_setup(
                     worker_name,
