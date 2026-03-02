@@ -46,7 +46,11 @@ impl DiscoveredWorker {
     }
 
     /// Maximum number of layers this worker can fit, based on per-GPU VRAM.
-    /// Reserves ~15% of each GPU's VRAM for CUDA runtime overhead.
+    ///
+    /// For dedicated GPUs (CUDA), reserves ~15% for driver/runtime overhead.
+    /// For unified-memory devices (Apple Silicon), reserves at least 6 GiB
+    /// for macOS + inference working memory, since model weights compete with
+    /// the OS for the same physical memory.
     pub fn max_layers_for_size(&self, layer_size_bytes: u64) -> usize {
         if layer_size_bytes == 0 || self.gpus.is_empty() {
             return usize::MAX;
@@ -54,7 +58,15 @@ impl DiscoveredWorker {
         self.gpus
             .iter()
             .map(|g| {
-                let usable = (g.vram_bytes as f64 * 0.85) as u64;
+                let is_unified = g.name.to_lowercase().contains("apple");
+                let usable = if is_unified {
+                    // Unified memory: reserve at least 6 GiB for OS + working memory
+                    let os_reserve = 6u64 * 1024 * 1024 * 1024;
+                    g.vram_bytes.saturating_sub(os_reserve)
+                } else {
+                    // Dedicated VRAM: 15% overhead for CUDA/driver runtime
+                    (g.vram_bytes as f64 * 0.85) as u64
+                };
                 (usable / layer_size_bytes) as usize
             })
             .sum()
