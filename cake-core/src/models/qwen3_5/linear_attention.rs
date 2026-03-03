@@ -21,7 +21,8 @@ struct RmsNormGated {
 
 impl RmsNormGated {
     fn load(size: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
-        let weight = vb.get(size, "weight")?;
+        // Store weight as F32 at load time to avoid per-call dtype conversion.
+        let weight = vb.get(size, "weight")?.to_dtype(DType::F32)?;
         Ok(Self { weight, eps })
     }
 
@@ -35,9 +36,8 @@ impl RmsNormGated {
         let variance = x.sqr()?.mean_keepdim(D::Minus1)?;
         let x_normed = x.broadcast_div(&(variance + self.eps)?.sqrt()?)?;
 
-        // weight * norm(x)
-        let weight_f32 = self.weight.to_dtype(DType::F32)?;
-        let x_normed = x_normed.broadcast_mul(&weight_f32)?;
+        // weight * norm(x) — weight is already F32
+        let x_normed = x_normed.broadcast_mul(&self.weight)?;
 
         // Gating: silu(z)
         let gate = candle_nn::ops::silu(&z)?;
@@ -45,6 +45,15 @@ impl RmsNormGated {
 
         result.to_dtype(in_dtype)
     }
+}
+
+/// Numerically stable softplus: ln(1 + exp(x)).
+/// Uses max(x, 0) + ln(1 + exp(-|x|)) to avoid exp overflow for large x.
+fn stable_softplus(x: &Tensor) -> Result<Tensor> {
+    let abs_x = x.abs()?;
+    let pos_part = x.maximum(0f64)?;
+    let log_part = (abs_x.neg()?.exp()? + 1.0)?.log()?;
+    &pos_part + &log_part
 }
 
 /// Gated DeltaNet linear attention block.
@@ -55,10 +64,14 @@ pub struct GatedDeltaNet {
     in_proj_b: Linear,
     in_proj_z: Linear,
     conv1d_weight: Tensor,
-    a_log: Tensor,
-    dt_bias: Tensor,
     norm: RmsNormGated,
     out_proj: Linear,
+
+    // Precomputed constants (F32, avoids per-call recomputation)
+    neg_a_exp_f32: Tensor,
+    dt_bias_f32: Tensor,
+    conv1d_weight_3d: Tensor,
+    q_scale: f64,
 
     num_heads: usize,
     num_key_heads: usize,
@@ -87,12 +100,18 @@ impl GatedDeltaNet {
         let in_proj_z = candle_nn::linear_no_bias(cfg.hidden_size, value_dim, vb.pp("in_proj_z"))?;
         let out_proj = candle_nn::linear_no_bias(value_dim, cfg.hidden_size, vb.pp("out_proj"))?;
 
-        // Conv1d weight: stored as (conv_dim, 1, kernel_size), we want (conv_dim, kernel_size)
-        let conv1d_weight = vb.get((conv_dim, 1, la.conv_kernel_dim), "conv1d.weight")?
-            .squeeze(1)?;
+        // Conv1d weight: stored as (conv_dim, 1, kernel_size)
+        let conv1d_weight_3d = vb.get((conv_dim, 1, la.conv_kernel_dim), "conv1d.weight")?;
+        // Squeezed view for causal_conv1d_step: (conv_dim, kernel_size)
+        let conv1d_weight = conv1d_weight_3d.squeeze(1)?;
 
         let a_log = vb.get(num_heads, "A_log")?;
         let dt_bias = vb.get(num_heads, "dt_bias")?;
+
+        // Precompute constants in F32 to avoid per-call recomputation
+        let neg_a_exp_f32 = a_log.to_dtype(DType::F32)?.exp()?.neg()?;
+        let dt_bias_f32 = dt_bias.to_dtype(DType::F32)?;
+        let q_scale = 1.0 / (key_head_dim as f64).sqrt();
 
         let norm = RmsNormGated::load(value_head_dim, cfg.rms_norm_eps, vb.pp("norm"))?;
 
@@ -102,10 +121,12 @@ impl GatedDeltaNet {
             in_proj_b,
             in_proj_z,
             conv1d_weight,
-            a_log,
-            dt_bias,
             norm,
             out_proj,
+            neg_a_exp_f32,
+            dt_bias_f32,
+            conv1d_weight_3d,
+            q_scale,
             num_heads,
             num_key_heads,
             key_head_dim,
@@ -142,45 +163,36 @@ impl GatedDeltaNet {
     }
 
     /// Apply causal depthwise conv1d + SiLU on a full sequence.
+    /// Uses native Tensor::conv1d with groups=channels (depthwise) instead of a per-timestep loop.
     /// x: (batch, seq_len, channels)
     fn causal_conv1d_seq(&self, x: &Tensor) -> Result<(Tensor, Tensor)> {
         let (batch, seq_len, channels) = x.dims3()?;
-        let kernel_size = self.conv_kernel_size;
-        let pad = kernel_size - 1;
+        let pad = self.conv_kernel_size - 1;
 
-        // Transpose to (batch, channels, seq_len) for conv
+        // Transpose to (batch, channels, seq_len) for conv1d API
         let x_t = x.transpose(1, 2)?;
 
-        // Left-pad with zeros for causal conv
-        let padding = Tensor::zeros((batch, channels, pad), x_t.dtype(), x_t.device())?;
-        let padded = Tensor::cat(&[&padding, &x_t], 2)?;
+        // Left-pad with zeros for causal conv: (batch, channels, pad + seq_len)
+        let padded = x_t.pad_with_zeros(2, pad, 0)?;
 
-        // Depthwise conv: for each position, multiply-accumulate over kernel
-        // padded: (batch, channels, seq_len + pad)
-        // weight: (channels, kernel_size)
-        let weight = self.conv1d_weight.to_dtype(padded.dtype())?;
-        let mut outputs = Vec::with_capacity(seq_len);
-        for t in 0..seq_len {
-            let window = padded.narrow(2, t, kernel_size)?;
-            let y = (window.broadcast_mul(&weight.unsqueeze(0)?)?).sum(D::Minus1)?;
-            outputs.push(y);
-        }
-        let y = Tensor::stack(&outputs, 1)?; // (batch, seq_len, channels)
+        // Depthwise conv1d: groups=channels, kernel (channels, 1, kernel_size)
+        let w = self.conv1d_weight_3d.to_dtype(padded.dtype())?;
+        let y = padded.conv1d(&w, 0, 1, 1, channels)?;
 
-        // SiLU activation
+        // Transpose back to (batch, seq_len, channels) and apply SiLU
+        let y = y.transpose(1, 2)?;
         let y = candle_nn::ops::silu(&y)?;
 
-        // Save last (kernel_size-1) timesteps as conv state
-        let conv_state = x_t.narrow(2, seq_len.saturating_sub(pad), seq_len.min(pad))?;
-        let conv_state = if conv_state.dims()[2] < pad {
-            let extra_pad = Tensor::zeros(
-                (batch, channels, pad - conv_state.dims()[2]),
-                conv_state.dtype(),
-                conv_state.device(),
-            )?;
-            Tensor::cat(&[&extra_pad, &conv_state], 2)?
+        // Save conv state: last (kernel_size-1) timesteps of input
+        let conv_state = if seq_len >= pad {
+            x_t.narrow(2, seq_len - pad, pad)?.contiguous()?
         } else {
-            conv_state.contiguous()?
+            let extra = Tensor::zeros(
+                (batch, channels, pad - seq_len),
+                x_t.dtype(),
+                x_t.device(),
+            )?;
+            Tensor::cat(&[&extra, &x_t.contiguous()?], 2)?
         };
 
         Ok((y, conv_state))
@@ -212,6 +224,7 @@ impl GatedDeltaNet {
     }
 
     /// Recurrent forward for a single timestep (token-by-token generation).
+    /// State is kept in F32 permanently to avoid per-step dtype round-trips.
     fn recurrent_step(
         &self,
         q: &Tensor,    // (batch, num_heads, key_head_dim)
@@ -219,12 +232,11 @@ impl GatedDeltaNet {
         v: &Tensor,    // (batch, num_heads, value_head_dim)
         g: &Tensor,    // (batch, num_heads) - log-decay
         beta: &Tensor, // (batch, num_heads) - input gate
-        state: &Tensor, // (batch, num_heads, key_head_dim, value_head_dim)
+        state: &Tensor, // (batch, num_heads, key_head_dim, value_head_dim) — F32
     ) -> Result<(Tensor, Tensor)> {
-        let in_dtype = state.dtype();
+        debug_assert_eq!(state.dtype(), DType::F32);
 
-        // Work in f32 for numerical stability
-        let state = state.to_dtype(DType::F32)?;
+        // q, k, v, g, beta arrive in model dtype; convert to F32
         let q = q.to_dtype(DType::F32)?;
         let k = k.to_dtype(DType::F32)?;
         let v = v.to_dtype(DType::F32)?;
@@ -232,31 +244,27 @@ impl GatedDeltaNet {
         let beta = beta.to_dtype(DType::F32)?;
 
         // 1. Decay state: S = S * exp(g)
-        // g: (batch, num_heads) -> (batch, num_heads, 1, 1)
         let decay = g.unsqueeze(D::Minus1)?.unsqueeze(D::Minus1)?.exp()?;
         let state = state.broadcast_mul(&decay)?;
 
-        // 2. Retrieve from state: retrieved = einsum('bhkv,bhk->bhv' state, k)
-        // k: (batch, heads, key_dim) -> (batch, heads, key_dim, 1)
-        // state: (batch, heads, key_dim, val_dim)
-        // result: (batch, heads, 1, val_dim) -> (batch, heads, val_dim)
+        // 2. Retrieve: retrieved = S^T @ k  (batched matrix-vector)
         let k_4d = k.unsqueeze(D::Minus1)?;
-        let retrieved = state.broadcast_mul(&k_4d)?.sum(2)?; // (batch, heads, val_dim)
+        let retrieved = state.transpose(2, 3)?.matmul(&k_4d)?.squeeze(D::Minus1)?;
 
         // 3. Delta rule: delta = beta * (v - retrieved)
-        let beta_3d = beta.unsqueeze(D::Minus1)?; // (batch, heads, 1)
-        let diff = v.broadcast_sub(&retrieved)?;
-        let delta = diff.broadcast_mul(&beta_3d)?; // (batch, heads, val_dim)
+        let beta_3d = beta.unsqueeze(D::Minus1)?;
+        let delta = (v - &retrieved)?.broadcast_mul(&beta_3d)?;
 
-        // 4. Update state: S = S + outer(k, delta) = S + k[:,:,:,None] * delta[:,:,None,:]
-        let update = k_4d.broadcast_mul(&delta.unsqueeze(2)?)?;
-        let state = state.broadcast_add(&update)?;
+        // 4. Update state: S = S + k @ delta^T  (rank-1 outer product)
+        let update = k_4d.matmul(&delta.unsqueeze(2)?)?;
+        let state = (state + update)?;
 
-        // 5. Query: o = einsum('bhkv,bhk->bhv' state, q)
+        // 5. Query: output = S^T @ q  (batched matrix-vector)
         let q_4d = q.unsqueeze(D::Minus1)?;
-        let output = state.broadcast_mul(&q_4d)?.sum(2)?; // (batch, heads, val_dim)
+        let output = state.transpose(2, 3)?.matmul(&q_4d)?.squeeze(D::Minus1)?;
 
-        Ok((output.to_dtype(in_dtype)?, state.to_dtype(in_dtype)?))
+        // Both output and state stay in F32
+        Ok((output, state))
     }
 
     /// Full forward pass through the Gated DeltaNet layer.
@@ -267,6 +275,7 @@ impl GatedDeltaNet {
         cache: &mut Cache,
     ) -> anyhow::Result<Tensor> {
         let (batch, seq_len, _hidden) = x.dims3().map_err(|e| anyhow!("dims3: {e}"))?;
+        let model_dtype = x.dtype();
 
         // Project QKV
         let mixed_qkv = self.in_proj_qkv.forward(x)
@@ -332,40 +341,32 @@ impl GatedDeltaNet {
         let v = v.reshape((batch, seq_len, self.num_heads, self.value_head_dim))
             .map_err(|e| anyhow!("v reshape: {e}"))?;
 
-        // L2-normalize Q and K, then scale Q by 1/sqrt(key_head_dim)
+        // L2-normalize Q and K, then scale Q by precomputed 1/sqrt(key_head_dim)
         let q = Self::l2_normalize(&q).map_err(|e| anyhow!("l2norm q: {e}"))?;
         let k = Self::l2_normalize(&k).map_err(|e| anyhow!("l2norm k: {e}"))?;
-        let scale = 1.0 / (self.key_head_dim as f64).sqrt();
-        let q = (q * scale).map_err(|e| anyhow!("q scale: {e}"))?;
+        let q = (q * self.q_scale).map_err(|e| anyhow!("q scale: {e}"))?;
 
-        // Compute gating parameters
-        // g = -exp(A_log) * softplus(a + dt_bias), per head per timestep
-        let a_log_f32 = self.a_log.to_dtype(DType::F32).map_err(|e| anyhow!("a_log dtype: {e}"))?;
-        let dt_bias_f32 = self.dt_bias.to_dtype(DType::F32).map_err(|e| anyhow!("dt_bias dtype: {e}"))?;
+        // Compute gating parameters using precomputed constants
+        // g = neg_a_exp * softplus(a + dt_bias), per head per timestep
         let a_f32 = a.to_dtype(DType::F32).map_err(|e| anyhow!("a dtype: {e}"))?;
-        let a_plus_dt = a_f32.broadcast_add(&dt_bias_f32).map_err(|e| anyhow!("a+dt: {e}"))?;
-        // softplus(x) = ln(1 + exp(x))
-        let softplus_a = (a_plus_dt.exp()? + 1.0)?.log()?;
-        let neg_a_exp = a_log_f32.exp()?.neg()?;
-        let g = softplus_a.broadcast_mul(&neg_a_exp)
+        let a_plus_dt = a_f32.broadcast_add(&self.dt_bias_f32).map_err(|e| anyhow!("a+dt: {e}"))?;
+        let softplus_a = stable_softplus(&a_plus_dt)?;
+        let g = softplus_a.broadcast_mul(&self.neg_a_exp_f32)
             .map_err(|e| anyhow!("g compute: {e}"))?;
-        // g: (batch, seq_len, num_heads)
 
         // beta = sigmoid(b)
         let beta = candle_nn::ops::sigmoid(&b.to_dtype(DType::F32)
             .map_err(|e| anyhow!("b dtype: {e}"))?)
             .map_err(|e| anyhow!("sigmoid: {e}"))?;
-        // beta: (batch, seq_len, num_heads)
 
-        // Get or initialize recurrent state
+        // Get or initialize recurrent state (always F32 to avoid per-step dtype round-trips)
         let dev = x.device();
-        let dtype = x.dtype();
         let mut state = if let Some(s) = cache.get_recurrent_state(block_idx) {
             s.clone()
         } else {
             Tensor::zeros(
                 (batch, self.num_heads, self.key_head_dim, self.value_head_dim),
-                dtype,
+                DType::F32,
                 dev,
             ).map_err(|e| anyhow!("init state: {e}"))?
         };
@@ -399,8 +400,9 @@ impl GatedDeltaNet {
         let output = self.norm.forward(&output, &z)
             .map_err(|e| anyhow!("norm: {e}"))?;
 
-        // Flatten heads: (batch, seq_len, value_dim)
-        let output = output.reshape((batch, seq_len, self.value_dim))
+        // Flatten heads and convert back to model dtype for output projection
+        let output = output.reshape((batch, seq_len, self.value_dim))?
+            .to_dtype(model_dtype)
             .map_err(|e| anyhow!("output reshape: {e}"))?;
 
         // Project output
