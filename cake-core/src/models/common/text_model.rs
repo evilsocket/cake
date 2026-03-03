@@ -1,5 +1,7 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
-use candle_core::{DType, Device, IndexOp, Tensor};
+use candle_core::{Device, IndexOp, Tensor};
 use candle_nn::{linear_no_bias as linear, Embedding, Linear, Module, RmsNorm};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
 use tokenizers::Tokenizer;
@@ -35,6 +37,56 @@ pub fn load_tokenizer(
     };
 
     Ok((tokenizer, eos_token_id))
+}
+
+/// Apply repeat penalty entirely on GPU to avoid costly GPU↔CPU round-trips.
+///
+/// The upstream `candle_transformers::utils::apply_repeat_penalty` copies the entire
+/// logits tensor (vocab_size × 4 bytes ≈ 600 KB) to CPU, modifies a handful of elements,
+/// then copies everything back.  This forces a full GPU synchronisation and two large PCIe
+/// transfers per token.
+///
+/// This implementation stays on-device: it selects only the penalty positions, computes
+/// sign-aware multipliers, and scatters the deltas back with `index_add`.
+fn apply_repeat_penalty_gpu(
+    logits: &Tensor,
+    penalty: f32,
+    context: &[u32],
+) -> Result<Tensor> {
+    // Deduplicate tokens (same semantics as the upstream version).
+    let mut seen = HashSet::new();
+    let unique: Vec<u32> = context
+        .iter()
+        .filter(|t| seen.insert(**t))
+        .copied()
+        .collect();
+
+    if unique.is_empty() {
+        return Ok(logits.clone());
+    }
+
+    let device = logits.device();
+    let dtype = logits.dtype();
+    let indices = Tensor::new(unique.as_slice(), device)?;
+
+    // Gather logits at penalty positions  (N elements, tiny).
+    let selected = logits.index_select(&indices, 0)?;
+
+    // Sign-aware multiplier:  1/penalty for logits ≥ 0,  penalty for logits < 0.
+    let is_non_negative = selected.ge(0f32)?;
+    let recip = Tensor::new(1.0f32 / penalty, device)?
+        .to_dtype(dtype)?
+        .broadcast_as(selected.shape())?;
+    let pen = Tensor::new(penalty, device)?
+        .to_dtype(dtype)?
+        .broadcast_as(selected.shape())?;
+    let mult = is_non_negative.where_cond(&recip, &pen)?;
+
+    // delta = selected * mult - selected  (what to add to the original logits).
+    let penalized = (&selected * &mult)?;
+    let delta = (&penalized - &selected)?;
+
+    Ok(logits.index_add(&indices, &delta, 0)?)
 }
 
 /// Create the logit sampling logic from the context.
@@ -286,9 +338,7 @@ impl TextModelBase {
             head_elapsed.as_secs_f64() * 1000.0,
         );
 
-        logits
-            .to_dtype(DType::F32)
-            .map_err(|e| anyhow!("error converting logits: {e}"))
+        Ok(logits)
     }
 
     /// Tokenize a prompt string and set up token state for generation.
@@ -355,6 +405,7 @@ impl TextModelBase {
             .map_err(|e| anyhow!("error squeezing logits: {e}"))?;
 
         // Apply repeat penalty only to generated tokens (not prompt tokens)
+        let penalty_start = std::time::Instant::now();
         let logits = if self.ctx.args.repeat_penalty == 1. {
             logits
         } else {
@@ -366,13 +417,14 @@ impl TextModelBase {
                 let start_at = penalty_tokens
                     .len()
                     .saturating_sub(self.ctx.args.repeat_last_n);
-                candle_transformers::utils::apply_repeat_penalty(
+                apply_repeat_penalty_gpu(
                     &logits,
                     self.ctx.args.repeat_penalty,
                     &penalty_tokens[start_at..],
                 )?
             }
         };
+        let penalty_elapsed = penalty_start.elapsed();
         self.index_pos += num_context_tokens;
 
         let sample_start = std::time::Instant::now();
@@ -402,8 +454,9 @@ impl TextModelBase {
         let post_elapsed = post_start.elapsed();
 
         log::debug!(
-            "  post-forward: total={:.1}ms sample={:.1}ms decode={:.1}ms",
+            "  post-forward: total={:.1}ms penalty={:.1}ms sample={:.1}ms decode={:.1}ms",
             post_elapsed.as_secs_f64() * 1000.0,
+            penalty_elapsed.as_secs_f64() * 1000.0,
             sample_elapsed.as_secs_f64() * 1000.0,
             decode_elapsed.as_secs_f64() * 1000.0,
         );
