@@ -149,14 +149,34 @@ async fn run_zero_config_worker(
     };
 
     log_ios("[cake-ios] creating Context::from_args...");
-    let mut ctx = match Context::from_args(args) {
-        Ok(ctx) => {
+
+    // Install a panic hook that writes to our log file before aborting
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let msg = format!("[cake-ios] PANIC: {}", info);
+        log_ios(&msg);
+    }));
+
+    let ctx_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Context::from_args(args)
+    }));
+
+    // Restore previous panic hook
+    std::panic::set_hook(prev_hook);
+
+    let mut ctx = match ctx_result {
+        Ok(Ok(ctx)) => {
             log_ios(&format!("[cake-ios] context created, device={:?}", ctx.device));
             ctx
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             let msg = format!("context creation failed: {}", e);
             log_ios(&format!("[cake-ios] ERROR: {}", msg));
+            return msg;
+        }
+        Err(panic_info) => {
+            let msg = format!("context creation panicked: {:?}", panic_info.downcast_ref::<String>().map(|s| s.as_str()).or_else(|| panic_info.downcast_ref::<&str>().copied()).unwrap_or("unknown"));
+            log_ios(&format!("[cake-ios] PANIC: {}", msg));
             return msg;
         }
     };
