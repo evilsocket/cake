@@ -351,7 +351,11 @@ struct WorkerView: View {
 
         DispatchQueue.global(qos: .userInitiated).async {
             DispatchQueue.main.async {
-                status = .running("downloading model...")
+                if clusterKey.isEmpty {
+                    status = .running("downloading model...")
+                } else {
+                    status = .running("waiting for master...")
+                }
             }
 
             print("[cake] calling startWorker FFI...")

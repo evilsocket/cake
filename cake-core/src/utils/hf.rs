@@ -124,7 +124,15 @@ pub fn ensure_model_downloaded(repo_id: &str) -> Result<PathBuf> {
         repo_id
     );
 
-    let api = ApiBuilder::new().with_progress(true).build()?;
+    let mut builder = ApiBuilder::new().with_progress(true);
+
+    // Use explicit cache dir if HF_HUB_CACHE is set, to avoid hf_hub bugs
+    // with env var handling (lock files created at wrong path).
+    if let Ok(cache_dir) = std::env::var("HF_HUB_CACHE") {
+        builder = builder.with_cache_dir(PathBuf::from(cache_dir));
+    }
+
+    let api = builder.build()?;
     let repo = api.model(repo_id.to_string());
 
     // Download config.json first — validates repo access (fails fast on auth errors).

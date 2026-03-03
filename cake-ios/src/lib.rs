@@ -2,10 +2,9 @@
 uniffi::setup_scaffolding!();
 
 use cake_core::{
-    cake::{Context, Mode, Worker},
+    cake::{self, Context, Mode, Topology, Worker},
     Args, ModelType, TextModelArch,
 };
-
 /// Start a worker node that joins a cluster via discovery.
 /// Returns an error string if startup fails, or empty string on clean exit.
 ///
@@ -23,24 +22,117 @@ pub fn start_worker(name: String, model: String, cluster_key: String) -> String 
     eprintln!("[cake-ios]   model: {model}");
     eprintln!("[cake-ios]   cluster_key: {}", if cluster_key.is_empty() { "(none)" } else { "(set)" });
 
-    // Set HF cache to an iOS-writable directory (app sandbox tmp).
-    // The hf_hub crate will create subdirectories as needed.
-    let hf_cache = std::env::temp_dir().join("huggingface").join("hub");
-    if let Err(e) = std::fs::create_dir_all(&hf_cache) {
-        let msg = format!("failed to create HF cache dir: {}", e);
-        eprintln!("[cake-ios] {msg}");
-        return msg;
+    // iOS sandbox: set HOME and HF cache to writable tmp directories.
+    let tmp = std::env::temp_dir();
+    let ios_home = tmp.join("cake-home");
+    let hf_cache = tmp.join("huggingface").join("hub");
+    let cake_cache = tmp.join("cake");
+    for dir in [&ios_home, &hf_cache, &cake_cache] {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            let msg = format!("failed to create dir {}: {}", dir.display(), e);
+            eprintln!("[cake-ios] {msg}");
+            return msg;
+        }
     }
+    std::env::set_var("HOME", ios_home.to_string_lossy().as_ref());
     std::env::set_var("HF_HUB_CACHE", hf_cache.to_string_lossy().as_ref());
+    eprintln!("[cake-ios] HOME={}", ios_home.display());
     eprintln!("[cake-ios] HF_HUB_CACHE={}", hf_cache.display());
 
+    let address = "0.0.0.0:10128".to_string();
+    let use_cluster = !cluster_key.is_empty();
+
+    eprintln!("[cake-ios] starting tokio runtime...");
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            if use_cluster {
+                // Zero-config mode: wait for master to discover us and push model data.
+                eprintln!("[cake-ios] zero-config mode: waiting for master discovery...");
+                run_zero_config_worker(&name, &cluster_key, &address, &cake_cache, &model).await
+            } else {
+                // Direct mode: download model and start worker.
+                eprintln!("[cake-ios] direct mode: loading model...");
+                run_direct_worker(&name, &model, &address).await
+            }
+        })
+}
+
+/// Zero-config worker: advertise via mDNS, wait for master assignment, receive model data.
+async fn run_zero_config_worker(
+    name: &str,
+    cluster_key: &str,
+    address: &str,
+    cache_dir: &std::path::Path,
+    _model: &str,
+) -> String {
+    // Wait for master to discover us and send model data
+    let (layers, model_path, listener) = match cake::setup::worker_setup(
+        name,
+        cluster_key,
+        address,
+        cache_dir,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => return format!("worker setup failed: {}", e),
+    };
+
+    eprintln!("[cake-ios] master assigned layers: {:?}", layers);
+    eprintln!("[cake-ios] model path: {}", model_path.display());
+
+    // Build topology from assigned layers
+    let mut topology = Topology::new();
+    topology.insert(
+        name.to_string(),
+        cake::Node {
+            host: address.to_string(),
+            description: None,
+            layers: layers,
+            vram_bytes: 0,
+            tflops: 0.0,
+            backend: String::new(),
+            hostname: String::new(),
+            os: String::new(),
+        },
+    );
+
     let args = Args {
-        address: "0.0.0.0:10128".to_string(),
+        address: address.to_string(),
         mode: Mode::Worker,
-        name: Some(name),
-        model,
+        name: Some(name.to_string()),
+        model: model_path.to_string_lossy().to_string(),
         model_type: ModelType::TextModel,
-        cluster_key: if cluster_key.is_empty() { None } else { Some(cluster_key) },
+        topology_override: Some(topology),
+        ..Default::default()
+    };
+
+    let mut ctx = match Context::from_args(args) {
+        Ok(ctx) => {
+            eprintln!("[cake-ios] context created, device={:?}", ctx.device);
+            ctx
+        }
+        Err(e) => return format!("context creation failed: {}", e),
+    };
+
+    // Pass the pre-bound listener from setup
+    *ctx.listener_override.lock().unwrap() = Some(listener);
+
+    run_text_worker(&mut ctx).await
+}
+
+/// Direct worker: download model from HF and start serving.
+async fn run_direct_worker(name: &str, model: &str, address: &str) -> String {
+    let args = Args {
+        address: address.to_string(),
+        mode: Mode::Worker,
+        name: Some(name.to_string()),
+        model: model.to_string(),
+        model_type: ModelType::TextModel,
         ..Default::default()
     };
 
@@ -51,22 +143,10 @@ pub fn start_worker(name: String, model: String, cluster_key: String) -> String 
             eprintln!("[cake-ios] context created, device={:?}", ctx.device);
             ctx
         }
-        Err(e) => {
-            let msg = format!("context creation failed: {}", e);
-            eprintln!("[cake-ios] {msg}");
-            return msg;
-        }
+        Err(e) => return format!("context creation failed: {}", e),
     };
 
-    eprintln!("[cake-ios] starting tokio runtime...");
-
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(async {
-            run_text_worker(&mut ctx).await
-        })
+    run_text_worker(&mut ctx).await
 }
 
 async fn run_text_worker(ctx: &mut Context) -> String {
