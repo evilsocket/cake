@@ -13,37 +13,28 @@ use candle_nn::{Linear, Module, VarBuilder};
 use crate::models::common::{Cache, Config};
 
 /// RMSNorm with multiplicative SiLU gating: rms_norm(x) * silu(z).
+/// Uses candle's fused rms_norm kernel (1 kernel) instead of 7 separate ops.
 #[derive(Debug, Clone)]
 struct RmsNormGated {
     weight: Tensor,
-    eps: f64,
+    eps: f32,
 }
 
 impl RmsNormGated {
     fn load(size: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
-        // Store weight as F32 at load time to avoid per-call dtype conversion.
+        // Store weight as F32 to match the recurrent step's F32 output.
         let weight = vb.get(size, "weight")?.to_dtype(DType::F32)?;
-        Ok(Self { weight, eps })
+        Ok(Self { weight, eps: eps as f32 })
     }
 
-    /// Apply gated RMS normalization: (1 + weight) * rms_norm(x) * silu(z).
+    /// Apply gated RMS normalization: weight * rms_norm(x) * silu(z).
+    /// Uses fused rms_norm (1 kernel) + silu + mul = 4 kernels instead of 10.
     fn forward(&self, x: &Tensor, z: &Tensor) -> Result<Tensor> {
-        let in_dtype = x.dtype();
-        let x = x.to_dtype(DType::F32)?;
-        let z = z.to_dtype(DType::F32)?;
-
-        // RMS norm
-        let variance = x.sqr()?.mean_keepdim(D::Minus1)?;
-        let x_normed = x.broadcast_div(&(variance + self.eps)?.sqrt()?)?;
-
-        // weight * norm(x) — weight is already F32
-        let x_normed = x_normed.broadcast_mul(&self.weight)?;
-
-        // Gating: silu(z)
-        let gate = candle_nn::ops::silu(&z)?;
-        let result = (x_normed * gate)?;
-
-        result.to_dtype(in_dtype)
+        // Fused RMS norm on F32 input (x is F32 from recurrent step)
+        let x_normed = candle_nn::ops::rms_norm(&x.contiguous()?, &self.weight, self.eps)?;
+        // Gate: silu(z) in F32, then multiply
+        let gate = candle_nn::ops::silu(&z.to_dtype(x.dtype())?)?;
+        x_normed * gate
     }
 }
 
