@@ -22,6 +22,16 @@ pub fn start_worker(name: String, model: String, cluster_key: String) {
     log::info!("[cake-ios]   model: {model}");
     log::info!("[cake-ios]   cluster_key: {}", if cluster_key.is_empty() { "(none)" } else { "(set)" });
 
+    // Set HF cache to an iOS-writable directory (app sandbox tmp).
+    // The hf_hub crate will create subdirectories as needed.
+    let hf_cache = std::env::temp_dir().join("huggingface").join("hub");
+    if let Err(e) = std::fs::create_dir_all(&hf_cache) {
+        log::error!("[cake-ios] failed to create HF cache dir: {}", e);
+        return;
+    }
+    std::env::set_var("HF_HUB_CACHE", hf_cache.to_string_lossy().as_ref());
+    log::info!("[cake-ios] HF_HUB_CACHE={}", hf_cache.display());
+
     let args = Args {
         address: "0.0.0.0:10128".to_string(),
         mode: Mode::Worker,
