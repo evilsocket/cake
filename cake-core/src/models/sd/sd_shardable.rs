@@ -67,6 +67,7 @@ impl Forwarder for SDShardable {
         block_idx: usize,
         ctx: &mut Context,
     ) -> anyhow::Result<Tensor> {
+        log::debug!("forwarding single op");
         self.forwarder
             .forward_mut(x, index_pos, block_idx, ctx)
             .await
@@ -74,11 +75,12 @@ impl Forwarder for SDShardable {
 
     async fn forward_batch(
         &mut self,
-        _x: &Tensor,
-        _batch: Vec<(String, usize, usize)>,
+        x: &Tensor,
+        batch: Vec<(String, usize, usize)>,
         ctx: &mut Context,
     ) -> anyhow::Result<Tensor> {
-        self.forwarder.forward_batch(_x, _batch, ctx).await
+        log::debug!("forwarding batch of {} elements", batch.len());
+        self.forwarder.forward_batch(x, batch, ctx).await
     }
 
     fn layer_name(&self) -> &str {

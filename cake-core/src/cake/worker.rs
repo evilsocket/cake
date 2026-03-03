@@ -151,11 +151,17 @@ impl<G: Generator + 'static> Worker<G> {
                 // which is safe since we use a single stream per device.
                 #[cfg(feature = "cuda")]
                 if let Device::Cuda(cuda_dev) = &dev {
-                    unsafe { cuda_dev.disable_event_tracking(); }
+                    unsafe {
+                        cuda_dev.disable_event_tracking();
+                    }
                 }
 
-                let vb =
-                    crate::utils::load_var_builder_from_index(model_index.clone(), ctx.dtype, dev.clone(), ctx.fp8)?;
+                let vb = crate::utils::load_var_builder_from_index(
+                    model_index.clone(),
+                    ctx.dtype,
+                    dev.clone(),
+                    ctx.fp8,
+                )?;
                 log::info!("  GPU {} ready", ordinal);
                 gpu_devices.push(dev);
                 gpu_var_builders.push(vb);
@@ -405,7 +411,11 @@ impl<G: Generator + 'static> Worker<G> {
                     #[cfg(feature = "cuda")]
                     if let Device::Cuda(cuda_dev) = block_device {
                         if let Err(e) = cuda_dev.cuda_stream().context().bind_to_thread() {
-                            log::error!("[{client}] failed to bind CUDA context for {}: {:?}", &layer_name, e);
+                            log::error!(
+                                "[{client}] failed to bind CUDA context for {}: {:?}",
+                                &layer_name,
+                                e
+                            );
                         }
                     }
 

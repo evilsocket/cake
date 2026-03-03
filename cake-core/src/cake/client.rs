@@ -140,6 +140,7 @@ impl super::Forwarder for Client {
         block_idx: usize,
         _: &mut Context,
     ) -> Result<Tensor> {
+        log::debug!("forwarding single op");
         self.forward_request(super::Message::single_op(
             &self.layer_name,
             x,
@@ -156,6 +157,7 @@ impl super::Forwarder for Client {
         batch: Vec<(String, usize, usize)>,
         _: &mut Context,
     ) -> Result<Tensor> {
+        log::debug!("forwarding batch of {} elements", batch.len());
         self.forward_request(super::Message::from_batch(x, batch))
             .await
     }

@@ -89,12 +89,15 @@ impl MockWorker {
 
             match msg {
                 Message::SingleOp { x, .. } => {
+                    log::debug!("single op");
                     Message::Tensor(x).to_writer(&mut socket).await?;
                 }
                 Message::Batch { x, .. } => {
+                    log::debug!("batch");
                     Message::Tensor(x).to_writer(&mut socket).await?;
                 }
                 Message::Goodbye => {
+                    log::debug!("goodbye");
                     Message::WorkerInfo(mock_worker_info(0))
                         .to_writer(&mut socket)
                         .await?;
@@ -177,8 +180,7 @@ async fn test_handshake_auth_wrong_key() {
     let worker = tokio::spawn(async move { mock.handle_one(Some("correct-key")).await });
 
     let mut stream = TcpStream::connect(addr).await.unwrap();
-    let result =
-        cake_core::cake::auth::authenticate_as_master(&mut stream, "wrong-key").await;
+    let result = cake_core::cake::auth::authenticate_as_master(&mut stream, "wrong-key").await;
     assert!(result.is_err());
 
     drop(stream);
