@@ -377,7 +377,7 @@ struct WorkerView: View {
             status = .starting
 
             DispatchQueue.global(qos: .userInitiated).async {
-                startWorker(name: workerName, modelPath: modelPath, topologyPath: topologyPath)
+                startWorker(name: workerName, modelPath: modelPath, topologyPath: topologyPath, modelType: selectedModelType)
 
                 DispatchQueue.main.async {
                     status = .running("connected")
