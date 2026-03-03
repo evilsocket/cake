@@ -57,8 +57,6 @@ pub struct GatedDeltaNet {
 
     // Precomputed constants (F32, avoids per-call recomputation)
     neg_a_exp_f32: Tensor,
-    // Conv1d weights stored as F32 (matches proj after bulk conversion)
-    conv1d_weight_3d: Tensor,
 
     // Fused L2-norm alpha vectors: rms_norm(x, alpha, eps/N) = L2_normalize(x) * scale
     // Q alpha includes q_scale: 1/(key_head_dim) = 1/sqrt(N) * 1/sqrt(N)
@@ -118,9 +116,9 @@ impl GatedDeltaNet {
         let out_proj = Linear::new(out_w, None);
 
         // Conv1d weight: stored as F32 (matches post-projection F32 data path).
-        let conv1d_weight_3d = vb.get((conv_dim, 1, la.conv_kernel_dim), "conv1d.weight")?
-            .to_dtype(DType::F32)?;
-        let conv1d_weight = conv1d_weight_3d.squeeze(1)?;
+        let conv1d_weight = vb.get((conv_dim, 1, la.conv_kernel_dim), "conv1d.weight")?
+            .to_dtype(DType::F32)?
+            .squeeze(1)?;
 
         let a_log = vb.get(num_heads, "A_log")?;
 
@@ -152,7 +150,6 @@ impl GatedDeltaNet {
             norm,
             out_proj,
             neg_a_exp_f32,
-            conv1d_weight_3d,
             l2_alpha_q,
             l2_alpha_k,
             l2_norm_eps,
@@ -193,24 +190,38 @@ impl GatedDeltaNet {
     }
 
     /// Apply causal depthwise conv1d + SiLU on a full sequence.
-    /// Uses native Tensor::conv1d with groups=channels (depthwise) instead of a per-timestep loop.
+    /// Uses broadcast_mul+sum per timestep — cuDNN's grouped conv1d is
+    /// catastrophically slow (~200×) for large channel counts with tiny kernels
+    /// (e.g. 10240 groups × kernel_size=4 on Qwen3.5-27B).
     /// x: (batch, seq_len, channels)
     fn causal_conv1d_seq(&self, x: &Tensor) -> Result<(Tensor, Tensor)> {
         let (batch, seq_len, channels) = x.dims3()?;
-        let pad = self.conv_kernel_size - 1;
+        let kernel_size = self.conv_kernel_size;
+        let pad = kernel_size - 1;
 
-        // Transpose to (batch, channels, seq_len) for conv1d API
+        // Transpose to (batch, channels, seq_len) for windowed access
         let x_t = x.transpose(1, 2)?;
 
-        // Left-pad with zeros for causal conv: (batch, channels, pad + seq_len)
-        let padded = x_t.pad_with_zeros(2, pad, 0)?;
+        // Left-pad with zeros for causal conv
+        let padded = if pad > 0 {
+            let padding = Tensor::zeros((batch, channels, pad), x_t.dtype(), x_t.device())?;
+            Tensor::cat(&[&padding, &x_t.contiguous()?], 2)?
+        } else {
+            x_t.contiguous()?
+        };
 
-        // Depthwise conv1d: groups=channels, kernel (channels, 1, kernel_size)
-        let w = self.conv1d_weight_3d.to_dtype(padded.dtype())?;
-        let y = padded.conv1d(&w, 0, 1, 1, channels)?;
+        // Depthwise conv via broadcast_mul+sum per timestep
+        // weight: (channels, kernel_size), padded: (batch, channels, seq_len + pad)
+        let weight = self.conv1d_weight.unsqueeze(0)?; // (1, channels, kernel_size)
+        let mut outputs = Vec::with_capacity(seq_len);
+        for t in 0..seq_len {
+            let window = padded.narrow(2, t, kernel_size)?;
+            let y = window.broadcast_mul(&weight)?.sum(D::Minus1)?;
+            outputs.push(y);
+        }
+        let y = Tensor::stack(&outputs, 1)?; // (batch, seq_len, channels)
 
-        // Transpose back to (batch, seq_len, channels) and apply SiLU
-        let y = y.transpose(1, 2)?;
+        // SiLU activation
         let y = candle_nn::ops::silu(&y)?;
 
         // Save conv state: last (kernel_size-1) timesteps of input
