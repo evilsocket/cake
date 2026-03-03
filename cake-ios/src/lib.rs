@@ -197,6 +197,32 @@ async fn run_text_worker(ctx: &mut Context) -> String {
     log_ios(&format!("[cake-ios] text model arch: {:?}", ctx.text_model_arch));
 
     match ctx.text_model_arch {
+        #[cfg(feature = "qwen3_5")]
+        TextModelArch::Qwen3_5 => {
+            log_ios("[cake-ios] creating Qwen3.5 worker...");
+            let mut worker =
+                match Worker::<cake_core::models::qwen3_5::Qwen3_5>::new(ctx).await {
+                    Ok(w) => {
+                        log_ios("[cake-ios] Qwen3.5 worker ready on 0.0.0.0:10128");
+                        w
+                    }
+                    Err(e) => {
+                        let msg = format!("Qwen3.5 worker creation failed: {}", e);
+                        log_ios(&format!("[cake-ios] ERROR: {}", msg));
+                        return msg;
+                    }
+                };
+
+            log_ios("[cake-ios] Qwen3.5 worker.run() starting...");
+            match worker.run().await {
+                Ok(_) => String::new(),
+                Err(e) => {
+                    let msg = format!("worker error: {}", e);
+                    log_ios(&format!("[cake-ios] ERROR: {}", msg));
+                    msg
+                }
+            }
+        }
         #[cfg(feature = "qwen2")]
         TextModelArch::Qwen2 => {
             log_ios("[cake-ios] creating Qwen2 worker...");

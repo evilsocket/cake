@@ -89,7 +89,7 @@ impl Context {
             args.mode,
             &dtype,
             &device,
-            human_bytes::human_bytes(memory_stats::memory_stats().unwrap().physical_mem as f64)
+            human_bytes::human_bytes(memory_stats::memory_stats().map(|m| m.physical_mem).unwrap_or(0) as f64)
         );
 
         let data_path = PathBuf::from(&args.model);
