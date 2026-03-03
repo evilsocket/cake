@@ -75,9 +75,9 @@ impl Topology {
                         let start = caps.get(2).unwrap().as_str().to_string().parse::<usize>()?;
                         let stop = caps.get(3).unwrap().as_str().to_string().parse::<usize>()?;
 
-                        if stop <= start {
+                        if stop < start {
                             return Err(anyhow!(
-                                "invalid range expression {layer_name}, end must be > start"
+                                "invalid range expression {layer_name}, end must be >= start"
                             ));
                         }
 
