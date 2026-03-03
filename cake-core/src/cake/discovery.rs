@@ -175,10 +175,10 @@ pub fn detect_gpus() -> Vec<GpuInfo> {
         }
     }
 
-    // Report Metal on macOS when built with metal support
-    #[cfg(all(target_os = "macos", feature = "metal"))]
+    // Report Metal on macOS/iOS when built with metal support
+    #[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "metal"))]
     {
-        let chip = detect_apple_chip().unwrap_or_else(|| format!("Apple Silicon ({})", std::env::consts::ARCH));
+        let chip = detect_apple_chip().unwrap_or_else(|| format!("Apple ({})", std::env::consts::ARCH));
         let vram_bytes = detect_system_memory();
         let tflops = vram_bytes as f32 / (1024.0 * 1024.0 * 1024.0) * 0.4;
         return vec![GpuInfo {
@@ -222,7 +222,7 @@ pub fn detect_backend() -> String {
             return ver;
         }
     }
-    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[cfg(all(any(target_os = "macos", target_os = "ios"), feature = "metal"))]
     {
         if let Some(chip) = detect_apple_chip() {
             return chip;
@@ -256,37 +256,69 @@ pub fn detect_cuda_version() -> Option<String> {
     None
 }
 
-/// Detect the Apple Silicon chip model (e.g. "Apple M2 Max").
-#[cfg(target_os = "macos")]
+/// Detect the Apple chip model (e.g. "Apple M2 Max" on macOS, "iPad8,3" on iOS).
+#[cfg(any(target_os = "macos", target_os = "ios"))]
 fn detect_apple_chip() -> Option<String> {
-    let output = std::process::Command::new("sysctl")
-        .args(["-n", "machdep.cpu.brand_string"])
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !s.is_empty() {
-            return Some(s);
+    // Try machdep.cpu.brand_string first (macOS), then hw.machine (iOS).
+    for key in &["machdep.cpu.brand_string", "hw.machine"] {
+        if let Some(val) = sysctl_string(key) {
+            return Some(val);
         }
     }
     None
 }
 
+/// Read a sysctl string value using the C API (works in iOS sandbox unlike subprocess).
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn sysctl_string(name: &str) -> Option<String> {
+    use std::ffi::CString;
+    let c_name = CString::new(name).ok()?;
+    let mut len: usize = 0;
+    // First call to get buffer size
+    let ret = unsafe {
+        libc::sysctlbyname(c_name.as_ptr(), std::ptr::null_mut(), &mut len, std::ptr::null_mut(), 0)
+    };
+    if ret != 0 || len == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; len];
+    let ret = unsafe {
+        libc::sysctlbyname(c_name.as_ptr(), buf.as_mut_ptr() as *mut _, &mut len, std::ptr::null_mut(), 0)
+    };
+    if ret != 0 {
+        return None;
+    }
+    // Strip trailing null bytes
+    while buf.last() == Some(&0) {
+        buf.pop();
+    }
+    String::from_utf8(buf).ok().filter(|s| !s.is_empty())
+}
+
+/// Read a sysctl u64 value using the C API.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn sysctl_u64(name: &str) -> Option<u64> {
+    use std::ffi::CString;
+    let c_name = CString::new(name).ok()?;
+    let mut value: u64 = 0;
+    let mut len = std::mem::size_of::<u64>();
+    let ret = unsafe {
+        libc::sysctlbyname(c_name.as_ptr(), &mut value as *mut u64 as *mut _, &mut len, std::ptr::null_mut(), 0)
+    };
+    if ret == 0 && value > 0 {
+        Some(value)
+    } else {
+        None
+    }
+}
+
 /// Detect total system memory in bytes.
 fn detect_system_memory() -> u64 {
-    // On macOS, use sysctl for a reliable reading
-    #[cfg(target_os = "macos")]
+    // On macOS/iOS, use sysctl C API (works in iOS sandbox)
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
-        if let Ok(output) = std::process::Command::new("sysctl")
-            .args(["-n", "hw.memsize"])
-            .output()
-        {
-            if output.status.success() {
-                let s = String::from_utf8_lossy(&output.stdout);
-                if let Ok(bytes) = s.trim().parse::<u64>() {
-                    return bytes;
-                }
-            }
+        if let Some(bytes) = sysctl_u64("hw.memsize") {
+            return bytes;
         }
     }
 

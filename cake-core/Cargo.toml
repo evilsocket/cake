@@ -33,6 +33,7 @@ candle-nn = { version = "0.9" }
 candle-transformers = { version = "0.9" }
 image = "0.25.2"
 hf-hub = "0.5"
+libc = "0.2"
 sha2 = "0.10"
 hmac = "0.12"
 rand = "0.8"
