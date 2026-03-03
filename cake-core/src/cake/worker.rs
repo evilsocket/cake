@@ -134,21 +134,26 @@ impl<G: Generator + 'static> Worker<G> {
             );
         }
 
-        // Pre-create devices and var_builders for each GPU
-        let mut gpu_devices: Vec<Device> = Vec::new();
-        let mut gpu_var_builders: Vec<candle_nn::VarBuilder<'static>> = Vec::new();
+        let mut blocks = HashMap::new();
+        let mut layer_devices: HashMap<String, Device> = HashMap::new();
 
         if use_multi_gpu {
             let model_index = ctx.data_path.join("model.safetensors.index.json");
+
+            // Group layers by GPU assignment
+            let mut gpu_layer_groups: Vec<Vec<String>> = vec![vec![]; num_gpus];
+            for (i, name) in worker_topology.layers.iter().enumerate() {
+                let gpu_idx = i * num_gpus / worker_topology.layers.len();
+                gpu_layer_groups[gpu_idx].push(name.clone());
+            }
+
+            // Create per-GPU devices and VarBuilders (filtered to each GPU's layers)
+            let mut gpu_devices: Vec<Device> = Vec::new();
+            let mut gpu_var_builders: Vec<candle_nn::VarBuilder<'static>> = Vec::new();
+
             for ordinal in 0..num_gpus {
                 let dev = Device::new_cuda(ordinal)?;
 
-                // Disable cudarc event tracking for multi-GPU: cudarc's CudaStream::wait()
-                // rejects events from a different CudaContext (returns CUDA_ERROR_INVALID_CONTEXT).
-                // When cross-device transfers call device_ptr(), the source events belong to
-                // a different context, poisoning the destination context's error state.
-                // Disabling event tracking prevents events from being created on CudaSlices,
-                // which is safe since we use a single stream per device.
                 #[cfg(feature = "cuda")]
                 if let Device::Cuda(cuda_dev) = &dev {
                     unsafe {
@@ -156,50 +161,69 @@ impl<G: Generator + 'static> Worker<G> {
                     }
                 }
 
-                let vb = crate::utils::load_var_builder_from_index(
+                let vb = crate::utils::load_var_builder_for_specific_layers(
                     model_index.clone(),
                     ctx.dtype,
                     dev.clone(),
+                    &gpu_layer_groups[ordinal],
                     ctx.fp8,
                 )?;
                 log::info!("  GPU {} ready", ordinal);
                 gpu_devices.push(dev);
                 gpu_var_builders.push(vb);
             }
-        }
 
-        let mut blocks = HashMap::new();
-        let mut layer_devices: HashMap<String, Device> = HashMap::new();
+            // Load layers in parallel across GPUs
+            let mut handles = Vec::new();
+            for gpu_idx in 0..num_gpus {
+                let dev = gpu_devices[gpu_idx].clone();
+                let vb = gpu_var_builders[gpu_idx].clone();
+                let layers = std::mem::take(&mut gpu_layer_groups[gpu_idx]);
+                let mut thread_ctx = ctx.clone();
+                thread_ctx.device = dev.clone();
+                thread_ctx.var_builder = Some(vb);
 
-        for (i, block_layer_name) in worker_topology.layers.iter().enumerate() {
-            if use_multi_gpu {
-                // Assign layers to GPUs: split evenly
-                let gpu_idx = i * num_gpus / worker_topology.layers.len();
-                let dev = &gpu_devices[gpu_idx];
+                handles.push(std::thread::spawn(
+                    move || -> Result<Vec<(String, Device, Box<G::Shardable>)>> {
+                        #[cfg(feature = "cuda")]
+                        if let Device::Cuda(ref cuda_dev) = dev {
+                            cuda_dev
+                                .cuda_stream()
+                                .context()
+                                .bind_to_thread()
+                                .map_err(|e| {
+                                    anyhow!(
+                                        "failed to bind CUDA context for GPU {gpu_idx}: {e:?}"
+                                    )
+                                })?;
+                        }
 
-                log::info!("loading {} on cuda:{} ...", &block_layer_name, gpu_idx);
+                        let mut results = Vec::new();
+                        for layer_name in layers {
+                            log::info!("loading {} on cuda:{} ...", &layer_name, gpu_idx);
+                            let block =
+                                G::Shardable::load(layer_name.clone(), &thread_ctx)?;
+                            results.push((layer_name, dev.clone(), block));
+                        }
+                        Ok(results)
+                    },
+                ));
+            }
 
-                // Temporarily swap device and var_builder in context
-                let orig_device = ctx.device.clone();
-                let orig_vb = ctx.var_builder.take();
-
-                ctx.device = dev.clone();
-                ctx.var_builder = Some(gpu_var_builders[gpu_idx].clone());
-
-                let block = G::Shardable::load(block_layer_name.to_string(), ctx)?;
-
-                // Restore original context
-                ctx.device = orig_device;
-                ctx.var_builder = orig_vb;
-
-                layer_devices.insert(block_layer_name.to_string(), dev.clone());
-                blocks.insert(block_layer_name.to_string(), block);
-            } else {
+            // Collect results from all GPU threads
+            for handle in handles {
+                let results = handle
+                    .join()
+                    .map_err(|_| anyhow!("GPU loading thread panicked"))??;
+                for (name, dev, block) in results {
+                    layer_devices.insert(name.clone(), dev);
+                    blocks.insert(name, block);
+                }
+            }
+        } else {
+            for block_layer_name in worker_topology.layers.iter() {
                 log::info!("loading {} ...", &block_layer_name);
 
-                // NOTE: Do NOT prefix ctx.var_builder here — Transformer::load
-                // already calls vb.pp(&name) internally, so passing the root
-                // var_builder is correct.
                 let block = G::Shardable::load(block_layer_name.to_string(), ctx)?;
                 layer_devices.insert(block_layer_name.to_string(), ctx.device.clone());
                 blocks.insert(block_layer_name.to_string(), block);

@@ -127,13 +127,27 @@ impl TextModelBase {
 
         log::info!("loading {} blocks ...", config.num_hidden_layers);
 
-        let mut blocks: Vec<Box<dyn Forwarder>> = vec![];
+        // Two-pass loading: local layers first (no network wait), then remote
+        // layers (may block until workers finish loading). This overlaps
+        // master's local layer loading with worker startup time.
+        let mut blocks: Vec<Option<Box<dyn Forwarder>>> =
+            (0..config.num_hidden_layers).map(|_| None).collect();
 
+        // Pass 1: load local layers
+        for i in 0..config.num_hidden_layers {
+            let block_layer_name = format!("{prefix}.layers.{i}");
+            if ctx.topology.get_node_for_layer(&block_layer_name).is_none() {
+                log::info!("loading {} ...", &block_layer_name);
+                blocks[i] = Some(B::load(block_layer_name, ctx)?);
+            }
+        }
+
+        // Pass 2: connect to remote layers
         for i in 0..config.num_hidden_layers {
             let block_layer_name = format!("{prefix}.layers.{i}");
             if let Some((_node_name, node)) = ctx.topology.get_node_for_layer(&block_layer_name) {
                 log::info!("connecting {} to {} ...", &block_layer_name, &node.host);
-                blocks.push(Box::new(
+                blocks[i] = Some(Box::new(
                     crate::cake::Client::new(
                         ctx.device.clone(),
                         &node.host,
@@ -142,11 +156,10 @@ impl TextModelBase {
                     )
                     .await?,
                 ));
-            } else {
-                log::info!("loading {} ...", &block_layer_name);
-                blocks.push(B::load(block_layer_name.clone(), ctx)?);
             }
         }
+
+        let blocks: Vec<Box<dyn Forwarder>> = blocks.into_iter().map(|b| b.unwrap()).collect();
 
         for block in &blocks {
             log::info!("  {}", block)

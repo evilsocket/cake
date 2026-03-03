@@ -85,7 +85,16 @@ pub fn load_safetensors_paths_from_index(
 
 /// Pre-read safetensor files into the OS page cache so that subsequent
 /// mmap access doesn't trigger per-tensor page faults during layer loading.
+/// Uses OnceLock to skip redundant calls (e.g. multi-GPU VarBuilder creation).
 fn prefetch_safetensors(filenames: &[PathBuf]) -> Result<()> {
+    use std::sync::OnceLock;
+    static DONE: OnceLock<()> = OnceLock::new();
+
+    if DONE.get().is_some() {
+        log::info!("safetensor files already in page cache, skipping prefetch");
+        return Ok(());
+    }
+
     use std::io::Read;
     let start = std::time::Instant::now();
     let mut total_bytes: u64 = 0;
@@ -103,6 +112,8 @@ fn prefetch_safetensors(filenames: &[PathBuf]) -> Result<()> {
         human_bytes::human_bytes(total_bytes as f64),
         start.elapsed().as_secs_f64()
     );
+
+    DONE.set(()).ok();
     Ok(())
 }
 
@@ -193,6 +204,72 @@ pub fn load_var_builder_for_local_layers<'a>(
             .filter_map(|v| v.as_str())
             .collect::<std::collections::HashSet<_>>()
             .len()
+    );
+
+    prefetch_safetensors(&filenames)?;
+
+    if fp8 {
+        unsafe {
+            fp8::load_fp8_var_builder(&filenames, dtype, &device)
+                .map_err(|e| anyhow!("can't create fp8 varbuilder from tensors: {:?}", e))
+        }
+    } else {
+        unsafe {
+            VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)
+                .map_err(|e| anyhow!("can't create varbuilder from tensors: {:?}", e))
+        }
+    }
+}
+
+/// Create a VarBuilder that only loads safetensors shards containing tensors
+/// for the given layer prefixes. Workers use this to skip shards that only
+/// contain layers assigned to other nodes.
+pub fn load_var_builder_for_specific_layers<'a>(
+    tensor_index: PathBuf,
+    dtype: DType,
+    device: Device,
+    layer_prefixes: &[String],
+    fp8: bool,
+) -> Result<VarBuilder<'a>> {
+    if !tensor_index.exists() || layer_prefixes.is_empty() {
+        return load_var_builder_from_index(tensor_index, dtype, device, fp8);
+    }
+
+    let parent_dir = tensor_index.parent().unwrap();
+    let json_data = std::fs::read_to_string(&tensor_index)
+        .map_err(|e| anyhow!("can't read {}: {:?}", tensor_index.display(), e))?;
+    let json: serde_json::Value = serde_json::from_str(&json_data)
+        .map_err(|e| anyhow!("can't parse {}: {:?}", tensor_index.display(), e))?;
+    let weight_map = json
+        .get("weight_map")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| anyhow!("no weight_map in {}", tensor_index.display()))?;
+
+    let mut needed_shards: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (tensor_name, shard_file) in weight_map {
+        let is_needed = layer_prefixes
+            .iter()
+            .any(|prefix| tensor_name.starts_with(&format!("{}.", prefix)));
+        if is_needed {
+            if let Some(filename) = shard_file.as_str() {
+                needed_shards.insert(filename.to_string());
+            }
+        }
+    }
+
+    let total_shards = weight_map
+        .values()
+        .filter_map(|v| v.as_str())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+
+    let filenames: Vec<PathBuf> = needed_shards.iter().map(|f| parent_dir.join(f)).collect();
+
+    log::info!(
+        "loading {} of {} shard file(s) for {} layers",
+        filenames.len(),
+        total_shards,
+        layer_prefixes.len()
     );
 
     prefetch_safetensors(&filenames)?;
