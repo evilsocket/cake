@@ -190,9 +190,8 @@ impl GatedDeltaNet {
     }
 
     /// Apply causal depthwise conv1d + SiLU on a full sequence.
-    /// Uses broadcast_mul+sum per timestep — cuDNN's grouped conv1d is
-    /// catastrophically slow (~200×) for large channel counts with tiny kernels
-    /// (e.g. 10240 groups × kernel_size=4 on Qwen3.5-27B).
+    /// Uses vectorized unfold to process all timesteps in ~5 kernel calls
+    /// instead of 3*N calls from a per-timestep loop.
     /// x: (batch, seq_len, channels)
     fn causal_conv1d_seq(&self, x: &Tensor) -> Result<(Tensor, Tensor)> {
         let (batch, seq_len, channels) = x.dims3()?;
@@ -210,16 +209,16 @@ impl GatedDeltaNet {
             x_t.contiguous()?
         };
 
-        // Depthwise conv via broadcast_mul+sum per timestep
-        // weight: (channels, kernel_size), padded: (batch, channels, seq_len + pad)
-        let weight = self.conv1d_weight.unsqueeze(0)?; // (1, channels, kernel_size)
-        let mut outputs = Vec::with_capacity(seq_len);
-        for t in 0..seq_len {
-            let window = padded.narrow(2, t, kernel_size)?;
-            let y = window.broadcast_mul(&weight)?.sum(D::Minus1)?;
-            outputs.push(y);
-        }
-        let y = Tensor::stack(&outputs, 1)?; // (batch, seq_len, channels)
+        // Vectorized depthwise conv1d via unfold:
+        // unfold creates all sliding windows as a strided view (zero-copy),
+        // then a single broadcast_mul+sum processes all timesteps at once.
+        // (batch, channels, seq_len+pad) -> (batch, channels, seq_len, kernel_size)
+        let unfolded = padded.unfold(2, kernel_size, 1)?.contiguous()?;
+        // weight: (channels, kernel_size) -> (1, channels, 1, kernel_size)
+        let weight = self.conv1d_weight.unsqueeze(0)?.unsqueeze(2)?;
+        let y = unfolded.broadcast_mul(&weight)?.sum(D::Minus1)?;
+        // (batch, channels, seq_len) -> (batch, seq_len, channels)
+        let y = y.transpose(1, 2)?.contiguous()?;
 
         // SiLU activation
         let y = candle_nn::ops::silu(&y)?;
