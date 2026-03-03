@@ -366,25 +366,52 @@ struct WorkerView: View {
         switch result {
         case .success(let directory):
             guard directory.startAccessingSecurityScopedResource() else {
+                print("[cake] ERROR: startAccessingSecurityScopedResource failed")
                 status = .error("access denied")
                 return
             }
 
             let basePath = directory.path()
             let topologyPath = basePath + "/topology.yml"
-            let modelPath = basePath + "/model"
+
+            print("[cake] selected directory: \(basePath)")
+            print("[cake] topology path: \(topologyPath)")
+            print("[cake] model path: \(basePath)")
+            print("[cake] model type: \(selectedModelType)")
+            print("[cake] worker name: \(workerName)")
+
+            // Check if topology.yml exists
+            if !FileManager.default.fileExists(atPath: topologyPath) {
+                print("[cake] WARNING: topology.yml not found at \(topologyPath)")
+            }
+
+            // Check if config.json exists (model directory marker)
+            let configPath = basePath + "/config.json"
+            if FileManager.default.fileExists(atPath: configPath) {
+                print("[cake] found config.json - valid model directory")
+            } else {
+                print("[cake] WARNING: config.json not found at \(configPath)")
+            }
 
             status = .starting
 
             DispatchQueue.global(qos: .userInitiated).async {
-                startWorker(name: workerName, modelPath: modelPath, topologyPath: topologyPath, modelType: selectedModelType)
+                // Set running status before the blocking call
+                DispatchQueue.main.async {
+                    status = .running("worker started")
+                }
+
+                print("[cake] calling startWorker FFI...")
+                startWorker(name: workerName, modelPath: basePath, topologyPath: topologyPath, modelType: selectedModelType)
+                print("[cake] startWorker returned (worker exited)")
 
                 DispatchQueue.main.async {
-                    status = .running("connected")
+                    status = .idle
                 }
             }
 
         case .failure(let error):
+            print("[cake] ERROR: file picker failed: \(error.localizedDescription)")
             status = .error(error.localizedDescription)
         }
     }
