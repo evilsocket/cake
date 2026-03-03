@@ -38,20 +38,17 @@ fn metal_supports_simdgroup_matrix() -> bool {
 
     log_ios(&format!("[cake-ios] hw.machine: {}", machine));
 
-    // Parse device family and generation to determine A-series chip
+    // Parse device identifier like "iPad8,3" → family="iPad", generation=8
     // simdgroup_matrix requires Apple GPU Family 6+ (A13 Bionic or later)
     //
     // iPhone: iPhone12,x = A13, iPhone13,x = A14, iPhone14,x = A15, etc.
     // iPad:   iPad8,x = A12X, iPad11,x = A12, iPad13,x = M1, iPad14,x = M2
     //         iPad12,x = A14, iPad16,x = M4
     // iPod:   all A12 or older
-    let parts: Vec<&str> = machine.splitn(2, |c: char| !c.is_alphabetic()).collect();
-    let (family, gen_str) = if parts.len() == 2 {
-        (parts[0], parts[1])
-    } else {
-        return false;
-    };
-    let generation: u32 = gen_str.split(',').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let alpha_end = machine.find(|c: char| !c.is_alphabetic()).unwrap_or(machine.len());
+    let family = &machine[..alpha_end];
+    let rest = &machine[alpha_end..];
+    let generation: u32 = rest.split(',').next().and_then(|s| s.parse().ok()).unwrap_or(0);
 
     let supported = match family {
         "iPhone" => generation >= 12,  // iPhone12,x = A13
@@ -62,7 +59,7 @@ fn metal_supports_simdgroup_matrix() -> bool {
             // iPad13,x = M1 (supported)
             // iPad14,x = M2 (supported)
             // iPad16,x = M4 (supported)
-            generation >= 12 && generation != 11
+            generation >= 12
         }
         _ => false,
     };
@@ -213,6 +210,7 @@ async fn run_zero_config_worker(
         model_type: ModelType::TextModel,
         topology_override: Some(topology),
         cpu: force_cpu,
+        cluster_key: Some(cluster_key.to_string()),
         ..Default::default()
     };
 
