@@ -59,7 +59,13 @@ pub struct GatedDeltaNet {
     neg_a_exp_f32: Tensor,
     dt_bias_f32: Tensor,
     conv1d_weight_3d: Tensor,
-    q_scale: f64,
+
+    // Fused L2-norm alpha vectors: rms_norm(x, alpha, eps/N) = L2_normalize(x) * scale
+    // Q alpha includes q_scale: 1/(key_head_dim) = 1/sqrt(N) * 1/sqrt(N)
+    // K alpha is plain: 1/sqrt(key_head_dim)
+    l2_alpha_q: Tensor,
+    l2_alpha_k: Tensor,
+    l2_norm_eps: f32,
 
     num_heads: usize,
     num_key_heads: usize,
@@ -109,7 +115,23 @@ impl GatedDeltaNet {
         // Precompute constants in F32 to avoid per-call recomputation
         let neg_a_exp_f32 = a_log.to_dtype(DType::F32)?.exp()?.neg()?;
         let dt_bias_f32 = dt_bias.to_dtype(DType::F32)?;
-        let q_scale = 1.0 / (key_head_dim as f64).sqrt();
+
+        // Precompute alpha vectors for fused L2 normalization via rms_norm.
+        // rms_norm(x, alpha, eps/N) = x / sqrt(mean(x²) + eps/N) * alpha
+        //                            = x / sqrt((sum(x²)+eps)/N) * alpha
+        //                            = x * sqrt(N) / sqrt(sum(x²)+eps) * alpha
+        // Setting alpha = 1/sqrt(N): gives L2_normalize(x)
+        // Setting alpha = 1/N:       gives L2_normalize(x) * 1/sqrt(N) = L2_normalize(x) * q_scale
+        let dev = neg_a_exp_f32.device().clone();
+        let inv_sqrt_dim = 1.0f32 / (key_head_dim as f32).sqrt();
+        let inv_dim = inv_sqrt_dim * inv_sqrt_dim; // 1/N
+        let l2_alpha_q = Tensor::from_slice(
+            &vec![inv_dim; key_head_dim], key_head_dim, &dev,
+        )?;
+        let l2_alpha_k = Tensor::from_slice(
+            &vec![inv_sqrt_dim; key_head_dim], key_head_dim, &dev,
+        )?;
+        let l2_norm_eps = 1e-6f32 / key_head_dim as f32;
 
         let norm = RmsNormGated::load(value_head_dim, cfg.rms_norm_eps, vb.pp("norm"))?;
 
@@ -121,7 +143,9 @@ impl GatedDeltaNet {
             neg_a_exp_f32,
             dt_bias_f32,
             conv1d_weight_3d,
-            q_scale,
+            l2_alpha_q,
+            l2_alpha_k,
+            l2_norm_eps,
             num_heads,
             num_key_heads,
             key_head_dim,
@@ -207,15 +231,6 @@ impl GatedDeltaNet {
             .expand((b, s, h, n_rep, d))?
             .contiguous()?
             .reshape((b, s, h * n_rep, d))
-    }
-
-    /// L2-normalize along the last dimension, returning F32.
-    /// Stays in F32 to avoid round-tripping when the result feeds into F32 recurrent computation.
-    fn l2_normalize_f32(x: &Tensor) -> Result<Tensor> {
-        let x_f32 = x.to_dtype(DType::F32)?;
-        let sum_sq = x_f32.sqr()?.sum_keepdim(D::Minus1)?;
-        let inv_norm = (sum_sq + 1e-6)?.sqrt()?.recip()?;
-        x_f32.broadcast_mul(&inv_norm)
     }
 
     /// Recurrent forward for a single timestep (token-by-token generation).
@@ -326,11 +341,15 @@ impl GatedDeltaNet {
         let v = v.reshape((batch, seq_len, self.num_heads, self.value_head_dim))
             .map_err(|e| anyhow!("v reshape: {e}"))?;
 
-        // L2-normalize Q and K, staying in F32 to avoid round-tripping.
-        // The recurrent computation runs entirely in F32.
-        let q = Self::l2_normalize_f32(&q).map_err(|e| anyhow!("l2norm q: {e}"))?;
-        let k = Self::l2_normalize_f32(&k).map_err(|e| anyhow!("l2norm k: {e}"))?;
-        let q = (q * self.q_scale).map_err(|e| anyhow!("q scale: {e}"))?;
+        // L2-normalize Q and K using fused rms_norm kernel (2 kernels each instead of 7+1).
+        // rms_norm(x, alpha=1/N, eps/N) = L2_normalize(x) * q_scale (for Q)
+        // rms_norm(x, alpha=1/√N, eps/N) = L2_normalize(x) (for K)
+        let q = q.to_dtype(DType::F32).map_err(|e| anyhow!("q to_f32: {e}"))?;
+        let q = candle_nn::ops::rms_norm(&q.contiguous()?, &self.l2_alpha_q, self.l2_norm_eps)
+            .map_err(|e| anyhow!("q l2norm: {e}"))?;
+        let k = k.to_dtype(DType::F32).map_err(|e| anyhow!("k to_f32: {e}"))?;
+        let k = candle_nn::ops::rms_norm(&k.contiguous()?, &self.l2_alpha_k, self.l2_norm_eps)
+            .map_err(|e| anyhow!("k l2norm: {e}"))?;
 
         // Convert v to F32 once before the recurrent loop
         let v = v.to_dtype(DType::F32).map_err(|e| anyhow!("v to f32: {e}"))?;
