@@ -299,8 +299,8 @@ impl GatedDeltaNet {
         // Metal requires periodic command buffer flushes to prevent catastrophic
         // slowdown from command accumulation. Each GDN layer dispatches ~40 Metal
         // commands; without intermediate syncs, performance degrades by 50x+.
-        // Three sync points (after in_proj, after recurrent, after out_proj) keep
-        // each section under ~20 commands. Zero overhead on CUDA/CPU.
+        // Four sync points (after in_proj, after conv1d, after recurrent, after
+        // out_proj) keep each section under ~25 commands. Zero overhead on CUDA/CPU.
         let metal_sync = x.device().is_metal();
 
         // Single fused projection: QKV + A + B + Z (with dt_bias absorbed into A bias)
@@ -346,6 +346,10 @@ impl GatedDeltaNet {
             self.causal_conv1d_seq(&mixed_qkv)
                 .map_err(|e| anyhow!("conv1d_seq: {e}"))?
         };
+
+        // Flush Metal commands after conv1d operations
+        if metal_sync { let _ = x.device().synchronize(); }
+
         cache.set_conv_state(block_idx, new_conv_state);
 
         // Split into Q, K, V: (batch, seq_len, dim)
