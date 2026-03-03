@@ -57,7 +57,7 @@ pub struct GatedDeltaNet {
 
     // Precomputed constants (F32, avoids per-call recomputation)
     neg_a_exp_f32: Tensor,
-    dt_bias_f32: Tensor,
+    // Conv1d weights stored as F32 (matches proj after bulk conversion)
     conv1d_weight_3d: Tensor,
 
     // Fused L2-norm alpha vectors: rms_norm(x, alpha, eps/N) = L2_normalize(x) * scale
@@ -99,22 +99,33 @@ impl GatedDeltaNet {
         let b_w = vb.pp("in_proj_b").get((num_heads, h_size), "weight")?;
         let z_w = vb.pp("in_proj_z").get((value_dim, h_size), "weight")?;
         let fused_w = Tensor::cat(&[&qkv_w, &a_w, &b_w, &z_w], 0)?;
-        let in_proj = Linear::new(fused_w, None);
+
+        // Absorb dt_bias into the projection bias so `a` output already includes it.
+        // Bias layout: [zeros for QKV | dt_bias for A | zeros for B | zeros for Z]
+        let dt_bias = vb.get(num_heads, "dt_bias")?;
+        let total_out = conv_dim + num_heads + num_heads + value_dim;
+        let dt_bias_vec = dt_bias.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+        let mut bias_data = vec![0.0f32; total_out];
+        for i in 0..num_heads {
+            bias_data[conv_dim + i] = dt_bias_vec[i];
+        }
+        let dev_for_bias = fused_w.device().clone();
+        let fused_bias = Tensor::from_slice(&bias_data, total_out, &dev_for_bias)?
+            .to_dtype(fused_w.dtype())?;
+        let in_proj = Linear::new(fused_w, Some(fused_bias));
 
         let out_w = vb.pp("out_proj").get((h_size, value_dim), "weight")?;
         let out_proj = Linear::new(out_w, None);
 
-        // Conv1d weight: stored as (conv_dim, 1, kernel_size)
-        let conv1d_weight_3d = vb.get((conv_dim, 1, la.conv_kernel_dim), "conv1d.weight")?;
-        // Squeezed view for causal_conv1d_step: (conv_dim, kernel_size)
+        // Conv1d weight: stored as F32 (matches post-projection F32 data path).
+        let conv1d_weight_3d = vb.get((conv_dim, 1, la.conv_kernel_dim), "conv1d.weight")?
+            .to_dtype(DType::F32)?;
         let conv1d_weight = conv1d_weight_3d.squeeze(1)?;
 
         let a_log = vb.get(num_heads, "A_log")?;
-        let dt_bias = vb.get(num_heads, "dt_bias")?;
 
         // Precompute constants in F32 to avoid per-call recomputation
         let neg_a_exp_f32 = a_log.to_dtype(DType::F32)?.exp()?.neg()?;
-        let dt_bias_f32 = dt_bias.to_dtype(DType::F32)?;
 
         // Precompute alpha vectors for fused L2 normalization via rms_norm.
         // rms_norm(x, alpha, eps/N) = x / sqrt(mean(x²) + eps/N) * alpha
@@ -141,7 +152,6 @@ impl GatedDeltaNet {
             norm,
             out_proj,
             neg_a_exp_f32,
-            dt_bias_f32,
             conv1d_weight_3d,
             l2_alpha_q,
             l2_alpha_k,
@@ -276,11 +286,16 @@ impl GatedDeltaNet {
         let (batch, seq_len, _hidden) = x.dims3().map_err(|e| anyhow!("dims3: {e}"))?;
         let model_dtype = x.dtype();
 
-        // Single fused projection: QKV + A + B + Z
+        // Single fused projection: QKV + A + B + Z (with dt_bias absorbed into A bias)
         let proj = self.in_proj.forward(x)
             .map_err(|e| anyhow!("in_proj: {e}"))?;
 
-        // Split fused output
+        // Bulk F32 conversion: one kernel instead of 5 individual to_dtype calls.
+        // Everything downstream (conv1d, L2 norm, gates, recurrent step) operates in F32.
+        let proj = proj.to_dtype(DType::F32)
+            .map_err(|e| anyhow!("proj to_f32: {e}"))?;
+
+        // Split fused output (all views on F32 tensor — zero cost)
         let mixed_qkv = proj.narrow(2, 0, self.conv_dim)
             .map_err(|e| anyhow!("split qkv: {e}"))?;
         let a = proj.narrow(2, self.conv_dim, self.num_heads)
@@ -341,30 +356,24 @@ impl GatedDeltaNet {
         let v = v.reshape((batch, seq_len, self.num_heads, self.value_head_dim))
             .map_err(|e| anyhow!("v reshape: {e}"))?;
 
-        // L2-normalize Q and K using fused rms_norm kernel (2 kernels each instead of 7+1).
+        // L2-normalize Q and K using fused rms_norm kernel (1 kernel each).
+        // Q and K are already F32 from bulk conversion — no individual to_dtype needed.
         // rms_norm(x, alpha=1/N, eps/N) = L2_normalize(x) * q_scale (for Q)
         // rms_norm(x, alpha=1/√N, eps/N) = L2_normalize(x) (for K)
-        let q = q.to_dtype(DType::F32).map_err(|e| anyhow!("q to_f32: {e}"))?;
         let q = candle_nn::ops::rms_norm(&q.contiguous()?, &self.l2_alpha_q, self.l2_norm_eps)
             .map_err(|e| anyhow!("q l2norm: {e}"))?;
-        let k = k.to_dtype(DType::F32).map_err(|e| anyhow!("k to_f32: {e}"))?;
         let k = candle_nn::ops::rms_norm(&k.contiguous()?, &self.l2_alpha_k, self.l2_norm_eps)
             .map_err(|e| anyhow!("k l2norm: {e}"))?;
+        // v is already F32 from bulk conversion
 
-        // Convert v to F32 once before the recurrent loop
-        let v = v.to_dtype(DType::F32).map_err(|e| anyhow!("v to f32: {e}"))?;
-
-        // Compute gating parameters in F32 using precomputed constants
-        // g = neg_a_exp * softplus(a + dt_bias), per head per timestep
-        let a_f32 = a.to_dtype(DType::F32).map_err(|e| anyhow!("a dtype: {e}"))?;
-        let a_plus_dt = a_f32.broadcast_add(&self.dt_bias_f32).map_err(|e| anyhow!("a+dt: {e}"))?;
-        let softplus_a = stable_softplus(&a_plus_dt)?;
+        // Compute gating parameters — a already includes dt_bias (absorbed into projection bias),
+        // already F32 from bulk conversion. Saves 2 kernels (to_dtype + broadcast_add).
+        let softplus_a = stable_softplus(&a)?;
         let g = softplus_a.broadcast_mul(&self.neg_a_exp_f32)
             .map_err(|e| anyhow!("g compute: {e}"))?;
 
-        // beta = sigmoid(b) — computed in F32
-        let beta = candle_nn::ops::sigmoid(&b.to_dtype(DType::F32)
-            .map_err(|e| anyhow!("b dtype: {e}"))?)
+        // beta = sigmoid(b) — already F32 from bulk conversion
+        let beta = candle_nn::ops::sigmoid(&b)
             .map_err(|e| anyhow!("sigmoid: {e}"))?;
 
         // Get or initialize recurrent state (always F32)
