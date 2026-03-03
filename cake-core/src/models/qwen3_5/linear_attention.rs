@@ -295,8 +295,13 @@ impl GatedDeltaNet {
     ) -> anyhow::Result<Tensor> {
         let (batch, seq_len, _hidden) = x.dims3().map_err(|e| anyhow!("dims3: {e}"))?;
         let model_dtype = x.dtype();
+        let is_metal = x.device().is_metal();
+        let sync = |t: &Tensor| {
+            if is_metal { let _ = t.device().synchronize(); }
+        };
 
         // Single fused projection: QKV + A + B + Z (with dt_bias absorbed into A bias)
+        let t0 = std::time::Instant::now();
         let proj = self.in_proj.forward(x)
             .map_err(|e| anyhow!("in_proj: {e}"))?;
 
@@ -304,6 +309,8 @@ impl GatedDeltaNet {
         // Everything downstream (conv1d, L2 norm, gates, recurrent step) operates in F32.
         let proj = proj.to_dtype(DType::F32)
             .map_err(|e| anyhow!("proj to_f32: {e}"))?;
+        sync(&proj);
+        let t1 = std::time::Instant::now();
 
         // Split fused output (all views on F32 tensor — zero cost)
         let mixed_qkv = proj.narrow(2, 0, self.conv_dim)
@@ -316,6 +323,7 @@ impl GatedDeltaNet {
             .map_err(|e| anyhow!("split z: {e}"))?;
 
         // Apply causal conv1d + SiLU
+        let t2 = std::time::Instant::now();
         let (mixed_qkv, new_conv_state) = if seq_len == 1 {
             if let Some(conv_state) = cache.get_conv_state(block_idx) {
                 let (y, s) = self.causal_conv1d_step(&mixed_qkv, conv_state)
@@ -336,6 +344,8 @@ impl GatedDeltaNet {
             self.causal_conv1d_seq(&mixed_qkv)
                 .map_err(|e| anyhow!("conv1d_seq: {e}"))?
         };
+        sync(&mixed_qkv);
+        let t3 = std::time::Instant::now();
         cache.set_conv_state(block_idx, new_conv_state);
 
         // Split into Q, K, V: (batch, seq_len, dim)
@@ -399,6 +409,7 @@ impl GatedDeltaNet {
         };
 
         // Recurrent processing: all inputs are F32, no per-step dtype conversions
+        let t4 = std::time::Instant::now();
         let output = if seq_len == 1 {
             // Single token: skip loop and stack overhead
             let q_t = q.squeeze(1)?;
@@ -428,6 +439,9 @@ impl GatedDeltaNet {
                 .map_err(|e| anyhow!("stack outputs: {e}"))?
         };
 
+        sync(&output);
+        let t5 = std::time::Instant::now();
+
         // Save updated state
         cache.set_recurrent_state(block_idx, state);
 
@@ -446,6 +460,20 @@ impl GatedDeltaNet {
         // Project output
         let output = self.out_proj.forward(&output)
             .map_err(|e| anyhow!("out_proj: {e}"))?;
+        sync(&output);
+        let t6 = std::time::Instant::now();
+
+        log::debug!(
+            "GDN[{}] seq={} in_proj={:.1}ms split={:.1}ms conv={:.1}ms prep+gates={:.1}ms recurrent={:.1}ms norm+out={:.1}ms total={:.1}ms",
+            block_idx, seq_len,
+            (t1 - t0).as_secs_f64() * 1000.0,
+            (t2 - t1).as_secs_f64() * 1000.0,
+            (t3 - t2).as_secs_f64() * 1000.0,
+            (t4 - t3).as_secs_f64() * 1000.0,
+            (t5 - t4).as_secs_f64() * 1000.0,
+            (t6 - t5).as_secs_f64() * 1000.0,
+            (t6 - t0).as_secs_f64() * 1000.0,
+        );
 
         Ok(output)
     }
