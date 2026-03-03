@@ -149,10 +149,14 @@ impl Qwen3_5FullAttention {
         let q = self.q_norm.forward(&query).map_err(|e| anyhow!("q_norm: {e}"))?;
         let k = self.k_norm.forward(&k).map_err(|e| anyhow!("k_norm: {e}"))?;
 
-        // Transpose to (batch, heads, seq, head_dim) for attention
-        let q = q.transpose(1, 2)?.contiguous().map_err(|e| anyhow!("q transpose: {e}"))?;
-        let k = k.transpose(1, 2)?.contiguous().map_err(|e| anyhow!("k transpose: {e}"))?;
-        let v = v.transpose(1, 2).map_err(|e| anyhow!("v transpose: {e}"))?;
+        // Transpose to (batch, heads, seq, head_dim) for attention.
+        // For seq_len=1, squeeze+unsqueeze is zero-copy (avoids contiguous copy kernel)
+        // because removing a size-1 dim preserves contiguity.
+        let (q, k, v) = if seq_len == 1 {
+            (q.squeeze(1)?.unsqueeze(2)?, k.squeeze(1)?.unsqueeze(2)?, v.squeeze(1)?.unsqueeze(2)?)
+        } else {
+            (q.transpose(1, 2)?.contiguous()?, k.transpose(1, 2)?.contiguous()?, v.transpose(1, 2)?)
+        };
 
         // Apply partial RoPE
         let q = self.apply_partial_rotary_emb(&q, index_pos, cache)
