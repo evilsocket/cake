@@ -469,20 +469,16 @@ impl<G: Generator + 'static> Worker<G> {
                 // get layer block by name
                 if let Some(block) = context.blocks.get(&layer_name) {
                     // run forward pass
-                    let layer_start = Instant::now();
                     x = match block
                         .forward(&x, index_pos, block_idx, &mut context.context)
                         .await
                     {
                         Ok(t) => {
-                            // Force GPU sync by reading one value — measures actual GPU time
-                            let _ = t.sum_all().and_then(|s| s.to_dtype(candle_core::DType::F32)).and_then(|s| s.to_vec0::<f32>());
-                            let layer_elapsed = layer_start.elapsed();
-                            log::debug!(
-                                "[{}] layer {} (block_idx={}) fwd+sync: {:.1}ms",
-                                &client, &layer_name, block_idx,
-                                layer_elapsed.as_secs_f64() * 1000.0,
-                            );
+                            // Metal requires per-layer sync to prevent command buffer
+                            // accumulation which causes catastrophic performance degradation.
+                            if t.device().is_metal() {
+                                let _ = t.device().synchronize();
+                            }
                             t
                         }
                         Err(e) => {
