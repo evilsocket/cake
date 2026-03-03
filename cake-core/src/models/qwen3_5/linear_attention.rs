@@ -81,6 +81,10 @@ pub struct GatedDeltaNet {
 
     // Split offsets for the fused projection output
     conv_dim: usize,
+
+    // CPU copies of constants for seq_len=1 fast path (avoids GPU kernel launches)
+    neg_a_exp_cpu: Vec<f32>,
+    dt_bias_cpu: Vec<f32>,
 }
 
 impl GatedDeltaNet {
@@ -121,6 +125,10 @@ impl GatedDeltaNet {
         let dt_bias_f32 = dt_bias.to_dtype(DType::F32)?;
         let q_scale = 1.0 / (key_head_dim as f64).sqrt();
 
+        // CPU copies for seq_len=1 fast path
+        let neg_a_exp_cpu = neg_a_exp_f32.flatten_all()?.to_vec1::<f32>()?;
+        let dt_bias_cpu = dt_bias_f32.flatten_all()?.to_vec1::<f32>()?;
+
         let norm = RmsNormGated::load(value_head_dim, cfg.rms_norm_eps, vb.pp("norm"))?;
 
         Ok(Self {
@@ -140,6 +148,8 @@ impl GatedDeltaNet {
             value_dim,
             conv_kernel_size: la.conv_kernel_dim,
             conv_dim,
+            neg_a_exp_cpu,
+            dt_bias_cpu,
         })
     }
 
@@ -261,6 +271,177 @@ impl GatedDeltaNet {
         Ok((output, state))
     }
 
+    /// L2-normalize each head vector on CPU, with optional scale and GQA head repetition.
+    /// Combines normalize + scale + repeat_key_heads into a single pass.
+    fn l2_normalize_heads_cpu(
+        data: &[f32],
+        num_key_heads: usize,
+        head_dim: usize,
+        scale: f32,
+        n_rep: usize,
+    ) -> Vec<f32> {
+        let output_heads = num_key_heads * n_rep;
+        let mut result = Vec::with_capacity(output_heads * head_dim);
+        for h in 0..num_key_heads {
+            let start = h * head_dim;
+            let end = start + head_dim;
+            let head_data = &data[start..end];
+            let sum_sq: f32 = head_data.iter().map(|x| x * x).sum();
+            let inv_norm = scale / (sum_sq + 1e-6).sqrt();
+            for _ in 0..n_rep {
+                for &x in head_data {
+                    result.push(x * inv_norm);
+                }
+            }
+        }
+        result
+    }
+
+    /// Compute g = neg_a_exp * softplus(a + dt_bias) on CPU.
+    fn compute_gates_cpu(a: &[f32], dt_bias: &[f32], neg_a_exp: &[f32]) -> Vec<f32> {
+        a.iter()
+            .zip(dt_bias.iter().zip(neg_a_exp.iter()))
+            .map(|(&a_val, (&dt, &neg_a))| {
+                let x = a_val + dt;
+                let sp = if x > 20.0 {
+                    x
+                } else if x < -20.0 {
+                    0.0
+                } else {
+                    (1.0f32 + x.exp()).ln()
+                };
+                neg_a * sp
+            })
+            .collect()
+    }
+
+    /// Compute beta = sigmoid(b) on CPU.
+    fn compute_sigmoid_cpu(b: &[f32]) -> Vec<f32> {
+        b.iter()
+            .map(|&b_val| 1.0f32 / (1.0 + (-b_val).exp()))
+            .collect()
+    }
+
+    /// Optimized forward for single-token generation (seq_len=1).
+    ///
+    /// Moves small tensor operations (L2 normalize, gates, sigmoid) to CPU to
+    /// eliminate ~23 GPU kernel launches per layer. For the 0.8B model with 18
+    /// GatedDeltaNet layers, this saves ~1.5-2ms per token.
+    fn forward_generation(
+        &self,
+        x: &Tensor,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        a: &Tensor,
+        b: &Tensor,
+        z: &Tensor,
+        block_idx: usize,
+        cache: &mut Cache,
+        model_dtype: DType,
+    ) -> anyhow::Result<Tensor> {
+        let dev = x.device();
+
+        // --- GPU→CPU: batch dtype conversions then read ---
+        // Queue all to_dtype(F32) GPU kernels before any reads so they pipeline.
+        let q_f32_t = q.to_dtype(DType::F32).map_err(|e| anyhow!("q to_f32: {e}"))?;
+        let k_f32_t = k.to_dtype(DType::F32).map_err(|e| anyhow!("k to_f32: {e}"))?;
+        let v_f32_t = v.to_dtype(DType::F32).map_err(|e| anyhow!("v to_f32: {e}"))?;
+        let a_f32_t = a.to_dtype(DType::F32).map_err(|e| anyhow!("a to_f32: {e}"))?;
+        let b_f32_t = b.to_dtype(DType::F32).map_err(|e| anyhow!("b to_f32: {e}"))?;
+
+        // First to_vec1 triggers GPU sync; subsequent reads are instant.
+        let q_cpu = q_f32_t.flatten_all()?.to_vec1::<f32>()
+            .map_err(|e| anyhow!("q read: {e}"))?;
+        let k_cpu = k_f32_t.flatten_all()?.to_vec1::<f32>()
+            .map_err(|e| anyhow!("k read: {e}"))?;
+        let v_cpu = v_f32_t.flatten_all()?.to_vec1::<f32>()
+            .map_err(|e| anyhow!("v read: {e}"))?;
+        let a_cpu = a_f32_t.flatten_all()?.to_vec1::<f32>()
+            .map_err(|e| anyhow!("a read: {e}"))?;
+        let b_cpu = b_f32_t.flatten_all()?.to_vec1::<f32>()
+            .map_err(|e| anyhow!("b read: {e}"))?;
+
+        // --- CPU: L2-normalize Q/K per head + q_scale, handle GQA repeat ---
+        let n_rep = if self.num_key_heads < self.num_heads {
+            self.num_heads / self.num_key_heads
+        } else {
+            1
+        };
+        let q_normed = Self::l2_normalize_heads_cpu(
+            &q_cpu,
+            self.num_key_heads,
+            self.key_head_dim,
+            self.q_scale as f32,
+            n_rep,
+        );
+        let k_normed = Self::l2_normalize_heads_cpu(
+            &k_cpu,
+            self.num_key_heads,
+            self.key_head_dim,
+            1.0,
+            n_rep,
+        );
+
+        // --- CPU: compute gates ---
+        let g_cpu = Self::compute_gates_cpu(&a_cpu, &self.dt_bias_cpu, &self.neg_a_exp_cpu);
+        let beta_cpu = Self::compute_sigmoid_cpu(&b_cpu);
+
+        // --- CPU→GPU: push results as F32 tensors ---
+        let q_t = Tensor::from_slice(&q_normed, (1, self.num_heads, self.key_head_dim), dev)
+            .map_err(|e| anyhow!("q push: {e}"))?;
+        let k_t = Tensor::from_slice(&k_normed, (1, self.num_heads, self.key_head_dim), dev)
+            .map_err(|e| anyhow!("k push: {e}"))?;
+        let v_t = Tensor::from_slice(&v_cpu, (1, self.num_heads, self.value_head_dim), dev)
+            .map_err(|e| anyhow!("v push: {e}"))?;
+        let g_t = Tensor::from_slice(&g_cpu, (1, self.num_heads), dev)
+            .map_err(|e| anyhow!("g push: {e}"))?;
+        let beta_t = Tensor::from_slice(&beta_cpu, (1, self.num_heads), dev)
+            .map_err(|e| anyhow!("beta push: {e}"))?;
+
+        // --- GPU: recurrent step ---
+        let state = if let Some(s) = cache.get_recurrent_state(block_idx) {
+            s.clone()
+        } else {
+            Tensor::zeros(
+                (1, self.num_heads, self.key_head_dim, self.value_head_dim),
+                DType::F32,
+                dev,
+            )
+            .map_err(|e| anyhow!("init state: {e}"))?
+        };
+
+        let (o_t, new_state) =
+            Self::recurrent_step(&q_t, &k_t, &v_t, &g_t, &beta_t, &state)
+                .map_err(|e| anyhow!("recurrent step: {e}"))?;
+        cache.set_recurrent_state(block_idx, new_state);
+
+        // --- GPU: norm + output projection ---
+        // o_t: (1, num_heads, value_head_dim) → (1, 1, num_heads, value_head_dim)
+        let output = o_t
+            .unsqueeze(1)
+            .map_err(|e| anyhow!("output unsqueeze: {e}"))?;
+
+        let z = z
+            .reshape((1, 1, self.num_heads, self.value_head_dim))
+            .map_err(|e| anyhow!("z reshape: {e}"))?;
+        let output = self
+            .norm
+            .forward(&output, &z)
+            .map_err(|e| anyhow!("norm: {e}"))?;
+
+        let output = output
+            .reshape((1, 1, self.value_dim))?
+            .to_dtype(model_dtype)
+            .map_err(|e| anyhow!("output dtype: {e}"))?;
+        let output = self
+            .out_proj
+            .forward(&output)
+            .map_err(|e| anyhow!("out_proj: {e}"))?;
+
+        Ok(output)
+    }
+
     /// Full forward pass through the Gated DeltaNet layer.
     pub fn forward(
         &self,
@@ -315,6 +496,11 @@ impl GatedDeltaNet {
             .map_err(|e| anyhow!("split k: {e}"))?;
         let v = mixed_qkv.narrow(2, self.key_dim * 2, self.value_dim)
             .map_err(|e| anyhow!("split v: {e}"))?;
+
+        // Fast path: single-token generation moves small ops to CPU.
+        if seq_len == 1 {
+            return self.forward_generation(x, &q, &k, &v, &a, &b, &z, block_idx, cache, model_dtype);
+        }
 
         // Reshape Q/K to (batch, seq_len, num_key_heads, key_head_dim).
         // When num_key_heads < num_heads (GQA-like), repeat key heads to match
