@@ -1,0 +1,11 @@
+bahamut:
+  host: 'bahamut.local:10128'
+  description: '2x NVIDIA TITAN X Pascal (CUDA)'
+  layers:
+    - 'model.language_model.layers.0-7'
+
+stevie:
+  host: 'stevie.local:10128'
+  description: 'Apple M3 Pro (Metal)'
+  layers:
+    - 'model.language_model.layers.8-15'
