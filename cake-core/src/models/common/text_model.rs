@@ -96,7 +96,10 @@ pub fn create_logits_processor(ctx: &Context) -> LogitsProcessor {
         Sampling::ArgMax
     } else {
         match (ctx.args.top_k, ctx.args.top_p) {
-            (None, None) => Sampling::All { temperature },
+            // Gumbel-Softmax keeps everything on GPU: generates random noise,
+            // adds to logits/temperature, and takes argmax — only 4 bytes
+            // transferred instead of the full 600 KB vocabulary vector.
+            (None, None) => Sampling::GumbelSoftmax { temperature },
             (Some(k), None) => Sampling::TopK { k, temperature },
             (None, Some(p)) => Sampling::TopP { p, temperature },
             (Some(k), Some(p)) => Sampling::TopKThenTopP { k, p, temperature },
