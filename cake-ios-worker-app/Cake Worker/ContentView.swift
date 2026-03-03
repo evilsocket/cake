@@ -7,6 +7,9 @@
 
 import SwiftUI
 import UniformTypeIdentifiers
+import os
+
+private let logger = Logger(subsystem: "com.evilsocket.cake-worker", category: "worker")
 
 // MARK: - App Mode
 
@@ -57,15 +60,25 @@ struct ContentView: View {
     @State private var selectedMode: AppMode? = nil
     @State private var status: NodeStatus = .idle
 
+    // Auto-start support: pass --autostart [--cluster-key KEY] via devicectl launch args
+    private static let launchArgs = ProcessInfo.processInfo.arguments
+    private var shouldAutoStart: Bool { Self.launchArgs.contains("--autostart") }
+    private var autoClusterKey: String? {
+        if let idx = Self.launchArgs.firstIndex(of: "--cluster-key"), idx + 1 < Self.launchArgs.count {
+            return Self.launchArgs[idx + 1]
+        }
+        return nil
+    }
+
     var body: some View {
         ZStack {
             Color.surface0.ignoresSafeArea()
 
-            if selectedMode == nil {
+            if selectedMode == nil && !shouldAutoStart {
                 ModePickerView(selectedMode: $selectedMode)
                     .transition(.opacity.combined(with: .scale(scale: 0.95)))
-            } else if selectedMode == .worker {
-                WorkerView(status: $status, onBack: { withAnimation(.easeInOut(duration: 0.2)) { selectedMode = nil; status = .idle } })
+            } else if selectedMode == .worker || (shouldAutoStart && selectedMode != .master) {
+                WorkerView(status: $status, autoStart: shouldAutoStart, autoClusterKey: autoClusterKey, onBack: { withAnimation(.easeInOut(duration: 0.2)) { selectedMode = nil; status = .idle } })
                     .transition(.opacity.combined(with: .move(edge: .trailing)))
             } else {
                 MasterView(status: $status, onBack: { withAnimation(.easeInOut(duration: 0.2)) { selectedMode = nil; status = .idle } })
@@ -268,17 +281,20 @@ struct StatusBadge: View {
 
 struct WorkerView: View {
     @Binding var status: NodeStatus
+    var autoStart: Bool = false
+    var autoClusterKey: String? = nil
     var onBack: () -> Void
 
-    @State private var workerName: String = UIDevice.current.name
-    @State private var modelName: String = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
-    @State private var clusterKey: String = ""
+    @AppStorage("workerName") private var workerName: String = UIDevice.current.name
+    @AppStorage("modelName") private var modelName: String = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+    @AppStorage("clusterKey") private var clusterKey: String = ""
+    @State private var hasAutoStarted = false
 
     var body: some View {
         VStack(spacing: 0) {
             NavBar(
                 title: "Worker",
-                showBack: true,
+                showBack: !autoStart,
                 onBack: onBack,
                 trailing: AnyView(StatusBadge(status: status))
             )
@@ -342,10 +358,21 @@ struct WorkerView: View {
                 .padding(.horizontal, 20)
             }
         }
+        .onAppear {
+            if autoStart && !hasAutoStarted {
+                hasAutoStarted = true
+                // Override cluster key from CLI args if provided
+                if let key = autoClusterKey {
+                    clusterKey = key
+                }
+                logger.info("[cake] auto-starting worker: name=\(workerName) model=\(modelName) cluster_key=\(clusterKey.isEmpty ? "(none)" : "(set)")")
+                startWorkerAction()
+            }
+        }
     }
 
     private func startWorkerAction() {
-        print("[cake] starting worker: name=\(workerName) model=\(modelName) cluster_key=\(clusterKey.isEmpty ? "(none)" : "(set)")")
+        logger.info("[cake] starting worker: name=\(workerName) model=\(modelName) cluster_key=\(clusterKey.isEmpty ? "(none)" : "(set)")")
 
         status = .starting
 
@@ -358,9 +385,9 @@ struct WorkerView: View {
                 }
             }
 
-            print("[cake] calling startWorker FFI...")
+            logger.info("[cake] calling startWorker FFI...")
             let result = startWorker(name: workerName, model: modelName, clusterKey: clusterKey)
-            print("[cake] startWorker returned: \(result.isEmpty ? "(clean exit)" : result)")
+            logger.info("[cake] startWorker returned: \(result.isEmpty ? "(clean exit)" : result)")
 
             DispatchQueue.main.async {
                 if result.isEmpty {

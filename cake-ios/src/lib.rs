@@ -1,10 +1,31 @@
 //! This is a small library that wraps cake-core and exposes it as an API to the Swift side of things on iOS.
 uniffi::setup_scaffolding!();
 
+use std::io::Write;
+use std::sync::OnceLock;
+
 use cake_core::{
     cake::{self, Context, Mode, Topology, Worker},
     Args, ModelType, TextModelArch,
 };
+
+/// Path to the iOS log file for debugging (readable via device file access).
+static LOG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+/// Log a message to both stderr and the iOS log file.
+fn log_ios(msg: &str) {
+    eprintln!("{}", msg);
+    if let Some(path) = LOG_PATH.get() {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{}", msg);
+        }
+    }
+}
+
 /// Start a worker node that joins a cluster via discovery.
 /// Returns an error string if startup fails, or empty string on clean exit.
 ///
@@ -17,32 +38,38 @@ pub fn start_worker(name: String, model: String, cluster_key: String) -> String 
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .try_init();
 
-    eprintln!("[cake-ios] start_worker called");
-    eprintln!("[cake-ios]   name: {name}");
-    eprintln!("[cake-ios]   model: {model}");
-    eprintln!("[cake-ios]   cluster_key: {}", if cluster_key.is_empty() { "(none)" } else { "(set)" });
-
     // iOS sandbox: set HOME and HF cache to writable tmp directories.
     let tmp = std::env::temp_dir();
+
+    // Initialize log file (fresh each run)
+    let log_path = tmp.join("cake-worker.log");
+    let _ = std::fs::remove_file(&log_path);
+    let _ = LOG_PATH.set(log_path);
+
+    log_ios("[cake-ios] start_worker called");
+    log_ios(&format!("[cake-ios]   name: {name}"));
+    log_ios(&format!("[cake-ios]   model: {model}"));
+    log_ios(&format!("[cake-ios]   cluster_key: {}", if cluster_key.is_empty() { "(none)" } else { "(set)" }));
+
     let ios_home = tmp.join("cake-home");
     let hf_cache = tmp.join("huggingface").join("hub");
     let cake_cache = tmp.join("cake");
     for dir in [&ios_home, &hf_cache, &cake_cache] {
         if let Err(e) = std::fs::create_dir_all(dir) {
             let msg = format!("failed to create dir {}: {}", dir.display(), e);
-            eprintln!("[cake-ios] {msg}");
+            log_ios(&format!("[cake-ios] {msg}"));
             return msg;
         }
     }
     std::env::set_var("HOME", ios_home.to_string_lossy().as_ref());
     std::env::set_var("HF_HUB_CACHE", hf_cache.to_string_lossy().as_ref());
-    eprintln!("[cake-ios] HOME={}", ios_home.display());
-    eprintln!("[cake-ios] HF_HUB_CACHE={}", hf_cache.display());
+    log_ios(&format!("[cake-ios] HOME={}", ios_home.display()));
+    log_ios(&format!("[cake-ios] HF_HUB_CACHE={}", hf_cache.display()));
 
     let address = "0.0.0.0:10128".to_string();
     let use_cluster = !cluster_key.is_empty();
 
-    eprintln!("[cake-ios] starting tokio runtime...");
+    log_ios("[cake-ios] starting tokio runtime...");
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -51,11 +78,11 @@ pub fn start_worker(name: String, model: String, cluster_key: String) -> String 
         .block_on(async {
             if use_cluster {
                 // Zero-config mode: wait for master to discover us and push model data.
-                eprintln!("[cake-ios] zero-config mode: waiting for master discovery...");
+                log_ios("[cake-ios] zero-config mode: waiting for master discovery...");
                 run_zero_config_worker(&name, &cluster_key, &address, &cake_cache, &model).await
             } else {
                 // Direct mode: download model and start worker.
-                eprintln!("[cake-ios] direct mode: loading model...");
+                log_ios("[cake-ios] direct mode: loading model...");
                 run_direct_worker(&name, &model, &address).await
             }
         })
@@ -82,8 +109,8 @@ async fn run_zero_config_worker(
         Err(e) => return format!("worker setup failed: {}", e),
     };
 
-    eprintln!("[cake-ios] master assigned layers: {:?}", layers);
-    eprintln!("[cake-ios] model path: {}", model_path.display());
+    log_ios(&format!("[cake-ios] master assigned layers: {:?}", layers));
+    log_ios(&format!("[cake-ios] model path: {}", model_path.display()));
 
     // Build topology from assigned layers
     let mut topology = Topology::new();
@@ -113,7 +140,7 @@ async fn run_zero_config_worker(
 
     let mut ctx = match Context::from_args(args) {
         Ok(ctx) => {
-            eprintln!("[cake-ios] context created, device={:?}", ctx.device);
+            log_ios(&format!("[cake-ios] context created, device={:?}", ctx.device));
             ctx
         }
         Err(e) => return format!("context creation failed: {}", e),
@@ -136,11 +163,11 @@ async fn run_direct_worker(name: &str, model: &str, address: &str) -> String {
         ..Default::default()
     };
 
-    eprintln!("[cake-ios] creating context...");
+    log_ios("[cake-ios] creating context...");
 
     let mut ctx = match Context::from_args(args) {
         Ok(ctx) => {
-            eprintln!("[cake-ios] context created, device={:?}", ctx.device);
+            log_ios(&format!("[cake-ios] context created, device={:?}", ctx.device));
             ctx
         }
         Err(e) => return format!("context creation failed: {}", e),
@@ -150,16 +177,16 @@ async fn run_direct_worker(name: &str, model: &str, address: &str) -> String {
 }
 
 async fn run_text_worker(ctx: &mut Context) -> String {
-    eprintln!("[cake-ios] text model arch: {:?}", ctx.text_model_arch);
+    log_ios(&format!("[cake-ios] text model arch: {:?}", ctx.text_model_arch));
 
     match ctx.text_model_arch {
         #[cfg(feature = "qwen2")]
         TextModelArch::Qwen2 => {
-            eprintln!("[cake-ios] creating Qwen2 worker...");
+            log_ios("[cake-ios] creating Qwen2 worker...");
             let mut worker =
                 match Worker::<cake_core::models::qwen2::Qwen2>::new(ctx).await {
                     Ok(w) => {
-                        eprintln!("[cake-ios] Qwen2 worker ready on 0.0.0.0:10128");
+                        log_ios("[cake-ios] Qwen2 worker ready on 0.0.0.0:10128");
                         w
                     }
                     Err(e) => {
@@ -174,11 +201,11 @@ async fn run_text_worker(ctx: &mut Context) -> String {
         }
         #[cfg(feature = "llama")]
         TextModelArch::Llama | TextModelArch::Auto => {
-            eprintln!("[cake-ios] creating LLaMA worker...");
+            log_ios("[cake-ios] creating LLaMA worker...");
             let mut worker =
                 match Worker::<cake_core::models::llama3::LLama>::new(ctx).await {
                     Ok(w) => {
-                        eprintln!("[cake-ios] LLaMA worker ready on 0.0.0.0:10128");
+                        log_ios("[cake-ios] LLaMA worker ready on 0.0.0.0:10128");
                         w
                     }
                     Err(e) => {
