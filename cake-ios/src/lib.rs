@@ -112,7 +112,17 @@ async fn run_zero_config_worker(
     log_ios(&format!("[cake-ios] master assigned layers: {:?}", layers));
     log_ios(&format!("[cake-ios] model path: {}", model_path.display()));
 
+    // Verify model files exist
+    let config_path = model_path.join("config.json");
+    let model_file = model_path.join("model.safetensors");
+    log_ios(&format!("[cake-ios] config.json exists: {}", config_path.exists()));
+    log_ios(&format!("[cake-ios] model.safetensors exists: {} ({})",
+        model_file.exists(),
+        model_file.metadata().map(|m| format!("{} bytes", m.len())).unwrap_or_else(|e| format!("err: {e}"))
+    ));
+
     // Build topology from assigned layers
+    log_ios("[cake-ios] building topology...");
     let mut topology = Topology::new();
     topology.insert(
         name.to_string(),
@@ -138,17 +148,24 @@ async fn run_zero_config_worker(
         ..Default::default()
     };
 
+    log_ios("[cake-ios] creating Context::from_args...");
     let mut ctx = match Context::from_args(args) {
         Ok(ctx) => {
             log_ios(&format!("[cake-ios] context created, device={:?}", ctx.device));
             ctx
         }
-        Err(e) => return format!("context creation failed: {}", e),
+        Err(e) => {
+            let msg = format!("context creation failed: {}", e);
+            log_ios(&format!("[cake-ios] ERROR: {}", msg));
+            return msg;
+        }
     };
 
     // Pass the pre-bound listener from setup
+    log_ios("[cake-ios] setting listener_override...");
     *ctx.listener_override.lock().unwrap() = Some(listener);
 
+    log_ios("[cake-ios] entering run_text_worker...");
     run_text_worker(&mut ctx).await
 }
 
@@ -190,13 +207,20 @@ async fn run_text_worker(ctx: &mut Context) -> String {
                         w
                     }
                     Err(e) => {
-                        return format!("Qwen2 worker creation failed: {}", e);
+                        let msg = format!("Qwen2 worker creation failed: {}", e);
+                        log_ios(&format!("[cake-ios] ERROR: {}", msg));
+                        return msg;
                     }
                 };
 
+            log_ios("[cake-ios] Qwen2 worker.run() starting...");
             match worker.run().await {
                 Ok(_) => String::new(),
-                Err(e) => format!("worker error: {}", e),
+                Err(e) => {
+                    let msg = format!("worker error: {}", e);
+                    log_ios(&format!("[cake-ios] ERROR: {}", msg));
+                    msg
+                }
             }
         }
         #[cfg(feature = "llama")]
@@ -209,13 +233,20 @@ async fn run_text_worker(ctx: &mut Context) -> String {
                         w
                     }
                     Err(e) => {
-                        return format!("LLaMA worker creation failed: {}", e);
+                        let msg = format!("LLaMA worker creation failed: {}", e);
+                        log_ios(&format!("[cake-ios] ERROR: {}", msg));
+                        return msg;
                     }
                 };
 
+            log_ios("[cake-ios] LLaMA worker.run() starting...");
             match worker.run().await {
                 Ok(_) => String::new(),
-                Err(e) => format!("worker error: {}", e),
+                Err(e) => {
+                    let msg = format!("worker error: {}", e);
+                    log_ios(&format!("[cake-ios] ERROR: {}", msg));
+                    msg
+                }
             }
         }
         #[allow(unreachable_patterns)]
