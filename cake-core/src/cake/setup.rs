@@ -62,11 +62,51 @@ fn detect_free_gpu_memory() -> u64 {
     0
 }
 
-/// Estimate average layer size in bytes from safetensors files.
-fn estimate_layer_size(model_path: &Path, num_layers: usize) -> u64 {
+/// Read a safetensors header and return per-tensor byte sizes.
+/// The safetensors format stores an 8-byte LE header length followed by a JSON
+/// object mapping tensor names to `{dtype, shape, data_offsets: [start, end]}`.
+fn read_safetensors_tensor_sizes(path: &Path) -> Option<Vec<(String, u64)>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut len_buf = [0u8; 8];
+    f.read_exact(&mut len_buf).ok()?;
+    let header_len = u64::from_le_bytes(len_buf) as usize;
+    // Sanity: headers are typically < 1 MB
+    if header_len > 10 * 1024 * 1024 {
+        return None;
+    }
+    let mut header_buf = vec![0u8; header_len];
+    f.read_exact(&mut header_buf).ok()?;
+    let header: serde_json::Value = serde_json::from_slice(&header_buf).ok()?;
+    let obj = header.as_object()?;
+    let mut result = Vec::with_capacity(obj.len());
+    for (name, meta) in obj {
+        if name == "__metadata__" {
+            continue;
+        }
+        if let Some(offsets) = meta.get("data_offsets").and_then(|v| v.as_array()) {
+            if offsets.len() == 2 {
+                let start = offsets[0].as_u64().unwrap_or(0);
+                let end = offsets[1].as_u64().unwrap_or(0);
+                result.push((name.clone(), end.saturating_sub(start)));
+            }
+        }
+    }
+    Some(result)
+}
+
+/// Estimate average transformer layer size in bytes from safetensors files.
+///
+/// For sharded models, reads each shard's header to compute exact per-tensor
+/// byte sizes, then sums only tensors matching `layer_prefix`. This excludes
+/// non-layer weights (visual encoder, MTP heads, embeddings, lm_head) which
+/// can be significant — e.g. Qwen3.5-27B-FP8 has ~6 GB of non-layer data.
+fn estimate_layer_size(model_path: &Path, num_layers: usize, layer_prefix: &str) -> u64 {
     if num_layers == 0 {
         return 0;
     }
+
+    let layer_dot = format!("{}.", layer_prefix);
 
     // Try sharded model first
     let index_path = model_path.join("model.safetensors.index.json");
@@ -75,6 +115,42 @@ fn estimate_layer_size(model_path: &Path, num_layers: usize) -> u64 {
             if let Some(weight_map) = json.get("weight_map").and_then(|v| v.as_object()) {
                 let shards: HashSet<&str> =
                     weight_map.values().filter_map(|v| v.as_str()).collect();
+
+                // Try reading safetensors headers for exact tensor sizes
+                let mut layer_bytes: u64 = 0;
+                let mut total_bytes: u64 = 0;
+                let mut headers_ok = true;
+
+                for shard in &shards {
+                    let shard_path = model_path.join(shard);
+                    if let Some(tensors) = read_safetensors_tensor_sizes(&shard_path) {
+                        for (name, size) in &tensors {
+                            total_bytes += size;
+                            if name.starts_with(&layer_dot) {
+                                layer_bytes += size;
+                            }
+                        }
+                    } else {
+                        headers_ok = false;
+                        break;
+                    }
+                }
+
+                if headers_ok && layer_bytes > 0 {
+                    let non_layer = total_bytes - layer_bytes;
+                    if non_layer > 0 {
+                        log::info!(
+                            "model weights: {} total, {} layers, {} non-layer ({:.0}% excluded)",
+                            human_bytes::human_bytes(total_bytes as f64),
+                            human_bytes::human_bytes(layer_bytes as f64),
+                            human_bytes::human_bytes(non_layer as f64),
+                            non_layer as f64 / total_bytes as f64 * 100.0,
+                        );
+                    }
+                    return layer_bytes / num_layers as u64;
+                }
+
+                // Fallback: raw file size division
                 let total: u64 = shards
                     .iter()
                     .filter_map(|s| std::fs::metadata(model_path.join(s)).ok())
@@ -87,8 +163,23 @@ fn estimate_layer_size(model_path: &Path, num_layers: usize) -> u64 {
 
     // Single safetensors file
     let single = model_path.join("model.safetensors");
-    if let Ok(m) = std::fs::metadata(&single) {
-        return m.len() / num_layers as u64;
+    if let Ok(single_path) = single.canonicalize() {
+        // Try header-based estimation for single file too
+        if let Some(tensors) = read_safetensors_tensor_sizes(&single_path) {
+            let mut layer_bytes: u64 = 0;
+            for (name, size) in &tensors {
+                if name.starts_with(&layer_dot) {
+                    layer_bytes += size;
+                }
+            }
+            if layer_bytes > 0 {
+                return layer_bytes / num_layers as u64;
+            }
+        }
+        // Fallback
+        if let Ok(m) = std::fs::metadata(&single_path) {
+            return m.len() / num_layers as u64;
+        }
     }
 
     0
@@ -301,7 +392,14 @@ pub async fn master_setup(
         })
         .ok_or_else(|| anyhow!("num_hidden_layers not found in config.json"))? as usize;
 
-    log::info!("model has {} transformer layers", num_layers);
+    // Derive layer naming prefix from architecture (needed early for layer size estimation)
+    let layer_prefix = layer_prefix_for_config(&config_json);
+
+    log::info!(
+        "model has {} transformer layers (prefix: {})",
+        num_layers,
+        &layer_prefix,
+    );
 
     // Discover workers
     let workers = discovery::discover_workers(cluster_key, discovery_timeout).await?;
@@ -314,12 +412,14 @@ pub async fn master_setup(
     let master_gpus = discovery::detect_gpus();
     let master_tflops: f64 = master_gpus.iter().map(|g| g.tflops as f64).sum();
 
-    // Estimate per-layer size for VRAM-aware capping
-    let raw_layer_size = estimate_layer_size(model_path, num_layers);
-    if raw_layer_size > 0 {
+    // Estimate per-layer size for VRAM-aware capping.
+    // Uses weight_map tensor-count fractions to exclude non-layer weights
+    // (visual encoder, MTP heads, embeddings, lm_head, FP8 scale_inv, etc.).
+    let layer_size_on_disk = estimate_layer_size(model_path, num_layers, &layer_prefix);
+    if layer_size_on_disk > 0 {
         log::info!(
-            "estimated layer size (raw): {}",
-            human_bytes::human_bytes(raw_layer_size as f64)
+            "estimated layer size (on disk): {}",
+            human_bytes::human_bytes(layer_size_on_disk as f64)
         );
     }
 
@@ -357,30 +457,12 @@ pub async fn master_setup(
     // Add ~1 GiB for CUDA runtime/context, KV cache, memory fragmentation, and misc overhead
     let master_overhead = embed_size + lm_head_size + 1024 * 1024 * 1024;
 
-    // Correct layer size estimate: the raw estimate (total_files / num_layers) inflates
-    // by spreading non-layer weights (embeddings, lm_head) across all layers. Subtract
-    // this to get a more accurate per-transformer-layer size.
-    let layer_size_bytes = if raw_layer_size > 0 && num_layers > 0 {
-        let non_layer_per_layer = (embed_size + lm_head_size) / num_layers as u64;
-        let corrected = raw_layer_size.saturating_sub(non_layer_per_layer);
-        if corrected < raw_layer_size {
-            log::info!(
-                "corrected layer size: {} (non-layer overhead: {}/layer)",
-                human_bytes::human_bytes(corrected as f64),
-                human_bytes::human_bytes(non_layer_per_layer as f64),
-            );
-        }
-        corrected
-    } else {
-        raw_layer_size
-    };
-
     // FP8 models store weights at 1 byte per element on disk, but after dequantization
     // they expand to the target dtype (F16 = 2 bytes, BF16 = 2 bytes). Scale the layer
     // size estimate so VRAM-based capping uses the actual in-memory size.
     let is_fp8 = crate::utils::fp8::is_fp8_quantized(&config_path);
-    let layer_size_bytes = if is_fp8 && layer_size_bytes > 0 {
-        let expanded = layer_size_bytes * dtype_bytes; // FP8 is 1 byte, target is dtype_bytes
+    let layer_size_bytes = if is_fp8 && layer_size_on_disk > 0 {
+        let expanded = layer_size_on_disk * dtype_bytes; // FP8 is 1 byte, target is dtype_bytes
         log::info!(
             "FP8 model: layer size after dequantization: {} ({}x expansion)",
             human_bytes::human_bytes(expanded as f64),
@@ -388,7 +470,7 @@ pub async fn master_setup(
         );
         expanded
     } else {
-        layer_size_bytes
+        layer_size_on_disk
     };
 
     log::info!(
@@ -426,10 +508,6 @@ pub async fn master_setup(
         usize::MAX
     };
 
-    // Derive layer naming prefix from architecture
-    let layer_prefix = layer_prefix_for_config(&config_json);
-    log::info!("layer prefix: {}", &layer_prefix);
-
     // Compute assignments based on TFLOPS, capped by per-GPU VRAM
     let assignments = compute_layer_assignments(
         &workers,
@@ -440,6 +518,9 @@ pub async fn master_setup(
         &layer_prefix,
     );
 
+    // Summarise layer assignments and estimate per-node weight loads
+    let total_assigned: usize = assignments.iter().map(|(_, l)| l.len()).sum();
+    let master_layers = num_layers - total_assigned;
     log::info!("layer assignments:");
     for (worker_idx, layers) in &assignments {
         let w = &workers[*worker_idx];
@@ -448,13 +529,30 @@ pub async fn master_setup(
         } else {
             format!("{} — {}", layers.first().unwrap(), layers.last().unwrap())
         };
+        let weight_load = layers.len() as u64 * layer_size_bytes;
         log::info!(
-            "  {} ({}, {:.1} TFLOPS) → {} layers [{}]",
+            "  {} ({}, {:.1} TFLOPS) → {} layers ({}) [{}]",
             &w.name,
             human_bytes::human_bytes(w.total_vram() as f64),
             w.total_tflops(),
             layers.len(),
-            range
+            human_bytes::human_bytes(weight_load as f64),
+            range,
+        );
+    }
+    log::info!(
+        "  master ({:.1} TFLOPS) → {} layers ({} weights + {} overhead)",
+        master_tflops,
+        master_layers,
+        human_bytes::human_bytes((master_layers as u64 * layer_size_bytes) as f64),
+        human_bytes::human_bytes(master_overhead as f64),
+    );
+    if layer_size_bytes > 0 {
+        log::info!(
+            "total weight read per token: {} ({} per layer × {})",
+            human_bytes::human_bytes((num_layers as u64 * layer_size_bytes) as f64),
+            human_bytes::human_bytes(layer_size_bytes as f64),
+            num_layers,
         );
     }
 

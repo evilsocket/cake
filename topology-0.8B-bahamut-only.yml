@@ -1,5 +1,0 @@
-bahamut:
-  host: 'bahamut.local:10128'
-  description: '2x NVIDIA TITAN X Pascal (CUDA)'
-  layers:
-    - 'model.language_model.layers.0-1'
