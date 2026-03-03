@@ -39,12 +39,11 @@ impl RmsNormGated {
 }
 
 /// Numerically stable softplus: ln(1 + exp(x)).
-/// Uses max(x, 0) + ln(1 + exp(-|x|)) to avoid exp overflow for large x.
+/// Clamps input to avoid exp overflow, then uses max(x, result) for large x
+/// where softplus(x) ≈ x. 5 kernels instead of 7.
 fn stable_softplus(x: &Tensor) -> Result<Tensor> {
-    let abs_x = x.abs()?;
-    let pos_part = x.maximum(0f64)?;
-    let log_part = (abs_x.neg()?.exp()? + 1.0)?.log()?;
-    &pos_part + &log_part
+    let sp = (x.minimum(88f64)?.exp()? + 1.0)?.log()?;
+    x.maximum(&sp)
 }
 
 /// Gated DeltaNet linear attention block with fused input projections.
