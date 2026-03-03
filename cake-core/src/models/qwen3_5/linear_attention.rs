@@ -171,7 +171,8 @@ impl GatedDeltaNet {
     /// x: (batch, 1, channels), conv_state: (batch, channels, kernel_size-1)
     fn causal_conv1d_step(&self, x: &Tensor, conv_state: &Tensor) -> Result<(Tensor, Tensor)> {
         // x is (batch, 1, channels) -> (batch, channels, 1)
-        let x_t = x.transpose(1, 2)?;
+        // squeeze+unsqueeze preserves contiguity (transpose would trigger a copy kernel)
+        let x_t = x.squeeze(1)?.unsqueeze(2)?;
 
         // Build full window: cat(state, new_input) -> (batch, channels, kernel_size)
         let full_window = Tensor::cat(&[conv_state, &x_t], 2)?;
@@ -180,8 +181,7 @@ impl GatedDeltaNet {
         // conv1d_weight: (channels, kernel_size)
         // full_window: (batch, channels, kernel_size)
         // Result: sum along kernel dimension -> (batch, channels)
-        let weight = self.conv1d_weight.to_dtype(full_window.dtype())?;
-        let y = full_window.broadcast_mul(&weight.unsqueeze(0)?)?.sum(D::Minus1)?;
+        let y = full_window.broadcast_mul(&self.conv1d_weight.unsqueeze(0)?)?.sum(D::Minus1)?;
 
         // SiLU activation, reshape to (batch, 1, channels)
         let y = candle_nn::ops::silu(&y)?.unsqueeze(1)?;
