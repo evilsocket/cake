@@ -299,8 +299,8 @@ impl GatedDeltaNet {
         // Metal requires periodic command buffer flushes to prevent catastrophic
         // slowdown from command accumulation. Each GDN layer dispatches ~40 Metal
         // commands; without intermediate syncs, performance degrades by 50x+.
-        // Two sync points (after in_proj and after out_proj) keep the command
-        // buffer pipeline healthy with negligible overhead on other backends.
+        // Three sync points (after in_proj, after recurrent, after out_proj) keep
+        // each section under ~20 commands. Zero overhead on CUDA/CPU.
         let metal_sync = x.device().is_metal();
 
         // Single fused projection: QKV + A + B + Z (with dt_bias absorbed into A bias)
@@ -437,6 +437,9 @@ impl GatedDeltaNet {
             Tensor::stack(&outputs, 1)
                 .map_err(|e| anyhow!("stack outputs: {e}"))?
         };
+
+        // Flush Metal commands after conv+gates+recurrent (~20 operations)
+        if metal_sync { let _ = x.device().synchronize(); }
 
         // Save updated state
         cache.set_recurrent_state(block_idx, state);
