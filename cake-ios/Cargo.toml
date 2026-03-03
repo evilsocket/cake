@@ -13,6 +13,7 @@ uniffi = { version = "0.28.0", features = ["cli", "tokio"] }
 env_logger = "0.11.3"
 log = "0.4.22"
 tokio = "1.38.0"
+libc = "0.2"
 
 # we don't need master code here
 cake-core = { path = "../cake-core", default-features = false, features = ["llama", "qwen2", "qwen3_5"] }

@@ -9,6 +9,68 @@ use cake_core::{
     Args, ModelType, TextModelArch,
 };
 
+/// Check if this device's GPU supports simdgroup_matrix operations (requires A13+/M1+).
+/// Returns false for A12X and older chips where candle Metal kernels will fail.
+fn metal_supports_simdgroup_matrix() -> bool {
+    // Query hw.machine to get device identifier (e.g. "iPad8,3", "iPhone12,1")
+    let machine = {
+        let name = std::ffi::CString::new("hw.machine").unwrap();
+        let mut size: libc::size_t = 0;
+        unsafe {
+            libc::sysctlbyname(name.as_ptr(), std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0);
+        }
+        if size == 0 {
+            return false;
+        }
+        let mut buf = vec![0u8; size];
+        let ret = unsafe {
+            libc::sysctlbyname(name.as_ptr(), buf.as_mut_ptr() as *mut _, &mut size, std::ptr::null_mut(), 0)
+        };
+        if ret != 0 {
+            return false;
+        }
+        // Remove null terminator
+        if let Some(pos) = buf.iter().position(|&b| b == 0) {
+            buf.truncate(pos);
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    };
+
+    log_ios(&format!("[cake-ios] hw.machine: {}", machine));
+
+    // Parse device family and generation to determine A-series chip
+    // simdgroup_matrix requires Apple GPU Family 6+ (A13 Bionic or later)
+    //
+    // iPhone: iPhone12,x = A13, iPhone13,x = A14, iPhone14,x = A15, etc.
+    // iPad:   iPad8,x = A12X, iPad11,x = A12, iPad13,x = M1, iPad14,x = M2
+    //         iPad12,x = A14, iPad16,x = M4
+    // iPod:   all A12 or older
+    let parts: Vec<&str> = machine.splitn(2, |c: char| !c.is_alphabetic()).collect();
+    let (family, gen_str) = if parts.len() == 2 {
+        (parts[0], parts[1])
+    } else {
+        return false;
+    };
+    let generation: u32 = gen_str.split(',').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    let supported = match family {
+        "iPhone" => generation >= 12,  // iPhone12,x = A13
+        "iPad" => {
+            // iPad8,x = A12X (NOT supported)
+            // iPad11,x = A12 (NOT supported)
+            // iPad12,x = A14 (supported)
+            // iPad13,x = M1 (supported)
+            // iPad14,x = M2 (supported)
+            // iPad16,x = M4 (supported)
+            generation >= 12 && generation != 11
+        }
+        _ => false,
+    };
+
+    log_ios(&format!("[cake-ios] Metal simdgroup_matrix support: {} (family={}, gen={})", supported, family, generation));
+    supported
+}
+
 /// Path to the iOS log file for debugging (readable via device file access).
 static LOG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
 
@@ -138,6 +200,11 @@ async fn run_zero_config_worker(
         },
     );
 
+    let force_cpu = !metal_supports_simdgroup_matrix();
+    if force_cpu {
+        log_ios("[cake-ios] Metal not supported on this GPU, using CPU backend");
+    }
+
     let args = Args {
         address: address.to_string(),
         mode: Mode::Worker,
@@ -145,10 +212,11 @@ async fn run_zero_config_worker(
         model: model_path.to_string_lossy().to_string(),
         model_type: ModelType::TextModel,
         topology_override: Some(topology),
+        cpu: force_cpu,
         ..Default::default()
     };
 
-    log_ios("[cake-ios] creating Context::from_args...");
+    log_ios(&format!("[cake-ios] creating Context::from_args (cpu={})...", force_cpu));
 
     // Install a panic hook that writes to our log file before aborting
     let prev_hook = std::panic::take_hook();
@@ -191,12 +259,14 @@ async fn run_zero_config_worker(
 
 /// Direct worker: download model from HF and start serving.
 async fn run_direct_worker(name: &str, model: &str, address: &str) -> String {
+    let force_cpu = !metal_supports_simdgroup_matrix();
     let args = Args {
         address: address.to_string(),
         mode: Mode::Worker,
         name: Some(name.to_string()),
         model: model.to_string(),
         model_type: ModelType::TextModel,
+        cpu: force_cpu,
         ..Default::default()
     };
 
