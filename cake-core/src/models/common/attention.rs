@@ -1,5 +1,5 @@
 //! Causal self attention implementation.
-use candle_core::{DType, Result, Tensor, D};
+use candle_core::{Result, Tensor};
 use candle_nn::{linear_no_bias, Linear, Module, VarBuilder};
 
 #[derive(Debug, Clone)]
@@ -16,7 +16,9 @@ pub struct CausalSelfAttention {
 #[inline]
 fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> Result<Tensor> {
     let shape = mask.shape();
-    let on_true = Tensor::new(on_true, on_false.device())?.broadcast_as(shape.dims())?;
+    let on_true = Tensor::new(on_true, on_false.device())?
+        .to_dtype(on_false.dtype())?
+        .broadcast_as(shape.dims())?;
     let m = mask.where_cond(&on_true, on_false)?;
     Ok(m)
 }
@@ -84,18 +86,24 @@ impl CausalSelfAttention {
             .process_kv(block_idx, k, v)
             .map_err(|e| anyhow!("cache.process_kv(block={block_idx}) -> {e}"))?;
 
-        let k = self
-            .repeat_kv(k)
-            .map_err(|e| anyhow!("repeat_kv(k) -> {e}"))?;
-        let v = self
-            .repeat_kv(v)
-            .map_err(|e| anyhow!("repeat_kv(v) -> {e}"))?;
+        #[allow(unused_labels)]
+        let y = 'attn: {
+            // Fused SDPA on Metal — single kernel, native GQA (no repeat_kv needed)
+            #[cfg(feature = "metal")]
+            if matches!(q.device(), candle_core::Device::Metal(_)) {
+                let scale = 1.0 / (self.head_dim as f32).sqrt();
+                break 'attn candle_nn::ops::sdpa(&q, &k, &v, None, seq_len > 1, scale, 1.0)
+                    .map_err(|e| anyhow!("sdpa: {e}"))?;
+            }
 
-        let y = {
-            let in_dtype = q.dtype();
-            let q = q.to_dtype(DType::F32)?;
-            let k = k.to_dtype(DType::F32)?;
-            let v = v.to_dtype(DType::F32)?;
+            // Manual attention with GQA head expansion (CUDA, CPU)
+            let k = self
+                .repeat_kv(k)
+                .map_err(|e| anyhow!("repeat_kv(k) -> {e}"))?;
+            let v = self
+                .repeat_kv(v)
+                .map_err(|e| anyhow!("repeat_kv(v) -> {e}"))?;
+
             let att = (q.matmul(&k.t()?)? / (self.head_dim as f64).sqrt())?;
             let att = if seq_len == 1 {
                 att
@@ -109,10 +117,8 @@ impl CausalSelfAttention {
                 masked_fill(&att, &mask, f32::NEG_INFINITY)
                     .map_err(|e| anyhow!("masked_fill -> {e}"))?
             };
-            let att = candle_nn::ops::softmax(&att, D::Minus1)?;
-
-            // Convert to contiguous as matmul doesn't support strided vs for now.
-            att.matmul(&v.contiguous()?)?.to_dtype(in_dtype)?
+            let att = candle_nn::ops::softmax_last_dim(&att)?;
+            att.matmul(&v.contiguous()?)?
         };
         let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, hidden_size])?;
         let y = self.o_proj.forward(&y)?;
