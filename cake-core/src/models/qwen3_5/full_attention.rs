@@ -1,7 +1,8 @@
-//! Full (softmax) attention for Qwen3.5 with partial RoPE, Q/K norms, and output gating.
+//! Full (softmax) attention for Qwen3.5 with fused QKV projection,
+//! partial RoPE, Q/K norms, and output gating.
 
 use candle_core::{Result, Tensor, D};
-use candle_nn::{linear_no_bias, Linear, Module, RmsNorm, VarBuilder};
+use candle_nn::{Linear, Module, RmsNorm, VarBuilder};
 
 use crate::models::common::{Cache, Config};
 
@@ -15,12 +16,10 @@ fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> Result<Tensor>
     Ok(m)
 }
 
-/// Full attention with Q/K RMS norms, partial RoPE, and output gating via Q projection.
+/// Full attention with fused QKV, Q/K RMS norms, partial RoPE, and output gating.
 #[derive(Debug, Clone)]
 pub struct Qwen3_5FullAttention {
-    q_proj: Linear, // projects to num_heads * head_dim * 2 (query + gate)
-    k_proj: Linear,
-    v_proj: Linear,
+    qkv_proj: Linear, // fused: Q (num_heads * head_dim * 2) + K + V
     o_proj: Linear,
     q_norm: RmsNorm,
     k_norm: RmsNorm,
@@ -29,34 +28,31 @@ pub struct Qwen3_5FullAttention {
     num_key_value_heads: usize,
     head_dim: usize,
     rotary_dim: usize,
+
+    // Split offsets for the fused projection
+    q_size: usize,  // num_heads * head_dim * 2 (includes gate)
+    kv_size: usize,  // num_kv_heads * head_dim
 }
 
 impl Qwen3_5FullAttention {
     pub fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {
         let head_dim = cfg.head_dim.unwrap_or(cfg.hidden_size / cfg.num_attention_heads);
         let rotary_dim = (head_dim as f32 * cfg.partial_rotary_factor) as usize;
+        let h_size = cfg.hidden_size;
 
-        // Q projects to double size for output gating
-        let q_proj = linear_no_bias(
-            cfg.hidden_size,
-            cfg.num_attention_heads * head_dim * 2,
-            vb.pp("q_proj"),
-        )?;
-        let k_proj = linear_no_bias(
-            cfg.hidden_size,
-            cfg.num_key_value_heads * head_dim,
-            vb.pp("k_proj"),
-        )?;
-        let v_proj = linear_no_bias(
-            cfg.hidden_size,
-            cfg.num_key_value_heads * head_dim,
-            vb.pp("v_proj"),
-        )?;
-        let o_proj = linear_no_bias(
-            cfg.num_attention_heads * head_dim,
-            cfg.hidden_size,
-            vb.pp("o_proj"),
-        )?;
+        let q_size = cfg.num_attention_heads * head_dim * 2;
+        let kv_size = cfg.num_key_value_heads * head_dim;
+
+        // Fuse Q, K, V projections into a single Linear
+        let q_w = vb.pp("q_proj").get((q_size, h_size), "weight")?;
+        let k_w = vb.pp("k_proj").get((kv_size, h_size), "weight")?;
+        let v_w = vb.pp("v_proj").get((kv_size, h_size), "weight")?;
+        let fused_w = Tensor::cat(&[&q_w, &k_w, &v_w], 0)?;
+        let qkv_proj = Linear::new(fused_w, None);
+
+        let o_size = cfg.num_attention_heads * head_dim;
+        let o_w = vb.pp("o_proj").get((h_size, o_size), "weight")?;
+        let o_proj = Linear::new(o_w, None);
 
         let q_norm = crate::models::common::load_rms_norm(
             head_dim, cfg.rms_norm_eps, cfg.residual_rms_norm, vb.pp("q_norm"),
@@ -66,9 +62,7 @@ impl Qwen3_5FullAttention {
         )?;
 
         Ok(Self {
-            q_proj,
-            k_proj,
-            v_proj,
+            qkv_proj,
             o_proj,
             q_norm,
             k_norm,
@@ -76,6 +70,8 @@ impl Qwen3_5FullAttention {
             num_key_value_heads: cfg.num_key_value_heads,
             head_dim,
             rotary_dim,
+            q_size,
+            kv_size,
         })
     }
 
@@ -120,10 +116,19 @@ impl Qwen3_5FullAttention {
         let (b_sz, seq_len, _hidden) = x.dims3().map_err(|e| anyhow!("dims3: {e}"))?;
         let hidden_size = self.num_attention_heads * self.head_dim;
 
-        // Q projection: output is doubled for gating
-        let q_out = self.q_proj.forward(x)
-            .map_err(|e| anyhow!("q_proj: {e}"))?;
-        // Reshape to (batch, seq, num_heads, head_dim * 2), split into query and gate
+        // Single fused QKV projection
+        let qkv = self.qkv_proj.forward(x)
+            .map_err(|e| anyhow!("qkv_proj: {e}"))?;
+
+        // Split: Q (doubled for gating), K, V
+        let q_out = qkv.narrow(D::Minus1, 0, self.q_size)
+            .map_err(|e| anyhow!("q split: {e}"))?;
+        let k = qkv.narrow(D::Minus1, self.q_size, self.kv_size)
+            .map_err(|e| anyhow!("k split: {e}"))?;
+        let v = qkv.narrow(D::Minus1, self.q_size + self.kv_size, self.kv_size)
+            .map_err(|e| anyhow!("v split: {e}"))?;
+
+        // Reshape Q to (batch, seq, num_heads, head_dim * 2), split into query and gate
         let q_out = q_out.reshape((b_sz, seq_len, self.num_attention_heads, self.head_dim * 2))
             .map_err(|e| anyhow!("q reshape: {e}"))?;
         let query = q_out.narrow(D::Minus1, 0, self.head_dim)
@@ -133,10 +138,6 @@ impl Qwen3_5FullAttention {
         // Flatten gate for later: (batch, seq, num_heads * head_dim)
         let gate = gate.reshape((b_sz, seq_len, hidden_size))
             .map_err(|e| anyhow!("gate reshape: {e}"))?;
-
-        // K, V projections
-        let k = self.k_proj.forward(x).map_err(|e| anyhow!("k_proj: {e}"))?;
-        let v = self.v_proj.forward(x).map_err(|e| anyhow!("v_proj: {e}"))?;
 
         // Reshape K, V
         let k = k.reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))

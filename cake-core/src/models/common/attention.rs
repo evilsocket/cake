@@ -1,16 +1,16 @@
-//! Causal self attention implementation.
-use candle_core::{Result, Tensor};
+//! Causal self attention implementation with fused QKV projection.
+use candle_core::{Result, Tensor, D};
 use candle_nn::{linear_no_bias, Linear, Module, VarBuilder};
 
 #[derive(Debug, Clone)]
 pub struct CausalSelfAttention {
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
+    qkv_proj: Linear,
     o_proj: Linear,
     num_attention_heads: usize,
     num_key_value_heads: usize,
     head_dim: usize,
+    size_q: usize,
+    size_kv: usize,
 }
 
 #[inline]
@@ -46,18 +46,21 @@ impl CausalSelfAttention {
     ) -> anyhow::Result<Tensor> {
         let (b_sz, seq_len, hidden_size) = x.dims3().map_err(|e| anyhow!("x.dims3 -> {e}"))?;
 
-        let q = self
-            .q_proj
+        // Single fused QKV projection
+        let qkv = self
+            .qkv_proj
             .forward(x)
-            .map_err(|e| anyhow!("q.forward -> {e}"))?;
-        let k = self
-            .k_proj
-            .forward(x)
-            .map_err(|e| anyhow!("k.forward -> {e}"))?;
-        let v = self
-            .v_proj
-            .forward(x)
-            .map_err(|e| anyhow!("v.forward -> {e}"))?;
+            .map_err(|e| anyhow!("qkv.forward -> {e}"))?;
+
+        let q = qkv
+            .narrow(D::Minus1, 0, self.size_q)
+            .map_err(|e| anyhow!("q split -> {e}"))?;
+        let k = qkv
+            .narrow(D::Minus1, self.size_q, self.size_kv)
+            .map_err(|e| anyhow!("k split -> {e}"))?;
+        let v = qkv
+            .narrow(D::Minus1, self.size_q + self.size_kv, self.size_kv)
+            .map_err(|e| anyhow!("v split -> {e}"))?;
 
         let q = q
             .reshape((b_sz, seq_len, self.num_attention_heads, self.head_dim))?
@@ -139,31 +142,39 @@ impl CausalSelfAttention {
         let size_q = (cfg.hidden_size / cfg.num_attention_heads) * cfg.num_attention_heads;
         let size_kv = (cfg.hidden_size / cfg.num_attention_heads) * cfg.num_key_value_heads;
 
-        let (q_proj, k_proj, v_proj) = if cfg.use_qkv_bias {
-            (
-                candle_nn::linear(size_in, size_q, vb.pp("q_proj"))?,
-                candle_nn::linear(size_in, size_kv, vb.pp("k_proj"))?,
-                candle_nn::linear(size_in, size_kv, vb.pp("v_proj"))?,
-            )
+        // Fuse Q, K, V projections into a single Linear
+        let (qkv_proj,) = if cfg.use_qkv_bias {
+            let q_w = vb.pp("q_proj").get((size_q, size_in), "weight")?;
+            let k_w = vb.pp("k_proj").get((size_kv, size_in), "weight")?;
+            let v_w = vb.pp("v_proj").get((size_kv, size_in), "weight")?;
+            let fused_w = Tensor::cat(&[&q_w, &k_w, &v_w], 0)?;
+
+            let q_b = vb.pp("q_proj").get(size_q, "bias")?;
+            let k_b = vb.pp("k_proj").get(size_kv, "bias")?;
+            let v_b = vb.pp("v_proj").get(size_kv, "bias")?;
+            let fused_b = Tensor::cat(&[&q_b, &k_b, &v_b], 0)?;
+
+            (Linear::new(fused_w, Some(fused_b)),)
         } else {
-            (
-                linear_no_bias(size_in, size_q, vb.pp("q_proj"))?,
-                linear_no_bias(size_in, size_kv, vb.pp("k_proj"))?,
-                linear_no_bias(size_in, size_kv, vb.pp("v_proj"))?,
-            )
+            let q_w = vb.pp("q_proj").get((size_q, size_in), "weight")?;
+            let k_w = vb.pp("k_proj").get((size_kv, size_in), "weight")?;
+            let v_w = vb.pp("v_proj").get((size_kv, size_in), "weight")?;
+            let fused_w = Tensor::cat(&[&q_w, &k_w, &v_w], 0)?;
+
+            (Linear::new(fused_w, None),)
         };
 
         // o_proj never has bias in either architecture
         let o_proj = linear_no_bias(size_q, size_in, vb.pp("o_proj"))?;
 
         Ok(Self {
-            q_proj,
-            k_proj,
-            v_proj,
+            qkv_proj,
             o_proj,
             num_attention_heads: cfg.num_attention_heads,
             num_key_value_heads: cfg.num_key_value_heads,
             head_dim: cfg.hidden_size / cfg.num_attention_heads,
+            size_q,
+            size_kv,
         })
     }
 }

@@ -15,6 +15,7 @@ pub struct Client {
     layer_name: String,
     stream: TcpStream,
     info: WorkerInfo,
+    read_buf: Vec<u8>,
 }
 
 impl Client {
@@ -42,6 +43,7 @@ impl Client {
             stream,
             layer_name,
             info: worker_info,
+            read_buf: Vec::new(),
         };
 
         // Authenticate if cluster key is set
@@ -65,7 +67,7 @@ impl Client {
             .await
             .map_err(|e| anyhow!("error sending message {:?}: {}", req, e))?;
 
-        let (_, msg) = super::Message::from_reader(&mut self.stream)
+        let (_, msg) = super::Message::from_reader_buf(&mut self.stream, &mut self.read_buf)
             .await
             .map_err(|e| anyhow!("error receiving response for {:?}: {}", req, e))?;
         Ok(msg)
@@ -79,7 +81,7 @@ impl Client {
         let send_elapsed = send_start.elapsed();
 
         let recv_start = std::time::Instant::now();
-        let (resp_size, msg) = super::Message::from_reader(&mut self.stream)
+        let (resp_size, msg) = super::Message::from_reader_buf(&mut self.stream, &mut self.read_buf)
             .await
             .map_err(|e| anyhow!("error receiving response for {:?}: {}", req, e))?;
         let recv_elapsed = recv_start.elapsed();
