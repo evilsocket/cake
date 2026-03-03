@@ -7,30 +7,32 @@ use cake_core::{
 };
 
 /// Start a worker node that joins a cluster via discovery.
+/// Returns an error string if startup fails, or empty string on clean exit.
 ///
 /// - `name`: Worker name (e.g. device name)
 /// - `model`: HuggingFace model ID (e.g. "Qwen/Qwen2.5-Coder-1.5B-Instruct")
 /// - `cluster_key`: Shared secret for cluster discovery and authentication
 #[uniffi::export]
-pub fn start_worker(name: String, model: String, cluster_key: String) {
+pub fn start_worker(name: String, model: String, cluster_key: String) -> String {
     // Use try_init to avoid panic if called multiple times
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .try_init();
 
-    log::info!("[cake-ios] start_worker called");
-    log::info!("[cake-ios]   name: {name}");
-    log::info!("[cake-ios]   model: {model}");
-    log::info!("[cake-ios]   cluster_key: {}", if cluster_key.is_empty() { "(none)" } else { "(set)" });
+    eprintln!("[cake-ios] start_worker called");
+    eprintln!("[cake-ios]   name: {name}");
+    eprintln!("[cake-ios]   model: {model}");
+    eprintln!("[cake-ios]   cluster_key: {}", if cluster_key.is_empty() { "(none)" } else { "(set)" });
 
     // Set HF cache to an iOS-writable directory (app sandbox tmp).
     // The hf_hub crate will create subdirectories as needed.
     let hf_cache = std::env::temp_dir().join("huggingface").join("hub");
     if let Err(e) = std::fs::create_dir_all(&hf_cache) {
-        log::error!("[cake-ios] failed to create HF cache dir: {}", e);
-        return;
+        let msg = format!("failed to create HF cache dir: {}", e);
+        eprintln!("[cake-ios] {msg}");
+        return msg;
     }
     std::env::set_var("HF_HUB_CACHE", hf_cache.to_string_lossy().as_ref());
-    log::info!("[cake-ios] HF_HUB_CACHE={}", hf_cache.display());
+    eprintln!("[cake-ios] HF_HUB_CACHE={}", hf_cache.display());
 
     let args = Args {
         address: "0.0.0.0:10128".to_string(),
@@ -42,77 +44,76 @@ pub fn start_worker(name: String, model: String, cluster_key: String) {
         ..Default::default()
     };
 
-    log::info!("[cake-ios] creating context...");
+    eprintln!("[cake-ios] creating context...");
 
     let mut ctx = match Context::from_args(args) {
         Ok(ctx) => {
-            log::info!("[cake-ios] context created, device={:?}", ctx.device);
+            eprintln!("[cake-ios] context created, device={:?}", ctx.device);
             ctx
         }
         Err(e) => {
-            log::error!("[cake-ios] context creation failed: {}", e);
-            return;
+            let msg = format!("context creation failed: {}", e);
+            eprintln!("[cake-ios] {msg}");
+            return msg;
         }
     };
 
-    log::info!("[cake-ios] starting tokio runtime...");
+    eprintln!("[cake-ios] starting tokio runtime...");
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(async {
-            run_text_worker(&mut ctx).await;
+            run_text_worker(&mut ctx).await
         })
 }
 
-async fn run_text_worker(ctx: &mut Context) {
-    log::info!("[cake-ios] text model arch: {:?}", ctx.text_model_arch);
+async fn run_text_worker(ctx: &mut Context) -> String {
+    eprintln!("[cake-ios] text model arch: {:?}", ctx.text_model_arch);
 
     match ctx.text_model_arch {
         #[cfg(feature = "qwen2")]
         TextModelArch::Qwen2 => {
-            log::info!("[cake-ios] creating Qwen2 worker...");
+            eprintln!("[cake-ios] creating Qwen2 worker...");
             let mut worker =
                 match Worker::<cake_core::models::qwen2::Qwen2>::new(ctx).await {
                     Ok(w) => {
-                        log::info!("[cake-ios] Qwen2 worker ready on 0.0.0.0:10128");
+                        eprintln!("[cake-ios] Qwen2 worker ready on 0.0.0.0:10128");
                         w
                     }
                     Err(e) => {
-                        log::error!("[cake-ios] Qwen2 worker creation failed: {}", e);
-                        return;
+                        return format!("Qwen2 worker creation failed: {}", e);
                     }
                 };
 
             match worker.run().await {
-                Ok(_) => log::info!("[cake-ios] worker exited"),
-                Err(e) => log::error!("[cake-ios] worker error: {}", e),
+                Ok(_) => String::new(),
+                Err(e) => format!("worker error: {}", e),
             }
         }
         #[cfg(feature = "llama")]
         TextModelArch::Llama | TextModelArch::Auto => {
-            log::info!("[cake-ios] creating LLaMA worker...");
+            eprintln!("[cake-ios] creating LLaMA worker...");
             let mut worker =
                 match Worker::<cake_core::models::llama3::LLama>::new(ctx).await {
                     Ok(w) => {
-                        log::info!("[cake-ios] LLaMA worker ready on 0.0.0.0:10128");
+                        eprintln!("[cake-ios] LLaMA worker ready on 0.0.0.0:10128");
                         w
                     }
                     Err(e) => {
-                        log::error!("[cake-ios] LLaMA worker creation failed: {}", e);
-                        return;
+                        return format!("LLaMA worker creation failed: {}", e);
                     }
                 };
 
             match worker.run().await {
-                Ok(_) => log::info!("[cake-ios] worker exited"),
-                Err(e) => log::error!("[cake-ios] worker error: {}", e),
+                Ok(_) => String::new(),
+                Err(e) => format!("worker error: {}", e),
             }
         }
         #[allow(unreachable_patterns)]
         _ => {
-            log::error!("[cake-ios] no text model feature enabled for architecture {:?}", ctx.text_model_arch);
+            format!("no text model feature enabled for architecture {:?}", ctx.text_model_arch)
         }
     }
 }

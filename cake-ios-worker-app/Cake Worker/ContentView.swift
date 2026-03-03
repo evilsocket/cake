@@ -351,15 +351,19 @@ struct WorkerView: View {
 
         DispatchQueue.global(qos: .userInitiated).async {
             DispatchQueue.main.async {
-                status = .running("listening on :10128")
+                status = .running("downloading model...")
             }
 
             print("[cake] calling startWorker FFI...")
-            startWorker(name: workerName, model: modelName, clusterKey: clusterKey)
-            print("[cake] startWorker returned (worker exited)")
+            let result = startWorker(name: workerName, model: modelName, clusterKey: clusterKey)
+            print("[cake] startWorker returned: \(result.isEmpty ? "(clean exit)" : result)")
 
             DispatchQueue.main.async {
-                status = .idle
+                if result.isEmpty {
+                    status = .idle
+                } else {
+                    status = .error(result)
+                }
             }
         }
     }
