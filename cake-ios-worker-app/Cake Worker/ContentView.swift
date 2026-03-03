@@ -271,9 +271,8 @@ struct WorkerView: View {
     var onBack: () -> Void
 
     @State private var workerName: String = UIDevice.current.name
+    @State private var modelName: String = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
     @State private var clusterKey: String = ""
-    @State private var showModelPicker = false
-    @State private var selectedModelType: String = "text"
 
     var body: some View {
         VStack(spacing: 0) {
@@ -304,33 +303,19 @@ struct WorkerView: View {
                         SectionHeader(title: "Configuration")
 
                         InputField(label: "Worker Name", text: $workerName, placeholder: "my-device")
-                        InputField(label: "Cluster Key", text: $clusterKey, placeholder: "shared secret (optional)", isSecure: true)
-
-                        // Model type picker
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Model Type")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(.surface500)
-                                .textCase(.uppercase)
-                                .tracking(0.5)
-
-                            Picker("", selection: $selectedModelType) {
-                                Text("Text Model").tag("text")
-                                Text("Image Model").tag("image")
-                            }
-                            .pickerStyle(.segmented)
-                        }
+                        InputField(label: "Model", text: $modelName, placeholder: "Qwen/Qwen2.5-Coder-1.5B-Instruct")
+                        InputField(label: "Cluster Key", text: $clusterKey, placeholder: "shared secret for discovery")
                     }
                     .padding(16)
                     .cardStyle()
 
                     // Action
                     VStack(spacing: 12) {
-                        Button(action: { showModelPicker = true }) {
+                        Button(action: startWorkerAction) {
                             HStack(spacing: 10) {
                                 Image(systemName: status.isRunning ? "stop.fill" : "play.fill")
                                     .font(.system(size: 14))
-                                Text(status.isRunning ? "Running..." : "Select Model & Start")
+                                Text(status.isRunning ? "Running..." : "Start Worker")
                                     .font(.system(size: 16, weight: .semibold))
                             }
                             .foregroundColor(.white)
@@ -339,10 +324,7 @@ struct WorkerView: View {
                             .background(status.isRunning ? Color.surface300 : Color.accent500)
                             .cornerRadius(12)
                         }
-                        .disabled(status.isRunning)
-                        .fileImporter(isPresented: $showModelPicker, allowedContentTypes: [.folder]) { result in
-                            handleWorkerModelSelection(result)
-                        }
+                        .disabled(status.isRunning || modelName.isEmpty)
 
                         if case .error(let msg) = status {
                             Text(msg)
@@ -362,57 +344,23 @@ struct WorkerView: View {
         }
     }
 
-    private func handleWorkerModelSelection(_ result: Result<URL, Error>) {
-        switch result {
-        case .success(let directory):
-            guard directory.startAccessingSecurityScopedResource() else {
-                print("[cake] ERROR: startAccessingSecurityScopedResource failed")
-                status = .error("access denied")
-                return
+    private func startWorkerAction() {
+        print("[cake] starting worker: name=\(workerName) model=\(modelName) cluster_key=\(clusterKey.isEmpty ? "(none)" : "(set)")")
+
+        status = .starting
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            DispatchQueue.main.async {
+                status = .running("listening on :10128")
             }
 
-            let basePath = directory.path()
-            let topologyPath = basePath + "/topology.yml"
+            print("[cake] calling startWorker FFI...")
+            startWorker(name: workerName, model: modelName, clusterKey: clusterKey)
+            print("[cake] startWorker returned (worker exited)")
 
-            print("[cake] selected directory: \(basePath)")
-            print("[cake] topology path: \(topologyPath)")
-            print("[cake] model path: \(basePath)")
-            print("[cake] model type: \(selectedModelType)")
-            print("[cake] worker name: \(workerName)")
-
-            // Check if topology.yml exists
-            if !FileManager.default.fileExists(atPath: topologyPath) {
-                print("[cake] WARNING: topology.yml not found at \(topologyPath)")
+            DispatchQueue.main.async {
+                status = .idle
             }
-
-            // Check if config.json exists (model directory marker)
-            let configPath = basePath + "/config.json"
-            if FileManager.default.fileExists(atPath: configPath) {
-                print("[cake] found config.json - valid model directory")
-            } else {
-                print("[cake] WARNING: config.json not found at \(configPath)")
-            }
-
-            status = .starting
-
-            DispatchQueue.global(qos: .userInitiated).async {
-                // Set running status before the blocking call
-                DispatchQueue.main.async {
-                    status = .running("worker started")
-                }
-
-                print("[cake] calling startWorker FFI...")
-                startWorker(name: workerName, modelPath: basePath, topologyPath: topologyPath, modelType: selectedModelType)
-                print("[cake] startWorker returned (worker exited)")
-
-                DispatchQueue.main.async {
-                    status = .idle
-                }
-            }
-
-        case .failure(let error):
-            print("[cake] ERROR: file picker failed: \(error.localizedDescription)")
-            status = .error(error.localizedDescription)
         }
     }
 }

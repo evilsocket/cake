@@ -6,34 +6,29 @@ use cake_core::{
     Args, ModelType, TextModelArch,
 };
 
+/// Start a worker node that joins a cluster via discovery.
+///
+/// - `name`: Worker name (e.g. device name)
+/// - `model`: HuggingFace model ID (e.g. "Qwen/Qwen2.5-Coder-1.5B-Instruct")
+/// - `cluster_key`: Shared secret for cluster discovery and authentication
 #[uniffi::export]
-pub fn start_worker(name: String, model_path: String, topology_path: String, model_type: String) {
+pub fn start_worker(name: String, model: String, cluster_key: String) {
     // Use try_init to avoid panic if called multiple times
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug"))
+    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .try_init();
 
     log::info!("[cake-ios] start_worker called");
     log::info!("[cake-ios]   name: {name}");
-    log::info!("[cake-ios]   model_path: {model_path}");
-    log::info!("[cake-ios]   topology_path: {topology_path}");
-    log::info!("[cake-ios]   model_type: {model_type}");
-
-    let model_type_arg = match model_type.as_str() {
-        "text" => ModelType::TextModel,
-        "image" => ModelType::ImageModel,
-        _ => {
-            log::error!("[cake-ios] unrecognized model type: {model_type}");
-            return;
-        }
-    };
+    log::info!("[cake-ios]   model: {model}");
+    log::info!("[cake-ios]   cluster_key: {}", if cluster_key.is_empty() { "(none)" } else { "(set)" });
 
     let args = Args {
         address: "0.0.0.0:10128".to_string(),
         mode: Mode::Worker,
         name: Some(name),
-        model: model_path,
-        topology: Some(topology_path),
-        model_type: model_type_arg,
+        model,
+        model_type: ModelType::TextModel,
+        cluster_key: if cluster_key.is_empty() { None } else { Some(cluster_key) },
         ..Default::default()
     };
 
@@ -41,7 +36,7 @@ pub fn start_worker(name: String, model_path: String, topology_path: String, mod
 
     let mut ctx = match Context::from_args(args) {
         Ok(ctx) => {
-            log::info!("[cake-ios] context created successfully, device={:?}", ctx.device);
+            log::info!("[cake-ios] context created, device={:?}", ctx.device);
             ctx
         }
         Err(e) => {
@@ -57,29 +52,7 @@ pub fn start_worker(name: String, model_path: String, topology_path: String, mod
         .build()
         .unwrap()
         .block_on(async {
-            match model_type.as_str() {
-                "text" => run_text_worker(&mut ctx).await,
-                "image" => {
-                    let mut worker = match Worker::<cake_core::models::sd::SD>::new(&mut ctx).await
-                    {
-                        Ok(w) => w,
-                        Err(e) => {
-                            log::error!("[cake-ios] SD worker creation failed: {}", e);
-                            return;
-                        }
-                    };
-
-                    log::info!("[cake-ios] running SD worker...");
-
-                    match worker.run().await {
-                        Ok(_) => log::info!("[cake-ios] SD worker exited"),
-                        Err(e) => log::error!("[cake-ios] SD worker error: {}", e),
-                    }
-                }
-                _ => {
-                    log::error!("[cake-ios] unrecognized model type: {model_type}");
-                }
-            }
+            run_text_worker(&mut ctx).await;
         })
 }
 
@@ -93,7 +66,7 @@ async fn run_text_worker(ctx: &mut Context) {
             let mut worker =
                 match Worker::<cake_core::models::qwen2::Qwen2>::new(ctx).await {
                     Ok(w) => {
-                        log::info!("[cake-ios] Qwen2 worker created successfully");
+                        log::info!("[cake-ios] Qwen2 worker ready on 0.0.0.0:10128");
                         w
                     }
                     Err(e) => {
@@ -102,11 +75,9 @@ async fn run_text_worker(ctx: &mut Context) {
                     }
                 };
 
-            log::info!("[cake-ios] running Qwen2 worker on 0.0.0.0:10128...");
-
             match worker.run().await {
-                Ok(_) => log::info!("[cake-ios] Qwen2 worker exited"),
-                Err(e) => log::error!("[cake-ios] Qwen2 worker error: {}", e),
+                Ok(_) => log::info!("[cake-ios] worker exited"),
+                Err(e) => log::error!("[cake-ios] worker error: {}", e),
             }
         }
         #[cfg(feature = "llama")]
@@ -115,7 +86,7 @@ async fn run_text_worker(ctx: &mut Context) {
             let mut worker =
                 match Worker::<cake_core::models::llama3::LLama>::new(ctx).await {
                     Ok(w) => {
-                        log::info!("[cake-ios] LLaMA worker created successfully");
+                        log::info!("[cake-ios] LLaMA worker ready on 0.0.0.0:10128");
                         w
                     }
                     Err(e) => {
@@ -124,11 +95,9 @@ async fn run_text_worker(ctx: &mut Context) {
                     }
                 };
 
-            log::info!("[cake-ios] running LLaMA worker on 0.0.0.0:10128...");
-
             match worker.run().await {
-                Ok(_) => log::info!("[cake-ios] LLaMA worker exited"),
-                Err(e) => log::error!("[cake-ios] LLaMA worker error: {}", e),
+                Ok(_) => log::info!("[cake-ios] worker exited"),
+                Err(e) => log::error!("[cake-ios] worker error: {}", e),
             }
         }
         #[allow(unreachable_patterns)]
