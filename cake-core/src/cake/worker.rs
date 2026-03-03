@@ -395,6 +395,7 @@ impl<G: Generator + 'static> Worker<G> {
             };
 
             // load raw tensor to the first block's device
+            let load_start = Instant::now();
             let first_device = ops
                 .first()
                 .and_then(|(name, _, _)| context.layer_devices.get(name))
@@ -421,6 +422,8 @@ impl<G: Generator + 'static> Worker<G> {
                     continue;
                 }
             };
+
+            let load_elapsed = load_start.elapsed();
 
             let num_ops = ops.len();
             let start_ops = Instant::now();
@@ -504,9 +507,25 @@ impl<G: Generator + 'static> Worker<G> {
 
             let elaps_ops = start_ops.elapsed();
 
+            // serialize response tensor (includes GPU sync for data readback)
+            let ser_start = Instant::now();
+            let resp_msg = Message::from_tensor(&x);
+            let ser_elapsed = ser_start.elapsed();
+
             // send response tensor
-            match Self::write_message_timed(&mut socket, Message::from_tensor(&x)).await {
+            match Self::write_message_timed(&mut socket, resp_msg).await {
                 Ok((elaps_write, written)) => {
+                    log::debug!(
+                        "[{}] read={:.1}ms load={:.1}ms fwd={:.1}ms ser={:.1}ms write={:.1}ms ({} ops)",
+                        &client,
+                        read_time.as_secs_f64() * 1000.0,
+                        load_elapsed.as_secs_f64() * 1000.0,
+                        elaps_ops.as_secs_f64() * 1000.0,
+                        ser_elapsed.as_secs_f64() * 1000.0,
+                        elaps_write.as_secs_f64() * 1000.0,
+                        num_ops,
+                    );
+
                     let ops_per_sec = (num_ops as f64 / elaps_ops.as_secs_f64()) as usize;
                     let write_bytes_per_sec = (written as f64 / elaps_write.as_secs_f64()) as usize;
                     let read_bytes_per_sec = (read_size as f64 / read_time.as_secs_f64()) as usize;

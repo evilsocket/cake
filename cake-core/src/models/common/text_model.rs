@@ -348,6 +348,8 @@ impl TextModelBase {
             .await
             .map_err(|e| anyhow!("error in model.forward: {e}"))?;
 
+        let post_start = std::time::Instant::now();
+
         let logits = logits
             .squeeze(0)
             .map_err(|e| anyhow!("error squeezing logits: {e}"))?;
@@ -373,10 +375,13 @@ impl TextModelBase {
         };
         self.index_pos += num_context_tokens;
 
+        let sample_start = std::time::Instant::now();
         let next_token = self
             .logits_processor
             .sample(&logits)
             .map_err(|e| anyhow!("error sampling logits {logits}: {e}"))?;
+        let sample_elapsed = sample_start.elapsed();
+
         self.generated += 1;
         self.tokens.push(next_token);
 
@@ -385,15 +390,27 @@ impl TextModelBase {
             .as_ref()
             .map_or(false, |eos| eos.is_eos(next_token));
 
+        let decode_start = std::time::Instant::now();
+        let text = match self.tokenizer.decode(&[next_token], false) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                log::error!("could not decode token {next_token}: {e}");
+                None
+            }
+        };
+        let decode_elapsed = decode_start.elapsed();
+        let post_elapsed = post_start.elapsed();
+
+        log::debug!(
+            "  post-forward: total={:.1}ms sample={:.1}ms decode={:.1}ms",
+            post_elapsed.as_secs_f64() * 1000.0,
+            sample_elapsed.as_secs_f64() * 1000.0,
+            decode_elapsed.as_secs_f64() * 1000.0,
+        );
+
         Ok(Token {
             id: next_token,
-            text: match self.tokenizer.decode(&[next_token], false) {
-                Ok(s) => Some(s),
-                Err(e) => {
-                    log::error!("could not decode token {next_token}: {e}");
-                    None
-                }
-            },
+            text,
             is_end_of_stream,
         })
     }
