@@ -1,5 +1,5 @@
 //! Causal self attention implementation with fused QKV projection.
-use candle_core::{Result, Tensor, D};
+use candle_core::{DType, Result, Tensor, D};
 use candle_nn::{linear_no_bias, Linear, Module, VarBuilder};
 
 #[derive(Debug, Clone)]
@@ -89,6 +89,12 @@ impl CausalSelfAttention {
             .process_kv(block_idx, k, v)
             .map_err(|e| anyhow!("cache.process_kv(block={block_idx}) -> {e}"))?;
 
+        // Compute attention in F32 for numerical stability.
+        let in_dtype = q.dtype();
+        let q = q.to_dtype(DType::F32)?;
+        let k = k.to_dtype(DType::F32)?;
+        let v = v.to_dtype(DType::F32)?;
+
         #[allow(unused_labels)]
         let y = 'attn: {
             // Fused SDPA on Metal — single kernel, native GQA (no repeat_kv needed)
@@ -123,6 +129,8 @@ impl CausalSelfAttention {
             let att = candle_nn::ops::softmax_last_dim(&att)?;
             att.matmul(&v.contiguous()?)?
         };
+
+        let y = y.to_dtype(in_dtype)?;
         let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, hidden_size])?;
         let y = self.o_proj.forward(&y)?;
 
