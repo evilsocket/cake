@@ -116,9 +116,15 @@ impl Qwen3_5FullAttention {
         let (b_sz, seq_len, _hidden) = x.dims3().map_err(|e| anyhow!("dims3: {e}"))?;
         let hidden_size = self.num_attention_heads * self.head_dim;
 
+        // Metal requires periodic command buffer flushes (see linear_attention.rs).
+        let metal_sync = x.device().is_metal();
+
         // Single fused QKV projection
         let qkv = self.qkv_proj.forward(x)
             .map_err(|e| anyhow!("qkv_proj: {e}"))?;
+
+        // Flush Metal commands after the big QKV matmul
+        if metal_sync { let _ = x.device().synchronize(); }
 
         // Split: Q (doubled for gating), K, V
         let q_out = qkv.narrow(D::Minus1, 0, self.q_size)
@@ -208,6 +214,10 @@ impl Qwen3_5FullAttention {
 
         // Final projection
         let y = self.o_proj.forward(&y).map_err(|e| anyhow!("o_proj: {e}"))?;
+
+        // Flush Metal commands after attention + out_proj
+        if metal_sync { let _ = x.device().synchronize(); }
+
         Ok(y)
     }
 }
