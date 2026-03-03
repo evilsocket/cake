@@ -314,11 +314,15 @@ impl<G: Generator + 'static> Worker<G> {
         let mut avg_ops = 0;
         let mut avg_write = 0;
         let mut avg_read = 0;
+        let mut read_buf = Vec::new();
 
         // keep reading messages
-        while let Ok((read_time, read_size, op_message)) =
-            Self::read_message_timed(&mut socket).await
-        {
+        while let Ok((read_time, read_size, op_message)) = {
+            let start = Instant::now();
+            Message::from_reader_buf(&mut socket, &mut read_buf)
+                .await
+                .map(|(size, msg)| (start.elapsed(), size, msg))
+        } {
             if matches!(op_message, Message::Goodbye) {
                 log::debug!("[{}] goodbye", &client);
                 context

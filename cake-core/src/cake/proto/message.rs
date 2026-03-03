@@ -1,18 +1,47 @@
-use std::str::FromStr;
-
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use safetensors::View;
 use speedy::{BigEndian, Readable, Writable};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+/// Map a candle DType to a compact u8 tag for wire encoding.
+fn dtype_to_u8(dtype: DType) -> u8 {
+    match dtype {
+        DType::U8 => 0,
+        DType::U32 => 1,
+        DType::I64 => 2,
+        DType::BF16 => 3,
+        DType::F16 => 4,
+        DType::F32 => 5,
+        DType::F64 => 6,
+        DType::F8E4M3 => 7,
+        // Catch-all for newer candle dtypes we don't use on the wire yet.
+        _ => 255,
+    }
+}
+
+/// Map a u8 wire tag back to a candle DType.
+fn u8_to_dtype(tag: u8) -> Result<DType> {
+    match tag {
+        0 => Ok(DType::U8),
+        1 => Ok(DType::U32),
+        2 => Ok(DType::I64),
+        3 => Ok(DType::BF16),
+        4 => Ok(DType::F16),
+        5 => Ok(DType::F32),
+        6 => Ok(DType::F64),
+        7 => Ok(DType::F8E4M3),
+        _ => Err(anyhow!("unknown dtype tag: {tag}")),
+    }
+}
+
 /// Represents a tensor in Cake protocol.
 #[derive(Readable, Writable)]
 pub struct RawTensor {
     /// Tensor data.
     pub data: Vec<u8>,
-    /// The data type as string.
-    pub dtype: String,
+    /// The data type as a compact u8 tag (see dtype_to_u8 / u8_to_dtype).
+    pub dtype: u8,
     /// The tensor shape.
     pub shape: Vec<usize>,
 }
@@ -31,14 +60,14 @@ impl RawTensor {
     /// Convert x into a RawTensor.
     pub fn from_tensor(x: &Tensor) -> Self {
         let data: Vec<u8> = x.data().into_owned();
-        let dtype = x.dtype().as_str().to_string();
+        let dtype = dtype_to_u8(x.dtype());
         let shape = x.shape().clone().into_dims();
         Self { data, dtype, shape }
     }
 
     /// Convert the raw tensor in a Tensor allocated on the given device.
     pub fn to_tensor(&self, device: &Device) -> Result<Tensor> {
-        let dtype = DType::from_str(&self.dtype)?;
+        let dtype = u8_to_dtype(self.dtype)?;
         Ok(Tensor::from_raw_buffer(
             &self.data,
             dtype,
@@ -160,6 +189,15 @@ impl Message {
     where
         R: AsyncReadExt + Unpin,
     {
+        let mut buf = Vec::new();
+        Self::from_reader_buf(reader, &mut buf).await
+    }
+
+    /// Read a Message, reusing `buf` to avoid per-message heap allocation.
+    pub async fn from_reader_buf<R>(reader: &mut R, buf: &mut Vec<u8>) -> Result<(usize, Self)>
+    where
+        R: AsyncReadExt + Unpin,
+    {
         // read_u32() reads 4 bytes as big-endian and returns the native value.
         let magic = reader.read_u32().await?;
         if magic != super::PROTO_MAGIC {
@@ -171,11 +209,11 @@ impl Message {
             return Err(anyhow!("request size {req_size} > MESSAGE_MAX_SIZE"));
         }
 
-        let mut req = vec![0_u8; req_size as usize];
+        let req_size = req_size as usize;
+        buf.resize(req_size, 0);
+        reader.read_exact(&mut buf[..req_size]).await?;
 
-        reader.read_exact(&mut req).await?;
-
-        Ok((req.len(), Self::from_bytes(&req)?))
+        Ok((req_size, Self::from_bytes(&buf[..req_size])?))
     }
 
     /// Write a Message with the provided writer.
@@ -221,7 +259,7 @@ mod tests {
     fn test_raw_tensor_roundtrip_f32() {
         let original = make_f32_tensor(&[2, 64]);
         let raw = RawTensor::from_tensor(&original);
-        assert_eq!(raw.dtype, "f32");
+        assert_eq!(raw.dtype, dtype_to_u8(DType::F32));
         assert_eq!(raw.shape, vec![2, 64]);
         assert_eq!(raw.data.len(), 2 * 64 * 4);
 
@@ -234,7 +272,7 @@ mod tests {
     fn test_raw_tensor_roundtrip_f16() {
         let original = make_f16_tensor(&[1, 128]);
         let raw = RawTensor::from_tensor(&original);
-        assert_eq!(raw.dtype, "f16");
+        assert_eq!(raw.dtype, dtype_to_u8(DType::F16));
         assert_eq!(raw.shape, vec![1, 128]);
         assert_eq!(raw.data.len(), 1 * 128 * 2);
 
@@ -401,7 +439,7 @@ mod tests {
         let (_, decoded) = Message::from_reader(&mut reader).await.unwrap();
         match decoded {
             Message::Tensor(raw) => {
-                assert_eq!(raw.dtype, "f16");
+                assert_eq!(raw.dtype, dtype_to_u8(DType::F16));
                 assert_eq!(raw.shape, vec![1, 128]);
                 let t = raw.to_tensor(&Device::Cpu).unwrap();
                 assert_eq!(t.data().to_vec(), orig_bytes);
