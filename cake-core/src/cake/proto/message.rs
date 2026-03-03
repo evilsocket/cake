@@ -221,6 +221,15 @@ impl Message {
     where
         W: AsyncWriteExt + Unpin,
     {
+        let mut buf = Vec::new();
+        self.to_writer_buf(writer, &mut buf).await
+    }
+
+    /// Write a Message, reusing `buf` to avoid per-message heap allocation.
+    pub async fn to_writer_buf<W>(&self, writer: &mut W, buf: &mut Vec<u8>) -> Result<usize>
+    where
+        W: AsyncWriteExt + Unpin,
+    {
         let payload = self.to_bytes()?;
         let payload_size = payload.len() as u32;
         if payload_size > super::MESSAGE_MAX_SIZE {
@@ -228,13 +237,15 @@ impl Message {
         }
 
         // Coalesce header + payload into a single write to avoid Nagle delays.
-        let mut frame = Vec::with_capacity(8 + payload.len());
-        frame.extend_from_slice(&super::PROTO_MAGIC.to_be_bytes());
-        frame.extend_from_slice(&payload_size.to_be_bytes());
-        frame.extend_from_slice(&payload);
-        writer.write_all(&frame).await?;
+        let frame_len = 8 + payload.len();
+        buf.clear();
+        buf.reserve(frame_len);
+        buf.extend_from_slice(&super::PROTO_MAGIC.to_be_bytes());
+        buf.extend_from_slice(&payload_size.to_be_bytes());
+        buf.extend_from_slice(&payload);
+        writer.write_all(buf).await?;
 
-        Ok(frame.len())
+        Ok(frame_len)
     }
 }
 

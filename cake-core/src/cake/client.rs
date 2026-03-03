@@ -16,6 +16,7 @@ pub struct Client {
     stream: TcpStream,
     info: WorkerInfo,
     read_buf: Vec<u8>,
+    write_buf: Vec<u8>,
 }
 
 impl Client {
@@ -44,6 +45,7 @@ impl Client {
             layer_name,
             info: worker_info,
             read_buf: Vec::new(),
+            write_buf: Vec::new(),
         };
 
         // Authenticate if cluster key is set
@@ -75,7 +77,7 @@ impl Client {
 
     async fn forward_request(&mut self, req: Message) -> Result<Tensor> {
         let send_start = std::time::Instant::now();
-        req.to_writer(&mut self.stream)
+        req.to_writer_buf(&mut self.stream, &mut self.write_buf)
             .await
             .map_err(|e| anyhow!("error sending message {:?}: {}", req, e))?;
         let send_elapsed = send_start.elapsed();

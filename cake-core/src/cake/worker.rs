@@ -345,6 +345,7 @@ impl<G: Generator + 'static> Worker<G> {
         let mut avg_write = 0;
         let mut avg_read = 0;
         let mut read_buf = Vec::new();
+        let mut write_buf = Vec::new();
 
         // keep reading messages
         while let Ok((read_time, read_size, op_message)) = {
@@ -512,9 +513,11 @@ impl<G: Generator + 'static> Worker<G> {
             let resp_msg = Message::from_tensor(&x);
             let ser_elapsed = ser_start.elapsed();
 
-            // send response tensor
-            match Self::write_message_timed(&mut socket, resp_msg).await {
-                Ok((elaps_write, written)) => {
+            // send response tensor (reuse write buffer)
+            let write_start = Instant::now();
+            match resp_msg.to_writer_buf(&mut socket, &mut write_buf).await {
+                Ok(written) => {
+                    let elaps_write = write_start.elapsed();
                     log::debug!(
                         "[{}] read={:.1}ms load={:.1}ms fwd={:.1}ms ser={:.1}ms write={:.1}ms ({} ops)",
                         &client,
