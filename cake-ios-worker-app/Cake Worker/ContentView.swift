@@ -60,15 +60,10 @@ struct ContentView: View {
     @State private var selectedMode: AppMode? = nil
     @State private var status: NodeStatus = .idle
 
-    // Auto-start support: pass --autostart [--cluster-key KEY] via devicectl launch args
-    private static let launchArgs = ProcessInfo.processInfo.arguments
-    private var shouldAutoStart: Bool { Self.launchArgs.contains("--autostart") }
-    private var autoClusterKey: String? {
-        if let idx = Self.launchArgs.firstIndex(of: "--cluster-key"), idx + 1 < Self.launchArgs.count {
-            return Self.launchArgs[idx + 1]
-        }
-        return nil
-    }
+    // Auto-start: always start worker mode on launch for testing.
+    // Set to false for manual mode selection.
+    private let shouldAutoStart = true
+    private let autoClusterKey: String? = "test"
 
     var body: some View {
         ZStack {
