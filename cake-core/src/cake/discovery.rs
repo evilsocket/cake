@@ -71,8 +71,14 @@ impl DiscoveredWorker {
                     let os_reserve = pct_reserve.max(min_reserve);
                     g.vram_bytes.saturating_sub(os_reserve)
                 } else {
-                    // Dedicated VRAM: 5% overhead for CUDA/driver runtime
-                    (g.vram_bytes as f64 * 0.95) as u64
+                    // Dedicated VRAM: reserve max(5%, 768 MiB) for CUDA context,
+                    // cuBLAS workspace, and memory fragmentation. The percentage
+                    // works for large GPUs (24+ GB), but on 12 GB GPUs 5% = 600 MB
+                    // leaves only ~50 MB headroom after filling layers, causing OOM.
+                    let min_reserve = 768u64 * 1024 * 1024;
+                    let pct_reserve = (g.vram_bytes as f64 * 0.05) as u64;
+                    let reserve = pct_reserve.max(min_reserve);
+                    g.vram_bytes.saturating_sub(reserve)
                 };
                 (usable / layer_size_bytes) as usize
             })
