@@ -83,6 +83,29 @@ pub fn load_safetensors_paths_from_index(
     Ok(safetensors_files)
 }
 
+/// Pre-read safetensor files into the OS page cache so that subsequent
+/// mmap access doesn't trigger per-tensor page faults during layer loading.
+fn prefetch_safetensors(filenames: &[PathBuf]) -> Result<()> {
+    use std::io::Read;
+    let start = std::time::Instant::now();
+    let mut total_bytes: u64 = 0;
+    let mut buf = Vec::new();
+    for filename in filenames {
+        buf.clear();
+        std::fs::File::open(filename)
+            .map_err(|e| anyhow!("prefetch: can't open {}: {e}", filename.display()))?
+            .read_to_end(&mut buf)
+            .map_err(|e| anyhow!("prefetch: can't read {}: {e}", filename.display()))?;
+        total_bytes += buf.len() as u64;
+    }
+    log::info!(
+        "pre-cached {} in {:.1}s",
+        human_bytes::human_bytes(total_bytes as f64),
+        start.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
 /// Create a VarBuilder with the tensors loaded from the index.
 pub fn load_var_builder_from_index<'a>(
     tensor_index: PathBuf,
@@ -97,6 +120,8 @@ pub fn load_var_builder_from_index<'a>(
         load_safetensors_from_model(tensor_index.parent().unwrap())
             .map_err(|e| anyhow!("can't load tensors index: {:?}", e))?
     };
+
+    prefetch_safetensors(&filenames)?;
 
     if fp8 {
         unsafe {
@@ -169,6 +194,8 @@ pub fn load_var_builder_for_local_layers<'a>(
             .collect::<std::collections::HashSet<_>>()
             .len()
     );
+
+    prefetch_safetensors(&filenames)?;
 
     if fp8 {
         unsafe {

@@ -131,8 +131,8 @@ impl TextModelBase {
 
         for i in 0..config.num_hidden_layers {
             let block_layer_name = format!("{prefix}.layers.{i}");
-            if let Some((node_name, node)) = ctx.topology.get_node_for_layer(&block_layer_name) {
-                log::debug!("node {node_name} will serve {}", &block_layer_name);
+            if let Some((_node_name, node)) = ctx.topology.get_node_for_layer(&block_layer_name) {
+                log::info!("connecting {} to {} ...", &block_layer_name, &node.host);
                 blocks.push(Box::new(
                     crate::cake::Client::new(
                         ctx.device.clone(),
@@ -143,7 +143,7 @@ impl TextModelBase {
                     .await?,
                 ));
             } else {
-                log::debug!("{} will be served locally", &block_layer_name);
+                log::info!("loading {} ...", &block_layer_name);
                 blocks.push(B::load(block_layer_name.clone(), ctx)?);
             }
         }
