@@ -1,10 +1,10 @@
 package com.evilsocket.cake
 
-import cake_mobile_c.cake_free_string
-import cake_mobile_c.cake_get_worker_status
-import cake_mobile_c.cake_set_cache_dir
-import cake_mobile_c.cake_start_worker
-import cake_mobile_c.cake_stop_worker
+import cake_mobile.cake_free_string
+import cake_mobile.cake_get_worker_status
+import cake_mobile.cake_set_cache_dir
+import cake_mobile.cake_start_worker
+import cake_mobile.cake_stop_worker
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.cstr
