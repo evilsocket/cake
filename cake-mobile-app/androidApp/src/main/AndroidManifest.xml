@@ -9,9 +9,9 @@
 
     <application
         android:label="Cake Worker"
-        android:icon="@mipmap/ic_launcher"
-        android:roundIcon="@mipmap/ic_launcher_round"
-        android:theme="@style/Theme.AppCompat.DayNight.NoActionBar"
+        android:icon="@drawable/ic_launcher"
+        android:roundIcon="@drawable/ic_launcher"
+        android:theme="@style/AppTheme"
         android:allowBackup="true"
         android:supportsRtl="true">
 

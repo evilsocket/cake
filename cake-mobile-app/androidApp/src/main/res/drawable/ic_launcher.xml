@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Background -->
+    <path
+        android:fillColor="#1A1625"
+        android:pathData="M0,0h108v108h-108z"/>
+    <!-- Cake slice icon (simplified) -->
+    <path
+        android:fillColor="#6B45C8"
+        android:pathData="M54,20 L78,70 L30,70 Z"/>
+    <path
+        android:fillColor="#9C82D4"
+        android:pathData="M30,70 L78,70 L78,82 L30,82 Z"/>
+    <circle
+        android:fillColor="#FFFFFF"
+        android:cx="54"
+        android:cy="20"
+        android:r="5"/>
+</vector>
