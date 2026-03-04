@@ -13,6 +13,9 @@ license = "GPL-3.0"
 readme = "README.md"
 categories = ["science"]
 
+[workspace.dependencies]
+cake-core = { version = "0.1.0", path = "cake-core" }
+
 [profile.release]
 lto = true        # Enable link-time optimization
 codegen-units = 1 # Reduce number of codegen units to increase optimizations

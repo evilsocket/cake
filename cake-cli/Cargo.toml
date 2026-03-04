@@ -1,7 +1,14 @@
 [package]
 name = "cake-cli"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+keywords.workspace = true
+authors.workspace = true
+license.workspace = true
+readme.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "cake"
@@ -9,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.86"
-cake-core = { path = "../cake-core" }
+cake-core.workspace = true
 clap = "4.5.8"
 crossterm = "0.28"
 dirs = "5"

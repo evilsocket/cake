@@ -49,3 +49,7 @@ sync_blade:
 	@rsync -rvzc cake-data/8b-test/blade-node blade.local:/home/evilsocket/cake-data
 	
 sync: sync_bahamut sync_blade
+
+publish:
+	cargo publish -p cake-core
+	cargo publish -p cake-cli
