@@ -60,10 +60,8 @@ struct ContentView: View {
     @State private var selectedMode: AppMode? = nil
     @State private var status: NodeStatus = .idle
 
-    // Auto-start: always start worker mode on launch for testing.
-    // Set to false for manual mode selection.
-    private let shouldAutoStart = true
-    private let autoClusterKey: String? = "test"
+    private let shouldAutoStart = false
+    private let autoClusterKey: String? = nil
 
     var body: some View {
         ZStack {
@@ -126,6 +124,23 @@ struct ModePickerView: View {
                             }
                         }
                     }
+
+                    // Explainer
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("How it works")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.surface400)
+                            .textCase(.uppercase)
+                            .tracking(1)
+
+                        Text("Cake splits a large language model across multiple devices. A master node coordinates inference while workers each run a subset of the model's layers. Any device on the same network can contribute — the more devices, the larger the model you can run.")
+                            .font(.system(size: 13))
+                            .foregroundColor(.surface500)
+                            .lineSpacing(4)
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .cardStyle()
 
                     Spacer()
                 }
