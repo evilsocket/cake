@@ -32,6 +32,8 @@ kotlin {
         androidMain.dependencies {
             implementation(compose.preview)
             implementation(libs.androidx.activity.compose)
+            // JNA is required by UniFFI-generated Kotlin bindings
+            implementation("net.java.dev.jna:jna:5.15.0@aar")
         }
     }
 }
