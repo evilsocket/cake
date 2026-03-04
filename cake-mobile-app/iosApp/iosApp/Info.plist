@@ -26,6 +26,8 @@
     <array>
         <string>_cake._udp</string>
     </array>
+    <key>CADisableMinimumFrameDurationOnPhone</key>
+    <true/>
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>
