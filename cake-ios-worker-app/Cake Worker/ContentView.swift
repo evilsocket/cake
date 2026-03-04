@@ -652,6 +652,7 @@ struct MasterView: View {
     @State private var showModelPicker = false
     @State private var selectedModelPath: String? = nil
     @State private var selectedModelName: String? = nil
+    @State private var showUnsupportedAlert = false
 
     /// Effective model string: local path takes priority over HF ID.
     private var effectiveModel: String? {
@@ -807,6 +808,11 @@ struct MasterView: View {
                 .padding(.horizontal, 20)
             }
         }
+        .alert("Master Mode", isPresented: $showUnsupportedAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Master mode is not yet available on iOS. Use this device as a Worker and run the master node on a Mac or Linux machine.")
+        }
     }
 
     private func handleModelSelection(_ result: Result<URL, Error>) {
@@ -825,13 +831,7 @@ struct MasterView: View {
     }
 
     private func startMaster() {
-        guard let model = effectiveModel else { return }
-        status = .starting
-
-        // Master FFI not yet exposed; show placeholder status.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            status = .running("api: \(apiAddress) — \(model)")
-        }
+        showUnsupportedAlert = true
     }
 }
 

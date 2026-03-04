@@ -178,30 +178,39 @@ pub fn start_worker(name: String, model: String, cluster_key: String) -> String 
     update_status("starting", "Initializing...", 0.0);
     log_ios("[cake-ios] starting tokio runtime...");
 
-    tokio::runtime::Builder::new_multi_thread()
+    let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .unwrap()
-        .block_on(async {
-            let worker_fut = async {
-                if use_cluster {
-                    log_ios("[cake-ios] zero-config mode: waiting for master discovery...");
-                    run_zero_config_worker(&name, &cluster_key, &address, &cake_cache, &model).await
-                } else {
-                    log_ios("[cake-ios] direct mode: loading model...");
-                    run_direct_worker(&name, &model, &address).await
-                }
-            };
+        .unwrap();
 
-            tokio::select! {
-                result = worker_fut => result,
-                _ = stop_rx.wait_for(|v| *v) => {
-                    log_ios("[cake-ios] worker stopped by request");
-                    update_status("idle", "Stopped", 0.0);
-                    String::new()
-                }
+    let result = rt.block_on(async {
+        let worker_fut = async {
+            if use_cluster {
+                log_ios("[cake-ios] zero-config mode: waiting for master discovery...");
+                run_zero_config_worker(&name, &cluster_key, &address, &cake_cache, &model).await
+            } else {
+                log_ios("[cake-ios] direct mode: loading model...");
+                run_direct_worker(&name, &model, &address).await
             }
-        })
+        };
+
+        tokio::select! {
+            result = worker_fut => result,
+            _ = stop_rx.wait_for(|v| *v) => {
+                log_ios("[cake-ios] worker stopped by request");
+                update_status("idle", "Stopped", 0.0);
+                String::new()
+            }
+        }
+    });
+
+    // Shut down runtime with a short timeout so sockets are fully released
+    // before a potential restart tries to bind the same port.
+    log_ios("[cake-ios] shutting down tokio runtime...");
+    rt.shutdown_timeout(std::time::Duration::from_millis(500));
+    log_ios("[cake-ios] runtime shut down, port released");
+
+    result
 }
 
 /// Zero-config worker: advertise via mDNS, wait for master assignment, receive model data.
