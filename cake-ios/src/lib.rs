@@ -41,6 +41,41 @@ fn update_status(stage: &str, message: &str, progress: f64) {
     }
 }
 
+/// Update status with extended serving info (model name, layer range, backend).
+fn update_serving_status(model_name: &str, layers_range: &str, backend: &str) {
+    fn esc(s: &str) -> String {
+        s.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+    let json = format!(
+        r#"{{"stage":"serving","message":"Ready — serving inference","progress":1.0000,"model":"{}","layers":"{}","backend":"{}"}}"#,
+        esc(model_name),
+        esc(layers_range),
+        esc(backend),
+    );
+    log_ios(&format!("[cake-ios] status: {}", json));
+    if let Ok(mut s) = WORKER_STATUS.lock() {
+        *s = json;
+    }
+}
+
+/// Format a list of layer strings like "model.language_model.layers.0" into "0–7".
+fn layers_to_range(layers: &[String]) -> String {
+    if layers.is_empty() {
+        return "none".to_string();
+    }
+    let first_num = layers.first()
+        .and_then(|l| l.rsplit('.').next())
+        .and_then(|n| n.parse::<usize>().ok());
+    let last_num = layers.last()
+        .and_then(|l| l.rsplit('.').next())
+        .and_then(|n| n.parse::<usize>().ok());
+    match (first_num, last_num) {
+        (Some(f), Some(l)) if f == l => format!("layer {}", f),
+        (Some(f), Some(l)) => format!("layers {}–{} ({} total)", f, l, layers.len()),
+        _ => format!("{} layer(s)", layers.len()),
+    }
+}
+
 /// Get the current worker status as a JSON string.
 /// Returns empty string if no status is set.
 ///
@@ -207,7 +242,7 @@ pub fn start_worker(name: String, model: String, cluster_key: String) -> String 
     // Shut down runtime with a short timeout so sockets are fully released
     // before a potential restart tries to bind the same port.
     log_ios("[cake-ios] shutting down tokio runtime...");
-    rt.shutdown_timeout(std::time::Duration::from_millis(500));
+    rt.shutdown_timeout(std::time::Duration::from_secs(2));
     log_ios("[cake-ios] runtime shut down, port released");
 
     result
@@ -263,7 +298,7 @@ async fn run_zero_config_worker(
         cake::Node {
             host: address.to_string(),
             description: None,
-            layers: layers,
+            layers: layers.clone(),
             vram_bytes: 0,
             tflops: 0.0,
             backend: String::new(),
@@ -329,7 +364,14 @@ async fn run_zero_config_worker(
     log_ios("[cake-ios] setting listener_override...");
     *ctx.listener_override.lock().unwrap() = Some(listener);
 
-    update_status("serving", "Ready — serving inference", 1.0);
+    let model_display = model_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let layers_display = layers_to_range(&layers);
+    let backend_display = if force_cpu { "CPU".to_string() } else { "Metal".to_string() };
+    update_serving_status(&model_display, &layers_display, &backend_display);
     log_ios("[cake-ios] entering run_text_worker...");
     run_text_worker(&mut ctx).await
 }

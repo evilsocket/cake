@@ -293,8 +293,12 @@ struct WorkerStatusInfo {
     let stage: String
     let message: String
     let progress: Double
+    // Extended info populated when stage == "serving"
+    let model: String?
+    let layers: String?
+    let backend: String?
 
-    static let empty = WorkerStatusInfo(stage: "idle", message: "", progress: 0.0)
+    static let empty = WorkerStatusInfo(stage: "idle", message: "", progress: 0.0, model: nil, layers: nil, backend: nil)
 
     static func parse(_ json: String) -> WorkerStatusInfo {
         guard !json.isEmpty,
@@ -305,7 +309,10 @@ struct WorkerStatusInfo {
         return WorkerStatusInfo(
             stage: obj["stage"] as? String ?? "idle",
             message: obj["message"] as? String ?? "",
-            progress: obj["progress"] as? Double ?? 0.0
+            progress: obj["progress"] as? Double ?? 0.0,
+            model: obj["model"] as? String,
+            layers: obj["layers"] as? String,
+            backend: obj["backend"] as? String
         )
     }
 
@@ -332,7 +339,16 @@ struct WorkerStatusInfo {
         }
     }
 
+    /// Show some kind of progress indicator for any active (non-terminal) stage.
     var showProgress: Bool {
+        switch stage {
+        case "idle", "stopping", "serving", "error", "ready": return false
+        default: return true
+        }
+    }
+
+    /// True only when we have a determinate download progress value.
+    var isDeterminate: Bool {
         stage == "receiving" && progress > 0.0 && progress < 1.0
     }
 }
@@ -560,36 +576,73 @@ struct WorkerLiveStatus: View {
                 Spacer()
             }
 
-            // Progress bar (for model transfer)
+            // Progress indicator
             if workerStatus.showProgress {
-                VStack(spacing: 6) {
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(Color.surface200)
-                                .frame(height: 8)
+                if workerStatus.isDeterminate {
+                    // Determinate bar for model sync
+                    VStack(spacing: 6) {
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(Color.surface200)
+                                    .frame(height: 8)
 
-                            RoundedRectangle(cornerRadius: 4)
-                                .fill(
-                                    LinearGradient(
-                                        colors: [.accent500, .accent400],
-                                        startPoint: .leading,
-                                        endPoint: .trailing
+                                RoundedRectangle(cornerRadius: 4)
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [.accent500, .accent400],
+                                            startPoint: .leading,
+                                            endPoint: .trailing
+                                        )
                                     )
-                                )
-                                .frame(width: max(0, geo.size.width * workerStatus.progress), height: 8)
-                                .animation(.easeInOut(duration: 0.3), value: workerStatus.progress)
+                                    .frame(width: max(0, geo.size.width * workerStatus.progress), height: 8)
+                                    .animation(.easeInOut(duration: 0.3), value: workerStatus.progress)
+                            }
+                        }
+                        .frame(height: 8)
+
+                        HStack {
+                            Text("\(Int(workerStatus.progress * 100))%")
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundColor(.accent400)
+                            Spacer()
                         }
                     }
-                    .frame(height: 8)
-
-                    HStack {
-                        Text("\(Int(workerStatus.progress * 100))%")
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundColor(.accent400)
+                } else {
+                    // Indeterminate spinner for other active stages
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .tint(workerStatus.color)
+                            .scaleEffect(0.85)
+                        Text(workerStatus.message)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundColor(.surface500)
+                            .lineLimit(1)
                         Spacer()
                     }
+                    .padding(.vertical, 2)
                 }
+            }
+
+            // Serving info panel (model / layers / backend)
+            if workerStatus.stage == "serving",
+               let model = workerStatus.model,
+               let layers = workerStatus.layers {
+                VStack(spacing: 8) {
+                    WorkerInfoRow(label: "Model", value: model, icon: "cpu")
+                    WorkerInfoRow(label: "Layers", value: layers, icon: "square.stack.3d.up")
+                    if let backend = workerStatus.backend {
+                        WorkerInfoRow(label: "Backend", value: backend, icon: "memorychip")
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.surface100)
+                .cornerRadius(10)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.surface200, lineWidth: 1)
+                )
             }
 
             // Stage pipeline
@@ -597,6 +650,37 @@ struct WorkerLiveStatus: View {
         }
         .padding(16)
         .cardStyle()
+    }
+}
+
+// MARK: - Worker Info Row
+
+struct WorkerInfoRow: View {
+    let label: String
+    let value: String
+    let icon: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 12))
+                .foregroundColor(.surface400)
+                .frame(width: 16)
+
+            Text(label)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.surface400)
+                .textCase(.uppercase)
+                .tracking(0.5)
+                .frame(width: 56, alignment: .leading)
+
+            Text(value)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundColor(.surface600)
+                .lineLimit(1)
+
+            Spacer()
+        }
     }
 }
 
@@ -608,7 +692,7 @@ struct WorkerPipeline: View {
     private let stages: [(id: String, label: String)] = [
         ("discovery", "Discovery"),
         ("connected", "Connected"),
-        ("receiving", "Transfer"),
+        ("receiving", "Sync"),
         ("loading", "Loading"),
         ("serving", "Serving"),
     ]

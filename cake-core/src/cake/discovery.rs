@@ -387,8 +387,18 @@ fn decode_packet(data: &[u8]) -> Option<&[u8]> {
 
 /// Handle for a running discovery listener.
 /// Must be kept alive for the worker to respond to discovery queries.
+/// Dropping this handle signals the listener thread to exit.
 pub struct DiscoveryListener {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     _handle: std::thread::JoinHandle<()>,
+}
+
+impl Drop for DiscoveryListener {
+    fn drop(&mut self) {
+        // Signal the listener thread to exit on its next recv_from timeout (~1s).
+        self.stop
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Start listening for discovery queries and responding with worker info.
@@ -425,9 +435,12 @@ pub fn advertise_worker(
         DISCOVERY_PORT
     );
 
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_thread = stop.clone();
+
     let handle = std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
-        loop {
+        while !stop_thread.load(std::sync::atomic::Ordering::Relaxed) {
             match sock.recv_from(&mut buf) {
                 Ok((len, src)) => {
                     if let Some(payload) = decode_packet(&buf[..len]) {
@@ -444,7 +457,7 @@ pub fn advertise_worker(
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
                 {
-                    // Normal timeout, keep listening
+                    // Normal timeout — loop and check stop flag
                 }
                 Err(e) => {
                     log::warn!("discovery listener error: {}", e);
@@ -452,9 +465,10 @@ pub fn advertise_worker(
                 }
             }
         }
+        log::debug!("discovery listener thread exited");
     });
 
-    Ok(DiscoveryListener { _handle: handle })
+    Ok(DiscoveryListener { stop, _handle: handle })
 }
 
 // ── Interface enumeration ──────────────────────────────────────────────────
