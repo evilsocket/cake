@@ -57,13 +57,25 @@ For Pascal, Maxwell, or other GPUs with compute capability < 7.0, the upstream `
 cargo build --release --features cuda
 ```
 
-### iOS Bindings
+### Mobile Worker App (iOS + Android)
 
-To generate the iOS bindings that can then be [compiled and deployed via Xcode](https://github.com/evilsocket/cake/tree/main/cake-ios-worker-app):
+The `cake-mobile-app/` directory contains a Kotlin Multiplatform (Compose Multiplatform) worker app that runs on both iOS and Android with shared UI/logic code.
+
+**Android** (requires [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk) and Android NDK):
 
 ```sh
-make ios
+make mobile_android
+# installs: cake-mobile-app/androidApp/build/outputs/apk/debug/androidApp-debug.apk
 ```
+
+**iOS** (run on macOS with Xcode installed):
+
+```sh
+make mobile_ios
+# then open cake-mobile-app/iosApp/iosApp.xcodeproj in Xcode and build/deploy
+```
+
+`make mobile_ios` builds the Rust static library (`libcake_mobile.a` with Metal), compiles the KMP shared framework via Gradle, and copies it into the Xcode project. Metal acceleration is enabled on A13+ / M-series devices; older devices fall back to CPU automatically.
 
 ## Feature Flags
 

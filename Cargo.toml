@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["cake-core", "cake-cli", "cake-ios", "cake-mobile"]
+members = ["cake-core", "cake-cli", "cake-mobile"]
 
 [workspace.package]
 version = "0.1.0"
