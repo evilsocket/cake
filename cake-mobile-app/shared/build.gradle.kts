@@ -16,8 +16,36 @@ kotlin {
         }
     }
 
-    iosArm64()
-    iosSimulatorArm64()
+    // iOS arm64 (device) — cinterop calls into libcake_mobile.a via plain C exports.
+    // The .a is placed in iosApp/iosApp/Generated/ by `make mobile_rust_ios`.
+    val generatedDir = "${rootDir}/iosApp/iosApp/Generated"
+
+    iosArm64 {
+        compilations.getByName("main") {
+            cinterops {
+                val cake_mobile_c by creating {
+                    defFile(project.file("src/iosMain/cinterop/cake_mobile.def"))
+                    includeDirs(project.file("src/iosMain/cinterop"))
+                }
+            }
+        }
+        binaries.framework("shared") {
+            linkerOpts("-L$generatedDir", "-lcake_mobile")
+        }
+    }
+
+    // Simulator build (for Xcode previews / CI) — no static lib required,
+    // just compile the cinterop stubs so the Kotlin code type-checks.
+    iosSimulatorArm64 {
+        compilations.getByName("main") {
+            cinterops {
+                val cake_mobile_c by creating {
+                    defFile(project.file("src/iosMain/cinterop/cake_mobile.def"))
+                    includeDirs(project.file("src/iosMain/cinterop"))
+                }
+            }
+        }
+    }
 
     sourceSets {
         commonMain.dependencies {

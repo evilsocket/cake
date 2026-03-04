@@ -9,7 +9,7 @@
 /* Begin PBXBuildFile section */
 		AA000001 /* iOSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100001 /* iOSApp.swift */; };
 		AA000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100002 /* ContentView.swift */; };
-		AA000003 /* CakeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA100003 /* CakeBridge.swift */; };
+		// CakeBridge.swift removed — Kotlin/Native cinterop calls Rust C functions directly
 		AA000004 /* libcake_mobile.a in Frameworks */ = {isa = PBXBuildFile; fileRef = AA100004 /* libcake_mobile.a */; };
 		AA000005 /* shared.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AA100005 /* shared.framework */; };
 		AA000006 /* shared.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = AA100005 /* shared.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
@@ -157,7 +157,6 @@
 			files = (
 				AA000001 /* iOSApp.swift in Sources */,
 				AA000002 /* ContentView.swift in Sources */,
-				AA000003 /* CakeBridge.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

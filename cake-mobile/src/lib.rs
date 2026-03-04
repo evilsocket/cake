@@ -468,6 +468,50 @@ async fn run_direct_worker(name: &str, model: &str, address: &str) -> String {
     run_text_worker(&mut ctx).await
 }
 
+// ---------------------------------------------------------------------------
+// Plain C exports — used by Kotlin/Native cinterop on iOS
+// (UniFFI handles Android via JNI/JNA)
+// ---------------------------------------------------------------------------
+
+use std::ffi::{CStr, CString};
+use std::os::raw::c_char;
+
+#[no_mangle]
+pub unsafe extern "C" fn cake_start_worker(
+    name: *const c_char,
+    model: *const c_char,
+    cluster_key: *const c_char,
+) -> *mut c_char {
+    let name = CStr::from_ptr(name).to_string_lossy().into_owned();
+    let model = CStr::from_ptr(model).to_string_lossy().into_owned();
+    let key = CStr::from_ptr(cluster_key).to_string_lossy().into_owned();
+    let result = start_worker(name, model, key);
+    CString::new(result).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub extern "C" fn cake_stop_worker() {
+    stop_worker();
+}
+
+#[no_mangle]
+pub extern "C" fn cake_get_worker_status() -> *mut c_char {
+    CString::new(get_worker_status()).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cake_set_cache_dir(path: *const c_char) {
+    let path = CStr::from_ptr(path).to_string_lossy().into_owned();
+    set_cache_dir(path);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn cake_free_string(s: *mut c_char) {
+    if !s.is_null() {
+        drop(CString::from_raw(s));
+    }
+}
+
 async fn run_text_worker(ctx: &mut Context) -> String {
     log_mobile(&format!("[cake-mobile] text model arch: {:?}", ctx.text_model_arch));
 
