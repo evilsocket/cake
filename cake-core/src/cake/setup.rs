@@ -401,6 +401,12 @@ pub async fn master_setup(
         &layer_prefix,
     );
 
+    // Detect master GPU and free VRAM concurrently with the discovery window
+    // (nvidia-smi can take ~1-2s; hide that cost inside the discovery timeout).
+    let master_gpus = discovery::detect_gpus();
+    let master_tflops: f64 = master_gpus.iter().map(|g| g.tflops as f64).sum();
+    let free_gpu_fut = tokio::task::spawn_blocking(detect_free_gpu_memory);
+
     // Discover workers
     let workers = discovery::discover_workers(cluster_key, discovery_timeout).await?;
     if workers.is_empty() {
@@ -408,9 +414,8 @@ pub async fn master_setup(
         return Ok(Topology::new());
     }
 
-    // Detect master GPU for proportional split
-    let master_gpus = discovery::detect_gpus();
-    let master_tflops: f64 = master_gpus.iter().map(|g| g.tflops as f64).sum();
+    // nvidia-smi result is now ready (ran during the discovery window)
+    let master_free_from_smi = free_gpu_fut.await.unwrap_or(0);
 
     // Estimate per-layer size for VRAM-aware capping.
     // Uses weight_map tensor-count fractions to exclude non-layer weights
@@ -485,14 +490,13 @@ pub async fn master_setup(
     // overestimates on systems with display servers or other GPU consumers.
     let master_max_layers = if layer_size_bytes > 0 && !master_gpus.is_empty() {
         let master_vram: u64 = master_gpus.iter().map(|g| g.vram_bytes).sum();
-        let master_free = detect_free_gpu_memory();
-        let effective_vram = if master_free > 0 && master_free < master_vram {
+        let effective_vram = if master_free_from_smi > 0 && master_free_from_smi < master_vram {
             log::info!(
                 "master GPU: {} total, {} free",
                 human_bytes::human_bytes(master_vram as f64),
-                human_bytes::human_bytes(master_free as f64),
+                human_bytes::human_bytes(master_free_from_smi as f64),
             );
-            master_free
+            master_free_from_smi
         } else {
             master_vram
         };

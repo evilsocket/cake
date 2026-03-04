@@ -382,8 +382,22 @@ struct WorkerView: View {
                             SectionHeader(title: "Configuration")
 
                             InputField(label: "Worker Name", text: $workerName, placeholder: "my-device")
-                            InputField(label: "Model", text: $modelName, placeholder: "Qwen/Qwen2.5-Coder-1.5B-Instruct")
-                            InputField(label: "Cluster Key", text: $clusterKey, placeholder: "shared secret for discovery")
+                            InputField(label: "Cluster Key", text: $clusterKey, placeholder: "shared secret for zero-config discovery")
+
+                            // Model field only needed in direct mode (no cluster key)
+                            if clusterKey.isEmpty {
+                                InputField(label: "Model", text: $modelName, placeholder: "Qwen/Qwen2.5-Coder-1.5B-Instruct")
+                            } else {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.success)
+                                        .font(.system(size: 13))
+                                    Text("Model assigned automatically by master")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.surface400)
+                                }
+                                .padding(.top, 2)
+                            }
                         }
                         .padding(16)
                         .cardStyle()
@@ -396,20 +410,25 @@ struct WorkerView: View {
 
                     // Action
                     VStack(spacing: 12) {
-                        Button(action: status.isRunning ? stopWorkerAction : startWorkerAction) {
+                        let isStopping = workerStatus.stage == "stopping"
+                        Button(action: isStopping ? {} : (status.isRunning ? stopWorkerAction : startWorkerAction)) {
                             HStack(spacing: 10) {
-                                Image(systemName: status.isRunning ? "stop.fill" : "play.fill")
-                                    .font(.system(size: 14))
-                                Text(status.isRunning ? "Stop Worker" : "Start Worker")
+                                if isStopping {
+                                    ProgressView().tint(.white).scaleEffect(0.8)
+                                } else {
+                                    Image(systemName: status.isRunning ? "stop.fill" : "play.fill")
+                                        .font(.system(size: 14))
+                                }
+                                Text(isStopping ? "Stopping..." : (status.isRunning ? "Stop Worker" : "Start Worker"))
                                     .font(.system(size: 16, weight: .semibold))
                             }
                             .foregroundColor(.white)
                             .padding(.vertical, 14)
                             .frame(maxWidth: .infinity)
-                            .background(status.isRunning ? Color.danger.opacity(0.8) : Color.accent500)
+                            .background(isStopping ? Color.surface300 : (status.isRunning ? Color.danger.opacity(0.8) : Color.accent500))
                             .cornerRadius(12)
                         }
-                        .disabled(!status.isRunning && modelName.isEmpty)
+                        .disabled(isStopping || (!status.isRunning && modelName.isEmpty && clusterKey.isEmpty))
 
                         if case .error(let msg) = status {
                             Text(msg)
@@ -468,10 +487,13 @@ struct WorkerView: View {
 
     private func stopWorkerAction() {
         logger.info("[cake] stopping worker")
-        stopWorker()
+        stopWorker()          // signal Rust; start_worker will return after shutdown_timeout
         stopStatusPolling()
-        status = .idle
-        workerStatus = .empty
+        // Do NOT set status = .idle here — keep button disabled until the
+        // background thread sees start_worker return, preventing a restart
+        // attempt while the old runtime is still releasing the port.
+        status = .running("stopping...")
+        workerStatus = WorkerStatusInfo(stage: "stopping", message: "Releasing port...", progress: 0.0)
     }
 
     private func startWorkerAction() {
