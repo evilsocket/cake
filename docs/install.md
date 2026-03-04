@@ -15,7 +15,7 @@
 | Android | arm, arm64, x86_64 | - | Supported |
 | Android | arm, arm64, x86_64 | CUDA | [Untested](https://docs.nvidia.com/gameworks/content/technologies/mobile/cuda_android_main.htm) |
 | iOS / iPadOS | aarch64 | - | Supported |
-| iOS / iPadOS | aarch64 | Metal | [WIP](https://github.com/huggingface/candle/issues/2322) |
+| iOS / iPadOS | aarch64 | Metal | Supported (A13+ / M-series) |
 
 CUDA >= 12.2 is required for CUDA accelerated systems.
 
