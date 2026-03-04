@@ -739,19 +739,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cake-ios"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "cake-core",
- "env_logger",
- "libc",
- "log",
- "tokio",
- "uniffi",
-]
-
-[[package]]
 name = "cake-mobile"
 version = "0.1.0"
 dependencies = [

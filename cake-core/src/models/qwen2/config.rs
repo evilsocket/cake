@@ -81,12 +81,18 @@ impl QwenConfig {
             rope_scaling: self.rope_scaling,
             tie_word_embeddings: self.tie_word_embeddings,
             max_seq_len: self.max_position_embeddings,
-            use_qkv_bias: true, // Qwen2 always uses QKV bias
+            use_qkv_bias: true,
             model_prefix: "model".into(),
             head_dim: None,
             partial_rotary_factor: 1.0,
             linear_attn: None,
             residual_rms_norm: false,
+            use_qk_norm: false,
+            pre_reshape_qk_norm: false,
+            sliding_window: None,
+            fused_qkv_proj: false,
+            fused_gate_up_proj: false,
+            global_layers: vec![],
         }
     }
 }

@@ -130,6 +130,20 @@ impl Context {
                     "Qwen2ForCausalLM" => TextModelArch::Qwen2,
                     #[cfg(feature = "qwen3_5")]
                     "Qwen3_5ForConditionalGeneration" => TextModelArch::Qwen3_5,
+                    #[cfg(feature = "qwen3")]
+                    "Qwen3ForCausalLM" => TextModelArch::Qwen3,
+                    #[cfg(feature = "phi4")]
+                    "Phi3ForCausalLM" | "Phi4ForCausalLM" => TextModelArch::Phi4,
+                    #[cfg(feature = "mistral")]
+                    "MistralForCausalLM" => TextModelArch::Mistral,
+                    #[cfg(feature = "gemma3")]
+                    "Gemma3ForCausalLM" => TextModelArch::Gemma3,
+                    #[cfg(feature = "falcon3")]
+                    "FalconForCausalLM" => TextModelArch::Falcon3,
+                    #[cfg(feature = "olmo2")]
+                    "OLMo2ForCausalLM" | "Olmo2ForCausalLM" => TextModelArch::OLMo2,
+                    #[cfg(feature = "exaone4")]
+                    "ExaoneForCausalLM" => TextModelArch::EXAONE4,
                     _ => TextModelArch::Llama,
                 };
             }
@@ -145,13 +159,39 @@ impl Context {
                 TextModelArch::Qwen3_5 => {
                     crate::models::qwen3_5::Qwen3_5Config::from_path(&config_filename)?.into_config()
                 }
+                #[cfg(feature = "qwen3")]
+                TextModelArch::Qwen3 => {
+                    crate::models::qwen3::Qwen3Config::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "phi4")]
+                TextModelArch::Phi4 => {
+                    crate::models::phi4::Phi4Config::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "mistral")]
+                TextModelArch::Mistral => {
+                    crate::models::mistral::MistralConfig::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "gemma3")]
+                TextModelArch::Gemma3 => {
+                    crate::models::gemma3::Gemma3Config::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "falcon3")]
+                TextModelArch::Falcon3 => {
+                    crate::models::falcon3::Falcon3Config::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "olmo2")]
+                TextModelArch::OLMo2 => {
+                    crate::models::olmo2::OLMo2Config::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "exaone4")]
+                TextModelArch::EXAONE4 => {
+                    crate::models::exaone4::EXAONE4Config::from_path(&config_filename)?.into_config()
+                }
                 #[cfg(feature = "llama")]
                 TextModelArch::Llama => {
                     crate::models::llama3::LlamaConfig::from_path(&config_filename)?.into_config()
                 }
                 _ => {
-                    // Fallback: use a generic config parser approach
-                    // Parse the raw JSON and construct Config directly
                     bail!("no text model feature enabled for architecture {:?}", text_model_arch)
                 }
             };

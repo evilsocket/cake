@@ -148,32 +148,46 @@ impl Cache {
     pub fn process_kv(
         &mut self,
         block_idx: usize,
+        k: Tensor,
+        v: Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        self.process_kv_inner(block_idx, k, v, self.max_seq_len)
+    }
+
+    /// Like `process_kv` but caps the KV cache to `window` tokens (sliding window attention).
+    pub fn process_kv_windowed(
+        &mut self,
+        block_idx: usize,
+        k: Tensor,
+        v: Tensor,
+        window: usize,
+    ) -> Result<(Tensor, Tensor)> {
+        let limit = window.min(self.max_seq_len);
+        self.process_kv_inner(block_idx, k, v, limit)
+    }
+
+    fn process_kv_inner(
+        &mut self,
+        block_idx: usize,
         mut k: Tensor,
         mut v: Tensor,
+        limit: usize,
     ) -> Result<(Tensor, Tensor)> {
         if self.use_kv_cache {
-            // if this block_idx in cache
             if let Some((cache_k, cache_v)) = &self.kvs[block_idx] {
-                // update cache entry: concatenate on dim 2 (seq_len)
                 // tensor shape is (batch, num_heads, seq_len, head_dim)
                 k = Tensor::cat(&[cache_k, &k], 2)?.contiguous()?;
                 v = Tensor::cat(&[cache_v, &v], 2)?.contiguous()?;
 
-                // truncate on dim 2 (seq_len) if over limit
                 let k_seq_len = k.dims()[2];
-                if k_seq_len > self.max_seq_len {
-                    k = k
-                        .narrow(2, k_seq_len - self.max_seq_len, self.max_seq_len)?
-                        .contiguous()?;
+                if k_seq_len > limit {
+                    k = k.narrow(2, k_seq_len - limit, limit)?.contiguous()?;
                 }
                 let v_seq_len = v.dims()[2];
-                if v_seq_len > self.max_seq_len {
-                    v = v
-                        .narrow(2, v_seq_len - self.max_seq_len, self.max_seq_len)?
-                        .contiguous()?;
+                if v_seq_len > limit {
+                    v = v.narrow(2, v_seq_len - limit, limit)?.contiguous()?;
                 }
             }
-            // set entry for this block
             self.kvs[block_idx] = Some((k.clone(), v.clone()))
         }
         Ok((k, v))

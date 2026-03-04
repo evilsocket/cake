@@ -111,6 +111,24 @@ pub struct Config {
     /// Whether RMS norm uses residual weight: `(1 + weight) * norm(x)` instead of `weight * norm(x)`.
     /// True for Qwen3.5 whose norm weights are initialized to zero with +1 applied at runtime.
     pub residual_rms_norm: bool,
+    /// Whether Q and K projections are normalized via RmsNorm after reshape (Qwen3, Gemma3).
+    pub use_qk_norm: bool,
+    /// Whether QK-norm is applied BEFORE the head reshape on the full projection output (OLMo2).
+    /// When true, norm weights have size `num_heads * head_dim` instead of `head_dim`.
+    pub pre_reshape_qk_norm: bool,
+    /// Model-level sliding window size for local attention (None = full context).
+    /// Per-layer overrides are handled in model-specific blocks (e.g. Gemma3).
+    pub sliding_window: Option<usize>,
+    /// Whether QKV weights are stored as a single pre-fused 'qkv_proj' tensor (Phi-3/4 style).
+    /// If false (default), weights are separate 'q_proj'/'k_proj'/'v_proj'.
+    pub fused_qkv_proj: bool,
+    /// Whether MLP gate+up weights are stored as a single pre-fused 'gate_up_proj' tensor (Phi-3/4 style).
+    /// If false (default), weights are stored as 'gate_proj' + 'up_proj'.
+    pub fused_gate_up_proj: bool,
+    /// Per-layer attention type: true = global (full RoPE, full context),
+    /// false = local (sliding window, no RoPE for Gemma3).
+    /// Empty for models where all layers share the same config.
+    pub global_layers: Vec<bool>,
 }
 
 /// Load an RMS norm, optionally applying the residual weight pattern `(1 + weight)`.

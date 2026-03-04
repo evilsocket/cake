@@ -28,8 +28,12 @@ fn layer_prefix_for_config(config_json: &serde_json::Value) -> String {
     if let Some(archs) = config_json.get("architectures").and_then(|v| v.as_array()) {
         for arch in archs {
             if let Some(s) = arch.as_str() {
-                if s == "Qwen3_5ForConditionalGeneration" {
-                    return "model.language_model.layers".to_string();
+                match s {
+                    "Qwen3_5ForConditionalGeneration" => {
+                        return "model.language_model.layers".to_string();
+                    }
+                    // All other supported architectures use "model.layers"
+                    _ => {}
                 }
             }
         }

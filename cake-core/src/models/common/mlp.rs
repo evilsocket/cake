@@ -25,11 +25,16 @@ impl MLP {
         let h_size = cfg.hidden_size;
         let i_size = cfg.intermediate_size;
 
-        // Fuse gate_proj and up_proj into a single matmul
-        let gate_w = vb.pp("gate_proj").get((i_size, h_size), "weight")?;
-        let up_w = vb.pp("up_proj").get((i_size, h_size), "weight")?;
-        let fused_w = Tensor::cat(&[&gate_w, &up_w], 0)?;
-        let gate_up_proj = Linear::new(fused_w, None);
+        let gate_up_w = if cfg.fused_gate_up_proj {
+            // Phi-3/4 style: weights already fused as 'gate_up_proj'
+            vb.pp("gate_up_proj").get((2 * i_size, h_size), "weight")?
+        } else {
+            // Standard: fuse gate_proj and up_proj into a single matmul
+            let gate_w = vb.pp("gate_proj").get((i_size, h_size), "weight")?;
+            let up_w = vb.pp("up_proj").get((i_size, h_size), "weight")?;
+            Tensor::cat(&[&gate_w, &up_w], 0)?
+        };
+        let gate_up_proj = Linear::new(gate_up_w, None);
 
         let down_w = vb.pp("down_proj").get((h_size, i_size), "weight")?;
         let down_proj = Linear::new(down_w, None);

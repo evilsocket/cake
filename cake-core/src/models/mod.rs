@@ -9,10 +9,24 @@ use crate::ImageGenerationArgs;
 
 pub mod chat;
 pub mod common;
+#[cfg(feature = "exaone4")]
+pub mod exaone4;
+#[cfg(feature = "falcon3")]
+pub mod falcon3;
+#[cfg(feature = "gemma3")]
+pub mod gemma3;
 #[cfg(feature = "llama")]
 pub mod llama3;
+#[cfg(feature = "mistral")]
+pub mod mistral;
+#[cfg(feature = "olmo2")]
+pub mod olmo2;
+#[cfg(feature = "phi4")]
+pub mod phi4;
 #[cfg(feature = "qwen2")]
 pub mod qwen2;
+#[cfg(feature = "qwen3")]
+pub mod qwen3;
 #[cfg(feature = "qwen3_5")]
 pub mod qwen3_5;
 pub mod sd;

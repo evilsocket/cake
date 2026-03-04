@@ -24,12 +24,26 @@ pub enum TextModelArch {
     /// Auto-detect from config.json
     #[default]
     Auto,
-    /// LLaMA family
+    /// LLaMA family (also covers SmolLM2, DeepSeek-R1 distilled)
     Llama,
     /// Qwen2/Qwen2.5 family
     Qwen2,
     /// Qwen3.5 hybrid linear/full attention
     Qwen3_5,
+    /// Qwen3 dense (GQA + QK-norm)
+    Qwen3,
+    /// Phi-4-mini / Phi-4 (pre-fused QKV + gate_up)
+    Phi4,
+    /// Mistral family (standard GQA + optional sliding window)
+    Mistral,
+    /// Gemma 3 (interleaved local/global attention)
+    Gemma3,
+    /// Falcon3 (standard GQA, Apache 2.0)
+    Falcon3,
+    /// OLMo 2 (post-norm, QK-norm)
+    OLMo2,
+    /// EXAONE 4.0 (3:1 local/global hybrid, QK-norm)
+    EXAONE4,
 }
 
 #[derive(Clone, Parser, Default, Debug)]

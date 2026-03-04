@@ -138,6 +138,12 @@ impl Qwen3_5Config {
             partial_rotary_factor,
             linear_attn,
             residual_rms_norm: true,
+            use_qk_norm: false,
+            pre_reshape_qk_norm: false,
+            sliding_window: None,
+            fused_qkv_proj: false,
+            fused_gate_up_proj: false,
+            global_layers: vec![],
         }
     }
 }
