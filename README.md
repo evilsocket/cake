@@ -17,7 +17,7 @@ Cake is a Rust framework for distributed inference of large language models and 
 
 <p align="center">
   <strong>
-  This is experimental code that's being actively developed and changed very quickly, expect bugs
+  This is experimental code that's being actively developed and changed very quickly.
   </strong>
 </p>
 
@@ -29,6 +29,32 @@ Cake is a Rust framework for distributed inference of large language models and 
 - **Zero-Config Clustering** — mDNS discovery, automatic layer assignment, and model data push with a single `--cluster-key` flag. [Learn more](https://github.com/evilsocket/cake/blob/main/docs/clustering.md#zero-config-cluster-mdns-discovery).
 - **OpenAI-Compatible API** — REST API with streaming support, plus a [built-in web UI and TUI chat client](https://github.com/evilsocket/cake/blob/main/docs/usage.md#web-ui).
 - **Docker** — [Container builds](https://github.com/evilsocket/cake/blob/main/docs/docker.md) for Linux/NVIDIA with docker-compose cluster support.
+
+### Platform Support
+
+| OS | Architectures | Acceleration | Status |
+|----|---------------|--------------|--------|
+| GNU/Linux | arm, arm64, x86_64 | - | ✅ |
+| GNU/Linux | arm, arm64, x86_64 | CUDA | ✅ |
+| GNU/Linux | arm, arm64, x86_64 | BLAS | ✅ |
+| Windows | x86_64 | BLAS | [⚠️](https://github.com/evilsocket/cake/issues/7) |
+| Windows | x86_64 | CUDA | ✅ |
+| macOS | x86_64 | - | ✅ |
+| macOS | aarch64 | - | ✅ |
+| macOS | aarch64 | Metal | ✅ |
+| Android | arm, arm64, x86_64 | - | ✅ |
+| Android | arm, arm64, x86_64 | CUDA | [⚠️](https://docs.nvidia.com/gameworks/content/technologies/mobile/cuda_android_main.htm) |
+| iOS / iPadOS | aarch64 | - | ✅ |
+| iOS / iPadOS | aarch64 | Metal | ✅ (A13+ / M-series) |
+
+### Models
+
+| Model | Type | Feature Flag | Status |
+|-------|------|-------------|--------|
+| LLaMA 3.x | Text | `llama` (default) | ✅ |
+| Qwen2 / Qwen2.5 | Text | `qwen2` (default) | ✅ |
+| Qwen3.5 | Text | `qwen3_5` (default) | ✅ |
+| Stable Diffusion (1.5, 2.1, XL, XL Turbo) | Image | - | ✅ |
 
 ## Quick Start
 
@@ -45,15 +71,6 @@ cake master --model Qwen/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080
 ```
 
 For the full usage guide and API reference, [check the project documentation](https://github.com/evilsocket/cake/blob/main/docs/index.md).
-
-## Models
-
-| Model | Type | Feature Flag | Status |
-|-------|------|-------------|--------|
-| LLaMA 3.x | Text | `llama` (default) | ✅ |
-| Qwen2 / Qwen2.5 | Text | `qwen2` (default) | ✅ |
-| Qwen3.5 | Text | `qwen3_5` (default) | ✅ |
-| Stable Diffusion (1.5, 2.1, XL, XL Turbo) | Image | - | ✅ |
 
 ## Contributors
 
