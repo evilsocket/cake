@@ -287,6 +287,56 @@ struct StatusBadge: View {
     }
 }
 
+// MARK: - Worker Status (from Rust FFI)
+
+struct WorkerStatusInfo {
+    let stage: String
+    let message: String
+    let progress: Double
+
+    static let empty = WorkerStatusInfo(stage: "idle", message: "", progress: 0.0)
+
+    static func parse(_ json: String) -> WorkerStatusInfo {
+        guard !json.isEmpty,
+              let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return .empty
+        }
+        return WorkerStatusInfo(
+            stage: obj["stage"] as? String ?? "idle",
+            message: obj["message"] as? String ?? "",
+            progress: obj["progress"] as? Double ?? 0.0
+        )
+    }
+
+    var icon: String {
+        switch stage {
+        case "discovery": return "antenna.radiowaves.left.and.right"
+        case "connected", "authenticated": return "checkmark.shield"
+        case "layers": return "square.stack.3d.up"
+        case "receiving": return "arrow.down.circle"
+        case "cached": return "checkmark.circle"
+        case "loading": return "memorychip"
+        case "serving": return "bolt.fill"
+        case "error": return "exclamationmark.triangle"
+        default: return "hourglass"
+        }
+    }
+
+    var color: Color {
+        switch stage {
+        case "serving": return .success
+        case "error": return .danger
+        case "receiving": return .accent500
+        default: return .warning
+        }
+    }
+
+    var showProgress: Bool {
+        stage == "receiving" && progress > 0.0 && progress < 1.0
+    }
+}
+
 // MARK: - Worker View
 
 struct WorkerView: View {
@@ -299,6 +349,8 @@ struct WorkerView: View {
     @AppStorage("modelName") private var modelName: String = "Qwen/Qwen2.5-Coder-1.5B-Instruct"
     @AppStorage("clusterKey") private var clusterKey: String = ""
     @State private var hasAutoStarted = false
+    @State private var workerStatus: WorkerStatusInfo = .empty
+    @State private var statusTimer: Timer? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -324,16 +376,23 @@ struct WorkerView: View {
                             .foregroundColor(.accent400)
                     }
 
-                    // Config section
-                    VStack(spacing: 16) {
-                        SectionHeader(title: "Configuration")
+                    // Config section (hide when running to save space)
+                    if !status.isRunning {
+                        VStack(spacing: 16) {
+                            SectionHeader(title: "Configuration")
 
-                        InputField(label: "Worker Name", text: $workerName, placeholder: "my-device")
-                        InputField(label: "Model", text: $modelName, placeholder: "Qwen/Qwen2.5-Coder-1.5B-Instruct")
-                        InputField(label: "Cluster Key", text: $clusterKey, placeholder: "shared secret for discovery")
+                            InputField(label: "Worker Name", text: $workerName, placeholder: "my-device")
+                            InputField(label: "Model", text: $modelName, placeholder: "Qwen/Qwen2.5-Coder-1.5B-Instruct")
+                            InputField(label: "Cluster Key", text: $clusterKey, placeholder: "shared secret for discovery")
+                        }
+                        .padding(16)
+                        .cardStyle()
                     }
-                    .padding(16)
-                    .cardStyle()
+
+                    // Live status card (shown when running)
+                    if status.isRunning {
+                        WorkerLiveStatus(workerStatus: workerStatus)
+                    }
 
                     // Action
                     VStack(spacing: 12) {
@@ -371,7 +430,6 @@ struct WorkerView: View {
         .onAppear {
             if autoStart && !hasAutoStarted {
                 hasAutoStarted = true
-                // Override cluster key from CLI args if provided
                 if let key = autoClusterKey {
                     clusterKey = key
                 }
@@ -379,20 +437,45 @@ struct WorkerView: View {
                 startWorkerAction()
             }
         }
+        .onDisappear {
+            stopStatusPolling()
+        }
+    }
+
+    private func startStatusPolling() {
+        statusTimer?.invalidate()
+        statusTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+            let raw = getWorkerStatus()
+            let parsed = WorkerStatusInfo.parse(raw)
+            DispatchQueue.main.async {
+                workerStatus = parsed
+                // Update the top-level status badge
+                if parsed.stage == "serving" {
+                    status = .running("serving")
+                } else if parsed.stage == "error" {
+                    // Don't override — let the FFI return handle errors
+                } else if !parsed.message.isEmpty {
+                    status = .running(parsed.stage)
+                }
+            }
+        }
+    }
+
+    private func stopStatusPolling() {
+        statusTimer?.invalidate()
+        statusTimer = nil
     }
 
     private func startWorkerAction() {
         logger.info("[cake] starting worker: name=\(workerName) model=\(modelName) cluster_key=\(clusterKey.isEmpty ? "(none)" : "(set)")")
 
         status = .starting
+        workerStatus = .empty
+        startStatusPolling()
 
         DispatchQueue.global(qos: .userInitiated).async {
             DispatchQueue.main.async {
-                if clusterKey.isEmpty {
-                    status = .running("downloading model...")
-                } else {
-                    status = .running("waiting for master...")
-                }
+                status = .running("starting")
             }
 
             logger.info("[cake] calling startWorker FFI...")
@@ -400,13 +483,152 @@ struct WorkerView: View {
             logger.info("[cake] startWorker returned: \(result.isEmpty ? "(clean exit)" : result)")
 
             DispatchQueue.main.async {
+                stopStatusPolling()
                 if result.isEmpty {
                     status = .idle
                 } else {
                     status = .error(result)
                 }
+                workerStatus = .empty
             }
         }
+    }
+}
+
+// MARK: - Worker Live Status Card
+
+struct WorkerLiveStatus: View {
+    let workerStatus: WorkerStatusInfo
+
+    var body: some View {
+        VStack(spacing: 16) {
+            SectionHeader(title: "Status")
+
+            // Stage indicator
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(workerStatus.color.opacity(0.15))
+                        .frame(width: 40, height: 40)
+
+                    Image(systemName: workerStatus.icon)
+                        .font(.system(size: 18))
+                        .foregroundColor(workerStatus.color)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(workerStatus.stage.replacingOccurrences(of: "_", with: " ").capitalized)
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(.surface700)
+
+                    Text(workerStatus.message)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundColor(.surface500)
+                        .lineLimit(2)
+                }
+
+                Spacer()
+            }
+
+            // Progress bar (for model transfer)
+            if workerStatus.showProgress {
+                VStack(spacing: 6) {
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(Color.surface200)
+                                .frame(height: 8)
+
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [.accent500, .accent400],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .frame(width: max(0, geo.size.width * workerStatus.progress), height: 8)
+                                .animation(.easeInOut(duration: 0.3), value: workerStatus.progress)
+                        }
+                    }
+                    .frame(height: 8)
+
+                    HStack {
+                        Text("\(Int(workerStatus.progress * 100))%")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundColor(.accent400)
+                        Spacer()
+                    }
+                }
+            }
+
+            // Stage pipeline
+            WorkerPipeline(currentStage: workerStatus.stage)
+        }
+        .padding(16)
+        .cardStyle()
+    }
+}
+
+// MARK: - Worker Pipeline
+
+struct WorkerPipeline: View {
+    let currentStage: String
+
+    private let stages: [(id: String, label: String)] = [
+        ("discovery", "Discovery"),
+        ("connected", "Connected"),
+        ("receiving", "Transfer"),
+        ("loading", "Loading"),
+        ("serving", "Serving"),
+    ]
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(stages.enumerated()), id: \.element.id) { index, stage in
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(stageColor(stage.id))
+                        .frame(width: 8, height: 8)
+
+                    Text(stage.label)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(stageColor(stage.id))
+                }
+
+                if index < stages.count - 1 {
+                    Rectangle()
+                        .fill(lineColor(after: stage.id))
+                        .frame(height: 1)
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 2)
+                }
+            }
+        }
+    }
+
+    private func stageIndex(_ id: String) -> Int {
+        // Map authenticated/layers/cached to their visual stage
+        let mapped = switch id {
+        case "authenticated", "layers": "connected"
+        case "cached": "receiving"
+        default: id
+        }
+        return stages.firstIndex(where: { $0.id == mapped }) ?? -1
+    }
+
+    private func stageColor(_ id: String) -> Color {
+        let current = stageIndex(currentStage)
+        let target = stageIndex(id)
+        if target < current { return .success }
+        if target == current { return .accent400 }
+        return .surface400
+    }
+
+    private func lineColor(after id: String) -> Color {
+        let current = stageIndex(currentStage)
+        let target = stageIndex(id)
+        return target < current ? .success.opacity(0.5) : .surface300
     }
 }
 

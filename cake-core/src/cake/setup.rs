@@ -899,11 +899,29 @@ fn has_valid_model_cache(cache_dir: &Path, layers: &[String]) -> bool {
 /// cache path.
 ///
 /// The `listener` is returned so it can be reused for inference connections.
+/// Progress callback for worker setup stages.
+///
+/// Arguments: (stage, message, progress 0.0–1.0)
+/// - stage: "discovery", "connected", "authenticated", "layers", "receiving", "cached", "ready"
+/// - message: human-readable status
+/// - progress: 0.0–1.0 for transfer, 0.0 otherwise
+pub type SetupProgressFn = dyn Fn(&str, &str, f64) + Send + Sync;
+
 pub async fn worker_setup(
     worker_name: &str,
     cluster_key: &str,
     bind_address: &str,
     model_cache_dir: &Path,
+) -> Result<(Vec<String>, PathBuf, TcpListener)> {
+    worker_setup_with_progress(worker_name, cluster_key, bind_address, model_cache_dir, None).await
+}
+
+pub async fn worker_setup_with_progress(
+    worker_name: &str,
+    cluster_key: &str,
+    bind_address: &str,
+    model_cache_dir: &Path,
+    on_progress: Option<&SetupProgressFn>,
 ) -> Result<(Vec<String>, PathBuf, TcpListener)> {
     // Detect GPUs
     let gpus = discovery::detect_gpus();
@@ -926,15 +944,24 @@ pub async fn worker_setup(
     let _discovery = discovery::advertise_worker(worker_name, port, cluster_key, &gpus)?;
 
     log::info!("waiting for master to connect and assign layers...");
+    if let Some(cb) = &on_progress {
+        cb("discovery", "Waiting for master...", 0.0);
+    }
 
     // Accept one setup connection from master
     let (mut stream, client_addr) = listener.accept().await?;
     let _ = stream.set_nodelay(true);
     log::info!("[{}] master connected", client_addr);
+    if let Some(cb) = &on_progress {
+        cb("connected", &format!("Master connected ({})", client_addr), 0.0);
+    }
 
     // Authenticate
     auth::authenticate_as_worker(&mut stream, cluster_key).await?;
     log::info!("[{}] authenticated", client_addr);
+    if let Some(cb) = &on_progress {
+        cb("authenticated", "Authenticated with master", 0.0);
+    }
 
     // Receive layer assignment
     let (_, msg) = Message::from_reader(&mut stream).await?;
@@ -955,6 +982,9 @@ pub async fn worker_setup(
     for layer in &layers {
         log::info!("  {}", layer);
     }
+    if let Some(cb) = &on_progress {
+        cb("layers", &format!("Assigned {} layer(s)", layers.len()), 0.0);
+    }
 
     // Determine cache directory: cluster_hash/model_hash
     // This ensures switching models invalidates the cache.
@@ -974,14 +1004,23 @@ pub async fn worker_setup(
     ack.to_writer(&mut stream).await?;
 
     if needs_data {
-        receive_model_data(&mut stream, &cache_dir, &layers).await?;
+        if let Some(cb) = &on_progress {
+            cb("receiving", "Receiving model data...", 0.0);
+        }
+        receive_model_data(&mut stream, &cache_dir, &layers, on_progress).await?;
     } else {
         log::info!("using cached model data from {}", cache_dir.display());
+        if let Some(cb) = &on_progress {
+            cb("cached", "Using cached model data", 1.0);
+        }
     }
 
     // Signal ready
     Message::WorkerReady.to_writer(&mut stream).await?;
     log::info!("setup complete, ready for inference");
+    if let Some(cb) = &on_progress {
+        cb("ready", "Setup complete", 1.0);
+    }
 
     // Drop the setup connection (stream goes out of scope)
     // The listener is returned for reuse
@@ -993,6 +1032,7 @@ async fn receive_model_data(
     stream: &mut TcpStream,
     cache_dir: &Path,
     layers: &[String],
+    on_progress: Option<&SetupProgressFn>,
 ) -> Result<()> {
     let overall_start = Instant::now();
     let mut overall_bytes: u64 = 0;
@@ -1074,6 +1114,17 @@ async fn receive_model_data(
                             human_bytes::human_bytes(speed),
                             eta_secs
                         );
+                        if let Some(cb) = &on_progress {
+                            let msg = format!(
+                                "{} — {}/{} — {}/s — ETA {:.0}s",
+                                &filename,
+                                human_bytes::human_bytes(written as f64),
+                                human_bytes::human_bytes(total_size as f64),
+                                human_bytes::human_bytes(speed),
+                                eta_secs
+                            );
+                            cb("receiving", &msg, pct / 100.0);
+                        }
                     }
                 }
             }

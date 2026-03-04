@@ -2,12 +2,40 @@
 uniffi::setup_scaffolding!();
 
 use std::io::Write;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use cake_core::{
     cake::{self, Context, Mode, Topology, Worker},
     Args, ModelType, TextModelArch,
 };
+
+/// Global worker status for Swift polling via UniFFI.
+static WORKER_STATUS: Mutex<String> = Mutex::new(String::new());
+
+/// Update the global worker status as a JSON string.
+fn update_status(stage: &str, message: &str, progress: f64) {
+    let json = format!(
+        r#"{{"stage":"{}","message":"{}","progress":{:.4}}}"#,
+        stage,
+        message.replace('\\', "\\\\").replace('"', "\\\""),
+        progress
+    );
+    log_ios(&format!("[cake-ios] status: {}", json));
+    if let Ok(mut s) = WORKER_STATUS.lock() {
+        *s = json;
+    }
+}
+
+/// Get the current worker status as a JSON string.
+/// Returns empty string if no status is set.
+///
+/// JSON format: {"stage":"...","message":"...","progress":0.0}
+/// Stages: "idle", "starting", "discovery", "connected", "authenticated",
+///         "layers", "receiving", "cached", "loading", "serving", "error"
+#[uniffi::export]
+pub fn get_worker_status() -> String {
+    WORKER_STATUS.lock().map(|s| s.clone()).unwrap_or_default()
+}
 
 /// Check if this device's GPU supports simdgroup_matrix operations (requires A13+/M1+).
 /// Returns false for A12X and older chips where candle Metal kernels will fail.
@@ -128,6 +156,7 @@ pub fn start_worker(name: String, model: String, cluster_key: String) -> String 
     let address = "0.0.0.0:10128".to_string();
     let use_cluster = !cluster_key.is_empty();
 
+    update_status("starting", "Initializing...", 0.0);
     log_ios("[cake-ios] starting tokio runtime...");
 
     tokio::runtime::Builder::new_multi_thread()
@@ -155,17 +184,26 @@ async fn run_zero_config_worker(
     cache_dir: &std::path::Path,
     _model: &str,
 ) -> String {
+    // Progress callback that updates global status for Swift polling
+    let progress_cb = |stage: &str, message: &str, progress: f64| {
+        update_status(stage, message, progress);
+    };
+
     // Wait for master to discover us and send model data
-    let (layers, model_path, listener) = match cake::setup::worker_setup(
+    let (layers, model_path, listener) = match cake::setup::worker_setup_with_progress(
         name,
         cluster_key,
         address,
         cache_dir,
+        Some(&progress_cb),
     )
     .await
     {
         Ok(result) => result,
-        Err(e) => return format!("worker setup failed: {}", e),
+        Err(e) => {
+            update_status("error", &format!("Setup failed: {}", e), 0.0);
+            return format!("worker setup failed: {}", e);
+        }
     };
 
     log_ios(&format!("[cake-ios] master assigned layers: {:?}", layers));
@@ -214,6 +252,7 @@ async fn run_zero_config_worker(
         ..Default::default()
     };
 
+    update_status("loading", "Loading model weights...", 0.0);
     log_ios(&format!("[cake-ios] creating Context::from_args (cpu={})...", force_cpu));
 
     // Install a panic hook that writes to our log file before aborting
@@ -238,11 +277,13 @@ async fn run_zero_config_worker(
         Ok(Err(e)) => {
             let msg = format!("context creation failed: {}", e);
             log_ios(&format!("[cake-ios] ERROR: {}", msg));
+            update_status("error", &msg, 0.0);
             return msg;
         }
         Err(panic_info) => {
             let msg = format!("context creation panicked: {:?}", panic_info.downcast_ref::<String>().map(|s| s.as_str()).or_else(|| panic_info.downcast_ref::<&str>().copied()).unwrap_or("unknown"));
             log_ios(&format!("[cake-ios] PANIC: {}", msg));
+            update_status("error", &msg, 0.0);
             return msg;
         }
     };
@@ -251,6 +292,7 @@ async fn run_zero_config_worker(
     log_ios("[cake-ios] setting listener_override...");
     *ctx.listener_override.lock().unwrap() = Some(listener);
 
+    update_status("serving", "Ready — serving inference", 1.0);
     log_ios("[cake-ios] entering run_text_worker...");
     run_text_worker(&mut ctx).await
 }
@@ -268,6 +310,7 @@ async fn run_direct_worker(name: &str, model: &str, address: &str) -> String {
         ..Default::default()
     };
 
+    update_status("loading", "Downloading model...", 0.0);
     log_ios("[cake-ios] creating context...");
 
     let mut ctx = match Context::from_args(args) {
@@ -275,9 +318,13 @@ async fn run_direct_worker(name: &str, model: &str, address: &str) -> String {
             log_ios(&format!("[cake-ios] context created, device={:?}", ctx.device));
             ctx
         }
-        Err(e) => return format!("context creation failed: {}", e),
+        Err(e) => {
+            update_status("error", &format!("Failed: {}", e), 0.0);
+            return format!("context creation failed: {}", e);
+        }
     };
 
+    update_status("serving", "Ready — serving inference", 1.0);
     run_text_worker(&mut ctx).await
 }
 
