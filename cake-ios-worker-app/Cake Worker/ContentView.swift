@@ -396,20 +396,20 @@ struct WorkerView: View {
 
                     // Action
                     VStack(spacing: 12) {
-                        Button(action: startWorkerAction) {
+                        Button(action: status.isRunning ? stopWorkerAction : startWorkerAction) {
                             HStack(spacing: 10) {
                                 Image(systemName: status.isRunning ? "stop.fill" : "play.fill")
                                     .font(.system(size: 14))
-                                Text(status.isRunning ? "Running..." : "Start Worker")
+                                Text(status.isRunning ? "Stop Worker" : "Start Worker")
                                     .font(.system(size: 16, weight: .semibold))
                             }
                             .foregroundColor(.white)
                             .padding(.vertical, 14)
                             .frame(maxWidth: .infinity)
-                            .background(status.isRunning ? Color.surface300 : Color.accent500)
+                            .background(status.isRunning ? Color.danger.opacity(0.8) : Color.accent500)
                             .cornerRadius(12)
                         }
-                        .disabled(status.isRunning || modelName.isEmpty)
+                        .disabled(!status.isRunning && modelName.isEmpty)
 
                         if case .error(let msg) = status {
                             Text(msg)
@@ -464,6 +464,14 @@ struct WorkerView: View {
     private func stopStatusPolling() {
         statusTimer?.invalidate()
         statusTimer = nil
+    }
+
+    private func stopWorkerAction() {
+        logger.info("[cake] stopping worker")
+        stopWorker()
+        stopStatusPolling()
+        status = .idle
+        workerStatus = .empty
     }
 
     private func startWorkerAction() {
@@ -638,11 +646,19 @@ struct MasterView: View {
     @Binding var status: NodeStatus
     var onBack: () -> Void
 
-    @State private var clusterKey: String = ""
-    @State private var apiAddress: String = "0.0.0.0:8080"
+    @AppStorage("masterClusterKey") private var clusterKey: String = ""
+    @AppStorage("masterApiAddress") private var apiAddress: String = "0.0.0.0:8080"
+    @AppStorage("masterHfModel") private var hfModelId: String = ""
     @State private var showModelPicker = false
     @State private var selectedModelPath: String? = nil
     @State private var selectedModelName: String? = nil
+
+    /// Effective model string: local path takes priority over HF ID.
+    private var effectiveModel: String? {
+        if let path = selectedModelPath, !path.isEmpty { return path }
+        if !hfModelId.isEmpty { return hfModelId }
+        return nil
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -678,15 +694,29 @@ struct MasterView: View {
                     .padding(16)
                     .cardStyle()
 
-                    // Model selection
+                    // Model section — HF ID or local folder
                     VStack(spacing: 16) {
                         SectionHeader(title: "Model")
 
+                        // HuggingFace model ID input
+                        InputField(label: "HuggingFace Model ID", text: $hfModelId, placeholder: "Qwen/Qwen3.5-0.8B")
+
+                        // Divider
+                        HStack {
+                            Rectangle().fill(Color.surface200).frame(height: 1)
+                            Text("or")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.surface400)
+                                .padding(.horizontal, 8)
+                            Rectangle().fill(Color.surface200).frame(height: 1)
+                        }
+
+                        // Local folder picker
                         Button(action: { showModelPicker = true }) {
                             HStack(spacing: 12) {
                                 Image(systemName: "folder")
                                     .font(.system(size: 18))
-                                    .foregroundColor(.brand400)
+                                    .foregroundColor(selectedModelPath != nil ? .brand400 : .surface400)
 
                                 if let name = selectedModelName {
                                     VStack(alignment: .leading, spacing: 2) {
@@ -699,7 +729,7 @@ struct MasterView: View {
                                             .lineLimit(1)
                                     }
                                 } else {
-                                    Text("Select model directory...")
+                                    Text("Browse local model directory...")
                                         .font(.system(size: 15))
                                         .foregroundColor(.surface400)
                                 }
@@ -722,6 +752,15 @@ struct MasterView: View {
                         .fileImporter(isPresented: $showModelPicker, allowedContentTypes: [.folder]) { result in
                             handleModelSelection(result)
                         }
+
+                        // Clear local selection
+                        if selectedModelPath != nil {
+                            Button(action: { selectedModelPath = nil; selectedModelName = nil }) {
+                                Text("Clear folder selection")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.surface400)
+                            }
+                        }
                     }
                     .padding(16)
                     .cardStyle()
@@ -739,16 +778,17 @@ struct MasterView: View {
                             .padding(.vertical, 14)
                             .frame(maxWidth: .infinity)
                             .background(
-                                (selectedModelPath != nil && !status.isRunning) ? Color.brand500 : Color.surface300
+                                (effectiveModel != nil && !status.isRunning) ? Color.brand500 : Color.surface300
                             )
                             .cornerRadius(12)
                         }
-                        .disabled(selectedModelPath == nil || status.isRunning)
+                        .disabled(effectiveModel == nil || status.isRunning)
 
-                        if selectedModelPath == nil && !status.isRunning {
-                            Text("Select a model directory to continue")
+                        if effectiveModel == nil && !status.isRunning {
+                            Text("Enter a HuggingFace model ID or select a local folder")
                                 .font(.system(size: 13))
                                 .foregroundColor(.surface400)
+                                .multilineTextAlignment(.center)
                         }
 
                         if case .error(let msg) = status {
@@ -778,23 +818,20 @@ struct MasterView: View {
             }
             selectedModelPath = directory.path()
             selectedModelName = directory.lastPathComponent
+            hfModelId = "" // clear HF ID when folder selected
         case .failure(let error):
             status = .error(error.localizedDescription)
         }
     }
 
     private func startMaster() {
-        guard let modelPath = selectedModelPath else { return }
+        guard let model = effectiveModel else { return }
         status = .starting
 
-        // Master start would go here once the FFI exposes a startMaster function.
-        // For now, we show a placeholder status.
+        // Master FFI not yet exposed; show placeholder status.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            status = .running("api: \(apiAddress)")
+            status = .running("api: \(apiAddress) — \(model)")
         }
-
-        // TODO: Call Rust FFI when master mode is exposed:
-        // startMaster(modelPath: modelPath, apiAddress: apiAddress, clusterKey: clusterKey)
     }
 }
 

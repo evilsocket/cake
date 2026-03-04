@@ -1076,35 +1076,41 @@ async fn receive_model_data(
                                 human_bytes::human_bytes(size as f64),
                                 human_bytes::human_bytes(speed)
                             );
+                            if let Some(cb) = &on_progress {
+                                cb("receiving", &format!("{} complete", &prev_name), 1.0);
+                            }
                         }
                         let path = cache_dir.join(&filename);
                         let f = std::fs::File::create(&path)?;
                         current_file = Some((filename.clone(), f, Instant::now(), total_size));
+                        if let Some(cb) = &on_progress {
+                            cb("receiving", &format!("Receiving {} ({})", &filename, human_bytes::human_bytes(total_size as f64)), 0.0);
+                        }
                         &mut current_file.as_mut().unwrap().1
                     }
                 } else {
                     let path = cache_dir.join(&filename);
                     let f = std::fs::File::create(&path)?;
                     current_file = Some((filename.clone(), f, Instant::now(), total_size));
+                    if let Some(cb) = &on_progress {
+                        cb("receiving", &format!("Receiving {} ({})", &filename, human_bytes::human_bytes(total_size as f64)), 0.0);
+                    }
                     &mut current_file.as_mut().unwrap().1
                 };
 
                 file.write_all(&data)?;
                 overall_bytes += data.len() as u64;
 
-                // Progress for large files
+                // Progress callback for all files (not just large ones)
                 let written = offset + data.len() as u64;
-                if total_size > MODEL_DATA_CHUNK_SIZE as u64 && written < total_size {
-                    if let Some((_, _, ref start, _)) = current_file {
-                        let elapsed = start.elapsed().as_secs_f64();
-                        let speed = written as f64 / elapsed;
-                        let pct = (written as f64 / total_size as f64) * 100.0;
+                if let Some((_, _, ref start, _)) = current_file {
+                    let elapsed = start.elapsed().as_secs_f64();
+                    let speed = if elapsed > 0.0 { written as f64 / elapsed } else { 0.0 };
+                    let pct = if total_size > 0 { (written as f64 / total_size as f64) * 100.0 } else { 0.0 };
+
+                    if total_size > MODEL_DATA_CHUNK_SIZE as u64 && written < total_size {
                         let remaining = total_size - written;
-                        let eta_secs = if speed > 0.0 {
-                            remaining as f64 / speed
-                        } else {
-                            0.0
-                        };
+                        let eta_secs = if speed > 0.0 { remaining as f64 / speed } else { 0.0 };
                         log::info!(
                             "  {} — {}/{} ({:.1}%) — {}/s — ETA {:.0}s",
                             &filename,

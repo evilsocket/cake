@@ -9,6 +9,21 @@ use cake_core::{
     Args, ModelType, TextModelArch,
 };
 
+/// Channel sender for stop signal; replaced on each start_worker call.
+static STOP_TX: Mutex<Option<tokio::sync::watch::Sender<bool>>> = Mutex::new(None);
+
+/// Request the running worker to stop gracefully.
+#[uniffi::export]
+pub fn stop_worker() {
+    log_ios("[cake-ios] stop_worker called");
+    update_status("stopping", "Stopping...", 0.0);
+    if let Ok(mut guard) = STOP_TX.lock() {
+        if let Some(tx) = guard.take() {
+            let _ = tx.send(true);
+        }
+    }
+}
+
 /// Global worker status for Swift polling via UniFFI.
 static WORKER_STATUS: Mutex<String> = Mutex::new(String::new());
 
@@ -156,6 +171,10 @@ pub fn start_worker(name: String, model: String, cluster_key: String) -> String 
     let address = "0.0.0.0:10128".to_string();
     let use_cluster = !cluster_key.is_empty();
 
+    // Create a stop channel so Swift can cancel via stop_worker().
+    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+    *STOP_TX.lock().unwrap() = Some(stop_tx);
+
     update_status("starting", "Initializing...", 0.0);
     log_ios("[cake-ios] starting tokio runtime...");
 
@@ -164,14 +183,23 @@ pub fn start_worker(name: String, model: String, cluster_key: String) -> String 
         .build()
         .unwrap()
         .block_on(async {
-            if use_cluster {
-                // Zero-config mode: wait for master to discover us and push model data.
-                log_ios("[cake-ios] zero-config mode: waiting for master discovery...");
-                run_zero_config_worker(&name, &cluster_key, &address, &cake_cache, &model).await
-            } else {
-                // Direct mode: download model and start worker.
-                log_ios("[cake-ios] direct mode: loading model...");
-                run_direct_worker(&name, &model, &address).await
+            let worker_fut = async {
+                if use_cluster {
+                    log_ios("[cake-ios] zero-config mode: waiting for master discovery...");
+                    run_zero_config_worker(&name, &cluster_key, &address, &cake_cache, &model).await
+                } else {
+                    log_ios("[cake-ios] direct mode: loading model...");
+                    run_direct_worker(&name, &model, &address).await
+                }
+            };
+
+            tokio::select! {
+                result = worker_fut => result,
+                _ = stop_rx.wait_for(|v| *v) => {
+                    log_ios("[cake-ios] worker stopped by request");
+                    update_status("idle", "Stopped", 0.0);
+                    String::new()
+                }
             }
         })
 }
