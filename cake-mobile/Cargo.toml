@@ -21,6 +21,8 @@ cake-core = { path = "../cake-core", default-features = false, features = ["llam
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "0.14"
+# Build OpenSSL from source when cross-compiling for Android (no system OpenSSL available)
+openssl = { version = "0.10", features = ["vendored"] }
 
 [features]
 default = ["llama", "qwen2", "qwen3_5"]
