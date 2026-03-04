@@ -6,33 +6,30 @@ import cake_mobile.cake_set_cache_dir
 import cake_mobile.cake_start_worker
 import cake_mobile.cake_stop_worker
 import kotlinx.cinterop.ExperimentalForeignApi
-import kotlinx.cinterop.memScoped
-import kotlinx.cinterop.cstr
 import kotlinx.cinterop.toKString
 
+// Kotlin/Native maps C `const char*` parameters as `String?` and `char*` return values
+// as `CPointer<ByteVar>?`. We pass Kotlin Strings directly; returned pointers need freeing.
 @OptIn(ExperimentalForeignApi::class)
 actual object WorkerBridge {
 
-    actual fun startWorker(name: String, model: String, clusterKey: String): String =
-        memScoped {
-            val ptr = cake_start_worker(name.cstr, model.cstr, clusterKey.cstr)
-            val result = ptr?.toKString() ?: ""
-            ptr?.let { cake_free_string(it) }
-            result
-        }
+    actual fun startWorker(name: String, model: String, clusterKey: String): String {
+        val ptr = cake_start_worker(name, model, clusterKey)
+        val result = ptr?.toKString() ?: ""
+        ptr?.let { cake_free_string(it) }
+        return result
+    }
 
     actual fun stopWorker() = cake_stop_worker()
 
-    actual fun getWorkerStatus(): String =
-        memScoped {
-            val ptr = cake_get_worker_status()
-            val result = ptr?.toKString() ?: ""
-            ptr?.let { cake_free_string(it) }
-            result
-        }
+    actual fun getWorkerStatus(): String {
+        val ptr = cake_get_worker_status()
+        val result = ptr?.toKString() ?: ""
+        ptr?.let { cake_free_string(it) }
+        return result
+    }
 
-    actual fun setCacheDir(path: String): Unit =
-        memScoped {
-            cake_set_cache_dir(path.cstr)
-        }
+    actual fun setCacheDir(path: String) {
+        cake_set_cache_dir(path)
+    }
 }
