@@ -60,8 +60,16 @@ impl DiscoveredWorker {
         self.gpus
             .iter()
             .map(|g| {
-                let is_unified = g.name.to_lowercase().contains("apple");
-                let usable = if is_unified {
+                let name_lower = g.name.to_lowercase();
+                let is_cpu = name_lower.starts_with("cpu");
+                let is_unified = name_lower.contains("apple");
+                let usable = if is_cpu {
+                    // CPU / mobile worker: reported vram_bytes is system RAM.
+                    // Reserve 20% for OS + runtime; no large fixed minimum since
+                    // mobile devices may have only 2–4 GiB total.
+                    let reserve = (g.vram_bytes as f64 * 0.20) as u64;
+                    g.vram_bytes.saturating_sub(reserve)
+                } else if is_unified {
                     // Unified memory: reserve 28% of total (min 6 GiB) for OS +
                     // Metal working memory. At 30 layers on a 36 GiB M3 Pro,
                     // only 8 GiB remained and macOS memory compressor caused
@@ -322,8 +330,9 @@ fn detect_system_memory() -> u64 {
         }
     }
 
-    // On Linux, read /proc/meminfo
-    #[cfg(target_os = "linux")]
+    // On Linux and Android, read /proc/meminfo
+    // Note: Android uses target_os = "android", not "linux", so both are listed.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
             for line in contents.lines() {
