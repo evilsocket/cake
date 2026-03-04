@@ -89,5 +89,5 @@ mobile_ios: mobile_rust_ios
 	cd cake-mobile-app && ./gradlew :shared:linkReleaseFrameworkIosArm64
 	mkdir -p cake-mobile-app/iosApp/iosApp/Frameworks
 	rm -rf cake-mobile-app/iosApp/iosApp/Frameworks/shared.framework
-	cp -r cake-mobile-app/shared/build/bin/iosArm64/releaseFramework/shared.framework \
+	cp -r cake-mobile-app/shared/build/bin/iosArm64/sharedReleaseFramework/shared.framework \
 	    cake-mobile-app/iosApp/iosApp/Frameworks/
