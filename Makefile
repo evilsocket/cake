@@ -72,7 +72,7 @@ mobile_rust_android:
 	cargo run --bin uniffi-bindgen generate \
 	    --library ./target/aarch64-linux-android/release/libcake_mobile.so \
 	    --language kotlin \
-	    --out-dir ./cake-mobile-app/androidApp/src/main/kotlin
+	    --out-dir ./cake-mobile-app/shared/src/androidMain/kotlin
 	mkdir -p cake-mobile-app/androidApp/src/main/jniLibs/arm64-v8a
 	cp target/aarch64-linux-android/release/libcake_mobile.so \
 	    cake-mobile-app/androidApp/src/main/jniLibs/arm64-v8a/

@@ -38,7 +38,7 @@ kotlin {
 
 android {
     namespace = "com.evilsocket.cake"
-    compileSdk = libs.versions.agp.get().split(".").first().toInt().let { 35 }
+    compileSdk = 35
 
     defaultConfig {
         minSdk = 26
