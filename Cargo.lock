@@ -257,6 +257,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "android_log-sys"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84521a3cf562bc62942e294181d9eef17eb38ceb8c68677bc49f144e4c3d4f8d"
+
+[[package]]
+name = "android_logger"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "05b07e8e73d720a1f2e4b6014766e6039fd2e96a4fa44e2a78d0e1fa2ff49826"
+dependencies = [
+ "android_log-sys",
+ "env_filter",
+ "log",
+]
+
+[[package]]
 name = "anstream"
 version = "0.6.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -725,6 +742,20 @@ dependencies = [
 name = "cake-ios"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "cake-core",
+ "env_logger",
+ "libc",
+ "log",
+ "tokio",
+ "uniffi",
+]
+
+[[package]]
+name = "cake-mobile"
+version = "0.1.0"
+dependencies = [
+ "android_logger",
  "anyhow",
  "cake-core",
  "env_logger",
