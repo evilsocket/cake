@@ -509,7 +509,7 @@ struct WorkerView: View {
         // background thread sees start_worker return, preventing a restart
         // attempt while the old runtime is still releasing the port.
         status = .running("stopping...")
-        workerStatus = WorkerStatusInfo(stage: "stopping", message: "Releasing port...", progress: 0.0)
+        workerStatus = WorkerStatusInfo(stage: "stopping", message: "Releasing port...", progress: 0.0, model: nil, layers: nil, backend: nil)
     }
 
     private func startWorkerAction() {
