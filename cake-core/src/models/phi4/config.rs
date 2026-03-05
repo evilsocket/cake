@@ -87,6 +87,8 @@ impl Phi4Config {
             sliding_window: None,
             fused_qkv_proj: true,
             fused_gate_up_proj: true,
+            use_gelu_mlp: false,
+            embed_scale: None,
             global_layers: vec![],
         }
     }

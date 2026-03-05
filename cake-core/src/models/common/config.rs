@@ -129,6 +129,11 @@ pub struct Config {
     /// false = local (sliding window, no RoPE for Gemma3).
     /// Empty for models where all layers share the same config.
     pub global_layers: Vec<bool>,
+    /// Use GELU-tanh (approximate GELU) activation in MLP instead of SiLU (Gemma3).
+    pub use_gelu_mlp: bool,
+    /// Scale embedding outputs by this factor before the transformer blocks.
+    /// Gemma models scale by sqrt(hidden_size); None means no scaling.
+    pub embed_scale: Option<f32>,
 }
 
 /// Load an RMS norm, optionally applying the residual weight pattern `(1 + weight)`.

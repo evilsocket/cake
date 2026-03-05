@@ -107,20 +107,22 @@ impl Gemma3Config {
             bos_token_id: self.bos_token_id,
             eos_token_id: self.eos_token_id,
             rope_scaling: self.rope_scaling,
-            tie_word_embeddings: self.tie_word_embeddings,
+            tie_word_embeddings: true, // Gemma3 always ties lm_head to embed_tokens
             max_seq_len: self.max_position_embeddings,
             use_qkv_bias: false,
             model_prefix: "model".into(),
             head_dim: self.head_dim,
             partial_rotary_factor: 1.0,
             linear_attn: None,
-            residual_rms_norm: false,
+            residual_rms_norm: true, // Gemma3RMSNorm: weight stored as delta from 0, forward = (1+weight)*norm(x)
             use_qk_norm: true,
             pre_reshape_qk_norm: false, // Both local and global layers use QK-norm
             sliding_window: Some(self.sliding_window), // local-layer window size
             fused_qkv_proj: false,
             fused_gate_up_proj: false,
             global_layers,
+            use_gelu_mlp: true, // Gemma3 uses GELU-tanh (gelu_pytorch_tanh), not SiLU
+            embed_scale: Some((self.hidden_size as f32).sqrt()),
         }
     }
 }

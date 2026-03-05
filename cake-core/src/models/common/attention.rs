@@ -2,6 +2,8 @@
 use candle_core::{DType, Result, Tensor, D};
 use candle_nn::{linear_no_bias, Linear, Module, RmsNorm, VarBuilder};
 
+use super::config::load_rms_norm;
+
 #[derive(Debug, Clone)]
 pub struct CausalSelfAttention {
     qkv_proj: Linear,
@@ -106,8 +108,10 @@ impl CausalSelfAttention {
             let eps = cfg.rms_norm_eps;
             let norm_dim = if cfg.pre_reshape_qk_norm { size_q } else { head_dim };
             let norm_kv_dim = if cfg.pre_reshape_qk_norm { size_kv } else { head_dim };
-            let qn = candle_nn::rms_norm(norm_dim, eps, vb.pp("q_norm"))?;
-            let kn = candle_nn::rms_norm(norm_kv_dim, eps, vb.pp("k_norm"))?;
+            // Gemma3 QK-norms use GemmaRMSNorm: weight stored as delta, apply (1+weight).
+            let residual = cfg.residual_rms_norm;
+            let qn = load_rms_norm(norm_dim, eps, residual, vb.pp("q_norm"))?;
+            let kn = load_rms_norm(norm_kv_dim, eps, residual, vb.pp("k_norm"))?;
             (Some(qn), Some(kn))
         } else {
             (None, None)

@@ -77,6 +77,8 @@ impl OLMo2Config {
             sliding_window: None,
             fused_qkv_proj: false,
             fused_gate_up_proj: false,
+            use_gelu_mlp: false,
+            embed_scale: None,
             global_layers: vec![],
         }
     }

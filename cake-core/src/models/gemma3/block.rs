@@ -14,7 +14,7 @@ use candle_core::Tensor;
 use candle_nn::{Module, RmsNorm};
 
 use crate::cake::{Context, Forwarder};
-use crate::models::common::{CausalSelfAttention, MLP};
+use crate::models::common::{load_rms_norm, CausalSelfAttention, MLP};
 use async_trait::async_trait;
 
 /// A Gemma 3 transformer block.
@@ -76,15 +76,16 @@ impl Forwarder for Gemma3Block {
 
         let eps = cfg.rms_norm_eps;
         let h = cfg.hidden_size;
+        let residual = cfg.residual_rms_norm; // Gemma3 uses (1+weight)*norm(x)
 
         let input_layernorm =
-            candle_nn::rms_norm(h, eps, vb.pp("input_layernorm"))?;
+            load_rms_norm(h, eps, residual, vb.pp("input_layernorm"))?;
         let post_attention_layernorm =
-            candle_nn::rms_norm(h, eps, vb.pp("post_attention_layernorm"))?;
+            load_rms_norm(h, eps, residual, vb.pp("post_attention_layernorm"))?;
         let pre_feedforward_layernorm =
-            candle_nn::rms_norm(h, eps, vb.pp("pre_feedforward_layernorm"))?;
+            load_rms_norm(h, eps, residual, vb.pp("pre_feedforward_layernorm"))?;
         let post_feedforward_layernorm =
-            candle_nn::rms_norm(h, eps, vb.pp("post_feedforward_layernorm"))?;
+            load_rms_norm(h, eps, residual, vb.pp("post_feedforward_layernorm"))?;
 
         Ok(Box::new(Self {
             name,

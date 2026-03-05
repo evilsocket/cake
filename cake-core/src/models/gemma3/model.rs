@@ -1,7 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::models::common::chatml_history::ChatMLHistory;
+use super::history::Gemma3History;
+use crate::models::common::EosTokenId;
 use crate::models::common::text_model::TextModelBase;
 use crate::models::TextGenerator;
 use crate::{
@@ -20,7 +21,7 @@ const DEFAULT_EOS_TOKEN: &str = "<eos>";
 /// no RoPE) and global (full RoPE) attention layers with QK-norm on both.
 pub struct Gemma3 {
     base: TextModelBase,
-    history: ChatMLHistory,
+    history: Gemma3History,
 }
 
 #[async_trait]
@@ -29,8 +30,21 @@ impl Generator for Gemma3 {
     const MODEL_NAME: &'static str = "gemma3";
 
     async fn load(ctx: &mut Context) -> Result<Option<Box<Self>>> {
-        let base = TextModelBase::load::<Gemma3Block>(ctx, DEFAULT_EOS_TOKEN).await?;
-        let history = ChatMLHistory::new();
+        let mut base = TextModelBase::load::<Gemma3Block>(ctx, DEFAULT_EOS_TOKEN).await?;
+
+        // Gemma 3 Instruct also stops at <end_of_turn> (token 106).
+        if let Some(eot_id) = base.tokenizer.token_to_id("<end_of_turn>") {
+            base.eos_token_id = Some(match base.eos_token_id.take() {
+                Some(EosTokenId::Single(id)) => EosTokenId::Multiple(vec![id, eot_id]),
+                Some(EosTokenId::Multiple(mut ids)) => {
+                    ids.push(eot_id);
+                    EosTokenId::Multiple(ids)
+                }
+                None => EosTokenId::Single(eot_id),
+            });
+        }
+
+        let history = Gemma3History::new();
         Ok(Some(Box::new(Self { base, history })))
     }
 }
