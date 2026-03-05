@@ -99,7 +99,13 @@ fn prefetch_safetensors(filenames: &[PathBuf]) -> Result<()> {
     let start = std::time::Instant::now();
     let mut total_bytes: u64 = 0;
     let mut buf = Vec::new();
-    for filename in filenames {
+    for (i, filename) in filenames.iter().enumerate() {
+        log::info!(
+            "caching shard {}/{} ({}) ...",
+            i + 1,
+            filenames.len(),
+            filename.file_name().unwrap_or_default().to_string_lossy()
+        );
         buf.clear();
         std::fs::File::open(filename)
             .map_err(|e| anyhow!("prefetch: can't open {}: {e}", filename.display()))?

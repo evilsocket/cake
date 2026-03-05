@@ -52,6 +52,16 @@ impl Generator for Gemma3 {
 #[async_trait]
 impl TextGenerator for Gemma3 {
     fn add_message(&mut self, message: Message) -> Result<()> {
+        // Gemma 3 IT has no dedicated system role — the system prompt is injected into
+        // the first user turn. Small models (1B) degrade badly when a system prompt is
+        // present. Warn users so they know to pass --system-prompt "".
+        if message.role == crate::models::chat::MessageRole::System && !message.content.trim().is_empty() {
+            log::warn!(
+                "gemma3: system prompt is injected into the first user turn. \
+                 The 1B model may generate incoherent output — pass --system-prompt \"\" \
+                 for reliable results."
+            );
+        }
         self.history.push(message);
         Ok(())
     }
