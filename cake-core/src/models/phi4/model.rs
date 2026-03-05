@@ -1,7 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::models::common::chatml_history::ChatMLHistory;
+use super::history::Phi4History;
+use crate::models::common::EosTokenId;
 use crate::models::common::text_model::TextModelBase;
 use crate::models::common::Transformer;
 use crate::models::TextGenerator;
@@ -11,16 +12,12 @@ use crate::{
 };
 
 /// Default EOS token for Phi-3/4 chat models.
-const DEFAULT_EOS_TOKEN: &str = "<|end|>";
+const DEFAULT_EOS_TOKEN: &str = "<|endoftext|>";
 
 /// Phi-4-mini / Phi-4 model.
-///
-/// Uses the standard `Transformer` block but with pre-fused `qkv_proj` and
-/// `gate_up_proj` weight tensors (set via `fused_qkv_proj` / `fused_gate_up_proj`
-/// flags in the Config).
 pub struct Phi4 {
     base: TextModelBase,
-    history: ChatMLHistory,
+    history: Phi4History,
 }
 
 #[async_trait]
@@ -29,8 +26,21 @@ impl Generator for Phi4 {
     const MODEL_NAME: &'static str = "phi4";
 
     async fn load(ctx: &mut Context) -> Result<Option<Box<Self>>> {
-        let base = TextModelBase::load::<Transformer>(ctx, DEFAULT_EOS_TOKEN).await?;
-        let history = ChatMLHistory::new();
+        let mut base = TextModelBase::load::<Transformer>(ctx, DEFAULT_EOS_TOKEN).await?;
+
+        // Phi-4 also stops at <|end|> (end-of-turn marker) in addition to <|endoftext|>.
+        if let Some(end_id) = base.tokenizer.token_to_id("<|end|>") {
+            base.eos_token_id = Some(match base.eos_token_id.take() {
+                Some(EosTokenId::Single(id)) => EosTokenId::Multiple(vec![id, end_id]),
+                Some(EosTokenId::Multiple(mut ids)) => {
+                    ids.push(end_id);
+                    EosTokenId::Multiple(ids)
+                }
+                None => EosTokenId::Single(end_id),
+            });
+        }
+
+        let history = Phi4History::new();
         Ok(Some(Box::new(Self { base, history })))
     }
 }
