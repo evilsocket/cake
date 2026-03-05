@@ -113,6 +113,10 @@ pub struct Args {
     #[arg(long, default_value_t = 10)]
     pub discovery_timeout: u64,
 
+    /// Stop discovery as soon as this many workers have been found (0 = wait full timeout).
+    #[arg(long, default_value_t = 0)]
+    pub min_workers: usize,
+
     /// Optional basic auth for the web UI (format: "user:pass").
     #[arg(long)]
     pub ui_auth: Option<String>,

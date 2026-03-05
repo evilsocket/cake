@@ -371,6 +371,7 @@ pub async fn master_setup(
     cluster_key: &str,
     model_path: &Path,
     discovery_timeout: Duration,
+    min_workers: usize,
 ) -> Result<Topology> {
     // Read config.json and compute a fingerprint for cache keying
     let config_path = model_path.join("config.json");
@@ -412,7 +413,7 @@ pub async fn master_setup(
     let free_gpu_fut = tokio::task::spawn_blocking(detect_free_gpu_memory);
 
     // Discover workers
-    let workers = discovery::discover_workers(cluster_key, discovery_timeout).await?;
+    let workers = discovery::discover_workers(cluster_key, discovery_timeout, min_workers).await?;
     if workers.is_empty() {
         log::warn!("no workers discovered — all layers will be loaded locally");
         return Ok(Topology::new());

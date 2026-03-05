@@ -620,17 +620,28 @@ fn get_broadcast_addresses() -> Vec<Ipv4Addr> {
 
 /// Browse for workers on the network matching the given cluster key.
 ///
-/// Sends periodic UDP broadcast queries, collects responses until timeout.
+/// Sends periodic UDP broadcast queries, collects responses until `timeout`.
+/// If `min_workers` is non-zero, stops as soon as that many distinct workers
+/// have been discovered (even if time remains).
 pub async fn discover_workers(
     cluster_key: &str,
     timeout: Duration,
+    min_workers: usize,
 ) -> Result<Vec<DiscoveredWorker>> {
     let expected_hash = cluster_hash(cluster_key);
 
-    log::info!(
-        "discovering workers (timeout: {}s)...",
-        timeout.as_secs()
-    );
+    if min_workers > 0 {
+        log::info!(
+            "discovering workers (timeout: {}s, stop at {} worker(s))...",
+            timeout.as_secs(),
+            min_workers,
+        );
+    } else {
+        log::info!(
+            "discovering workers (timeout: {}s)...",
+            timeout.as_secs()
+        );
+    }
 
     let workers = tokio::task::spawn_blocking(move || {
         let sock = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
@@ -710,6 +721,14 @@ pub async fn discover_workers(
                                     hostname: resp.hostname,
                                     os: resp.os,
                                 });
+
+                                if min_workers > 0 && workers.len() >= min_workers {
+                                    log::info!(
+                                        "reached min-workers ({}), stopping discovery early",
+                                        min_workers
+                                    );
+                                    break;
+                                }
                             }
                         }
                     }

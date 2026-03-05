@@ -139,6 +139,7 @@ async fn main() -> Result<()> {
                     args.cluster_key.as_ref().unwrap(),
                     &model_path,
                     timeout,
+                    args.min_workers,
                 )
                 .await?;
                 args.topology_override = Some(topology);
