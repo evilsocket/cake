@@ -98,6 +98,8 @@ impl Qwen3MoeConfig {
             num_experts: self.num_experts,
             num_experts_per_tok: self.num_experts_per_tok,
             norm_topk_prob: self.norm_topk_prob,
+            shared_expert_intermediate_size: None,
+            attn_output_gate: false,
         }
     }
 }

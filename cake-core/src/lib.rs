@@ -34,6 +34,8 @@ pub enum TextModelArch {
     Qwen3,
     /// Qwen3 MoE sparse mixture-of-experts
     Qwen3Moe,
+    /// Qwen3.5 MoE sparse mixture-of-experts (35B-A3B)
+    Qwen3_5Moe,
     /// Phi-4-mini / Phi-4 (pre-fused QKV + gate_up)
     Phi4,
     /// Mistral family (standard GQA + optional sliding window)

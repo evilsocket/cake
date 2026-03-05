@@ -134,6 +134,8 @@ impl Context {
                     "Qwen3ForCausalLM" => TextModelArch::Qwen3,
                     #[cfg(feature = "qwen3_moe")]
                     "Qwen3MoeForCausalLM" => TextModelArch::Qwen3Moe,
+                    #[cfg(feature = "qwen3_5_moe")]
+                    "Qwen3_5MoeForConditionalGeneration" => TextModelArch::Qwen3_5Moe,
                     #[cfg(feature = "phi4")]
                     "Phi3ForCausalLM" | "Phi4ForCausalLM" => TextModelArch::Phi4,
                     #[cfg(feature = "mistral")]
@@ -168,6 +170,10 @@ impl Context {
                 #[cfg(feature = "qwen3_moe")]
                 TextModelArch::Qwen3Moe => {
                     crate::models::qwen3_moe::Qwen3MoeConfig::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "qwen3_5_moe")]
+                TextModelArch::Qwen3_5Moe => {
+                    crate::models::qwen3_5_moe::Qwen3_5MoeConfig::from_path(&config_filename)?.into_config()
                 }
                 #[cfg(feature = "phi4")]
                 TextModelArch::Phi4 => {
@@ -207,6 +213,13 @@ impl Context {
             if fp8 {
                 log::info!("model uses FP8 quantization — weights will be dequantized at load time");
             }
+            let gptq_group_size = if utils::gptq::is_gptq_quantized(&config_filename) {
+                let gs = utils::gptq::gptq_group_size(&config_filename);
+                log::info!("model uses GPTQ quantization (group_size={gs}) — weights will be dequantized at load time");
+                Some(gs)
+            } else {
+                None
+            };
             let is_master = matches!(args.mode, Mode::Master);
             let my_layers: Vec<String> = if !is_master {
                 topology.all_worker_layers().into_iter().collect()
@@ -223,6 +236,7 @@ impl Context {
                         dtype,
                         device.clone(),
                         fp8,
+                        gptq_group_size,
                     )?
                 } else {
                     utils::load_var_builder_for_local_layers(
@@ -231,6 +245,7 @@ impl Context {
                         device.clone(),
                         &worker_layers,
                         fp8,
+                        gptq_group_size,
                     )?
                 }
             } else if !my_layers.is_empty() {
@@ -241,6 +256,7 @@ impl Context {
                     device.clone(),
                     &my_layers,
                     fp8,
+                    gptq_group_size,
                 )?
             } else {
                 // Worker without known layers: load everything
@@ -249,6 +265,7 @@ impl Context {
                     dtype,
                     device.clone(),
                     fp8,
+                    gptq_group_size,
                 )?
             });
             cache = Some(Cache::new(true, dtype, &config_internal, &device)?);

@@ -31,6 +31,8 @@ pub mod qwen3;
 pub mod qwen3_moe;
 #[cfg(feature = "qwen3_5")]
 pub mod qwen3_5;
+#[cfg(feature = "qwen3_5_moe")]
+pub mod qwen3_5_moe;
 pub mod sd;
 
 /// A token.

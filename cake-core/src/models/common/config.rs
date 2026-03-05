@@ -142,6 +142,11 @@ pub struct Config {
     pub num_experts_per_tok: usize,
     /// MoE: re-normalise top-K routing weights to sum to 1.0 after selection.
     pub norm_topk_prob: bool,
+    /// MoE: intermediate size of the always-active shared expert (None = no shared expert).
+    pub shared_expert_intermediate_size: Option<usize>,
+    /// Whether the attention output gate is enabled (Qwen3.5 MoE full-attention layers):
+    /// q_proj outputs 2× heads; the second half gates the attention output via sigmoid.
+    pub attn_output_gate: bool,
 }
 
 /// Load an RMS norm, optionally applying the residual weight pattern `(1 + weight)`.

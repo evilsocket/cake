@@ -10,6 +10,7 @@
 | Qwen3 (dense) | `Qwen/Qwen3-0.6B` | `qwen3` (default) | GQA + QK-norm, thinking mode via `/think` |
 | Qwen3 MoE | `Qwen/Qwen3-30B-A3B` | `qwen3_moe` (default) | Sparse MoE FFN, 128 experts / top-8 per token |
 | Qwen3.5 | `Qwen/Qwen3.5-0.8B` | `qwen3_5` (default) | Hybrid GDN linear + full attention |
+| Qwen3.5 MoE | `Qwen/Qwen3.5-35B-A3B-GPTQ-Int4` | `qwen3_5_moe` (default) | Hybrid GDN+full-attn + sparse MoE FFN, 256 experts / top-8 per token; GPTQ-Int4 dequantized at load time |
 | Phi-4-mini | `microsoft/Phi-4-mini-instruct` | `phi4` (default) | 3.8B, partial RoPE, 200K vocab |
 | Phi-4 | `microsoft/phi-4` | `phi4` (default) | 14B, same family as Phi-4-mini |
 | Mistral | `mistralai/Mistral-7B-Instruct-v0.3` | `mistral` (default) | Standard GQA, optional sliding window |
@@ -35,7 +36,7 @@ See [Stable Diffusion](stable_diffusion.md) for image generation usage.
 Text model architecture is auto-detected from `config.json` in the model directory. You can also set it explicitly:
 
 ```sh
-cake master --model /path/to/model --text-model-arch auto|llama|qwen2|qwen3|qwen3-moe|qwen3-5|phi4|mistral|gemma3|falcon3|ol-mo2|exaone4
+cake master --model /path/to/model --text-model-arch auto|llama|qwen2|qwen3|qwen3-moe|qwen3-5|qwen3-5moe|phi4|mistral|gemma3|falcon3|ol-mo2|exaone4
 ```
 
 ## Model Notes

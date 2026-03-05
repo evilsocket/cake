@@ -106,6 +106,8 @@ impl EXAONE4Config {
             num_experts: 0,
             num_experts_per_tok: 0,
             norm_topk_prob: false,
+            shared_expert_intermediate_size: None,
+            attn_output_gate: false,
             global_layers,
         }
     }

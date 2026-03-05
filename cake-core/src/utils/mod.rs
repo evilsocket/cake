@@ -1,6 +1,7 @@
 //! Utility functions and abstractions.
 
 pub mod fp8;
+pub mod gptq;
 pub mod hf;
 pub mod models;
 pub mod split;
@@ -129,6 +130,7 @@ pub fn load_var_builder_from_index<'a>(
     dtype: DType,
     device: Device,
     fp8: bool,
+    gptq_group_size: Option<usize>,
 ) -> Result<VarBuilder<'a>> {
     let filenames: Vec<std::path::PathBuf> = if tensor_index.exists() {
         load_safetensors_paths_from_index(tensor_index)
@@ -144,6 +146,11 @@ pub fn load_var_builder_from_index<'a>(
         unsafe {
             fp8::load_fp8_var_builder(&filenames, dtype, &device)
                 .map_err(|e| anyhow!("can't create fp8 varbuilder from tensors: {:?}", e))
+        }
+    } else if let Some(group_size) = gptq_group_size {
+        unsafe {
+            gptq::load_gptq_var_builder(&filenames, dtype, &device, group_size)
+                .map_err(|e| anyhow!("can't create gptq varbuilder from tensors: {:?}", e))
         }
     } else {
         unsafe {
@@ -162,15 +169,16 @@ pub fn load_var_builder_for_local_layers<'a>(
     device: Device,
     worker_layers: &std::collections::HashSet<String>,
     fp8: bool,
+    gptq_group_size: Option<usize>,
 ) -> Result<VarBuilder<'a>> {
     if !tensor_index.exists() {
         // Single safetensors file — can't filter, load all
-        return load_var_builder_from_index(tensor_index, dtype, device, fp8);
+        return load_var_builder_from_index(tensor_index, dtype, device, fp8, gptq_group_size);
     }
 
     if worker_layers.is_empty() {
         // No workers — load everything
-        return load_var_builder_from_index(tensor_index, dtype, device, fp8);
+        return load_var_builder_from_index(tensor_index, dtype, device, fp8, gptq_group_size);
     }
 
     let parent_dir = tensor_index.parent().unwrap();
@@ -219,6 +227,11 @@ pub fn load_var_builder_for_local_layers<'a>(
             fp8::load_fp8_var_builder(&filenames, dtype, &device)
                 .map_err(|e| anyhow!("can't create fp8 varbuilder from tensors: {:?}", e))
         }
+    } else if let Some(group_size) = gptq_group_size {
+        unsafe {
+            gptq::load_gptq_var_builder(&filenames, dtype, &device, group_size)
+                .map_err(|e| anyhow!("can't create gptq varbuilder from tensors: {:?}", e))
+        }
     } else {
         unsafe {
             VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)
@@ -236,9 +249,10 @@ pub fn load_var_builder_for_specific_layers<'a>(
     device: Device,
     layer_prefixes: &[String],
     fp8: bool,
+    gptq_group_size: Option<usize>,
 ) -> Result<VarBuilder<'a>> {
     if !tensor_index.exists() || layer_prefixes.is_empty() {
-        return load_var_builder_from_index(tensor_index, dtype, device, fp8);
+        return load_var_builder_from_index(tensor_index, dtype, device, fp8, gptq_group_size);
     }
 
     let parent_dir = tensor_index.parent().unwrap();
@@ -284,6 +298,11 @@ pub fn load_var_builder_for_specific_layers<'a>(
         unsafe {
             fp8::load_fp8_var_builder(&filenames, dtype, &device)
                 .map_err(|e| anyhow!("can't create fp8 varbuilder from tensors: {:?}", e))
+        }
+    } else if let Some(group_size) = gptq_group_size {
+        unsafe {
+            gptq::load_gptq_var_builder(&filenames, dtype, &device, group_size)
+                .map_err(|e| anyhow!("can't create gptq varbuilder from tensors: {:?}", e))
         }
     } else {
         unsafe {

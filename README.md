@@ -57,6 +57,7 @@ Cake is a Rust framework for distributed inference of large language models and 
 | Qwen3 (dense) | Text | `qwen3` (default) | ✅ |
 | Qwen3 MoE | Text | `qwen3_moe` (default) | ✅ |
 | Qwen3.5 | Text | `qwen3_5` (default) | ✅ |
+| Qwen3.5 MoE (GPTQ-Int4) | Text | `qwen3_5_moe` (default) | ✅ |
 | Phi-4-mini / Phi-4 | Text | `phi4` (default) | ✅ |
 | Mistral | Text | `mistral` (default) | ✅ |
 | Gemma 3 | Text | `gemma3` (default) | ✅ |
