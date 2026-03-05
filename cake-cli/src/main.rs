@@ -308,6 +308,6 @@ fn build_worker_topology(
 /// Return the base cache directory for zero-config model data.
 fn cache_base_dir() -> PathBuf {
     dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .unwrap_or_else(std::env::temp_dir)
         .join("cake")
 }
