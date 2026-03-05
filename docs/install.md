@@ -48,6 +48,14 @@ version supported by your driver to avoid library version mismatches:
 CUDA_HOME=/usr/local/cuda-12.4 cargo build --release --features cuda
 ```
 
+**CUDA on Windows:**
+
+Windows workers require an NVIDIA GPU driver and the [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads) >= 12.2 (the installer sets `CUDA_PATH` automatically).
+
+```powershell
+cargo build --release --features cuda
+```
+
 ### Pre-Volta NVIDIA GPUs
 
 For Pascal, Maxwell, or other GPUs with compute capability < 7.0, the upstream `candle-kernels` crate requires patches. See [`cuda-compat/`](../cuda-compat/) for a one-command fix:

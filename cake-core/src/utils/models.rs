@@ -171,7 +171,7 @@ fn hf_cache_dir() -> Option<PathBuf> {
 /// Return the Cake cluster cache directory if it exists.
 fn cake_cache_dir() -> Option<PathBuf> {
     let cache = dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .unwrap_or_else(std::env::temp_dir)
         .join("cake");
     if cache.exists() {
         Some(cache)

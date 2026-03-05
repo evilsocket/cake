@@ -243,10 +243,26 @@ pub fn detect_backend() -> String {
 
 /// Detect the CUDA toolkit version via nvcc.
 pub fn detect_cuda_version() -> Option<String> {
+    // Try nvcc from PATH first.
     let output = std::process::Command::new("nvcc")
         .arg("--version")
-        .output()
-        .ok()?;
+        .output();
+
+    // On Windows, nvcc may not be in PATH but CUDA_PATH is always set by the installer.
+    // Only fall back to CUDA_PATH if the PATH lookup failed.
+    #[cfg(target_os = "windows")]
+    let output = output.or_else(|_| {
+        let cuda_path = std::env::var("CUDA_PATH")
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::NotFound, "CUDA_PATH not set"))?;
+        let nvcc_path = std::path::PathBuf::from(&cuda_path)
+            .join("bin")
+            .join("nvcc.exe");
+        std::process::Command::new(nvcc_path)
+            .arg("--version")
+            .output()
+    });
+
+    let output = output.ok()?;
     if !output.status.success() {
         return None;
     }
@@ -327,6 +343,24 @@ fn detect_system_memory() -> u64 {
     {
         if let Some(bytes) = sysctl_u64("hw.memsize") {
             return bytes;
+        }
+    }
+
+    // On Windows, get total physical memory.
+    // Try PowerShell/CIM first (wmic is deprecated and removed in some Win11 builds).
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command",
+                   "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Ok(bytes) = stdout.trim().parse::<u64>() {
+                    return bytes;
+                }
+            }
         }
     }
 
@@ -523,6 +557,52 @@ fn get_broadcast_addresses() -> Vec<Ipv4Addr> {
                     if let Ok(ip) = addr_str.parse::<Ipv4Addr>() {
                         if !ip.is_loopback() {
                             addrs.push(ip);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // On Windows, parse `ipconfig` to compute broadcast addresses from IP + subnet mask.
+    // ipconfig groups lines under adapter headers (non-indented). Indented lines contain
+    // the IPv4 address and subnet mask. We reset last_ip on adapter boundaries so a
+    // stale IP from a previous adapter can't pair with the wrong subnet mask.
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = std::process::Command::new("ipconfig").output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut last_ip: Option<Ipv4Addr> = None;
+            for line in stdout.lines() {
+                // Adapter headers have no leading whitespace; detail lines are indented.
+                // Reset state on adapter boundaries to prevent cross-adapter mispairing.
+                if !line.starts_with(' ') && !line.starts_with('\t') {
+                    last_ip = None;
+                }
+
+                let trimmed = line.trim();
+                // Match lines containing an IPv4 address value (x.x.x.x after a colon).
+                // This is locale-independent: we look for ": <ipv4>" on any line and
+                // distinguish address vs mask by checking if it looks like a mask
+                // (starts with 255.).
+                if let Some(colon_idx) = trimmed.rfind(':') {
+                    let value = trimmed[colon_idx + 1..].trim();
+                    if let Ok(ip) = value.parse::<Ipv4Addr>() {
+                        let octets = ip.octets();
+                        if octets[0] == 255 {
+                            // This is a subnet mask — pair with last_ip
+                            if let Some(addr) = last_ip.take() {
+                                let ip_bits = u32::from(addr);
+                                let mask_bits = u32::from(ip);
+                                let brd = (ip_bits & mask_bits) | (!mask_bits);
+                                let brd_addr = Ipv4Addr::from(brd);
+                                if !brd_addr.is_loopback() {
+                                    addrs.push(brd_addr);
+                                }
+                            }
+                        } else if !ip.is_loopback() {
+                            // This is an IPv4 address
+                            last_ip = Some(ip);
                         }
                     }
                 }
