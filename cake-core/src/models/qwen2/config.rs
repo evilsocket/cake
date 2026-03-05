@@ -94,6 +94,10 @@ impl QwenConfig {
             fused_gate_up_proj: false,
             use_gelu_mlp: false,
             embed_scale: None,
+            moe_intermediate_size: None,
+            num_experts: 0,
+            num_experts_per_tok: 0,
+            norm_topk_prob: false,
             global_layers: vec![],
         }
     }

@@ -134,6 +134,14 @@ pub struct Config {
     /// Scale embedding outputs by this factor before the transformer blocks.
     /// Gemma models scale by sqrt(hidden_size); None means no scaling.
     pub embed_scale: Option<f32>,
+    /// MoE: FFN intermediate dimension per expert (None = dense model).
+    pub moe_intermediate_size: Option<usize>,
+    /// MoE: total number of experts in the pool (0 = dense model).
+    pub num_experts: usize,
+    /// MoE: number of experts activated per token (top-K).
+    pub num_experts_per_tok: usize,
+    /// MoE: re-normalise top-K routing weights to sum to 1.0 after selection.
+    pub norm_topk_prob: bool,
 }
 
 /// Load an RMS norm, optionally applying the residual weight pattern `(1 + weight)`.

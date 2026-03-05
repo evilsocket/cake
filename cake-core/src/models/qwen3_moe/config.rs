@@ -8,22 +8,19 @@ fn default_rope() -> f32 {
     1_000_000.0
 }
 
-fn default_partial_rotary_factor() -> f32 {
-    1.0
-}
-
 fn default_max_position_embeddings() -> usize {
     131072
 }
 
-/// Phi-3 / Phi-4-mini / Phi-4 configuration (flat JSON, `Phi3ForCausalLM` or `Phi4ForCausalLM`).
-///
-/// These models use pre-fused `qkv_proj` and `gate_up_proj` weight tensors instead of
-/// separate `q_proj`/`k_proj`/`v_proj` and `gate_proj`/`up_proj`.
+/// Qwen3 MoE model configuration (`Qwen3MoeForCausalLM`).
+/// Covers Qwen3-30B-A3B and Qwen3-235B-A22B (and Qwen3-Coder MoE variants).
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct Phi4Config {
+pub struct Qwen3MoeConfig {
     pub hidden_size: usize,
+    /// Dense MLP intermediate size (used only for `mlp_only_layers`, typically unused).
     pub intermediate_size: usize,
+    /// Per-expert FFN intermediate size (the MoE-active dimension).
+    pub moe_intermediate_size: usize,
     pub vocab_size: usize,
     pub num_hidden_layers: usize,
     pub num_attention_heads: usize,
@@ -42,18 +39,25 @@ pub struct Phi4Config {
     pub tie_word_embeddings: bool,
     #[serde(default = "default_max_position_embeddings")]
     pub max_position_embeddings: usize,
-    /// Explicit head dimension (e.g. 96 for Phi-4-mini).
+    /// Optional explicit head dimension.
     #[serde(default)]
     pub head_dim: Option<usize>,
-    /// Fraction of head dims that get RoPE applied (Phi-4-mini = 0.75).
-    #[serde(default = "default_partial_rotary_factor")]
-    pub partial_rotary_factor: f32,
+    /// Total number of experts in the pool.
+    pub num_experts: usize,
+    /// Number of experts activated per token (top-K).
+    pub num_experts_per_tok: usize,
+    /// Re-normalise top-K weights to sum to 1.0 after selection.
+    #[serde(default = "default_true")]
+    pub norm_topk_prob: bool,
 }
 
-impl Phi4Config {
-    pub fn from_path(path: &Path) -> Result<Self> {
-        log::info!("loading Phi-4 configuration from {}", path.display());
+fn default_true() -> bool {
+    true
+}
 
+impl Qwen3MoeConfig {
+    pub fn from_path(path: &Path) -> Result<Self> {
+        log::info!("loading Qwen3 MoE configuration from {}", path.display());
         let data =
             std::fs::read(path).map_err(|e| anyhow!("can't read {}: {:?}", path.display(), e))?;
         serde_json::from_slice(&data)
@@ -79,50 +83,21 @@ impl Phi4Config {
             use_qkv_bias: false,
             model_prefix: "model".into(),
             head_dim: self.head_dim,
-            partial_rotary_factor: self.partial_rotary_factor,
+            partial_rotary_factor: 1.0,
             linear_attn: None,
             residual_rms_norm: false,
-            use_qk_norm: false,
+            use_qk_norm: true,   // Qwen3 MoE uses QK-norm (same as dense Qwen3)
             pre_reshape_qk_norm: false,
             sliding_window: None,
-            fused_qkv_proj: true,
-            fused_gate_up_proj: true,
+            fused_qkv_proj: false,
+            fused_gate_up_proj: false,
             use_gelu_mlp: false,
             embed_scale: None,
-            moe_intermediate_size: None,
-            num_experts: 0,
-            num_experts_per_tok: 0,
-            norm_topk_prob: false,
             global_layers: vec![],
+            moe_intermediate_size: Some(self.moe_intermediate_size),
+            num_experts: self.num_experts,
+            num_experts_per_tok: self.num_experts_per_tok,
+            norm_topk_prob: self.norm_topk_prob,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_phi4_mini_config() {
-        let json = r#"{
-            "architectures": ["Phi3ForCausalLM"],
-            "hidden_size": 3072,
-            "intermediate_size": 8192,
-            "vocab_size": 200064,
-            "num_hidden_layers": 32,
-            "num_attention_heads": 32,
-            "num_key_value_heads": 8,
-            "rms_norm_eps": 1e-05,
-            "rope_theta": 1000000.0,
-            "max_position_embeddings": 128000
-        }"#;
-        let config: Phi4Config = serde_json::from_str(json).unwrap();
-        let cfg = config.into_config();
-
-        assert_eq!(cfg.hidden_size, 3072);
-        assert_eq!(cfg.num_key_value_heads, 8);
-        assert!(cfg.fused_qkv_proj);
-        assert!(cfg.fused_gate_up_proj);
-        assert!(!cfg.use_qk_norm);
     }
 }

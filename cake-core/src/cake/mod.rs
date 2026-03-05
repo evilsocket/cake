@@ -132,6 +132,8 @@ impl Context {
                     "Qwen3_5ForConditionalGeneration" => TextModelArch::Qwen3_5,
                     #[cfg(feature = "qwen3")]
                     "Qwen3ForCausalLM" => TextModelArch::Qwen3,
+                    #[cfg(feature = "qwen3_moe")]
+                    "Qwen3MoeForCausalLM" => TextModelArch::Qwen3Moe,
                     #[cfg(feature = "phi4")]
                     "Phi3ForCausalLM" | "Phi4ForCausalLM" => TextModelArch::Phi4,
                     #[cfg(feature = "mistral")]
@@ -162,6 +164,10 @@ impl Context {
                 #[cfg(feature = "qwen3")]
                 TextModelArch::Qwen3 => {
                     crate::models::qwen3::Qwen3Config::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "qwen3_moe")]
+                TextModelArch::Qwen3Moe => {
+                    crate::models::qwen3_moe::Qwen3MoeConfig::from_path(&config_filename)?.into_config()
                 }
                 #[cfg(feature = "phi4")]
                 TextModelArch::Phi4 => {

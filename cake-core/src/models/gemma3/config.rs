@@ -123,6 +123,10 @@ impl Gemma3Config {
             global_layers,
             use_gelu_mlp: true, // Gemma3 uses GELU-tanh (gelu_pytorch_tanh), not SiLU
             embed_scale: Some((self.hidden_size as f32).sqrt()),
+            moe_intermediate_size: None,
+            num_experts: 0,
+            num_experts_per_tok: 0,
+            norm_topk_prob: false,
         }
     }
 }

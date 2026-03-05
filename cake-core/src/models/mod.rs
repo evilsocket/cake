@@ -27,6 +27,8 @@ pub mod phi4;
 pub mod qwen2;
 #[cfg(feature = "qwen3")]
 pub mod qwen3;
+#[cfg(feature = "qwen3_moe")]
+pub mod qwen3_moe;
 #[cfg(feature = "qwen3_5")]
 pub mod qwen3_5;
 pub mod sd;

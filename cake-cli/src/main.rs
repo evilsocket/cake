@@ -218,6 +218,13 @@ async fn run_master(ctx: Context) -> Result<()> {
                 .run()
                 .await
         }
+        #[cfg(feature = "qwen3_moe")]
+        TextModelArch::Qwen3Moe => {
+            Master::<cake_core::models::qwen3_moe::Qwen3Moe, cake_core::models::sd::SD>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
         #[cfg(feature = "phi4")]
         TextModelArch::Phi4 => {
             Master::<cake_core::models::phi4::Phi4, cake_core::models::sd::SD>::new(ctx)
@@ -300,6 +307,13 @@ async fn run_worker(ctx: &mut Context) -> Result<()> {
             #[cfg(feature = "qwen3")]
             TextModelArch::Qwen3 => {
                 Worker::<cake_core::models::qwen3::Qwen3>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(feature = "qwen3_moe")]
+            TextModelArch::Qwen3Moe => {
+                Worker::<cake_core::models::qwen3_moe::Qwen3Moe>::new(ctx)
                     .await?
                     .run()
                     .await
