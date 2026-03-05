@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::models::common::chatml_history::ChatMLHistory;
+use crate::models::common::EosTokenId;
 use crate::models::common::text_model::TextModelBase;
 use crate::models::TextGenerator;
 use crate::{
@@ -12,7 +13,7 @@ use crate::{
 use super::block::Qwen3_5Block;
 
 /// Default end of stream token if not found in configuration.
-const DEFAULT_EOS_TOKEN: &str = "<|im_end|>";
+const DEFAULT_EOS_TOKEN: &str = "<|endoftext|>";
 
 /// Qwen3.5 main class.
 pub struct Qwen3_5 {
@@ -27,7 +28,19 @@ impl Generator for Qwen3_5 {
 
     /// Load this model from the context.
     async fn load(ctx: &mut Context) -> Result<Option<Box<Self>>> {
-        let base = TextModelBase::load::<Qwen3_5Block>(ctx, DEFAULT_EOS_TOKEN).await?;
+        let mut base = TextModelBase::load::<Qwen3_5Block>(ctx, DEFAULT_EOS_TOKEN).await?;
+        // Qwen3.5 config sets eos_token_id=<|endoftext|> but ChatML uses <|im_end|> as turn terminator.
+        // Add <|im_end|> to the EOS set so generation stops at turn boundaries.
+        if let Some(im_end_id) = base.tokenizer.token_to_id("<|im_end|>") {
+            base.eos_token_id = Some(match base.eos_token_id.take() {
+                Some(EosTokenId::Single(id)) => EosTokenId::Multiple(vec![id, im_end_id]),
+                Some(EosTokenId::Multiple(mut ids)) => {
+                    ids.push(im_end_id);
+                    EosTokenId::Multiple(ids)
+                }
+                None => EosTokenId::Single(im_end_id),
+            });
+        }
         let history = ChatMLHistory::new();
         Ok(Some(Box::new(Self { base, history })))
     }
