@@ -161,7 +161,7 @@ impl Qwen3_5FullAttention {
         let (q, k, v) = if seq_len == 1 {
             (q.squeeze(1)?.unsqueeze(2)?, k.squeeze(1)?.unsqueeze(2)?, v.squeeze(1)?.unsqueeze(2)?)
         } else {
-            (q.transpose(1, 2)?.contiguous()?, k.transpose(1, 2)?.contiguous()?, v.transpose(1, 2)?)
+            (q.transpose(1, 2)?.contiguous()?, k.transpose(1, 2)?.contiguous()?, v.transpose(1, 2)?.contiguous()?)
         };
 
         // Apply partial RoPE
@@ -175,8 +175,21 @@ impl Qwen3_5FullAttention {
             .map_err(|e| anyhow!("process_kv: {e}"))?;
 
         // Attention
+        let in_dtype = q.dtype();
         #[allow(unused_labels)]
         let y = 'attn: {
+            // Flash Attention on CUDA — fused kernel, O(N) memory, native GQA
+            #[cfg(feature = "cuda")]
+            if matches!(q.device(), candle_core::Device::Cuda(_)) {
+                let q_fa = if q.dtype() == candle_core::DType::F32 { q.to_dtype(candle_core::DType::F16)? } else { q.clone() };
+                let k_fa = if k.dtype() == candle_core::DType::F32 { k.to_dtype(candle_core::DType::F16)? } else { k.clone() };
+                let v_fa = if v.dtype() == candle_core::DType::F32 { v.to_dtype(candle_core::DType::F16)? } else { v.clone() };
+                let softmax_scale = 1.0 / (self.head_dim as f32).sqrt();
+                let y = candle_flash_attn::flash_attn(&q_fa, &k_fa, &v_fa, softmax_scale, seq_len > 1)
+                    .map_err(|e| anyhow!("flash_attn: {e}"))?;
+                break 'attn y.to_dtype(in_dtype)?;
+            }
+
             // Fused SDPA on Metal — single kernel, native GQA (no repeat_kv needed)
             #[cfg(feature = "metal")]
             if matches!(q.device(), candle_core::Device::Metal(_)) {
@@ -185,7 +198,7 @@ impl Qwen3_5FullAttention {
                     .map_err(|e| anyhow!("sdpa: {e}"))?;
             }
 
-            // Manual attention with GQA head expansion (CUDA, CPU)
+            // Fallback: manual attention with GQA head expansion (CPU)
             let k = self.repeat_kv(k).map_err(|e| anyhow!("repeat_kv k: {e}"))?;
             let v = self.repeat_kv(v).map_err(|e| anyhow!("repeat_kv v: {e}"))?;
 
@@ -201,7 +214,7 @@ impl Qwen3_5FullAttention {
                     .map_err(|e| anyhow!("masked_fill: {e}"))?
             };
             let att = candle_nn::ops::softmax_last_dim(&att)?;
-            att.matmul(&v.contiguous()?)?
+            att.matmul(&v)?
         };
 
         // Reshape: (batch, heads, seq, head_dim) -> (batch, seq, hidden_size)

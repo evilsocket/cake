@@ -74,7 +74,8 @@ impl CausalSelfAttention {
             .map_err(|e| anyhow!("k.reshape -> {e}"))?;
         let v = v
             .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?
-            .transpose(1, 2)
+            .transpose(1, 2)?
+            .contiguous()
             .map_err(|e| anyhow!("v.reshape -> {e}"))?;
 
         let q = self
@@ -89,23 +90,40 @@ impl CausalSelfAttention {
             .process_kv(block_idx, k, v)
             .map_err(|e| anyhow!("cache.process_kv(block={block_idx}) -> {e}"))?;
 
-        // Compute attention in F32 for numerical stability.
         let in_dtype = q.dtype();
-        let q = q.to_dtype(DType::F32)?;
-        let k = k.to_dtype(DType::F32)?;
-        let v = v.to_dtype(DType::F32)?;
 
         #[allow(unused_labels)]
         let y = 'attn: {
+            // Flash Attention on CUDA — fused kernel, O(N) memory, native GQA
+            #[cfg(feature = "cuda")]
+            if matches!(q.device(), candle_core::Device::Cuda(_)) {
+                // flash-attn expects F16/BF16 input
+                let q_fa = if q.dtype() == DType::F32 { q.to_dtype(DType::F16)? } else { q.clone() };
+                let k_fa = if k.dtype() == DType::F32 { k.to_dtype(DType::F16)? } else { k.clone() };
+                let v_fa = if v.dtype() == DType::F32 { v.to_dtype(DType::F16)? } else { v.clone() };
+                let softmax_scale = 1.0 / (self.head_dim as f32).sqrt();
+                let y = candle_flash_attn::flash_attn(&q_fa, &k_fa, &v_fa, softmax_scale, seq_len > 1)
+                    .map_err(|e| anyhow!("flash_attn: {e}"))?;
+                break 'attn y.to_dtype(in_dtype)?;
+            }
+
             // Fused SDPA on Metal — single kernel, native GQA (no repeat_kv needed)
             #[cfg(feature = "metal")]
             if matches!(q.device(), candle_core::Device::Metal(_)) {
+                let q = q.to_dtype(DType::F32)?;
+                let k = k.to_dtype(DType::F32)?;
+                let v = v.to_dtype(DType::F32)?;
                 let scale = 1.0 / (self.head_dim as f32).sqrt();
-                break 'attn candle_nn::ops::sdpa(&q, &k, &v, None, seq_len > 1, scale, 1.0)
+                let y = candle_nn::ops::sdpa(&q, &k, &v, None, seq_len > 1, scale, 1.0)
                     .map_err(|e| anyhow!("sdpa: {e}"))?;
+                break 'attn y.to_dtype(in_dtype)?;
             }
 
-            // Manual attention with GQA head expansion (CUDA, CPU)
+            // Fallback: manual attention with GQA head expansion (CPU)
+            let q = q.to_dtype(DType::F32)?;
+            let k = k.to_dtype(DType::F32)?;
+            let v = v.to_dtype(DType::F32)?;
+
             let k = self
                 .repeat_kv(k)
                 .map_err(|e| anyhow!("repeat_kv(k) -> {e}"))?;
@@ -127,10 +145,9 @@ impl CausalSelfAttention {
                     .map_err(|e| anyhow!("masked_fill -> {e}"))?
             };
             let att = candle_nn::ops::softmax_last_dim(&att)?;
-            att.matmul(&v.contiguous()?)?
+            att.matmul(&v)?.to_dtype(in_dtype)?
         };
 
-        let y = y.to_dtype(in_dtype)?;
         let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, hidden_size])?;
         let y = self.o_proj.forward(&y)?;
 

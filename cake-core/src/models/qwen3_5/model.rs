@@ -27,7 +27,13 @@ impl Generator for Qwen3_5 {
 
     /// Load this model from the context.
     async fn load(ctx: &mut Context) -> Result<Option<Box<Self>>> {
-        let base = TextModelBase::load::<Qwen3_5Block>(ctx, DEFAULT_EOS_TOKEN).await?;
+        let mut base = TextModelBase::load::<Qwen3_5Block>(ctx, DEFAULT_EOS_TOKEN).await?;
+
+        if let Some(ref draft_model) = ctx.args.draft_model.clone() {
+            // Draft model uses standard Transformer blocks (dense model)
+            base.load_draft::<crate::models::common::Transformer>(draft_model, DEFAULT_EOS_TOKEN).await?;
+        }
+
         let history = ChatMLHistory::new();
         Ok(Some(Box::new(Self { base, history })))
     }

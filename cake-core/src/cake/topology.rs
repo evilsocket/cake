@@ -132,3 +132,156 @@ impl std::ops::DerefMut for Topology {
         &mut self.0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_node(host: &str, layers: &[&str]) -> Node {
+        Node {
+            host: host.to_string(),
+            description: None,
+            layers: layers.iter().map(|s| s.to_string()).collect(),
+            vram_bytes: 0,
+            tflops: 0.0,
+            backend: String::new(),
+            hostname: String::new(),
+            os: String::new(),
+        }
+    }
+
+    #[test]
+    fn test_empty_topology() {
+        let topo = Topology::new();
+        assert!(topo.is_empty());
+        assert!(topo.all_worker_layers().is_empty());
+        assert!(topo.get_node_for_layer("model.layers.0").is_none());
+    }
+
+    #[test]
+    fn test_node_layer_ownership() {
+        let node = make_node("worker1:10128", &["model.layers.0", "model.layers.1"]);
+
+        // Full layer name with sub-path matches
+        assert!(node.is_text_model_layer_owner("model.layers.0.self_attn"));
+        assert!(node.is_text_model_layer_owner("model.layers.1.mlp"));
+
+        // Layer not assigned
+        assert!(!node.is_text_model_layer_owner("model.layers.2.self_attn"));
+
+        // Exact name without trailing dot doesn't match
+        assert!(!node.is_text_model_layer_owner("model.layers.0"));
+    }
+
+    #[test]
+    fn test_get_node_for_layer() {
+        let mut topo = Topology::new();
+        topo.insert("gpu1".into(), make_node("10.0.0.1:10128", &["model.layers.0", "model.layers.1"]));
+        topo.insert("gpu2".into(), make_node("10.0.0.2:10128", &["model.layers.2"]));
+
+        let (name, node) = topo.get_node_for_layer("model.layers.0").unwrap();
+        assert_eq!(name, "gpu1");
+        assert_eq!(node.host, "10.0.0.1:10128");
+
+        let (name, node) = topo.get_node_for_layer("model.layers.2").unwrap();
+        assert_eq!(name, "gpu2");
+        assert_eq!(node.host, "10.0.0.2:10128");
+
+        assert!(topo.get_node_for_layer("model.layers.99").is_none());
+    }
+
+    #[test]
+    fn test_all_worker_layers() {
+        let mut topo = Topology::new();
+        topo.insert("w1".into(), make_node("a:1", &["model.layers.0", "model.layers.1"]));
+        topo.insert("w2".into(), make_node("b:1", &["model.layers.2"]));
+
+        let layers = topo.all_worker_layers();
+        assert_eq!(layers.len(), 3);
+        assert!(layers.contains("model.layers.0"));
+        assert!(layers.contains("model.layers.1"));
+        assert!(layers.contains("model.layers.2"));
+    }
+
+    #[test]
+    fn test_topology_yaml_parsing() {
+        let yaml = r#"
+gpu1:
+  host: "10.0.0.1:10128"
+  layers:
+    - "model.layers.0-2"
+gpu2:
+  host: "10.0.0.2:10128"
+  layers:
+    - "model.layers.3"
+    - "model.layers.4"
+"#;
+        let mut topo: Topology = serde_yaml::from_str(yaml).unwrap();
+
+        // Before range expansion, gpu1 has the raw range string
+        assert_eq!(topo["gpu1"].layers.len(), 1);
+        assert_eq!(topo["gpu1"].layers[0], "model.layers.0-2");
+
+        // Simulate range expansion (from_path does this for TextModel)
+        let re = regex::Regex::new(r"(?m)^(.+[^\d])(\d+)-(\d+)$").unwrap();
+        for (_name, node) in topo.iter_mut() {
+            let mut expanded = vec![];
+            for layer in &node.layers {
+                if let Some(caps) = re.captures(layer) {
+                    let base = caps.get(1).unwrap().as_str();
+                    let start: usize = caps.get(2).unwrap().as_str().parse().unwrap();
+                    let stop: usize = caps.get(3).unwrap().as_str().parse().unwrap();
+                    for n in start..=stop {
+                        expanded.push(format!("{}{}", base, n));
+                    }
+                } else {
+                    expanded.push(layer.clone());
+                }
+            }
+            node.layers = expanded;
+        }
+
+        // After expansion: gpu1 should have 3 layers
+        assert_eq!(topo["gpu1"].layers, vec![
+            "model.layers.0", "model.layers.1", "model.layers.2"
+        ]);
+        // gpu2 unchanged
+        assert_eq!(topo["gpu2"].layers, vec!["model.layers.3", "model.layers.4"]);
+    }
+
+    #[test]
+    fn test_topology_component_layers() {
+        // Non-text-model topology (Flux/LTX/HunyuanVideo style)
+        let yaml = r#"
+worker1:
+  host: "10.0.0.1:10128"
+  layers:
+    - "flux-t5"
+    - "flux-clip"
+worker2:
+  host: "10.0.0.2:10128"
+  layers:
+    - "flux-transformer"
+"#;
+        let topo: Topology = serde_yaml::from_str(yaml).unwrap();
+
+        assert!(topo.get_node_for_layer("flux-t5").is_some());
+        assert!(topo.get_node_for_layer("flux-transformer").is_some());
+        assert!(topo.get_node_for_layer("flux-vae").is_none());
+    }
+
+    #[test]
+    fn test_node_optional_fields_default() {
+        let yaml = r#"
+worker:
+  host: "10.0.0.1:10128"
+  layers: ["layer0"]
+"#;
+        let topo: Topology = serde_yaml::from_str(yaml).unwrap();
+        let node = &topo["worker"];
+        assert_eq!(node.vram_bytes, 0);
+        assert_eq!(node.tflops, 0.0);
+        assert_eq!(node.backend, "");
+        assert!(node.description.is_none());
+    }
+}

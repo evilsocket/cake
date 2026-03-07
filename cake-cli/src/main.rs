@@ -7,7 +7,7 @@ mod chat;
 
 use cake_core::{
     cake::{self, Context, Mode, Worker},
-    utils, Args, ModelType, TextModelArch,
+    utils, Args, ImageModelArch, ModelType, TextModelArch,
 };
 
 use anyhow::Result;
@@ -195,28 +195,85 @@ async fn main() -> Result<()> {
 #[cfg(feature = "master")]
 async fn run_master(ctx: Context) -> Result<()> {
     use cake_core::cake::Master;
+    use cake_core::cake::master::VideoMaster;
+
+    // Video models use VideoMaster (VideoGenerator trait) instead of Master (ImageGenerator)
+    if ctx.args.model_type == ModelType::ImageModel {
+        match ctx.args.image_model_arch {
+            ImageModelArch::LtxVideo => {
+                #[cfg(feature = "llama")]
+                {
+                    let master = VideoMaster::<cake_core::models::llama3::LLama, cake_core::models::ltx_video::LtxVideo>::new(ctx).await?;
+                    return master.run().await;
+                }
+                #[cfg(not(feature = "llama"))]
+                anyhow::bail!("ltx-video master requires the llama feature as a type placeholder");
+            }
+            ImageModelArch::HunyuanVideo => {
+                #[cfg(feature = "llama")]
+                {
+                    let master = VideoMaster::<cake_core::models::llama3::LLama, cake_core::models::hunyuan_video::HunyuanVideo>::new(ctx).await?;
+                    return master.run().await;
+                }
+                #[cfg(not(feature = "llama"))]
+                anyhow::bail!("hunyuan-video master requires the llama feature as a type placeholder");
+            }
+            ImageModelArch::Ltx2 => {
+                #[cfg(feature = "llama")]
+                {
+                    let master = VideoMaster::<cake_core::models::llama3::LLama, cake_core::models::ltx2::Ltx2>::new(ctx).await?;
+                    return master.run().await;
+                }
+                #[cfg(not(feature = "llama"))]
+                anyhow::bail!("ltx-2 master requires the llama feature as a type placeholder");
+            }
+            _ => {} // Non-video image models handled below
+        }
+    }
+
+    macro_rules! run_with_image_model {
+        ($text_model:ty, $ctx:expr) => {
+            match $ctx.args.image_model_arch {
+                ImageModelArch::Flux => {
+                    Master::<$text_model, cake_core::models::flux::Flux>::new($ctx)
+                        .await?
+                        .run()
+                        .await
+                }
+                ImageModelArch::LtxVideo | ImageModelArch::HunyuanVideo | ImageModelArch::Ltx2 => {
+                    // Handled above via VideoMaster
+                    unreachable!()
+                }
+                ImageModelArch::StableDiffusion | ImageModelArch::Auto => {
+                    Master::<$text_model, cake_core::models::sd::SD>::new($ctx)
+                        .await?
+                        .run()
+                        .await
+                }
+            }
+        };
+    }
 
     match ctx.text_model_arch {
         #[cfg(feature = "qwen2")]
         TextModelArch::Qwen2 => {
-            Master::<cake_core::models::qwen2::Qwen2, cake_core::models::sd::SD>::new(ctx)
-                .await?
-                .run()
-                .await
+            run_with_image_model!(cake_core::models::qwen2::Qwen2, ctx)
         }
         #[cfg(feature = "qwen3_5")]
         TextModelArch::Qwen3_5 => {
-            Master::<cake_core::models::qwen3_5::Qwen3_5, cake_core::models::sd::SD>::new(ctx)
-                .await?
-                .run()
-                .await
+            run_with_image_model!(cake_core::models::qwen3_5::Qwen3_5, ctx)
+        }
+        #[cfg(feature = "llava")]
+        TextModelArch::Llava => {
+            run_with_image_model!(cake_core::models::llava::LLava, ctx)
+        }
+        #[cfg(feature = "mixtral")]
+        TextModelArch::Mixtral => {
+            run_with_image_model!(cake_core::models::mixtral::Mixtral, ctx)
         }
         #[cfg(feature = "llama")]
         TextModelArch::Llama | TextModelArch::Auto => {
-            Master::<cake_core::models::llama3::LLama, cake_core::models::sd::SD>::new(ctx)
-                .await?
-                .run()
-                .await
+            run_with_image_model!(cake_core::models::llama3::LLama, ctx)
         }
         #[allow(unreachable_patterns)]
         _ => anyhow::bail!(
@@ -248,6 +305,20 @@ async fn run_worker(ctx: &mut Context) -> Result<()> {
                     .run()
                     .await
             }
+            #[cfg(feature = "llava")]
+            TextModelArch::Llava => {
+                Worker::<cake_core::models::llava::LLava>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(feature = "mixtral")]
+            TextModelArch::Mixtral => {
+                Worker::<cake_core::models::mixtral::Mixtral>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
             #[cfg(feature = "llama")]
             TextModelArch::Llama | TextModelArch::Auto => {
                 Worker::<cake_core::models::llama3::LLama>::new(ctx)
@@ -261,12 +332,38 @@ async fn run_worker(ctx: &mut Context) -> Result<()> {
                 ctx.text_model_arch
             ),
         },
-        ModelType::ImageModel => {
-            Worker::<cake_core::models::sd::SD>::new(ctx)
-                .await?
-                .run()
-                .await
-        }
+        ModelType::ImageModel => match ctx.args.image_model_arch {
+            ImageModelArch::Flux => {
+                Worker::<cake_core::models::flux::Flux>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            ImageModelArch::LtxVideo => {
+                Worker::<cake_core::models::ltx_video::LtxVideo>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            ImageModelArch::HunyuanVideo => {
+                Worker::<cake_core::models::hunyuan_video::HunyuanVideo>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            ImageModelArch::Ltx2 => {
+                Worker::<cake_core::models::ltx2::Ltx2>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            ImageModelArch::StableDiffusion | ImageModelArch::Auto => {
+                Worker::<cake_core::models::sd::SD>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+        },
     }
 }
 

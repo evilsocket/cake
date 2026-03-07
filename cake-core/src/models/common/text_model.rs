@@ -10,6 +10,7 @@ use super::EosTokenId;
 use crate::{
     cake::{Context, Forwarder},
     models::Token,
+    models::speculative::{SpeculativeState, speculate_and_verify},
 };
 
 /// Load the tokenizer and resolve EOS token ID(s).
@@ -131,6 +132,11 @@ pub struct TextModelBase {
     pub logits_processor: LogitsProcessor,
 
     pub tokens: Vec<u32>,
+
+    /// Optional draft model for speculative decoding.
+    pub draft: Option<Box<TextModelBase>>,
+    /// Speculative decoding state (present when draft model is loaded).
+    pub spec_state: Option<SpeculativeState>,
 }
 
 impl TextModelBase {
@@ -197,20 +203,25 @@ impl TextModelBase {
             }
         }
 
-        // Pass 2: connect to remote layers
-        for i in 0..config.num_hidden_layers {
-            let block_layer_name = format!("{prefix}.layers.{i}");
-            if let Some((_node_name, node)) = ctx.topology.get_node_for_layer(&block_layer_name) {
-                log::info!("connecting {} to {} ...", &block_layer_name, &node.host);
-                blocks[i] = Some(Box::new(
-                    crate::cake::Client::new(
-                        ctx.device.clone(),
-                        &node.host,
-                        &block_layer_name,
-                        ctx.args.cluster_key.as_deref(),
-                    )
-                    .await?,
-                ));
+        // Pass 2: connect to remote layers (one TCP connection per worker)
+        let remote_layers: Vec<(usize, String, String)> = (0..config.num_hidden_layers)
+            .filter_map(|i| {
+                let name = format!("{prefix}.layers.{i}");
+                ctx.topology
+                    .get_node_for_layer(&name)
+                    .map(|(_, node)| (i, name, node.host.clone()))
+            })
+            .collect();
+
+        if !remote_layers.is_empty() {
+            let connected = crate::cake::client::connect_remote_layers(
+                &remote_layers,
+                &ctx.device,
+                ctx.args.cluster_key.as_deref(),
+            )
+            .await?;
+            for (idx, forwarder) in connected {
+                blocks[idx] = Some(forwarder);
             }
         }
 
@@ -246,7 +257,48 @@ impl TextModelBase {
             ln_f,
             lm_head,
             logits_processor,
+            draft: None,
+            spec_state: None,
         })
+    }
+
+    /// Load a draft model for speculative decoding.
+    /// Creates a separate Context for the draft model (all layers local, no topology).
+    /// `default_eos_token` should match the main model's EOS token string.
+    pub async fn load_draft<B: Forwarder + 'static>(
+        &mut self,
+        draft_model_path: &str,
+        default_eos_token: &str,
+    ) -> Result<()> {
+        use crate::cake::Mode;
+
+        log::info!("loading draft model from {} for speculative decoding ...", draft_model_path);
+
+        // Create draft args: same device/dtype, no topology, all local
+        let mut draft_args = self.ctx.args.clone();
+        draft_args.model = draft_model_path.to_string();
+        draft_args.topology = None;
+        draft_args.topology_override = None;
+        draft_args.mode = Mode::Master;
+        // Draft model should not recursively load another draft
+        draft_args.draft_model = None;
+
+        let spec_tokens = draft_args.spec_tokens;
+
+        let mut draft_ctx = Context::from_args(draft_args)?;
+        let mut draft_base = TextModelBase::load::<B>(&mut draft_ctx, default_eos_token).await?;
+
+        // Override draft EOS to match main model (they must agree on when to stop)
+        if self.eos_token_id.is_some() {
+            draft_base.eos_token_id = self.eos_token_id.clone();
+        }
+
+        self.draft = Some(Box::new(draft_base));
+        self.spec_state = Some(SpeculativeState::new(spec_tokens));
+
+        log::info!("draft model loaded, speculative decoding enabled (K={})", spec_tokens);
+
+        Ok(())
     }
 
     /// Forward pass through all blocks.
@@ -264,8 +316,7 @@ impl TextModelBase {
         let mut local_count: usize = 0;
 
         while block_idx < num_blocks {
-            let curr_block_id = self.blocks[block_idx].ident().to_owned();
-            if curr_block_id == "local" {
+            if self.blocks[block_idx].ident() == "local" {
                 let local_start = std::time::Instant::now();
                 x = self.blocks[block_idx]
                     .forward_mut(&x, idx, block_idx, &mut self.ctx)
@@ -281,6 +332,7 @@ impl TextModelBase {
                 // collect all contiguous layers running on the same worker
                 let mut batch = vec![];
                 let first = block_idx;
+                let curr_block_id = self.blocks[block_idx].ident().to_owned();
                 while block_idx < num_blocks && self.blocks[block_idx].ident() == curr_block_id {
                     batch.push((
                         self.blocks[block_idx].layer_name().to_string(),
@@ -367,12 +419,23 @@ impl TextModelBase {
         // Track prompt length for repeat penalty scoping
         self.prompt_len = self.tokens.len();
 
+        // Sync draft model with the same prompt tokens
+        if let Some(ref mut draft) = self.draft {
+            draft.tokens = self.tokens.clone();
+            draft.prompt_len = self.prompt_len;
+        }
+
         Ok(())
     }
 
     /// Generate the next token. Assumes `prepare_prompt()` has been called for the first token.
     pub async fn next_token(&mut self, index: usize) -> Result<Token> {
         log::trace!("model.next_token({index})");
+
+        // Speculative decoding path: drain from buffer, refill via speculate_and_verify
+        if self.draft.is_some() && self.spec_state.is_some() {
+            return self.next_token_speculative(index).await;
+        }
 
         let num_tokens = self.tokens.len();
         let (context_size, context_index) = if self
@@ -471,6 +534,47 @@ impl TextModelBase {
         })
     }
 
+    /// Speculative decoding path for next_token.
+    async fn next_token_speculative(&mut self, _index: usize) -> Result<Token> {
+        // Check if we have buffered tokens from a previous speculation round
+        if let Some(ref mut state) = self.spec_state {
+            if let Some((token_id, text, is_eos)) = state.accepted_buffer.pop_front() {
+                return Ok(Token {
+                    id: token_id,
+                    text,
+                    is_end_of_stream: is_eos,
+                });
+            }
+        }
+
+        // Buffer is empty — run a new speculation round
+        // We need to temporarily take ownership of draft and state
+        let mut draft = self.draft.take().unwrap();
+        let mut state = self.spec_state.take().unwrap();
+
+        let results = speculate_and_verify(self, &mut draft, &mut state).await?;
+
+        // Put them back
+        self.draft = Some(draft);
+        self.spec_state = Some(state);
+
+        // Put all results into buffer, then pop the first one to return
+        let state = self.spec_state.as_mut().unwrap();
+        for (token_id, text, is_eos) in results {
+            state.accepted_buffer.push_back((token_id, text, is_eos));
+        }
+
+        if let Some((token_id, text, is_eos)) = state.accepted_buffer.pop_front() {
+            Ok(Token {
+                id: token_id,
+                text,
+                is_end_of_stream: is_eos,
+            })
+        } else {
+            bail!("speculative decoding produced no tokens")
+        }
+    }
+
     /// Reset all generation state.
     pub fn reset(&mut self) {
         self.tokens.clear();
@@ -478,6 +582,15 @@ impl TextModelBase {
         self.index_pos = 0;
         self.generated = 0;
         self.prompt_len = 0;
+
+        if let Some(ref mut draft) = self.draft {
+            draft.reset();
+        }
+        if let Some(ref mut state) = self.spec_state {
+            state.accepted_buffer.clear();
+            state.total_accepted = 0;
+            state.total_drafted = 0;
+        }
 
         // Clear any stale CUDA error state left by tensor cleanup (CudaSlice drops).
         // cudarc's error_state is an atomic that gets poisoned by internal operations
@@ -491,15 +604,18 @@ impl TextModelBase {
     }
 
     /// Notify all remote blocks of session end (clears their KV caches).
+    /// Only sends goodbye once per unique worker (skips RemoteRef stubs).
     pub async fn goodbye(&mut self) -> Result<()> {
-        let num_blocks = self.blocks.len();
-        let mut block_idx = 0;
-        while block_idx < num_blocks {
+        let mut seen = HashSet::new();
+        for block_idx in 0..self.blocks.len() {
+            let ident = self.blocks[block_idx].ident().to_owned();
+            if ident != "local" && !seen.insert(ident) {
+                continue; // already sent goodbye to this worker
+            }
             self.blocks[block_idx]
                 .goodbye()
                 .await
                 .map_err(|e| anyhow!("error in goodbye operation for block {block_idx}: {e}"))?;
-            block_idx += 1;
         }
         Ok(())
     }

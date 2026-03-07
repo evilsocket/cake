@@ -60,3 +60,47 @@ impl Message {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message_constructors() {
+        let sys = Message::system("sys".into());
+        assert!(matches!(sys.role, MessageRole::System));
+        assert_eq!(sys.content, "sys");
+
+        let usr = Message::user("usr".into());
+        assert!(matches!(usr.role, MessageRole::User));
+
+        let asst = Message::assistant("asst".into());
+        assert!(matches!(asst.role, MessageRole::Assistant));
+    }
+
+    #[test]
+    fn test_role_display() {
+        assert_eq!(format!("{}", MessageRole::System), "system");
+        assert_eq!(format!("{}", MessageRole::User), "user");
+        assert_eq!(format!("{}", MessageRole::Assistant), "assistant");
+    }
+
+    #[test]
+    fn test_message_json_roundtrip() {
+        let msg = Message::user("Hello world".into());
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"role\":\"user\""));
+        assert!(json.contains("\"content\":\"Hello world\""));
+
+        let decoded: Message = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded.role, MessageRole::User));
+        assert_eq!(decoded.content, "Hello world");
+    }
+
+    #[test]
+    fn test_role_deserialize_lowercase() {
+        let json = r#"{"role":"system","content":"test"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert!(matches!(msg.role, MessageRole::System));
+    }
+}

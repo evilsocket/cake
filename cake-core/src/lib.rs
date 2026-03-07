@@ -10,12 +10,31 @@ use serde::Deserialize;
 pub mod cake;
 pub mod models;
 pub mod utils;
+pub mod video;
 
 #[derive(Copy, Clone, Parser, Default, Debug, Eq, PartialEq, PartialOrd, Ord, ValueEnum)]
 pub enum ModelType {
     #[default]
     TextModel,
     ImageModel,
+}
+
+/// Supported image model architectures.
+#[derive(Copy, Clone, Parser, Default, Debug, Eq, PartialEq, PartialOrd, Ord, ValueEnum)]
+pub enum ImageModelArch {
+    /// Auto-detect (defaults to Stable Diffusion)
+    #[default]
+    Auto,
+    /// Stable Diffusion family
+    StableDiffusion,
+    /// Black Forest Labs Flux
+    Flux,
+    /// Lightricks LTX-Video (0.9.x series)
+    LtxVideo,
+    /// Lightricks LTX-2 (19B audio+video, Gemma-3 text encoder)
+    Ltx2,
+    /// Tencent HunyuanVideo
+    HunyuanVideo,
 }
 
 /// Supported text model architectures.
@@ -30,6 +49,10 @@ pub enum TextModelArch {
     Qwen2,
     /// Qwen3.5 hybrid linear/full attention
     Qwen3_5,
+    /// LLaVA (vision-language, CLIP + LLaMA)
+    Llava,
+    /// Mixtral MoE (sparse mixture of experts)
+    Mixtral,
 }
 
 #[derive(Clone, Parser, Default, Debug)]
@@ -105,6 +128,16 @@ pub struct Args {
     #[arg(skip)]
     pub topology_override: Option<cake::Topology>,
 
+    /// Draft model for speculative decoding (path or HuggingFace repo).
+    /// Must share the same tokenizer as the main model.
+    /// Example: --draft-model Qwen/Qwen2.5-0.5B-Instruct
+    #[arg(long)]
+    pub draft_model: Option<String>,
+
+    /// Number of speculative tokens to draft before verification (default: 4).
+    #[arg(long, default_value_t = 4)]
+    pub spec_tokens: usize,
+
     /// Run on CPU rather than on GPU.
     #[arg(long, default_value_t = false)]
     pub cpu: bool,
@@ -116,11 +149,21 @@ pub struct Args {
     #[arg(long, default_value = "auto")]
     pub text_model_arch: TextModelArch,
 
+    /// Image model architecture (defaults to auto/stable-diffusion).
+    #[arg(long, default_value = "auto")]
+    pub image_model_arch: ImageModelArch,
+
     #[clap(flatten)]
     pub sd_args: SDArgs,
 
     #[clap(flatten)]
     pub sd_img_gen_args: ImageGenerationArgs,
+
+    #[clap(flatten)]
+    pub flux_args: FluxArgs,
+
+    #[clap(flatten)]
+    pub ltx_args: LtxVideoArgs,
 }
 
 #[derive(Clone, Parser, Default, Debug)]
@@ -305,6 +348,146 @@ impl StableDiffusionVersion {
                     "text_encoder_2/model.safetensors"
                 }
             }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq, Default)]
+pub enum FluxVariant {
+    #[default]
+    Dev,
+    Schnell,
+}
+
+#[derive(Clone, Parser, Default, Debug)]
+pub struct FluxArgs {
+    /// Flux model variant (dev or schnell).
+    #[arg(long = "flux-variant", value_enum, default_value = "dev")]
+    pub flux_variant: FluxVariant,
+
+    /// Override path to Flux transformer weights (safetensors).
+    #[arg(long = "flux-transformer")]
+    pub flux_transformer: Option<String>,
+
+    /// Override path to T5-XXL encoder weights (safetensors, comma-separated for sharded).
+    #[arg(long = "flux-t5")]
+    pub flux_t5: Option<String>,
+
+    /// Override path to T5 config.json.
+    #[arg(long = "flux-t5-config")]
+    pub flux_t5_config: Option<String>,
+
+    /// Override path to T5 tokenizer (tokenizer.json).
+    #[arg(long = "flux-t5-tokenizer")]
+    pub flux_t5_tokenizer: Option<String>,
+
+    /// Override path to CLIP-L weights (safetensors).
+    #[arg(long = "flux-clip")]
+    pub flux_clip: Option<String>,
+
+    /// Override path to CLIP tokenizer (tokenizer.json).
+    #[arg(long = "flux-clip-tokenizer")]
+    pub flux_clip_tokenizer: Option<String>,
+
+    /// Override path to Flux VAE weights (ae.safetensors).
+    #[arg(long = "flux-vae")]
+    pub flux_vae: Option<String>,
+
+    /// Guidance scale for Flux-dev (ignored for schnell).
+    #[arg(long = "flux-guidance-scale", default_value_t = 3.5)]
+    pub flux_guidance_scale: f64,
+
+    /// Output image height.
+    #[arg(long = "flux-height", default_value_t = 1024)]
+    pub flux_height: usize,
+
+    /// Output image width.
+    #[arg(long = "flux-width", default_value_t = 1024)]
+    pub flux_width: usize,
+
+    /// Number of sampling steps (default: 50 for dev, 4 for schnell).
+    #[arg(long = "flux-num-steps")]
+    pub flux_num_steps: Option<usize>,
+}
+
+#[derive(Clone, Parser, Default, Debug)]
+pub struct LtxVideoArgs {
+    /// LTX-Video model version (e.g., "0.9.8-13b-distilled").
+    #[arg(long = "ltx-version", default_value = "0.9.8-13b-distilled")]
+    pub ltx_version: String,
+
+    /// Override HuggingFace repo for LTX-Video weights.
+    #[arg(long = "ltx-model")]
+    pub ltx_model: Option<String>,
+
+    /// Override path to LTX transformer weights (safetensors).
+    #[arg(long = "ltx-transformer")]
+    pub ltx_transformer: Option<String>,
+
+    /// Override path to T5-XXL encoder weights (safetensors, comma-separated for sharded).
+    #[arg(long = "ltx-t5")]
+    pub ltx_t5: Option<String>,
+
+    /// Override path to T5 config.json.
+    #[arg(long = "ltx-t5-config")]
+    pub ltx_t5_config: Option<String>,
+
+    /// Override path to T5 tokenizer (tokenizer.json).
+    #[arg(long = "ltx-t5-tokenizer")]
+    pub ltx_t5_tokenizer: Option<String>,
+
+    /// Override path to LTX VAE weights (safetensors).
+    #[arg(long = "ltx-vae")]
+    pub ltx_vae: Option<String>,
+
+    /// Number of video frames to generate.
+    #[arg(long = "ltx-num-frames", default_value_t = 41)]
+    pub ltx_num_frames: usize,
+
+    /// Video frame rate.
+    #[arg(long = "ltx-fps", default_value_t = 24)]
+    pub ltx_fps: usize,
+
+    /// Output video height.
+    #[arg(long = "ltx-height", default_value_t = 512)]
+    pub ltx_height: usize,
+
+    /// Output video width.
+    #[arg(long = "ltx-width", default_value_t = 704)]
+    pub ltx_width: usize,
+
+    /// Number of sampling steps (default from model config).
+    #[arg(long = "ltx-num-steps")]
+    pub ltx_num_steps: Option<usize>,
+}
+
+impl LtxVideoArgs {
+    /// Get the HuggingFace repo ID for the LTX-Video model.
+    pub fn ltx_repo(&self) -> String {
+        if let Some(ref repo) = self.ltx_model {
+            return repo.clone();
+        }
+        match self.ltx_version.as_str() {
+            // LTX-2 (19B, audio+video, Gemma-3 text encoder)
+            "2-19b-dev" | "2.0" | "2" => "Lightricks/LTX-2".to_string(),
+            "2-19b-distilled" => "Lightricks/LTX-2".to_string(),
+
+            // LTX-Video 0.9.8
+            "0.9.8-13b-distilled" | "0.9.8-13b" => {
+                "Lightricks/LTX-Video-0.9.8-13b-distilled".to_string()
+            }
+            "0.9.8-13b-dev" => "Lightricks/LTX-Video-0.9.8-13b-dev".to_string(),
+            "0.9.8-2b-distilled" | "0.9.8-distilled" => {
+                "Lightricks/LTX-Video-0.9.8-distilled".to_string()
+            }
+
+            // LTX-Video 0.9.6
+            "0.9.6-distilled" | "0.9.6-2b-distilled" => {
+                "Lightricks/LTX-Video-0.9.6-distilled".to_string()
+            }
+            "0.9.6-dev" | "0.9.6-2b-dev" => "Lightricks/LTX-Video-0.9.6-dev".to_string(),
+
+            _ => "Lightricks/LTX-Video".to_string(),
         }
     }
 }

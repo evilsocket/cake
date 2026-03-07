@@ -1,0 +1,8 @@
+# LTX-2 distributed topology
+# Windows 5090 (32GB) handles the transformer (37.8GB BF16, tight fit via mmap)
+# Linux 4090 (24GB) master keeps gemma connector + VAE + vocoder locally
+# Gemma-3 12B encoder runs on CPU (24GB VRAM not enough for both)
+win5090:
+  host: "192.168.1.158:10128"
+  layers:
+    - "ltx2-transformer"

@@ -17,10 +17,10 @@ use candle_nn::VarBuilder;
 #[cfg(feature = "master")]
 pub mod api;
 #[cfg(feature = "master")]
-mod master;
+pub mod master;
 
 pub mod auth;
-mod client;
+pub mod client;
 pub mod discovery;
 mod proto;
 pub mod setup;
@@ -130,6 +130,12 @@ impl Context {
                     "Qwen2ForCausalLM" => TextModelArch::Qwen2,
                     #[cfg(feature = "qwen3_5")]
                     "Qwen3_5ForConditionalGeneration" => TextModelArch::Qwen3_5,
+                    #[cfg(feature = "llava")]
+                    "LlavaForConditionalGeneration" | "LlavaLlamaForCausalLM" => {
+                        TextModelArch::Llava
+                    }
+                    #[cfg(feature = "mixtral")]
+                    "MixtralForCausalLM" => TextModelArch::Mixtral,
                     _ => TextModelArch::Llama,
                 };
             }
@@ -145,6 +151,14 @@ impl Context {
                 TextModelArch::Qwen3_5 => {
                     crate::models::qwen3_5::Qwen3_5Config::from_path(&config_filename)?.into_config()
                 }
+                #[cfg(feature = "llava")]
+                TextModelArch::Llava => {
+                    crate::models::llava::LlavaConfig::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "mixtral")]
+                TextModelArch::Mixtral => {
+                    crate::models::mixtral::MixtralConfig::from_path(&config_filename)?.into_config()
+                }
                 #[cfg(feature = "llama")]
                 TextModelArch::Llama => {
                     crate::models::llama3::LlamaConfig::from_path(&config_filename)?.into_config()
@@ -156,55 +170,68 @@ impl Context {
                 }
             };
 
-            let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
-            fp8 = utils::fp8::is_fp8_quantized(&config_filename);
-            if fp8 {
-                log::info!("model uses FP8 quantization — weights will be dequantized at load time");
-            }
-            let is_master = matches!(args.mode, Mode::Master);
-            let my_layers: Vec<String> = if !is_master {
-                topology.all_worker_layers().into_iter().collect()
-            } else {
-                vec![]
-            };
+            // Check for GGUF file first, then fall back to safetensors
+            let gguf_file = utils::gguf::detect_gguf_file(&data_path);
 
-            var_builder = Some(if is_master {
-                // Master: exclude shards that only contain remote-worker tensors
-                let worker_layers = topology.all_worker_layers();
-                if worker_layers.is_empty() {
+            if let Some(ref gguf_path) = gguf_file {
+                log::info!("detected GGUF model: {}", gguf_path.display());
+                var_builder = Some(utils::gguf::load_var_builder_from_gguf(
+                    gguf_path,
+                    dtype,
+                    device.clone(),
+                    &config_internal.model_prefix,
+                )?);
+            } else {
+                let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
+                fp8 = utils::fp8::is_fp8_quantized(&config_filename);
+                if fp8 {
+                    log::info!("model uses FP8 quantization — weights will be dequantized at load time");
+                }
+                let is_master = matches!(args.mode, Mode::Master);
+                let my_layers: Vec<String> = if !is_master {
+                    topology.all_worker_layers().into_iter().collect()
+                } else {
+                    vec![]
+                };
+
+                var_builder = Some(if is_master {
+                    // Master: exclude shards that only contain remote-worker tensors
+                    let worker_layers = topology.all_worker_layers();
+                    if worker_layers.is_empty() {
+                        utils::load_var_builder_from_index(
+                            model_tensors_index,
+                            dtype,
+                            device.clone(),
+                            fp8,
+                        )?
+                    } else {
+                        utils::load_var_builder_for_local_layers(
+                            model_tensors_index,
+                            dtype,
+                            device.clone(),
+                            &worker_layers,
+                            fp8,
+                        )?
+                    }
+                } else if !my_layers.is_empty() {
+                    // Worker with known layers: only load shards containing our layers
+                    utils::load_var_builder_for_specific_layers(
+                        model_tensors_index,
+                        dtype,
+                        device.clone(),
+                        &my_layers,
+                        fp8,
+                    )?
+                } else {
+                    // Worker without known layers: load everything
                     utils::load_var_builder_from_index(
                         model_tensors_index,
                         dtype,
                         device.clone(),
                         fp8,
                     )?
-                } else {
-                    utils::load_var_builder_for_local_layers(
-                        model_tensors_index,
-                        dtype,
-                        device.clone(),
-                        &worker_layers,
-                        fp8,
-                    )?
-                }
-            } else if !my_layers.is_empty() {
-                // Worker with known layers: only load shards containing our layers
-                utils::load_var_builder_for_specific_layers(
-                    model_tensors_index,
-                    dtype,
-                    device.clone(),
-                    &my_layers,
-                    fp8,
-                )?
-            } else {
-                // Worker without known layers: load everything
-                utils::load_var_builder_from_index(
-                    model_tensors_index,
-                    dtype,
-                    device.clone(),
-                    fp8,
-                )?
-            });
+                });
+            }
             cache = Some(Cache::new(true, dtype, &config_internal, &device)?);
             config = Some(config_internal);
         }

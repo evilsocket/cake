@@ -1,6 +1,7 @@
 use std::io::Write;
 
-use crate::models::{chat::Message, ImageGenerator, TextGenerator};
+use crate::models::{chat::Message, ImageGenerator, TextGenerator, VideoGenerator};
+use crate::video::VideoOutput;
 
 use super::{api, Context};
 
@@ -117,7 +118,12 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
         let mut start_gen = std::time::Instant::now();
         let llm_model = self.llm_model.as_mut().expect("LLM model not found");
 
-        for index in 0..sample_len {
+        let mut index = 0;
+        loop {
+            if llm_model.generated_tokens() >= sample_len {
+                break;
+            }
+
             if index == 1 {
                 // record start time again since the first token is the warmup
                 start_gen = std::time::Instant::now()
@@ -139,6 +145,8 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
             } else {
                 stream(&token.to_string());
             }
+
+            index += 1;
         }
 
         // signal end of stream
@@ -150,7 +158,7 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
         log::info!(
             "{} tokens generated ({:.2} token/s) - mem={}",
             generated,
-            (generated - 1) as f64 / dt.as_secs_f64(),
+            (generated.saturating_sub(1)) as f64 / dt.as_secs_f64(),
             human_bytes::human_bytes(memory_stats::memory_stats().unwrap().physical_mem as f64)
         );
 
@@ -163,5 +171,64 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
     {
         let sd_model = self.sd_model.as_mut().expect("SD model not found");
         sd_model.generate_image(&args, callback).await
+    }
+}
+
+/// Video-capable master variant. Separate impl block because VideoGenerator
+/// is a different trait from ImageGenerator.
+pub struct VideoMaster<TG, VG> {
+    pub ctx: Context,
+    pub llm_model: Option<Box<TG>>,
+    pub video_model: Option<Box<VG>>,
+}
+
+impl<TG: TextGenerator + Send + Sync + 'static, VG: VideoGenerator + Send + Sync + 'static>
+    VideoMaster<TG, VG>
+{
+    pub async fn new(mut ctx: Context) -> Result<Self> {
+        match ctx.args.model_type {
+            ModelType::ImageModel => {
+                let video_model = VG::load(&mut ctx).await?;
+                Ok(Self {
+                    ctx,
+                    video_model,
+                    llm_model: None,
+                })
+            }
+            ModelType::TextModel => {
+                anyhow::bail!("VideoMaster cannot be used for text models");
+            }
+        }
+    }
+
+    pub async fn run(mut self) -> Result<()> {
+        if self.ctx.args.api.is_some() {
+            api::start_video(self).await?;
+        } else {
+            std::fs::create_dir_all("videos")?;
+            let video = self.generate_video(self.ctx.args.sd_img_gen_args.clone()).await?;
+
+            // Save as AVI
+            let avi_path = std::path::PathBuf::from("videos/output.avi");
+            video.save_avi(&avi_path)?;
+            log::info!(
+                "Saved video: {} frames, {:.1}s @ {} fps -> {}",
+                video.num_frames(),
+                video.duration_secs(),
+                video.fps,
+                avi_path.display()
+            );
+
+            // Also save individual frames for convenience
+            video.save_frames(std::path::Path::new("videos/frames"), "frame")?;
+            log::info!("Saved {} individual frames to videos/frames/", video.num_frames());
+        }
+
+        Ok(())
+    }
+
+    pub async fn generate_video(&mut self, args: ImageGenerationArgs) -> Result<VideoOutput> {
+        let video_model = self.video_model.as_mut().expect("Video model not found");
+        video_model.generate_video(&args).await
     }
 }

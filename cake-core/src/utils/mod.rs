@@ -1,6 +1,7 @@
 //! Utility functions and abstractions.
 
 pub mod fp8;
+pub mod gguf;
 pub mod hf;
 pub mod models;
 pub mod split;

@@ -5,6 +5,7 @@ use image::{ImageBuffer, Rgb};
 use chat::Message;
 
 use crate::cake::{Context, Forwarder};
+use crate::video::VideoOutput;
 use crate::ImageGenerationArgs;
 
 pub mod chat;
@@ -15,7 +16,16 @@ pub mod llama3;
 pub mod qwen2;
 #[cfg(feature = "qwen3_5")]
 pub mod qwen3_5;
+pub mod flux;
+#[cfg(feature = "llava")]
+pub mod llava;
+pub mod ltx_video;
+pub mod ltx2;
+#[cfg(feature = "mixtral")]
+pub mod mixtral;
 pub mod sd;
+pub mod speculative;
+pub mod hunyuan_video;
 
 /// A token.
 pub struct Token {
@@ -78,4 +88,25 @@ pub trait ImageGenerator: Generator {
     ) -> Result<(), anyhow::Error>
     where
         F: FnMut(Vec<ImageBuffer<Rgb<u8>, Vec<u8>>>) + Send + 'static;
+}
+
+/// A model that generates video (sequence of frames with temporal metadata).
+#[async_trait]
+pub trait VideoGenerator: Generator {
+    /// Generate a video from the given arguments.
+    /// Returns a `VideoOutput` containing all frames, fps, and dimensions.
+    async fn generate_video(
+        &mut self,
+        args: &ImageGenerationArgs,
+    ) -> Result<VideoOutput>;
+}
+
+/// A vision-language model that extends text generation with image understanding.
+#[async_trait]
+pub trait VisionLanguageGenerator: TextGenerator {
+    /// Process an image tensor and return visual embeddings.
+    async fn encode_image(&mut self, image: &candle_core::Tensor) -> Result<candle_core::Tensor>;
+    /// Add pre-encoded image embeddings to the conversation context.
+    /// These will be merged with text embeddings on the next forward pass.
+    fn add_image(&mut self, image_embeddings: candle_core::Tensor) -> Result<()>;
 }

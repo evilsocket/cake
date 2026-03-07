@@ -26,7 +26,12 @@ impl Generator for Qwen2 {
 
     /// Load this model from the context.
     async fn load(ctx: &mut Context) -> Result<Option<Box<Self>>> {
-        let base = TextModelBase::load::<Transformer>(ctx, DEFAULT_EOS_TOKEN).await?;
+        let mut base = TextModelBase::load::<Transformer>(ctx, DEFAULT_EOS_TOKEN).await?;
+
+        if let Some(ref draft_model) = ctx.args.draft_model.clone() {
+            base.load_draft::<Transformer>(draft_model, DEFAULT_EOS_TOKEN).await?;
+        }
+
         let history = QwenHistory::new();
         Ok(Some(Box::new(Self { base, history })))
     }
