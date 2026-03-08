@@ -16,7 +16,7 @@ use tokenizers::Tokenizer;
 pub fn gemma3_12b_config() -> gemma3::Config {
     gemma3::Config {
         attention_bias: false,
-        head_dim: 240,
+        head_dim: 256,
         hidden_activation: candle_nn::Activation::GeluPytorchTanh,
         hidden_size: 3840,
         intermediate_size: 15360,
@@ -29,7 +29,7 @@ pub fn gemma3_12b_config() -> gemma3::Config {
         vocab_size: 262_208,
         final_logit_softcapping: None,
         attn_logit_softcapping: None,
-        query_pre_attn_scalar: 240,
+        query_pre_attn_scalar: 256,
         sliding_window: 1024,
         sliding_window_pattern: 6, // 5 local : 1 global
         max_position_embeddings: 131_072,
@@ -37,7 +37,9 @@ pub fn gemma3_12b_config() -> gemma3::Config {
 }
 
 /// Maximum sequence length for text encoding.
-pub const MAX_SEQ_LEN: usize = 1024;
+/// Matches the default `max_sequence_length=256` in the Python LTX-2 pipeline.
+/// Using 1024 causes OOM on 32GB GPUs during the 48-layer forward pass.
+pub const MAX_SEQ_LEN: usize = 256;
 
 /// Scale factor for normalization (matches Python pipeline).
 pub const PACK_SCALE_FACTOR: f32 = 8.0;
@@ -49,6 +51,7 @@ pub const PACK_SCALE_FACTOR: f32 = 8.0;
 /// (1 embedding + 48 transformer layers) for the LTX-2 connector.
 pub struct Gemma3TextEncoder {
     model: Gemma3AllHidden,
+    #[allow(dead_code)]
     tokenizer: Tokenizer,
     device: Device,
     dtype: DType,
@@ -95,6 +98,7 @@ impl Gemma3TextEncoder {
     /// Returns `(packed_embeds, attention_mask)`:
     /// - `packed_embeds`: `[B, seq_len, hidden_dim * num_layers]` = `[1, L, 188160]`
     /// - `attention_mask`: `[B, seq_len]` binary mask (1=valid, 0=padding)
+    #[allow(dead_code)]
     pub fn encode(&mut self, prompt: &str) -> Result<(Tensor, Tensor)> {
         let encoding = self
             .tokenizer
@@ -141,6 +145,43 @@ impl Gemma3TextEncoder {
         Ok((packed, attention_mask.to_dtype(DType::F32)?))
     }
 
+    /// Encode from pre-tokenized input tensors (for worker-side encoding).
+    ///
+    /// `input_ids`: `[B, L]` u32 token IDs (left-padded to MAX_SEQ_LEN)
+    /// `attention_mask`: `[B, L]` float mask (1=valid, 0=padding)
+    ///
+    /// Returns `(packed_embeds, attention_mask)` same as `encode()`.
+    pub fn encode_from_tokens(
+        &mut self,
+        input_ids: &Tensor,
+        attention_mask: &Tensor,
+    ) -> Result<(Tensor, Tensor)> {
+        let _seq_len = input_ids.dim(1)?;
+
+        // Move tensors to encoder's device if needed
+        let input_ids = input_ids.to_device(&self.device)?;
+        let attention_mask_f = attention_mask.to_dtype(DType::F32)?.to_device(&self.device)?;
+
+        // Run Gemma-3 forward pass
+        self.model.clear_kv_cache();
+        let all_hidden = self.model.forward_all_hidden(&input_ids, 0, Some(&attention_mask_f))?;
+
+        // Stack to [B, seq_len, hidden_dim, num_layers]
+        let stacked = Tensor::stack(&all_hidden, D::Minus1)?;
+
+        // Compute sequence lengths from mask (sum of valid tokens per batch)
+        let sequence_lengths = attention_mask_f.sum(1)?; // [B]
+
+        let packed = pack_text_embeds(
+            &stacked,
+            &sequence_lengths,
+            "left",
+            PACK_SCALE_FACTOR,
+        )?
+        .to_dtype(self.dtype)?;
+
+        Ok((packed, attention_mask_f))
+    }
 }
 
 /// Pack and normalize text encoder hidden states.
@@ -257,7 +298,12 @@ struct Gemma3AllHidden {
 
 impl Gemma3AllHidden {
     fn new(use_flash_attn: bool, cfg: &gemma3::Config, vb: VarBuilder) -> candle_core::Result<Self> {
-        let vb_m = vb.pp("model");
+        // google/gemma-3-12b-pt uses "language_model.model." prefix
+        let vb_m = if vb.contains_tensor("language_model.model.embed_tokens.weight") {
+            vb.pp("language_model").pp("model")
+        } else {
+            vb.pp("model")
+        };
         let embed_tokens =
             candle_nn::embedding(cfg.vocab_size, cfg.hidden_size, vb_m.pp("embed_tokens"))?;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
@@ -574,6 +620,9 @@ impl GemmaAttention {
         let (query_states, key_states) =
             self.rotary_emb.apply_rotary_emb_qkv(&query_states, &key_states, seqlen_offset)?;
 
+        // KV cache's slice_set requires contiguous tensors
+        let key_states = key_states.contiguous()?;
+        let value_states = value_states.contiguous()?;
         let (key_states, value_states) = match &mut self.kv_cache {
             GemmaKvCache::Normal(cache) => cache.append(&key_states, &value_states)?,
             GemmaKvCache::Rotating(cache) => cache.append(&key_states, &value_states)?,
@@ -800,7 +849,7 @@ mod tests {
         assert_eq!(cfg.num_hidden_layers, 48);
         assert_eq!(cfg.num_attention_heads, 16);
         assert_eq!(cfg.num_key_value_heads, 8);
-        assert_eq!(cfg.head_dim, 240);
+        assert_eq!(cfg.head_dim, 256);
         assert_eq!(cfg.intermediate_size, 15360);
         assert_eq!(cfg.vocab_size, 262_208);
         assert_eq!(cfg.sliding_window, 1024);

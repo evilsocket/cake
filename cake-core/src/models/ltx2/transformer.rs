@@ -14,19 +14,32 @@ use super::vendored::model::LTXModel;
 
 /// LTX-2 dual-stream DiT transformer Forwarder.
 ///
-/// Layer name: `"ltx2-transformer"`
+/// Supports two modes:
+/// 1. Full model: layer name `"ltx2-transformer"` — runs all 48 blocks + setup + finalize
+/// 2. Block range: layer name `"ltx2-transformer.N-M"` — runs blocks N through M only
 ///
-/// Packed tensor format (for network transport):
+/// Full model packed tensor format:
 /// 0: video_latent  [B, T, in_channels]
 /// 1: sigma         [B]
 /// 2: timesteps     [B]
 /// 3: positions     [B, 3, T]
 /// 4: context       [B, L, cross_attention_dim]
 /// 5: context_mask  [B, L]
+///
+/// Block range packed tensor format:
+/// 0: hidden        [B, T, video_dim]
+/// 1: temb          [B, 1, adaln_params, video_dim]
+/// 2: pe_cos        [B, H, T, d_head/2]
+/// 3: pe_sin        [B, H, T, d_head/2]
+/// 4: context       [B, L, video_dim]  (already through caption projection)
+/// 5: context_mask  [B, L]
+/// 6: embedded_ts   [B, 1, video_dim]  (for finalize, if this shard includes it)
 #[derive(Debug)]
 pub struct Ltx2Transformer {
     name: String,
     model: LTXModel,
+    /// true when running only a block range (not the full model)
+    is_block_range: bool,
 }
 
 impl std::fmt::Display for Ltx2Transformer {
@@ -35,7 +48,22 @@ impl std::fmt::Display for Ltx2Transformer {
     }
 }
 
+/// Parse block range from layer name like "ltx2-transformer.0-23".
+/// Returns (start, end_exclusive) or None for full model.
+fn parse_block_range(name: &str) -> Option<(usize, usize)> {
+    let suffix = name.strip_prefix("ltx2-transformer.")?;
+    let parts: Vec<&str> = suffix.split('-').collect();
+    if parts.len() == 2 {
+        let start: usize = parts[0].parse().ok()?;
+        let end: usize = parts[1].parse().ok()?;
+        Some((start, end + 1)) // inclusive to exclusive
+    } else {
+        None
+    }
+}
+
 impl Ltx2Transformer {
+    /// Load as a full model (all blocks + setup + finalize).
     pub fn load_model(ctx: &Context) -> Result<Box<dyn Forwarder>> {
         let (config, weights_path) = Self::resolve_config_and_weights(ctx)?;
 
@@ -53,10 +81,41 @@ impl Ltx2Transformer {
         Ok(Box::new(Self {
             name: "ltx2-transformer".to_string(),
             model,
+            is_block_range: false,
         }))
     }
 
-    fn resolve_config_and_weights(ctx: &Context) -> Result<(Ltx2TransformerConfig, PathBuf)> {
+    /// Load a block range (e.g., blocks 0-23).
+    pub fn load_block_range(
+        name: String,
+        ctx: &Context,
+        block_start: usize,
+        block_end: usize,
+    ) -> Result<Box<dyn Forwarder>> {
+        let (config, weights_path) = Self::resolve_config_and_weights(ctx)?;
+
+        info!(
+            "Loading LTX-2 transformer blocks {}-{} from {:?}...",
+            block_start,
+            block_end - 1,
+            weights_path
+        );
+
+        let weight_files = find_weight_files(&weights_path)?;
+        let vb = unsafe {
+            candle_nn::VarBuilder::from_mmaped_safetensors(&weight_files, ctx.dtype, &ctx.device)?
+        };
+
+        let model = LTXModel::new_block_range(config, vb, block_start, Some(block_end))?;
+
+        Ok(Box::new(Self {
+            name,
+            model,
+            is_block_range: true,
+        }))
+    }
+
+    pub(crate) fn resolve_config_and_weights(ctx: &Context) -> Result<(Ltx2TransformerConfig, PathBuf)> {
         let ltx_args = &ctx.args.ltx_args;
 
         // If explicit transformer path given, use it directly
@@ -98,16 +157,16 @@ impl Ltx2Transformer {
             Ltx2TransformerConfig::default()
         };
 
+        // Resolve weights — try single file first, then find index for sharded models
         let weights_path =
             if let Ok(path) = model_api.get("transformer/diffusion_pytorch_model.safetensors") {
                 path
             } else {
+                // Sharded model — get the index file, then resolve all shards from its directory
                 let index_path = model_api
                     .get("transformer/diffusion_pytorch_model.safetensors.index.json")?;
-                index_path
-                    .parent()
-                    .unwrap()
-                    .join("diffusion_pytorch_model-00001-of-00002.safetensors")
+                // Return the directory containing the index — find_weight_files will scan it
+                index_path.parent().unwrap().to_path_buf()
             };
 
         Ok((config, weights_path))
@@ -133,10 +192,10 @@ impl Ltx2Transformer {
         if single.exists() {
             return Ok(single);
         }
-        // Sharded — return the index file (find_weight_files will resolve shards)
+        // Sharded — return the directory (find_weight_files will scan it)
         let index = dir.join("diffusion_pytorch_model.safetensors.index.json");
         if index.exists() {
-            return Ok(index);
+            return Ok(dir.clone());
         }
         // Look for any safetensors file
         for entry in std::fs::read_dir(dir)? {
@@ -148,7 +207,7 @@ impl Ltx2Transformer {
         anyhow::bail!("No safetensors files found in {:?}", dir)
     }
 
-    /// Pack tensors for network transport and call the forwarder.
+    /// Pack tensors for full-model network transport and call the forwarder.
     #[allow(clippy::too_many_arguments)]
     pub async fn forward_packed(
         forwarder: &mut Box<dyn Forwarder>,
@@ -166,26 +225,79 @@ impl Ltx2Transformer {
         )?;
         forwarder.forward_mut(&packed, 0, 0, ctx).await
     }
+
+    /// Pack tensors for block-range network transport and call the forwarder.
+    ///
+    /// Sends pre-computed hidden states + metadata instead of raw latents.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn forward_blocks_packed(
+        forwarder: &mut Box<dyn Forwarder>,
+        hidden: Tensor,
+        temb: Tensor,
+        pe_cos: Tensor,
+        pe_sin: Tensor,
+        context: Tensor,
+        context_mask: Tensor,
+        embedded_ts: Tensor,
+        ctx: &mut Context,
+    ) -> Result<Tensor> {
+        let packed = pack_tensors(
+            vec![hidden, temb, pe_cos, pe_sin, context, context_mask, embedded_ts],
+            &ctx.device,
+        )?;
+        // Use block_idx=1 to signal block-range format
+        forwarder.forward_mut(&packed, 0, 1, ctx).await
+    }
+
+    /// Reference to the inner model (for master-side local execution).
+    pub fn model(&self) -> &LTXModel {
+        &self.model
+    }
 }
 
 #[async_trait]
 impl Forwarder for Ltx2Transformer {
-    fn load(_name: String, ctx: &Context) -> Result<Box<Self>> {
+    fn load(name: String, ctx: &Context) -> Result<Box<Self>> {
         let (config, weights_path) = Self::resolve_config_and_weights(ctx)?;
 
-        info!("Loading LTX-2 transformer from {:?}...", weights_path);
-
-        let weight_files = find_weight_files(&weights_path)?;
-        let vb = unsafe {
-            candle_nn::VarBuilder::from_mmaped_safetensors(&weight_files, ctx.dtype, &ctx.device)?
+        let is_block_range;
+        let model = if let Some((start, end)) = parse_block_range(&name) {
+            info!(
+                "Loading LTX-2 transformer blocks {}-{} from {:?}...",
+                start,
+                end - 1,
+                weights_path
+            );
+            is_block_range = true;
+            let weight_files = find_weight_files(&weights_path)?;
+            let vb = unsafe {
+                candle_nn::VarBuilder::from_mmaped_safetensors(
+                    &weight_files,
+                    ctx.dtype,
+                    &ctx.device,
+                )?
+            };
+            LTXModel::new_block_range(config, vb, start, Some(end))?
+        } else {
+            info!("Loading full LTX-2 transformer from {:?}...", weights_path);
+            is_block_range = false;
+            let weight_files = find_weight_files(&weights_path)?;
+            let vb = unsafe {
+                candle_nn::VarBuilder::from_mmaped_safetensors(
+                    &weight_files,
+                    ctx.dtype,
+                    &ctx.device,
+                )?
+            };
+            LTXModel::new(config, vb)?
         };
-        let model = LTXModel::new(config, vb)?;
 
         info!("LTX-2 transformer loaded!");
 
         Ok(Box::new(Self {
-            name: "ltx2-transformer".to_string(),
+            name,
             model,
+            is_block_range,
         }))
     }
 
@@ -193,38 +305,72 @@ impl Forwarder for Ltx2Transformer {
         &self,
         x: &Tensor,
         _index_pos: usize,
-        _block_idx: usize,
+        block_idx: usize,
         ctx: &mut Context,
     ) -> Result<Tensor> {
         let t0 = std::time::Instant::now();
-
         let unpacked = unpack_tensors(x)?;
-        // Packed: [video_latent, sigma, timesteps, positions, context, context_mask]
-        let video_latent = unpacked[0].to_dtype(ctx.dtype)?;
-        let sigma = unpacked[1].to_dtype(ctx.dtype)?;
-        let timesteps = unpacked[2].to_dtype(ctx.dtype)?;
-        let positions = unpacked[3].to_dtype(DType::F32)?;
-        let context = unpacked[4].to_dtype(ctx.dtype)?;
-        let context_mask = unpacked[5].to_dtype(ctx.dtype)?;
 
-        let unpack_ms = t0.elapsed().as_millis();
-        info!(
-            "LTX-2 transformer forwarding... (unpack: {}ms, packed_size: {}, dtype: {:?}, device: {:?})",
-            unpack_ms, x.elem_count(), ctx.dtype, ctx.device
-        );
+        // block_idx == 1 signals block-range format
+        if self.is_block_range || block_idx == 1 {
+            // Block-range format: [hidden, temb, pe_cos, pe_sin, context, context_mask, embedded_ts]
+            let hidden = unpacked[0].to_dtype(ctx.dtype)?;
+            let temb = unpacked[1].to_dtype(ctx.dtype)?;
+            let pe_cos = unpacked[2].to_dtype(ctx.dtype)?;
+            let pe_sin = unpacked[3].to_dtype(ctx.dtype)?;
+            let context = unpacked[4].to_dtype(ctx.dtype)?;
+            let context_mask = unpacked[5].to_dtype(ctx.dtype)?;
+            let embedded_ts = if unpacked.len() > 6 {
+                Some(unpacked[6].to_dtype(ctx.dtype)?)
+            } else {
+                None
+            };
 
-        let result = self.model.forward_video(
-            &video_latent,
-            &sigma,
-            &timesteps,
-            &positions,
-            &context,
-            Some(&context_mask),
-        )?;
+            info!(
+                "LTX-2 transformer blocks forwarding (unpack: {}ms, hidden: {:?})",
+                t0.elapsed().as_millis(),
+                hidden.shape()
+            );
 
-        info!("LTX-2 transformer done in {}ms", t0.elapsed().as_millis());
+            let pe = (pe_cos, pe_sin);
+            let result = self.model.forward_blocks_only(
+                &hidden,
+                &temb,
+                &pe,
+                &context,
+                Some(&context_mask),
+                embedded_ts.as_ref(),
+            )?;
 
-        Ok(result)
+            info!("LTX-2 transformer blocks done in {}ms", t0.elapsed().as_millis());
+            Ok(result)
+        } else {
+            // Full model format: [video_latent, sigma, timesteps, positions, context, context_mask]
+            let video_latent = unpacked[0].to_dtype(ctx.dtype)?;
+            let sigma = unpacked[1].to_dtype(ctx.dtype)?;
+            let timesteps = unpacked[2].to_dtype(ctx.dtype)?;
+            let positions = unpacked[3].to_dtype(DType::F32)?;
+            let context = unpacked[4].to_dtype(ctx.dtype)?;
+            let context_mask = unpacked[5].to_dtype(ctx.dtype)?;
+
+            info!(
+                "LTX-2 transformer forwarding (unpack: {}ms, latent: {:?})",
+                t0.elapsed().as_millis(),
+                video_latent.shape()
+            );
+
+            let result = self.model.forward_video(
+                &video_latent,
+                &sigma,
+                &timesteps,
+                &positions,
+                &context,
+                Some(&context_mask),
+            )?;
+
+            info!("LTX-2 transformer done in {}ms", t0.elapsed().as_millis());
+            Ok(result)
+        }
     }
 
     async fn forward_mut(
@@ -242,11 +388,39 @@ impl Forwarder for Ltx2Transformer {
     }
 }
 
+/// Find all safetensors weight files from a path.
+///
+/// If `path` is a single .safetensors file, returns just that file.
+/// If `path` is a directory, scans for all diffusion_pytorch_model*.safetensors files.
 fn find_weight_files(path: &PathBuf) -> Result<Vec<PathBuf>> {
+    // Single safetensors file
     if path.extension().map_or(false, |e| e == "safetensors") && path.exists() {
         return Ok(vec![path.clone()]);
     }
 
+    // Directory: scan for shards
+    if path.is_dir() {
+        let mut shards = Vec::new();
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let p = entry.path();
+            if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with("diffusion_pytorch_model")
+                    && name.ends_with(".safetensors")
+                    && !name.contains("index")
+                {
+                    shards.push(p);
+                }
+            }
+        }
+        if !shards.is_empty() {
+            shards.sort();
+            info!("Found {} transformer weight shards", shards.len());
+            return Ok(shards);
+        }
+    }
+
+    // Try parent directory scan (for paths pointing to specific shard files)
     if let Some(parent) = path.parent() {
         let mut shards = Vec::new();
         for entry in std::fs::read_dir(parent)? {
@@ -263,9 +437,25 @@ fn find_weight_files(path: &PathBuf) -> Result<Vec<PathBuf>> {
         }
         if !shards.is_empty() {
             shards.sort();
+            info!("Found {} transformer weight shards", shards.len());
             return Ok(shards);
         }
     }
 
     Ok(vec![path.clone()])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_block_range() {
+        assert_eq!(parse_block_range("ltx2-transformer"), None);
+        assert_eq!(parse_block_range("ltx2-transformer.0-23"), Some((0, 24)));
+        assert_eq!(parse_block_range("ltx2-transformer.24-47"), Some((24, 48)));
+        assert_eq!(parse_block_range("ltx2-transformer.0-47"), Some((0, 48)));
+        assert_eq!(parse_block_range("ltx2-transformer.abc"), None);
+        assert_eq!(parse_block_range("ltx2-vae"), None);
+    }
 }

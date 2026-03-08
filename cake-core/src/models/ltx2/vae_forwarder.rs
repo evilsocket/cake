@@ -9,18 +9,22 @@ use std::path::PathBuf;
 use crate::cake::{Context, Forwarder};
 use crate::models::sd::{pack_tensors, unpack_tensors};
 
-// LTX-2 reuses the same VAE architecture as LTX-Video
-use crate::models::ltx_video::vendored::vae::{AutoencoderKLLtxVideo, AutoencoderKLLtxVideoConfig};
+// LTX-2 VAE decoder reuses the same building blocks as LTX-Video,
+// but the encoder is architecturally different (AutoencoderKLLTX2Video).
+// We only need the decoder for generation, so we load it directly.
+use crate::models::ltx_video::vendored::vae::{AutoencoderKLLtxVideoConfig, LtxVideoDecoder3d};
 
-/// LTX-2 Video VAE Forwarder.
+/// LTX-2 Video VAE Forwarder (decoder-only).
 ///
 /// Layer name: `"ltx2-vae"`
 ///
-/// Reuses the LTX-Video VAE architecture (same decoder, 128 latent channels).
+/// The LTX-2 VAE (`AutoencoderKLLTX2Video`) has a different encoder architecture
+/// from LTX-Video, but shares the same decoder building blocks. Since video
+/// generation only needs decode (latents → pixels), we skip the encoder entirely.
 #[derive(Debug)]
 pub struct Ltx2Vae {
     name: String,
-    model: AutoencoderKLLtxVideo,
+    decoder: LtxVideoDecoder3d,
 }
 
 impl std::fmt::Display for Ltx2Vae {
@@ -31,7 +35,8 @@ impl std::fmt::Display for Ltx2Vae {
 
 impl Ltx2Vae {
     fn vae_config() -> AutoencoderKLLtxVideoConfig {
-        // LTX-2 uses AutoencoderKLLTX2Video — different from LTX-Video 0.9.x
+        // LTX-2 VAE config from vae/config.json
+        // Only decoder fields matter since we skip the encoder.
         AutoencoderKLLtxVideoConfig {
             block_out_channels: vec![256, 512, 1024, 2048],
             decoder_block_out_channels: vec![256, 512, 1024],
@@ -70,7 +75,7 @@ impl Ltx2Vae {
 
     fn load_inner(name: String, ctx: &Context) -> Result<Self> {
         let weights_path = Self::resolve_weights(ctx)?;
-        info!("Loading LTX-2 VAE from {:?}...", weights_path);
+        info!("Loading LTX-2 VAE (decoder-only) from {:?}...", weights_path);
 
         let vb = unsafe {
             candle_nn::VarBuilder::from_mmaped_safetensors(
@@ -80,10 +85,29 @@ impl Ltx2Vae {
             )?
         };
 
-        let model = AutoencoderKLLtxVideo::new(Self::vae_config(), vb)?;
-        info!("LTX-2 VAE loaded!");
+        let config = Self::vae_config();
 
-        Ok(Self { name, model })
+        // Load decoder directly — skip encoder (different architecture in LTX-2)
+        let decoder = LtxVideoDecoder3d::new(
+            config.latent_channels,
+            config.out_channels,
+            &config.decoder_block_out_channels,
+            &config.decoder_spatiotemporal_scaling,
+            &config.decoder_layers_per_block,
+            config.patch_size,
+            config.patch_size_t,
+            config.resnet_eps,
+            config.decoder_causal,
+            &config.decoder_inject_noise,
+            config.timestep_conditioning,
+            &config.decoder_upsample_residual,
+            &config.decoder_upsample_factor,
+            vb.pp("decoder"),
+        )?;
+
+        info!("LTX-2 VAE decoder loaded!");
+
+        Ok(Self { name, decoder })
     }
 
     pub fn load_model(ctx: &Context) -> Result<Box<dyn Forwarder>> {
@@ -124,21 +148,19 @@ impl Forwarder for Ltx2Vae {
         let input = unpacked[1].to_dtype(ctx.dtype)?;
 
         if direction == 1.0 {
-            let encoded = self.model.encoder.forward(&input, false)?;
-            let dist =
-                crate::models::ltx_video::vendored::vae::DiagonalGaussianDistribution::new(
-                    &encoded,
-                )?;
-            Ok(dist.mode()?)
-        } else {
-            let timestep = if unpacked.len() > 2 {
-                Some(unpacked[2].to_dtype(ctx.dtype)?)
-            } else {
-                None
-            };
-            let decoded = self.model.decoder.forward(&input, timestep.as_ref(), false)?;
-            Ok(decoded)
+            anyhow::bail!(
+                "LTX-2 VAE encoding not supported — encoder architecture differs from decoder. \
+                 Use LTX-Video VAE for encoding."
+            );
         }
+
+        let timestep = if unpacked.len() > 2 {
+            Some(unpacked[2].to_dtype(ctx.dtype)?)
+        } else {
+            None
+        };
+        let decoded = self.decoder.forward(&input, timestep.as_ref(), false)?;
+        Ok(decoded)
     }
 
     async fn forward_mut(

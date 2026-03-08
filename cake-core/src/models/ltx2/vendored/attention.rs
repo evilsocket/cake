@@ -147,13 +147,13 @@ impl Attention {
         let scale = (self.d_head as f64).sqrt();
         let attn = q.matmul(&k.transpose(2, 3)?.contiguous()?)?.affine(1.0 / scale, 0.0)?;
 
-        // Apply mask
+        // Apply mask (additive: masked positions get -inf)
         let attn = if let Some(mask) = mask {
-            // mask: [B, T_q, T_kv] -> [B, 1, T_q, T_kv]
-            let mask = mask.unsqueeze(1)?;
-            let neg_inf = Tensor::full(f32::NEG_INFINITY, attn.shape(), attn.device())?
-                .to_dtype(attn.dtype())?;
-            mask.where_cond(&attn, &neg_inf)?
+            // mask: [B, T_q, T_kv] (1=attend, 0=masked) -> [B, 1, T_q, T_kv]
+            let mask = mask.unsqueeze(1)?.to_dtype(attn.dtype())?;
+            // (1 - mask) * -1e9 gives 0 for attend positions, -1e9 for masked
+            let additive_mask = mask.affine(-1.0, 1.0)?.affine(1e9, 0.0)?;
+            attn.broadcast_add(&additive_mask)?
         } else {
             attn
         };

@@ -12,6 +12,7 @@ use super::transformer::Ltx2Transformer;
 use super::vae_forwarder::Ltx2Vae;
 use super::vocoder::Ltx2Vocoder;
 use super::vendored::config::{Ltx2SchedulerConfig, Ltx2TransformerConfig, Ltx2VaeConfig};
+use super::vendored::model::LTXModel;
 use super::vendored::pipeline::{
     build_video_positions, denormalize_latents, normalize_latents, pack_latents, unpack_latents,
 };
@@ -25,24 +26,27 @@ use crate::ImageGenerationArgs;
 ///
 /// Architecture:
 /// - Asymmetric dual-stream DiT transformer (14B video + 5B audio)
-/// - Gemma-3 12B text encoder (quantized to Q4)
+/// - Gemma-3 12B text encoder
 /// - Video VAE decoder (native 4K support)
 /// - Audio vocoder (synchronized with video)
 ///
-/// Component topology:
+/// Supports split transformer topology for distributed inference:
 /// ```yaml
-/// gpu1:
+/// win5090:
 ///   host: "worker1:10128"
-///   layers: ["ltx2-transformer"]  # ~19GB (FP8)
-/// gpu2:
-///   host: "worker2:10128"
-///   layers: ["ltx2-gemma"]        # ~6GB (Q4)
-/// # Master keeps ltx2-vae (~400MB) + ltx2-vocoder (~200MB)
+///   layers:
+///     - "ltx2-transformer.0-23"  # First 24 blocks (~17GB)
+/// # Master keeps blocks 24-47 + connector + VAE + Gemma
 /// ```
 pub struct Ltx2 {
-    gemma_encoder: Box<dyn Forwarder>,
-    gemma_text_encoder: Option<Gemma3TextEncoder>,
+    /// Connector forwarder (runs locally on master GPU)
+    gemma_connector: Box<dyn Forwarder>,
+    /// Gemma-3 12B text encoder (stays on CPU permanently)
+    gemma_encoder: Option<Gemma3TextEncoder>,
+    /// Remote transformer forwarder (full model or block range)
     transformer: Box<dyn Forwarder>,
+    /// Local transformer blocks (for split mode — the master's block range)
+    local_transformer: Option<LTXModel>,
     vae: Box<dyn Forwarder>,
     #[allow(dead_code)]
     vocoder: Box<dyn Forwarder>,
@@ -57,10 +61,10 @@ impl Generator for Ltx2 {
     async fn load(context: &mut Context) -> Result<Option<Box<Self>>> {
         info!("Loading LTX-2 components...");
 
-        // Gemma-3 text encoder
-        let gemma_encoder: Box<dyn Forwarder> =
+        // Text connector (runs locally on master GPU)
+        let gemma_connector: Box<dyn Forwarder> =
             if let Some((_name, node)) = context.topology.get_node_for_layer("ltx2-gemma") {
-                info!("ltx2-gemma will be served by {}", &node.host);
+                info!("ltx2-gemma (connector) will be served by {}", &node.host);
                 Box::new(
                     crate::cake::Client::new(
                         context.device.clone(),
@@ -74,22 +78,8 @@ impl Generator for Ltx2 {
                 Ltx2Gemma::load_model(context)?
             };
 
-        // Transformer
-        let transformer: Box<dyn Forwarder> =
-            if let Some((_name, node)) = context.topology.get_node_for_layer("ltx2-transformer") {
-                info!("ltx2-transformer will be served by {}", &node.host);
-                Box::new(
-                    crate::cake::Client::new(
-                        context.device.clone(),
-                        &node.host,
-                        "ltx2-transformer",
-                        context.args.cluster_key.as_deref(),
-                    )
-                    .await?,
-                )
-            } else {
-                Ltx2Transformer::load_model(&context)?
-            };
+        // Transformer — check for full or block-range topology
+        let (transformer, local_transformer) = Self::load_transformer(context).await?;
 
         // VAE
         let vae: Box<dyn Forwarder> =
@@ -125,15 +115,15 @@ impl Generator for Ltx2 {
                 Ltx2Vocoder::load_model(context)?
             };
 
-        // Try to load Gemma-3 text encoder for direct text-to-video
-        let gemma_text_encoder = match Self::try_load_gemma_encoder(context) {
+        // Gemma-3 12B encoder — stays on master CPU permanently
+        let gemma_encoder = match Self::try_load_gemma_encoder(context) {
             Ok(enc) => {
-                info!("Gemma-3 text encoder loaded — text prompts are supported!");
+                info!("Gemma-3 12B encoder loaded on master CPU — text prompts supported!");
                 Some(enc)
             }
             Err(e) => {
                 log::warn!(
-                    "Gemma-3 text encoder not available: {}. \
+                    "Gemma-3 encoder not available: {}. \
                      Pre-computed embeddings must be provided.",
                     e
                 );
@@ -144,9 +134,10 @@ impl Generator for Ltx2 {
         info!("LTX-2 components loaded");
 
         Ok(Some(Box::new(Self {
+            gemma_connector,
             gemma_encoder,
-            gemma_text_encoder,
             transformer,
+            local_transformer,
             vae,
             vocoder,
             context: context.clone(),
@@ -155,7 +146,108 @@ impl Generator for Ltx2 {
 }
 
 impl Ltx2 {
-    /// Try to load the Gemma-3 12B model for text encoding.
+    /// Load the transformer, handling both full-model and block-range topologies.
+    ///
+    /// Returns (remote_forwarder, local_transformer_option):
+    /// - Full model on worker: (Client, None)
+    /// - Full model local: (Ltx2Transformer, None)
+    /// - Block range on worker: (Client for remote blocks, Some(LTXModel for local blocks))
+    async fn load_transformer(
+        context: &mut Context,
+    ) -> Result<(Box<dyn Forwarder>, Option<LTXModel>)> {
+        // Check for full transformer on a worker
+        if let Some((_name, node)) = context.topology.get_node_for_layer("ltx2-transformer") {
+            info!("ltx2-transformer (full) will be served by {}", &node.host);
+            let client = Box::new(
+                crate::cake::Client::new(
+                    context.device.clone(),
+                    &node.host,
+                    "ltx2-transformer",
+                    context.args.cluster_key.as_deref(),
+                )
+                .await?,
+            );
+            return Ok((client, None));
+        }
+
+        // Check for block-range assignments
+        // Find any layer name matching "ltx2-transformer.N-M"
+        let block_range_layer = context
+            .topology
+            .all_worker_layers()
+            .into_iter()
+            .find(|name| name.starts_with("ltx2-transformer."));
+
+        if let Some(ref remote_layer) = block_range_layer {
+            let (_name, node) = context
+                .topology
+                .get_node_for_layer(remote_layer)
+                .ok_or_else(|| anyhow::anyhow!("No node found for layer {}", remote_layer))?;
+
+            info!("{} will be served by {}", remote_layer, &node.host);
+
+            // Parse remote block range
+            let suffix = remote_layer
+                .strip_prefix("ltx2-transformer.")
+                .unwrap();
+            let parts: Vec<&str> = suffix.split('-').collect();
+            let remote_start: usize = parts[0].parse()?;
+            let remote_end: usize = parts[1].parse::<usize>()? + 1;
+
+            let client: Box<dyn Forwarder> = Box::new(
+                crate::cake::Client::new(
+                    context.device.clone(),
+                    &node.host,
+                    remote_layer,
+                    context.args.cluster_key.as_deref(),
+                )
+                .await?,
+            );
+
+            // Load the remaining blocks locally on the master
+            let config = Ltx2TransformerConfig::default();
+            let num_layers = config.num_layers;
+
+            // Determine local block range (complement of remote)
+            let (local_start, local_end) = if remote_start == 0 {
+                // Remote has first half → local has second half
+                (remote_end, num_layers)
+            } else {
+                // Remote has second half → local has first half
+                (0, remote_start)
+            };
+
+            info!(
+                "Loading local transformer blocks {}-{} on master GPU",
+                local_start,
+                local_end - 1
+            );
+
+            // Load local blocks via Ltx2Transformer resolver (handles HF cache)
+            let local_model = {
+                let (cfg, weights_path) =
+                    Ltx2Transformer::resolve_config_and_weights(context)?;
+                let weight_files = find_local_weight_files(&weights_path)?;
+                let vb = unsafe {
+                    candle_nn::VarBuilder::from_mmaped_safetensors(
+                        &weight_files,
+                        context.dtype,
+                        &context.device,
+                    )?
+                };
+                LTXModel::new_block_range(cfg, vb, local_start, Some(local_end))?
+            };
+
+            return Ok((client, Some(local_model)));
+        }
+
+        // No topology entry — load full model locally
+        info!("Loading full LTX-2 transformer locally");
+        let transformer = Ltx2Transformer::load_model(context)?;
+        Ok((transformer, None))
+    }
+
+    /// Load Gemma-3 12B encoder on the master's CPU.
     fn try_load_gemma_encoder(ctx: &Context) -> Result<Gemma3TextEncoder> {
         use hf_hub::api::sync::ApiBuilder;
         use hf_hub::Cache;
@@ -170,7 +262,6 @@ impl Ltx2 {
 
         let tokenizer_path = model_api.get("tokenizer.json")?;
 
-        // Parse config
         let config_path = model_api.get("config.json")?;
         let config_str = std::fs::read_to_string(&config_path)?;
         let gemma_config: candle_transformers::models::gemma3::Config =
@@ -200,14 +291,59 @@ impl Ltx2 {
             vec![model_api.get("model.safetensors")?]
         };
 
+        info!("Loading Gemma-3 12B on CPU (F32)...");
         Gemma3TextEncoder::load(
             &model_paths,
             &tokenizer_path,
             &gemma_config,
-            ctx.dtype,
-            &ctx.device,
+            DType::F32,
+            &Device::Cpu,
         )
     }
+}
+
+/// Find weight files from a path (for local master loading).
+fn find_local_weight_files(path: &PathBuf) -> Result<Vec<PathBuf>> {
+    if path.extension().map_or(false, |e| e == "safetensors") && path.exists() {
+        return Ok(vec![path.clone()]);
+    }
+    if path.is_dir() {
+        let mut shards = Vec::new();
+        for entry in std::fs::read_dir(path)? {
+            let p = entry?.path();
+            if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with("diffusion_pytorch_model")
+                    && name.ends_with(".safetensors")
+                    && !name.contains("index")
+                {
+                    shards.push(p);
+                }
+            }
+        }
+        if !shards.is_empty() {
+            shards.sort();
+            return Ok(shards);
+        }
+    }
+    if let Some(parent) = path.parent() {
+        let mut shards = Vec::new();
+        for entry in std::fs::read_dir(parent)? {
+            let p = entry?.path();
+            if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with("diffusion_pytorch_model")
+                    && name.ends_with(".safetensors")
+                    && !name.contains("index")
+                {
+                    shards.push(p);
+                }
+            }
+        }
+        if !shards.is_empty() {
+            shards.sort();
+            return Ok(shards);
+        }
+    }
+    Ok(vec![path.clone()])
 }
 
 #[async_trait]
@@ -240,40 +376,43 @@ impl VideoGenerator for Ltx2 {
             width, height, num_frames, num_steps
         );
 
-        // 1. Encode prompt with Gemma-3 → connector
-        info!("Encoding prompt through text connector...");
+        // 1. Encode prompt with Gemma-3 on master CPU → send packed embeddings to connector
+        info!("Encoding prompt...");
         let prompt_text = if args.image_prompt.is_empty() {
             "a beautiful video"
         } else {
             &args.image_prompt
         };
 
-        let (packed_embeds, text_mask) = if let Some(ref mut encoder) = self.gemma_text_encoder {
-            // Use Gemma-3 encoder for real text encoding
-            info!("Encoding text with Gemma-3: \"{}\"", prompt_text);
-            encoder.encode(prompt_text)?
+        let (packed_embeds, text_mask) = if let Some(ref mut encoder) = self.gemma_encoder {
+            info!("Encoding text with Gemma-3 (CPU): \"{}\"", prompt_text);
+            let (embeds, mask) = encoder.encode(prompt_text)?;
+            // Transfer from CPU to GPU for network serialization
+            let embeds = embeds
+                .to_device(&self.context.device)?
+                .to_dtype(self.context.dtype)?;
+            let mask = mask.to_device(&self.context.device)?;
+            (embeds, mask)
         } else {
             // Fallback: dummy packed embeddings (for testing without Gemma weights)
             log::warn!("Using dummy text embeddings (Gemma-3 not loaded)");
-            let connector_seq_len = 1024usize;
+            let seq_len = 256usize;
             let packed_dim = trans_config.caption_channels * 49; // 3840 * 49 = 188160
             let dummy = Tensor::randn(
                 0f32,
                 1f32,
-                (1, connector_seq_len, packed_dim),
+                (1, seq_len, packed_dim),
                 &self.context.device,
             )?
             .to_dtype(self.context.dtype)?;
-            let mask = Tensor::ones(
-                (1, connector_seq_len),
-                DType::F32,
-                &self.context.device,
-            )?;
+            let mask = Tensor::ones((1, seq_len), DType::F32, &self.context.device)?;
             (dummy, mask)
         };
 
+        // Send packed embeddings to connector (local)
+        info!("Sending packed embeddings to connector...");
         let prompt_embeds = Ltx2Gemma::encode(
-            &mut self.gemma_encoder,
+            &mut self.gemma_connector,
             packed_embeds,
             Some(text_mask),
             &mut self.context,
@@ -281,13 +420,9 @@ impl VideoGenerator for Ltx2 {
         .await?
         .to_dtype(self.context.dtype)?;
 
-        // The connector returns [B, seq_len, cross_attention_dim] with an attention mask.
-        // The Gemma forwarder returns the embeddings; the mask is all-ones since
-        // registers replace all padding. We use the full sequence.
         let ctx_seq_len = prompt_embeds.dim(1)?;
-        let context_mask =
-            Tensor::ones((1, ctx_seq_len), DType::F32, &self.context.device)?
-                .to_dtype(self.context.dtype)?;
+        let context_mask = Tensor::ones((1, ctx_seq_len), DType::F32, &self.context.device)?
+            .to_dtype(self.context.dtype)?;
 
         info!("Text connector done: {:?}", prompt_embeds.shape());
 
@@ -306,8 +441,10 @@ impl VideoGenerator for Ltx2 {
         .to_dtype(self.context.dtype)?;
 
         // Normalize initial noise
-        let latents_mean = Tensor::new(vae_config.latents_mean.as_slice(), &self.context.device)?;
-        let latents_std = Tensor::new(vae_config.latents_std.as_slice(), &self.context.device)?;
+        let latents_mean =
+            Tensor::new(vae_config.latents_mean.as_slice(), &self.context.device)?;
+        let latents_std =
+            Tensor::new(vae_config.latents_std.as_slice(), &self.context.device)?;
         let latents_5d = normalize_latents(
             &latents_5d.to_dtype(DType::F32)?,
             &latents_mean,
@@ -345,6 +482,8 @@ impl VideoGenerator for Ltx2 {
         );
 
         // 5. Denoising loop
+        let is_split = self.local_transformer.is_some();
+
         for step in 0..num_steps {
             let start_time = std::time::Instant::now();
 
@@ -353,32 +492,49 @@ impl VideoGenerator for Ltx2 {
 
             let sigma_t = Tensor::full(sigma, (1,), &self.context.device)?
                 .to_dtype(self.context.dtype)?;
-            // Timestep = 1 - sigma (flow matching convention)
             let timestep_t = Tensor::full(1.0 - sigma, (1,), &self.context.device)?
                 .to_dtype(self.context.dtype)?;
 
-            // Scale input by sigma: noisy_input = sample * (1 - sigma) + noise * sigma
-            // For velocity prediction, input is just the latents at current sigma level
-
-            let velocity = Ltx2Transformer::forward_packed(
-                &mut self.transformer,
-                latents.to_dtype(self.context.dtype)?,
-                sigma_t.clone(),
-                timestep_t,
-                positions.clone(),
-                prompt_embeds.clone(),
-                context_mask.clone(),
-                &mut self.context,
-            )
-            .await?
-            .to_dtype(DType::F32)?;
+            let velocity = if is_split {
+                // Split transformer mode: master does setup + local blocks,
+                // worker does remote blocks
+                self.forward_split_transformer(
+                    &latents,
+                    &sigma_t,
+                    &timestep_t,
+                    &positions,
+                    &prompt_embeds,
+                    &context_mask,
+                )
+                .await?
+            } else {
+                // Full model on single worker
+                Ltx2Transformer::forward_packed(
+                    &mut self.transformer,
+                    latents.to_dtype(self.context.dtype)?,
+                    sigma_t.clone(),
+                    timestep_t,
+                    positions.clone(),
+                    prompt_embeds.clone(),
+                    context_mask.clone(),
+                    &mut self.context,
+                )
+                .await?
+                .to_dtype(DType::F32)?
+            };
 
             // Euler step
             latents = euler_step(&latents.to_dtype(DType::F32)?, &velocity, sigma, sigma_next)?
                 .to_dtype(self.context.dtype)?;
 
             let dt = start_time.elapsed().as_secs_f32();
-            info!("step {}/{} done, sigma={:.4}, {:.2}s", step + 1, num_steps, sigma, dt);
+            info!(
+                "step {}/{} done, sigma={:.4}, {:.2}s",
+                step + 1,
+                num_steps,
+                sigma,
+                dt
+            );
         }
 
         // 6. Unpack latents: [B, S, C] -> [B, C, F, H, W]
@@ -400,12 +556,8 @@ impl VideoGenerator for Ltx2 {
 
         // 8. Decode with VAE
         info!("Decoding with VAE...");
-        let decoded = Ltx2Vae::decode(
-            &mut self.vae,
-            latents_5d,
-            &mut self.context,
-        )
-        .await?;
+        let decoded =
+            Ltx2Vae::decode(&mut self.vae, latents_5d, &mut self.context).await?;
 
         // 9. Convert video frames to images
         let frames = video_tensor_to_images(&decoded)?;
@@ -420,9 +572,78 @@ impl VideoGenerator for Ltx2 {
     }
 }
 
+impl Ltx2 {
+    /// Forward pass through split transformer (remote blocks + local blocks).
+    ///
+    /// Flow:
+    /// 1. Master: setup (proj_in + adaln + caption + RoPE) — runs on local_transformer
+    /// 2. If remote has first blocks: send hidden → remote → receive → local blocks → finalize
+    /// 3. If remote has last blocks: local blocks → send hidden → remote → receive finalize result
+    async fn forward_split_transformer(
+        &mut self,
+        latents: &Tensor,
+        sigma: &Tensor,
+        timestep: &Tensor,
+        positions: &Tensor,
+        context: &Tensor,
+        context_mask: &Tensor,
+    ) -> Result<Tensor> {
+        let local = self
+            .local_transformer
+            .as_ref()
+            .expect("split mode requires local_transformer");
+
+        let latents = latents.to_dtype(self.context.dtype)?;
+
+        // Determine which model has setup (block 0)
+        let local_has_setup = local.has_setup();
+        let local_has_finalize = local.has_finalize();
+
+        // The model with setup does proj_in + adaln + caption + RoPE
+        let (hidden, temb, embedded_ts, pe, ctx_projected) = if local_has_setup {
+            local.forward_setup(&latents, timestep, positions, context)?
+        } else {
+            anyhow::bail!(
+                "Split transformer requires local model to have setup (block 0). \
+                 Put the HIGHER block range on the worker."
+            );
+        };
+
+        // Remote worker runs its block range
+        let remote_result = Ltx2Transformer::forward_blocks_packed(
+            &mut self.transformer,
+            hidden,
+            temb.clone(),
+            pe.0.clone(),
+            pe.1.clone(),
+            ctx_projected.clone(),
+            context_mask.clone(),
+            embedded_ts.clone(),
+            &mut self.context,
+        )
+        .await?;
+
+        // Local model runs its block range
+        let x = local.forward_blocks(
+            &remote_result,
+            &temb,
+            &pe,
+            &ctx_projected,
+            Some(context_mask),
+        )?;
+
+        // Finalize
+        let result = if local_has_finalize {
+            local.forward_finalize(&x, &embedded_ts)?
+        } else {
+            x
+        };
+
+        Ok(result.to_dtype(DType::F32)?)
+    }
+}
+
 /// Convert a decoded video tensor `[B, C, T, H, W]` to a list of RGB images.
-///
-/// Values are expected in `[-1, 1]` and are mapped to `[0, 255]` uint8.
 fn video_tensor_to_images(video: &Tensor) -> Result<Vec<ImageBuffer<Rgb<u8>, Vec<u8>>>> {
     let mut result = Vec::new();
 
@@ -432,14 +653,14 @@ fn video_tensor_to_images(video: &Tensor) -> Result<Vec<ImageBuffer<Rgb<u8>, Vec
 
     let bsize = video.dim(0)?;
     for batch in 0..bsize {
-        let batch_video = video.i(batch)?; // [C, T, H, W]
+        let batch_video = video.i(batch)?;
         let (channels, num_frames, height, width) = batch_video.dims4()?;
         if channels != 3 {
             anyhow::bail!("Expected 3 channels, got {}", channels);
         }
 
         for frame in 0..num_frames {
-            let frame_tensor = batch_video.i((.., frame, .., ..))?; // [C, H, W]
+            let frame_tensor = batch_video.i((.., frame, .., ..))?;
             let frame_tensor = frame_tensor.permute((1, 2, 0))?.flatten_all()?;
             let pixels = frame_tensor.to_vec1::<u8>()?;
 
@@ -460,24 +681,20 @@ mod tests {
     #[test]
     fn test_video_tensor_to_images_basic() {
         let device = Device::Cpu;
-        // Create a simple [1, 3, 2, 4, 4] video tensor with values in [-1, 1]
         let video = Tensor::zeros((1, 3, 2, 4, 4), DType::F32, &device).unwrap();
         let frames = video_tensor_to_images(&video).unwrap();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].width(), 4);
         assert_eq!(frames[0].height(), 4);
-        // Zero maps to (0+1)*127.5 = 127
         assert_eq!(frames[0].get_pixel(0, 0)[0], 127);
     }
 
     #[test]
     fn test_video_tensor_to_images_clamping() {
         let device = Device::Cpu;
-        // Values outside [-1, 1] should be clamped
         let video = Tensor::full(2.0f32, (1, 3, 1, 2, 2), &device).unwrap();
         let frames = video_tensor_to_images(&video).unwrap();
         assert_eq!(frames.len(), 1);
-        // 2.0 clamped to 1.0, mapped to (1+1)*127.5 = 255
         assert_eq!(frames[0].get_pixel(0, 0)[0], 255);
     }
 
@@ -486,7 +703,6 @@ mod tests {
         let device = Device::Cpu;
         let video = Tensor::zeros((2, 3, 3, 4, 4), DType::F32, &device).unwrap();
         let frames = video_tensor_to_images(&video).unwrap();
-        // 2 batches * 3 frames = 6 total
         assert_eq!(frames.len(), 6);
     }
 }

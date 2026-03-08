@@ -30,12 +30,17 @@ impl Forwarder for Ltx2Shardable {
     where
         Self: Sized,
     {
-        let model: Box<dyn Forwarder> = match name.as_str() {
-            "ltx2-transformer" => Ltx2Transformer::load(name.clone(), ctx)?,
-            "ltx2-gemma" => Ltx2Gemma::load(name.clone(), ctx)?,
-            "ltx2-vae" => Ltx2Vae::load(name.clone(), ctx)?,
-            "ltx2-vocoder" => Ltx2Vocoder::load(name.clone(), ctx)?,
-            _ => anyhow::bail!("LTX-2 component name not recognized: {}", name),
+        let model: Box<dyn Forwarder> = if name == "ltx2-transformer"
+            || name.starts_with("ltx2-transformer.")
+        {
+            Ltx2Transformer::load(name.clone(), ctx)?
+        } else {
+            match name.as_str() {
+                "ltx2-gemma" => Ltx2Gemma::load(name.clone(), ctx)?,
+                "ltx2-vae" => Ltx2Vae::load(name.clone(), ctx)?,
+                "ltx2-vocoder" => Ltx2Vocoder::load(name.clone(), ctx)?,
+                _ => anyhow::bail!("LTX-2 component name not recognized: {}", name),
+            }
         };
 
         Ok(Box::new(Self {

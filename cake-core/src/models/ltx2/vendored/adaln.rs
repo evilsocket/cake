@@ -100,6 +100,9 @@ impl PixArtAlphaCombinedTimestepSizeEmbeddings {
 
     fn forward(&self, t: &Tensor) -> Result<Tensor> {
         let t_emb = self.timestep.forward(t)?;
+        // Timesteps produces F32 (sinusoidal); convert to weight dtype before Linear
+        let weight_dtype = self.time_proj.linear_1.weight().dtype();
+        let t_emb = t_emb.to_dtype(weight_dtype)?;
         self.time_proj.forward(&t_emb)
     }
 }
