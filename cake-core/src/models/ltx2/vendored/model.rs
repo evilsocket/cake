@@ -119,6 +119,14 @@ impl LTXModel {
         let video_dim = self.config.video_inner_dim();
         let adaln_params = self.config.adaln_params();
 
+        log::info!(
+            "Transformer input shapes: video_latent={:?} timesteps={:?} positions={:?} context={:?} dtype={:?} device={:?}",
+            video_latent.shape(), timesteps.shape(), positions.shape(), context.shape(),
+            video_latent.dtype(), video_latent.device(),
+        );
+
+        let t0 = std::time::Instant::now();
+
         // 1. Project input
         let hidden = proj_in.forward(video_latent)?;
 
@@ -146,24 +154,33 @@ impl LTXModel {
             hidden.dtype(),
         )?;
 
+        // Force sync to measure setup time accurately
+        let _ = pe.0.to_vec1::<u8>().ok();
+        let setup_ms = t0.elapsed().as_millis();
+        log::info!("Transformer setup (proj_in + adaln + caption + RoPE): {}ms", setup_ms);
+
         // 5. Run through transformer blocks
         let mut x = hidden;
-        for block in &self.blocks {
+        let blocks_start = std::time::Instant::now();
+        for (i, block) in self.blocks.iter().enumerate() {
+            let block_start = std::time::Instant::now();
             x = block.forward_video_only(&x, &temb, Some(&pe), &context, context_mask)?;
+            // Force sync every 8 blocks to get accurate timing
+            if (i + 1) % 8 == 0 || i == self.blocks.len() - 1 {
+                let _ = x.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1::<f32>().ok();
+                let elapsed = blocks_start.elapsed().as_millis();
+                log::info!("Blocks 0..={}: {}ms total", i, elapsed);
+            }
         }
 
         // 6. Final output with AdaLN modulation
-        // Python: scale_shift_values = sst[None,None] + embedded_timestep[:,:,None]
-        // sst: [2, dim] -> [1, 1, 2, dim]
-        // embedded_ts: [B, 1, dim] -> [B, 1, 1, dim]
-        // sum: [B, 1, 2, dim], then shift=[:,:,0], scale=[:,:,1]
-        let sst_4d = sst.unsqueeze(0)?.unsqueeze(0)?; // [1, 1, 2, dim]
-        let et_4d = embedded_ts.unsqueeze(2)?; // [B, 1, 1, dim]
+        let sst_4d = sst.unsqueeze(0)?.unsqueeze(0)?;
+        let et_4d = embedded_ts.unsqueeze(2)?;
         let scale_shift = sst_4d
             .to_dtype(et_4d.dtype())?
-            .broadcast_add(&et_4d)?; // [B, 1, 2, dim]
-        let shift = scale_shift.narrow(2, 0, 1)?.squeeze(2)?; // [B, 1, dim]
-        let scale = scale_shift.narrow(2, 1, 1)?.squeeze(2)?; // [B, 1, dim]
+            .broadcast_add(&et_4d)?;
+        let shift = scale_shift.narrow(2, 0, 1)?.squeeze(2)?;
+        let scale = scale_shift.narrow(2, 1, 1)?.squeeze(2)?;
 
         let x = rms_norm(&x, self.config.norm_eps)?;
         let x = x
@@ -171,6 +188,9 @@ impl LTXModel {
             .broadcast_add(&shift)?;
 
         let x = proj_out.forward(&x)?;
+
+        let total_ms = t0.elapsed().as_millis();
+        log::info!("Transformer forward total: {}ms ({} blocks)", total_ms, self.blocks.len());
 
         Ok(x)
     }

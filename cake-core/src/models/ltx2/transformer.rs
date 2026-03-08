@@ -196,6 +196,8 @@ impl Forwarder for Ltx2Transformer {
         _block_idx: usize,
         ctx: &mut Context,
     ) -> Result<Tensor> {
+        let t0 = std::time::Instant::now();
+
         let unpacked = unpack_tensors(x)?;
         // Packed: [video_latent, sigma, timesteps, positions, context, context_mask]
         let video_latent = unpacked[0].to_dtype(ctx.dtype)?;
@@ -205,7 +207,11 @@ impl Forwarder for Ltx2Transformer {
         let context = unpacked[4].to_dtype(ctx.dtype)?;
         let context_mask = unpacked[5].to_dtype(ctx.dtype)?;
 
-        info!("LTX-2 transformer forwarding...");
+        let unpack_ms = t0.elapsed().as_millis();
+        info!(
+            "LTX-2 transformer forwarding... (unpack: {}ms, packed_size: {}, dtype: {:?}, device: {:?})",
+            unpack_ms, x.elem_count(), ctx.dtype, ctx.device
+        );
 
         let result = self.model.forward_video(
             &video_latent,
@@ -215,6 +221,8 @@ impl Forwarder for Ltx2Transformer {
             &context,
             Some(&context_mask),
         )?;
+
+        info!("LTX-2 transformer done in {}ms", t0.elapsed().as_millis());
 
         Ok(result)
     }
