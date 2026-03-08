@@ -50,6 +50,9 @@ pub struct Ltx2 {
     vae: Box<dyn Forwarder>,
     #[allow(dead_code)]
     vocoder: Box<dyn Forwarder>,
+    /// Per-channel latent normalization parameters (from VAE safetensors)
+    latents_mean: Vec<f32>,
+    latents_std: Vec<f32>,
     context: Context,
 }
 
@@ -81,11 +84,11 @@ impl Generator for Ltx2 {
         // Transformer — check for full or block-range topology
         let (transformer, local_transformer) = Self::load_transformer(context).await?;
 
-        // VAE
-        let vae: Box<dyn Forwarder> =
+        // VAE — load locally to get latents_mean/std
+        let (vae, latents_mean, latents_std): (Box<dyn Forwarder>, Vec<f32>, Vec<f32>) =
             if let Some((_name, node)) = context.topology.get_node_for_layer("ltx2-vae") {
                 info!("ltx2-vae will be served by {}", &node.host);
-                Box::new(
+                let client = Box::new(
                     crate::cake::Client::new(
                         context.device.clone(),
                         &node.host,
@@ -93,9 +96,11 @@ impl Generator for Ltx2 {
                         context.args.cluster_key.as_deref(),
                     )
                     .await?,
-                )
+                );
+                // Remote VAE — use identity normalization as fallback
+                (client, vec![0.0; 128], vec![1.0; 128])
             } else {
-                Ltx2Vae::load_model(context)?
+                Ltx2Vae::load_with_stats(context)?
             };
 
         // Vocoder
@@ -140,6 +145,8 @@ impl Generator for Ltx2 {
             local_transformer,
             vae,
             vocoder,
+            latents_mean,
+            latents_std,
             context: context.clone(),
         })))
     }
@@ -208,14 +215,22 @@ impl Ltx2 {
             let config = Ltx2TransformerConfig::default();
             let num_layers = config.num_layers;
 
-            // Determine local block range (complement of remote)
+            // Local gets the complement of remote.
+            // For split transformer, master should have first blocks (with setup).
             let (local_start, local_end) = if remote_start == 0 {
-                // Remote has first half → local has second half
                 (remote_end, num_layers)
             } else {
-                // Remote has second half → local has first half
                 (0, remote_start)
             };
+
+            if local_start != 0 {
+                log::warn!(
+                    "Master has blocks {}-{} without setup. \
+                     Put the HIGHER block range on the worker for best performance.",
+                    local_start,
+                    local_end - 1
+                );
+            }
 
             info!(
                 "Loading local transformer blocks {}-{} on master GPU",
@@ -228,10 +243,11 @@ impl Ltx2 {
                 let (cfg, weights_path) =
                     Ltx2Transformer::resolve_config_and_weights(context)?;
                 let weight_files = find_local_weight_files(&weights_path)?;
+                // LTX-2 weights are BF16 — load as BF16 to avoid conversion artifacts
                 let vb = unsafe {
                     candle_nn::VarBuilder::from_mmaped_safetensors(
                         &weight_files,
-                        context.dtype,
+                        DType::BF16,
                         &context.device,
                     )?
                 };
@@ -352,6 +368,7 @@ impl VideoGenerator for Ltx2 {
         let ImageGenerationArgs {
             image_prompt: _,
             image_seed,
+            guidance_scale,
             ..
         } = args;
 
@@ -362,6 +379,7 @@ impl VideoGenerator for Ltx2 {
         let num_frames = ltx_args.ltx_num_frames;
         let num_steps = ltx_args.ltx_num_steps.unwrap_or(30);
         let frame_rate = ltx_args.ltx_fps;
+        let guidance_scale = guidance_scale.unwrap_or(4.0) as f32;
 
         if let Some(seed) = image_seed {
             self.context.device.set_seed(*seed)?;
@@ -372,8 +390,8 @@ impl VideoGenerator for Ltx2 {
         let sched_config = Ltx2SchedulerConfig::default();
 
         info!(
-            "Generating LTX-2 video: {}x{}, {} frames, {} steps",
-            width, height, num_frames, num_steps
+            "Generating LTX-2 video: {}x{}, {} frames, {} steps, guidance_scale={:.1}",
+            width, height, num_frames, num_steps, guidance_scale
         );
 
         // 1. Encode prompt with Gemma-3 on master CPU → send packed embeddings to connector
@@ -424,7 +442,64 @@ impl VideoGenerator for Ltx2 {
         let context_mask = Tensor::ones((1, ctx_seq_len), DType::F32, &self.context.device)?
             .to_dtype(self.context.dtype)?;
 
-        info!("Text connector done: {:?}", prompt_embeds.shape());
+        // Debug: log prompt embedding statistics
+        {
+            let pe_f32 = prompt_embeds.to_dtype(DType::F32)?.flatten_all()?;
+            let pe_min: f32 = pe_f32.min(0)?.to_scalar()?;
+            let pe_max: f32 = pe_f32.max(0)?.to_scalar()?;
+            let pe_mean: f32 = pe_f32.mean(0)?.to_scalar()?;
+            info!(
+                "Text connector done: {:?}, min={:.4}, max={:.4}, mean={:.4}",
+                prompt_embeds.shape(), pe_min, pe_max, pe_mean
+            );
+        }
+
+        // Prepare unconditional context for classifier-free guidance
+        // Python diffusers encodes empty string "" through full Gemma + connector pipeline
+        let do_cfg = guidance_scale > 1.0;
+        let (uncond_embeds, uncond_mask) = if do_cfg {
+            info!("Preparing unconditional embeddings for CFG (guidance_scale={:.1})", guidance_scale);
+
+            let (neg_packed, neg_mask) = if let Some(ref mut encoder) = self.gemma_encoder {
+                info!("Encoding empty string for unconditional embeddings...");
+                let (embeds, mask) = encoder.encode("")?;
+                let embeds = embeds
+                    .to_device(&self.context.device)?
+                    .to_dtype(self.context.dtype)?;
+                let mask = mask.to_device(&self.context.device)?;
+                (embeds, mask)
+            } else {
+                // Without Gemma, use zeros as fallback
+                let seq_len = 256usize;
+                let packed_dim = trans_config.caption_channels * 49;
+                let dummy = Tensor::zeros(
+                    (1, seq_len, packed_dim),
+                    self.context.dtype,
+                    &self.context.device,
+                )?;
+                let mask = Tensor::zeros((1, seq_len), DType::F32, &self.context.device)?;
+                (dummy, mask)
+            };
+
+            // Run through connector (same as positive prompt)
+            let neg_embeds = Ltx2Gemma::encode(
+                &mut self.gemma_connector,
+                neg_packed,
+                Some(neg_mask),
+                &mut self.context,
+            )
+            .await?
+            .to_dtype(self.context.dtype)?;
+
+            let neg_ctx_len = neg_embeds.dim(1)?;
+            let neg_ctx_mask = Tensor::ones((1, neg_ctx_len), DType::F32, &self.context.device)?
+                .to_dtype(self.context.dtype)?;
+
+            info!("Unconditional embeddings ready: {:?}", neg_embeds.shape());
+            (Some(neg_embeds), Some(neg_ctx_mask))
+        } else {
+            (None, None)
+        };
 
         // 2. Prepare latents
         let latent_h = height / vae_config.spatial_compression_ratio;
@@ -440,18 +515,14 @@ impl VideoGenerator for Ltx2 {
         )?
         .to_dtype(self.context.dtype)?;
 
-        // Normalize initial noise
+        // NOTE: Python LTX2Pipeline does NOT normalize initial noise.
+        // Normalization only happens when img2vid latents are provided.
+        // For txt2vid, initial noise is standard normal, and only
+        // denormalize_latents is applied at the end before VAE decode.
         let latents_mean =
-            Tensor::new(vae_config.latents_mean.as_slice(), &self.context.device)?;
+            Tensor::new(self.latents_mean.as_slice(), &self.context.device)?;
         let latents_std =
-            Tensor::new(vae_config.latents_std.as_slice(), &self.context.device)?;
-        let latents_5d = normalize_latents(
-            &latents_5d.to_dtype(DType::F32)?,
-            &latents_mean,
-            &latents_std,
-            vae_config.scaling_factor,
-        )?
-        .to_dtype(self.context.dtype)?;
+            Tensor::new(self.latents_std.as_slice(), &self.context.device)?;
 
         // Pack latents: [B, C, F, H, W] -> [B, S, C] (patch_size=1)
         let mut latents = pack_latents(&latents_5d)?;
@@ -492,12 +563,14 @@ impl VideoGenerator for Ltx2 {
 
             let sigma_t = Tensor::full(sigma, (1,), &self.context.device)?
                 .to_dtype(self.context.dtype)?;
-            let timestep_t = Tensor::full(1.0 - sigma, (1,), &self.context.device)?
+            // Python diffusers passes sigma (not 1-sigma) as the timestep.
+            // forward_setup then scales by timestep_scale_multiplier (1000),
+            // matching Python's `timesteps = sigmas * num_train_timesteps`.
+            let timestep_t = Tensor::full(sigma, (1,), &self.context.device)?
                 .to_dtype(self.context.dtype)?;
 
-            let velocity = if is_split {
-                // Split transformer mode: master does setup + local blocks,
-                // worker does remote blocks
+            // Conditional forward pass
+            let cond_velocity = if is_split {
                 self.forward_split_transformer(
                     &latents,
                     &sigma_t,
@@ -508,12 +581,11 @@ impl VideoGenerator for Ltx2 {
                 )
                 .await?
             } else {
-                // Full model on single worker
                 Ltx2Transformer::forward_packed(
                     &mut self.transformer,
                     latents.to_dtype(self.context.dtype)?,
                     sigma_t.clone(),
-                    timestep_t,
+                    timestep_t.clone(),
                     positions.clone(),
                     prompt_embeds.clone(),
                     context_mask.clone(),
@@ -521,6 +593,43 @@ impl VideoGenerator for Ltx2 {
                 )
                 .await?
                 .to_dtype(DType::F32)?
+            };
+
+            // Apply classifier-free guidance
+            let velocity = if do_cfg {
+                let uncond_ctx = uncond_embeds.as_ref().unwrap();
+                let uncond_mask = uncond_mask.as_ref().unwrap();
+
+                let uncond_velocity = if is_split {
+                    self.forward_split_transformer(
+                        &latents,
+                        &sigma_t,
+                        &timestep_t,
+                        &positions,
+                        uncond_ctx,
+                        uncond_mask,
+                    )
+                    .await?
+                } else {
+                    Ltx2Transformer::forward_packed(
+                        &mut self.transformer,
+                        latents.to_dtype(self.context.dtype)?,
+                        sigma_t.clone(),
+                        timestep_t,
+                        positions.clone(),
+                        uncond_ctx.clone(),
+                        uncond_mask.clone(),
+                        &mut self.context,
+                    )
+                    .await?
+                    .to_dtype(DType::F32)?
+                };
+
+                // CFG: uncond + guidance_scale * (cond - uncond)
+                let diff = (&cond_velocity - &uncond_velocity)?;
+                (&uncond_velocity + diff.affine(guidance_scale as f64, 0.0)?)?
+            } else {
+                cond_velocity
             };
 
             // Euler step
@@ -554,6 +663,19 @@ impl VideoGenerator for Ltx2 {
         )?
         .to_dtype(self.context.dtype)?;
 
+        // Debug: check latent statistics before VAE
+        {
+            let lat_f32 = latents_5d.to_dtype(DType::F32)?;
+            let flat = lat_f32.flatten_all()?;
+            let min_v: f32 = flat.min(0)?.to_scalar()?;
+            let max_v: f32 = flat.max(0)?.to_scalar()?;
+            let mean_v: f32 = flat.mean(0)?.to_scalar()?;
+            info!(
+                "Latents before VAE: shape={:?}, min={:.4}, max={:.4}, mean={:.4}",
+                latents_5d.shape(), min_v, max_v, mean_v
+            );
+        }
+
         // 8. Decode with VAE
         info!("Decoding with VAE...");
         let decoded =
@@ -573,16 +695,18 @@ impl VideoGenerator for Ltx2 {
 }
 
 impl Ltx2 {
-    /// Forward pass through split transformer (remote blocks + local blocks).
+    /// Forward pass through split transformer.
     ///
-    /// Flow:
-    /// 1. Master: setup (proj_in + adaln + caption + RoPE) — runs on local_transformer
-    /// 2. If remote has first blocks: send hidden → remote → receive → local blocks → finalize
-    /// 3. If remote has last blocks: local blocks → send hidden → remote → receive finalize result
+    /// Flow (master has first blocks with setup, worker has last blocks with finalize):
+    /// 1. Master: setup (proj_in + adaln + caption + RoPE)
+    /// 2. Master: run local blocks (0-23)
+    /// 3. Send hidden states + metadata to worker
+    /// 4. Worker: run remote blocks (24-47) + finalize
+    /// 5. Worker returns velocity prediction
     async fn forward_split_transformer(
         &mut self,
         latents: &Tensor,
-        sigma: &Tensor,
+        _sigma: &Tensor,
         timestep: &Tensor,
         positions: &Tensor,
         context: &Tensor,
@@ -593,51 +717,39 @@ impl Ltx2 {
             .as_ref()
             .expect("split mode requires local_transformer");
 
-        let latents = latents.to_dtype(self.context.dtype)?;
+        // LTX-2 weights are BF16 — convert all inputs to BF16 to match
+        let latents = latents.to_dtype(DType::BF16)?;
+        let timestep = &timestep.to_dtype(DType::BF16)?;
+        let positions = &positions.to_dtype(DType::F32)?; // RoPE always F32
+        let context = &context.to_dtype(DType::BF16)?;
 
-        // Determine which model has setup (block 0)
-        let local_has_setup = local.has_setup();
-        let local_has_finalize = local.has_finalize();
+        // 1. Setup: proj_in + adaln + caption projection + RoPE (local)
+        let (hidden, temb, embedded_ts, pe, ctx_projected) =
+            local.forward_setup(&latents, timestep, positions, context)?;
 
-        // The model with setup does proj_in + adaln + caption + RoPE
-        let (hidden, temb, embedded_ts, pe, ctx_projected) = if local_has_setup {
-            local.forward_setup(&latents, timestep, positions, context)?
-        } else {
-            anyhow::bail!(
-                "Split transformer requires local model to have setup (block 0). \
-                 Put the HIGHER block range on the worker."
-            );
-        };
-
-        // Remote worker runs its block range
-        let remote_result = Ltx2Transformer::forward_blocks_packed(
-            &mut self.transformer,
-            hidden,
-            temb.clone(),
-            pe.0.clone(),
-            pe.1.clone(),
-            ctx_projected.clone(),
-            context_mask.clone(),
-            embedded_ts.clone(),
-            &mut self.context,
-        )
-        .await?;
-
-        // Local model runs its block range
+        // 2. Run local blocks
+        let context_mask_bf16 = context_mask.to_dtype(DType::BF16)?;
         let x = local.forward_blocks(
-            &remote_result,
+            &hidden,
             &temb,
             &pe,
             &ctx_projected,
-            Some(context_mask),
+            Some(&context_mask_bf16),
         )?;
 
-        // Finalize
-        let result = if local_has_finalize {
-            local.forward_finalize(&x, &embedded_ts)?
-        } else {
-            x
-        };
+        // 3. Send to remote worker for remaining blocks + finalize
+        let result = Ltx2Transformer::forward_blocks_packed(
+            &mut self.transformer,
+            x,
+            temb,
+            pe.0,
+            pe.1,
+            ctx_projected,
+            context_mask.clone(),
+            embedded_ts,
+            &mut self.context,
+        )
+        .await?;
 
         Ok(result.to_dtype(DType::F32)?)
     }

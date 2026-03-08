@@ -198,24 +198,10 @@ impl LTXModel {
         context: &Tensor,
         context_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
-        let t0 = std::time::Instant::now();
-
         let mut x = hidden.clone();
-        for (i, block) in self.blocks.iter().enumerate() {
-            let global_idx = self.block_start + i;
+        for block in self.blocks.iter() {
             x = block.forward_video_only(&x, temb, Some(pe), context, context_mask)?;
-
-            if (i + 1) % 12 == 0 || i == self.blocks.len() - 1 {
-                log::info!(
-                    "Block {} (local {}/{}): {}ms",
-                    global_idx,
-                    i + 1,
-                    self.blocks.len(),
-                    t0.elapsed().as_millis()
-                );
-            }
         }
-
         Ok(x)
     }
 

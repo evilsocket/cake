@@ -1,7 +1,7 @@
 # LTX-2 distributed topology (split transformer)
-# Worker (5090, 32GB): transformer blocks 0-23 (~17GB)
-# Master (4090, 24GB): Gemma-3 encoder (CPU) + Connector + blocks 24-47 + VAE (GPU)
+# Master (4090, 24GB): Gemma-3 (CPU) + Connector + blocks 0-23 + setup (~20GB GPU)
+# Worker (5090, 32GB): blocks 24-47 + finalize (~17GB)
 win5090:
   host: "192.168.1.158:10128"
   layers:
-    - "ltx2-transformer.0-23"
+    - "ltx2-transformer.24-47"

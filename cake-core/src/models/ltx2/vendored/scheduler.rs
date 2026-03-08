@@ -29,13 +29,16 @@ impl Ltx2Scheduler {
     /// Compute sigma schedule for a given number of tokens and steps.
     ///
     /// Returns `(steps + 1)` sigma values from ~1.0 down to 0.0.
+    /// Matches Python diffusers FlowMatchEulerDiscreteScheduler:
+    /// 1. Generate N sigmas (no zero) via linspace
+    /// 2. Apply flux_time_shift
+    /// 3. Apply stretch_to_terminal (on N sigmas, without trailing zero)
+    /// 4. Append 0.0 at the end
     pub fn execute(&self, steps: usize, num_tokens: usize) -> Vec<f32> {
-        // Linear interpolation of shift based on token count
-        // In practice, base_shift + (max_shift - base_shift) * normalized_token_count
         let shift = self.compute_shift(num_tokens);
 
-        // Generate linear sigmas from 1.0 down to ~0.0
-        let mut sigmas: Vec<f32> = (0..=steps)
+        // Generate N sigmas from 1.0 down to 1/steps (no zero)
+        let mut sigmas: Vec<f32> = (0..steps)
             .map(|i| 1.0 - (i as f32 / steps as f32))
             .collect();
 
@@ -44,10 +47,13 @@ impl Ltx2Scheduler {
             *s = flux_time_shift(shift, self.config.power, *s);
         }
 
-        // Optional stretch to terminal
+        // Optional stretch to terminal (before appending zero)
         if let Some(terminal) = self.config.stretch_terminal {
             stretch_to_terminal(&mut sigmas, terminal);
         }
+
+        // Append terminal zero
+        sigmas.push(0.0);
 
         sigmas
     }
@@ -68,11 +74,11 @@ impl Ltx2Scheduler {
 }
 
 fn stretch_to_terminal(sigmas: &mut [f32], terminal: f32) {
-    if sigmas.len() < 2 {
+    if sigmas.is_empty() {
         return;
     }
-    let last_nonzero = sigmas[sigmas.len() - 2]; // second-to-last (last is ~0)
-    let one_minus_last = 1.0 - last_nonzero;
+    let last = *sigmas.last().unwrap();
+    let one_minus_last = 1.0 - last;
     let denom = 1.0 - terminal;
     if denom.abs() < 1e-12 {
         return;
@@ -151,6 +157,12 @@ mod tests {
                 sigmas[i - 1]
             );
         }
+        // All sigmas should be non-negative
+        for (i, s) in sigmas.iter().enumerate() {
+            assert!(*s >= 0.0, "Sigma at step {} ({}) is negative", i, s);
+        }
+        // Last sigma should be 0.0
+        assert_eq!(*sigmas.last().unwrap(), 0.0);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use candle_core::Tensor;
+use candle_core::{DType, Tensor};
 use hf_hub::api::sync::ApiBuilder;
 use hf_hub::Cache;
 use log::info;
@@ -25,6 +25,10 @@ use crate::models::ltx_video::vendored::vae::{AutoencoderKLLtxVideoConfig, LtxVi
 pub struct Ltx2Vae {
     name: String,
     decoder: LtxVideoDecoder3d,
+    /// Per-channel latent normalization mean (loaded from safetensors).
+    pub latents_mean: Vec<f32>,
+    /// Per-channel latent normalization std (loaded from safetensors).
+    pub latents_std: Vec<f32>,
 }
 
 impl std::fmt::Display for Ltx2Vae {
@@ -77,15 +81,33 @@ impl Ltx2Vae {
         let weights_path = Self::resolve_weights(ctx)?;
         info!("Loading LTX-2 VAE (decoder-only) from {:?}...", weights_path);
 
+        // LTX-2 VAE weights are BF16 — load as BF16 to avoid conversion artifacts
         let vb = unsafe {
             candle_nn::VarBuilder::from_mmaped_safetensors(
                 &[weights_path],
-                ctx.dtype,
+                DType::BF16,
                 &ctx.device,
             )?
         };
 
         let config = Self::vae_config();
+
+        // Load latents_mean and latents_std from safetensors (registered buffers)
+        let latents_mean: Vec<f32> = vb
+            .get(config.latent_channels, "latents_mean")?
+            .to_dtype(DType::F32)?
+            .to_vec1()?;
+        let latents_std: Vec<f32> = vb
+            .get(config.latent_channels, "latents_std")?
+            .to_dtype(DType::F32)?
+            .to_vec1()?;
+        info!(
+            "VAE latents_mean range: [{:.4}, {:.4}], latents_std range: [{:.4}, {:.4}]",
+            latents_mean.iter().cloned().fold(f32::INFINITY, f32::min),
+            latents_mean.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+            latents_std.iter().cloned().fold(f32::INFINITY, f32::min),
+            latents_std.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+        );
 
         // Load decoder directly — skip encoder (different architecture in LTX-2)
         let decoder = LtxVideoDecoder3d::new(
@@ -107,11 +129,24 @@ impl Ltx2Vae {
 
         info!("LTX-2 VAE decoder loaded!");
 
-        Ok(Self { name, decoder })
+        Ok(Self {
+            name,
+            decoder,
+            latents_mean,
+            latents_std,
+        })
     }
 
     pub fn load_model(ctx: &Context) -> Result<Box<dyn Forwarder>> {
         Ok(Box::new(Self::load_inner("ltx2-vae".to_string(), ctx)?))
+    }
+
+    /// Load VAE and return (forwarder, latents_mean, latents_std).
+    pub fn load_with_stats(ctx: &Context) -> Result<(Box<dyn Forwarder>, Vec<f32>, Vec<f32>)> {
+        let vae = Self::load_inner("ltx2-vae".to_string(), ctx)?;
+        let mean = vae.latents_mean.clone();
+        let std = vae.latents_std.clone();
+        Ok((Box::new(vae), mean, std))
     }
 
     /// Decode latents through the VAE (no timestep conditioning for LTX-2).
@@ -145,7 +180,8 @@ impl Forwarder for Ltx2Vae {
         let unpacked = unpack_tensors(x)?;
         let direction_vec: Vec<f32> = unpacked[0].to_vec1()?;
         let direction = direction_vec[0];
-        let input = unpacked[1].to_dtype(ctx.dtype)?;
+        // VAE weights are BF16 — convert input to match
+        let input = unpacked[1].to_dtype(DType::BF16)?;
 
         if direction == 1.0 {
             anyhow::bail!(
@@ -155,7 +191,7 @@ impl Forwarder for Ltx2Vae {
         }
 
         let timestep = if unpacked.len() > 2 {
-            Some(unpacked[2].to_dtype(ctx.dtype)?)
+            Some(unpacked[2].to_dtype(DType::BF16)?)
         } else {
             None
         };

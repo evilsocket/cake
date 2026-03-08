@@ -40,6 +40,8 @@ pub struct Ltx2Transformer {
     model: LTXModel,
     /// true when running only a block range (not the full model)
     is_block_range: bool,
+    /// Actual dtype of loaded weights (BF16 for LTX-2)
+    model_dtype: DType,
 }
 
 impl std::fmt::Display for Ltx2Transformer {
@@ -82,6 +84,7 @@ impl Ltx2Transformer {
             name: "ltx2-transformer".to_string(),
             model,
             is_block_range: false,
+            model_dtype: DType::BF16,
         }))
     }
 
@@ -112,6 +115,7 @@ impl Ltx2Transformer {
             name,
             model,
             is_block_range: true,
+            model_dtype: DType::BF16,
         }))
     }
 
@@ -260,32 +264,36 @@ impl Forwarder for Ltx2Transformer {
     fn load(name: String, ctx: &Context) -> Result<Box<Self>> {
         let (config, weights_path) = Self::resolve_config_and_weights(ctx)?;
 
+        // LTX-2 weights are natively BF16 — loading as F16 causes NaN
+        let model_dtype = DType::BF16;
+
         let is_block_range;
         let model = if let Some((start, end)) = parse_block_range(&name) {
             info!(
-                "Loading LTX-2 transformer blocks {}-{} from {:?}...",
+                "Loading LTX-2 transformer blocks {}-{} from {:?} (dtype={:?})...",
                 start,
                 end - 1,
-                weights_path
+                weights_path,
+                model_dtype,
             );
             is_block_range = true;
             let weight_files = find_weight_files(&weights_path)?;
             let vb = unsafe {
                 candle_nn::VarBuilder::from_mmaped_safetensors(
                     &weight_files,
-                    ctx.dtype,
+                    model_dtype,
                     &ctx.device,
                 )?
             };
             LTXModel::new_block_range(config, vb, start, Some(end))?
         } else {
-            info!("Loading full LTX-2 transformer from {:?}...", weights_path);
+            info!("Loading full LTX-2 transformer from {:?} (dtype={:?})...", weights_path, model_dtype);
             is_block_range = false;
             let weight_files = find_weight_files(&weights_path)?;
             let vb = unsafe {
                 candle_nn::VarBuilder::from_mmaped_safetensors(
                     &weight_files,
-                    ctx.dtype,
+                    model_dtype,
                     &ctx.device,
                 )?
             };
@@ -298,6 +306,7 @@ impl Forwarder for Ltx2Transformer {
             name,
             model,
             is_block_range,
+            model_dtype,
         }))
     }
 
@@ -314,14 +323,16 @@ impl Forwarder for Ltx2Transformer {
         // block_idx == 1 signals block-range format
         if self.is_block_range || block_idx == 1 {
             // Block-range format: [hidden, temb, pe_cos, pe_sin, context, context_mask, embedded_ts]
-            let hidden = unpacked[0].to_dtype(ctx.dtype)?;
-            let temb = unpacked[1].to_dtype(ctx.dtype)?;
-            let pe_cos = unpacked[2].to_dtype(ctx.dtype)?;
-            let pe_sin = unpacked[3].to_dtype(ctx.dtype)?;
-            let context = unpacked[4].to_dtype(ctx.dtype)?;
-            let context_mask = unpacked[5].to_dtype(ctx.dtype)?;
+            // Use model_dtype (BF16) to match loaded weights
+            let dt = self.model_dtype;
+            let hidden = unpacked[0].to_dtype(dt)?;
+            let temb = unpacked[1].to_dtype(dt)?;
+            let pe_cos = unpacked[2].to_dtype(dt)?;
+            let pe_sin = unpacked[3].to_dtype(dt)?;
+            let context = unpacked[4].to_dtype(dt)?;
+            let context_mask = unpacked[5].to_dtype(dt)?;
             let embedded_ts = if unpacked.len() > 6 {
-                Some(unpacked[6].to_dtype(ctx.dtype)?)
+                Some(unpacked[6].to_dtype(dt)?)
             } else {
                 None
             };
@@ -346,12 +357,13 @@ impl Forwarder for Ltx2Transformer {
             Ok(result)
         } else {
             // Full model format: [video_latent, sigma, timesteps, positions, context, context_mask]
-            let video_latent = unpacked[0].to_dtype(ctx.dtype)?;
-            let sigma = unpacked[1].to_dtype(ctx.dtype)?;
-            let timesteps = unpacked[2].to_dtype(ctx.dtype)?;
+            let dt = self.model_dtype;
+            let video_latent = unpacked[0].to_dtype(dt)?;
+            let sigma = unpacked[1].to_dtype(dt)?;
+            let timesteps = unpacked[2].to_dtype(dt)?;
             let positions = unpacked[3].to_dtype(DType::F32)?;
-            let context = unpacked[4].to_dtype(ctx.dtype)?;
-            let context_mask = unpacked[5].to_dtype(ctx.dtype)?;
+            let context = unpacked[4].to_dtype(dt)?;
+            let context_mask = unpacked[5].to_dtype(dt)?;
 
             info!(
                 "LTX-2 transformer forwarding (unpack: {}ms, latent: {:?})",

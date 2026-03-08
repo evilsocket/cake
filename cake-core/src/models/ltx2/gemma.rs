@@ -76,10 +76,11 @@ impl Ltx2Gemma {
 
         info!("Loading LTX-2 text connectors from {:?}...", connector_path);
 
+        // LTX-2 connector weights are BF16 — load as BF16 to avoid NaN
         let vb = unsafe {
             candle_nn::VarBuilder::from_mmaped_safetensors(
                 &[connector_path],
-                ctx.dtype,
+                DType::BF16,
                 &ctx.device,
             )?
         };
@@ -125,10 +126,11 @@ impl Forwarder for Ltx2Gemma {
             &ctx.args.model,
         )?;
 
+        // LTX-2 connector weights are BF16 — load as BF16 to avoid NaN
         let vb = unsafe {
             candle_nn::VarBuilder::from_mmaped_safetensors(
                 &[connector_path],
-                ctx.dtype,
+                DType::BF16,
                 &ctx.device,
             )?
         };
@@ -155,7 +157,8 @@ impl Forwarder for Ltx2Gemma {
             .ok_or_else(|| anyhow::anyhow!("LTX-2 text connector not loaded"))?;
 
         let unpacked = unpack_tensors(x)?;
-        let text_embeds = unpacked[0].to_dtype(ctx.dtype)?;
+        // Connector weights are BF16 — convert inputs to match
+        let text_embeds = unpacked[0].to_dtype(DType::BF16)?;
         let text_mask = if unpacked.len() > 1 {
             Some(unpacked[1].to_dtype(DType::F32)?)
         } else {
