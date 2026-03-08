@@ -468,6 +468,10 @@ impl LtxVideoArgs {
             return repo.clone();
         }
         match self.ltx_version.as_str() {
+            // LTX-2.3 (22B, improved training + gated attention)
+            "2.3" | "2.3-dev" | "2.3-22b-dev" => "Lightricks/LTX-2.3".to_string(),
+            "2.3-distilled" | "2.3-22b-distilled" => "Lightricks/LTX-2.3".to_string(),
+
             // LTX-2 (19B, audio+video, Gemma-3 text encoder)
             "2-19b-dev" | "2.0" | "2" => "Lightricks/LTX-2".to_string(),
             "2-19b-distilled" => "Lightricks/LTX-2".to_string(),
@@ -489,5 +493,11 @@ impl LtxVideoArgs {
 
             _ => "Lightricks/LTX-Video".to_string(),
         }
+    }
+
+    /// Whether this is an LTX-2.3 model (gated attention, 8 connector blocks).
+    pub fn is_ltx23(&self) -> bool {
+        let repo = self.ltx_repo();
+        repo.contains("LTX-2.3") || self.ltx_version.starts_with("2.3")
     }
 }

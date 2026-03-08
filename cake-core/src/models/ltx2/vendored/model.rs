@@ -37,6 +37,9 @@ pub struct LTXModel {
     caption_projection: Option<TextProjection>,
     scale_shift_table: Option<Tensor>, // [2, video_inner_dim] — final output modulation
 
+    // LTX-2.3: prompt-specific timestep embedding
+    prompt_adaln_single: Option<AdaLayerNormSingle>,
+
     // Transformer blocks (may be a subset)
     blocks: Vec<BasicAVTransformerBlock>,
     /// First block index (0 for full model or first shard)
@@ -81,14 +84,27 @@ impl LTXModel {
         let (proj_in, adaln_single, caption_projection) = if has_video && is_first {
             let proj_in = candle_nn::linear(config.in_channels, video_dim, vb.pp("proj_in"))?;
             let adaln = AdaLayerNormSingle::new(video_dim, adaln_params, vb.pp("time_embed"))?;
-            let caption = TextProjection::new(
-                config.caption_channels,
-                video_dim,
-                vb.pp("caption_projection"),
-            )?;
-            (Some(proj_in), Some(adaln), Some(caption))
+            // LTX-2.3: no caption_projection (feature extractor in connector handles this)
+            let caption = if config.prompt_modulation {
+                None
+            } else {
+                Some(TextProjection::new(
+                    config.caption_channels,
+                    video_dim,
+                    vb.pp("caption_projection"),
+                )?)
+            };
+            (Some(proj_in), Some(adaln), caption)
         } else {
             (None, None, None)
+        };
+
+        // LTX-2.3: prompt timestep embedding (loaded with setup)
+        let prompt_adaln_single = if has_video && is_first && config.prompt_modulation {
+            let prompt_adaln_params = config.prompt_adaln_params();
+            Some(AdaLayerNormSingle::new(video_dim, prompt_adaln_params, vb.pp("prompt_time_embed"))?)
+        } else {
+            None
         };
 
         // Finalize: only load for the last shard
@@ -119,6 +135,7 @@ impl LTXModel {
             adaln_single,
             caption_projection,
             scale_shift_table: sst,
+            prompt_adaln_single,
             blocks,
             block_start,
             proj_out,
@@ -141,17 +158,17 @@ impl LTXModel {
 
     /// Run setup: proj_in + adaln + caption_projection + RoPE.
     ///
-    /// Returns (hidden, temb, embedded_ts, pe, context_projected).
+    /// Returns (hidden, temb, embedded_ts, pe, context_projected, prompt_temb).
+    /// `prompt_temb` is Some only for LTX-2.3 (prompt modulation).
     pub fn forward_setup(
         &self,
         video_latent: &Tensor,
         timesteps: &Tensor,
         positions: &Tensor,
         context: &Tensor,
-    ) -> Result<(Tensor, Tensor, Tensor, (Tensor, Tensor), Tensor)> {
+    ) -> Result<(Tensor, Tensor, Tensor, (Tensor, Tensor), Tensor, Option<Tensor>)> {
         let proj_in = self.proj_in.as_ref().expect("forward_setup requires proj_in");
         let adaln = self.adaln_single.as_ref().expect("forward_setup requires adaln");
-        let caption_proj = self.caption_projection.as_ref().expect("forward_setup requires caption_projection");
 
         let video_dim = self.config.video_inner_dim();
         let adaln_params = self.config.adaln_params();
@@ -167,8 +184,21 @@ impl LTXModel {
         let temb = temb.reshape((b, 1, adaln_params, video_dim))?;
         let embedded_ts = embedded_ts.reshape((b, 1, video_dim))?;
 
-        // 3. Caption projection
-        let context = caption_proj.forward(context)?;
+        // 2b. LTX-2.3: prompt timestep embedding for prompt modulation
+        let prompt_temb = if let Some(ref prompt_adaln) = self.prompt_adaln_single {
+            let prompt_adaln_params = self.config.prompt_adaln_params();
+            let (pt, _pt_embedded) = prompt_adaln.forward(&scaled_ts)?;
+            Some(pt.reshape((b, 1, prompt_adaln_params, video_dim))?)
+        } else {
+            None
+        };
+
+        // 3. Caption projection (LTX-2 only; LTX-2.3 does this in the connector)
+        let context = if let Some(ref caption_proj) = self.caption_projection {
+            caption_proj.forward(context)?
+        } else {
+            context.clone()
+        };
 
         // 4. Compute RoPE
         let pe = precompute_freqs_cis(
@@ -180,7 +210,7 @@ impl LTXModel {
             hidden.dtype(),
         )?;
 
-        Ok((hidden, temb, embedded_ts, pe, context))
+        Ok((hidden, temb, embedded_ts, pe, context, prompt_temb))
     }
 
     /// Run transformer blocks on pre-setup hidden states.
@@ -190,6 +220,7 @@ impl LTXModel {
     /// `pe`: (cos, sin) RoPE
     /// `context`: [B, L, video_dim] — already through caption projection
     /// `context_mask`: [B, L]
+    /// `prompt_temb`: [B, 1, 3, video_dim] — prompt modulation (LTX-2.3, None for LTX-2)
     pub fn forward_blocks(
         &self,
         hidden: &Tensor,
@@ -197,10 +228,11 @@ impl LTXModel {
         pe: &(Tensor, Tensor),
         context: &Tensor,
         context_mask: Option<&Tensor>,
+        prompt_temb: Option<&Tensor>,
     ) -> Result<Tensor> {
         let mut x = hidden.clone();
         for block in self.blocks.iter() {
-            x = block.forward_video_only(&x, temb, Some(pe), context, context_mask)?;
+            x = block.forward_video_only(&x, temb, Some(pe), context, context_mask, prompt_temb)?;
         }
         Ok(x)
     }
@@ -249,12 +281,12 @@ impl LTXModel {
             video_latent.dtype(), video_latent.device(),
         );
 
-        let (hidden, temb, embedded_ts, pe, context) =
+        let (hidden, temb, embedded_ts, pe, context, prompt_temb) =
             self.forward_setup(video_latent, timesteps, positions, context)?;
 
         log::info!("Transformer setup: {}ms", t0.elapsed().as_millis());
 
-        let x = self.forward_blocks(&hidden, &temb, &pe, &context, context_mask)?;
+        let x = self.forward_blocks(&hidden, &temb, &pe, &context, context_mask, prompt_temb.as_ref())?;
         let x = self.forward_finalize(&x, &embedded_ts)?;
 
         log::info!("Transformer forward total: {}ms ({} blocks)", t0.elapsed().as_millis(), self.blocks.len());
@@ -275,8 +307,9 @@ impl LTXModel {
         context: &Tensor,
         context_mask: Option<&Tensor>,
         embedded_ts: Option<&Tensor>,
+        prompt_temb: Option<&Tensor>,
     ) -> Result<Tensor> {
-        let x = self.forward_blocks(hidden, temb, pe, context, context_mask)?;
+        let x = self.forward_blocks(hidden, temb, pe, context, context_mask, prompt_temb)?;
 
         if self.has_finalize() {
             let ets = embedded_ts.expect("forward_blocks_only with finalize needs embedded_ts");
@@ -368,10 +401,10 @@ mod tests {
             .unwrap();
 
         // Run split pipeline
-        let (hidden, temb, embedded_ts, pe, ctx) =
+        let (hidden, temb, embedded_ts, pe, ctx, prompt_temb) =
             first_half.forward_setup(&video_latent, &timestep, &positions, &context).unwrap();
-        let x = first_half.forward_blocks(&hidden, &temb, &pe, &ctx, None).unwrap();
-        let x = second_half.forward_blocks(&x, &temb, &pe, &ctx, None).unwrap();
+        let x = first_half.forward_blocks(&hidden, &temb, &pe, &ctx, None, prompt_temb.as_ref()).unwrap();
+        let x = second_half.forward_blocks(&x, &temb, &pe, &ctx, None, prompt_temb.as_ref()).unwrap();
         let split_out = second_half.forward_finalize(&x, &embedded_ts).unwrap();
 
         // Results should match (both use zeros weights)

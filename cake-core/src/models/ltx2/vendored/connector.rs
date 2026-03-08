@@ -35,9 +35,10 @@ impl ConnectorBlock {
         heads: usize,
         d_head: usize,
         norm_eps: f64,
+        gated: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
-        let attn1 = Attention::new(dim, None, heads, d_head, norm_eps, vb.pp("attn1"))?;
+        let attn1 = Attention::new(dim, None, heads, d_head, norm_eps, gated, vb.pp("attn1"))?;
         let ff = FeedForward::new(dim, dim, 4, vb.pp("ff"))?;
         Ok(Self {
             attn1,
@@ -89,6 +90,7 @@ impl ConnectorTransformer1d {
         norm_eps: f64,
         rope_theta: f32,
         base_seq_len: usize,
+        gated: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
         let inner_dim = heads * d_head;
@@ -102,6 +104,7 @@ impl ConnectorTransformer1d {
                 heads,
                 d_head,
                 norm_eps,
+                gated,
                 vb.pp(format!("transformer_blocks.{i}")),
             )?);
         }
@@ -278,6 +281,7 @@ impl ConnectorTransformer1d {
 /// - audio_connector: ConnectorTransformer1d
 #[derive(Debug)]
 pub struct Ltx2TextConnectors {
+    /// Input projection (LTX-2: text_proj_in, LTX-2.3: feature_extractor.video_aggregate_embed)
     text_proj_in: Linear,
     video_connector: ConnectorTransformer1d,
     #[allow(dead_code)]
@@ -288,9 +292,21 @@ impl Ltx2TextConnectors {
     pub fn new(config: &Ltx2ConnectorConfig, has_audio: bool, vb: VarBuilder) -> Result<Self> {
         let text_dim = config.caption_channels; // 3840
         let proj_in_dim = text_dim * config.text_proj_in_factor; // 3840 * 49 = 188160
+        let gated = config.gated_attention;
 
-        // Input projection: packed Gemma tokens → caption_channels (no bias)
-        let text_proj_in = candle_nn::linear_no_bias(proj_in_dim, text_dim, vb.pp("text_proj_in"))?;
+        // Input projection: packed Gemma tokens → output dim
+        // LTX-2: text_proj_in (3840*49 → 3840, no bias)
+        // LTX-2.3: feature_extractor.video_aggregate_embed (3840*49 → 4096, with bias)
+        let text_proj_in = if config.has_feature_extractor {
+            let out_dim = if config.feature_extractor_out_dim > 0 {
+                config.feature_extractor_out_dim // LTX-2.3: 4096
+            } else {
+                config.video_inner_dim() // fallback: 3840
+            };
+            candle_nn::linear(proj_in_dim, out_dim, vb.pp("feature_extractor.video_aggregate_embed"))?
+        } else {
+            candle_nn::linear_no_bias(proj_in_dim, text_dim, vb.pp("text_proj_in"))?
+        };
 
         let video_connector = ConnectorTransformer1d::new(
             config.video_connector_num_layers,
@@ -300,6 +316,7 @@ impl Ltx2TextConnectors {
             1e-6,
             config.rope_theta,
             config.connector_rope_base_seq_len,
+            gated,
             vb.pp("video_connector"),
         )?;
 
@@ -312,6 +329,7 @@ impl Ltx2TextConnectors {
                 1e-6,
                 config.rope_theta,
                 config.connector_rope_base_seq_len,
+                gated,
                 vb.pp("audio_connector"),
             )?)
         } else {
@@ -405,6 +423,7 @@ mod tests {
             1e-6,
             10000.0,       // rope_theta
             4096,          // base_seq_len
+            false,         // gated
             vb,
         )
         .unwrap();
@@ -428,7 +447,7 @@ mod tests {
         let inner_dim = heads * d_head;
 
         let vb = candle_nn::VarBuilder::zeros(DType::F32, &device);
-        let ct = ConnectorTransformer1d::new(1, 32, heads, d_head, 1e-6, 10000.0, 4096, vb)
+        let ct = ConnectorTransformer1d::new(1, 32, heads, d_head, 1e-6, 10000.0, 4096, false, vb)
             .unwrap();
 
         let hidden = Tensor::randn(0f32, 1f32, (b, seq_len, inner_dim), &device).unwrap();
@@ -446,7 +465,7 @@ mod tests {
         let d_head = 16;
 
         let vb = candle_nn::VarBuilder::zeros(DType::F32, &device);
-        let block = ConnectorBlock::new(dim, heads, d_head, 1e-6, vb).unwrap();
+        let block = ConnectorBlock::new(dim, heads, d_head, 1e-6, false, vb).unwrap();
 
         let x = Tensor::randn(0f32, 1f32, (1, 8, dim), &device).unwrap();
         let out = block.forward(&x, None, None).unwrap();

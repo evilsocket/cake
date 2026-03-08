@@ -270,10 +270,19 @@ impl Ltx2 {
 
         let gemma_repo = "google/gemma-3-12b-pt";
 
+        // Try model-local cache first, then standard HF cache, then download with token
         let mut cache_path = PathBuf::from(&ctx.args.model);
         cache_path.push("hub");
-        let cache = Cache::new(cache_path);
-        let api = ApiBuilder::from_cache(cache).build()?;
+        let api = if cache_path.exists() {
+            ApiBuilder::from_cache(Cache::new(cache_path)).build()?
+        } else {
+            // Use default HF cache (~/.cache/huggingface/hub) with optional token
+            let mut builder = ApiBuilder::new();
+            if let Ok(token) = std::env::var("HF_TOKEN") {
+                builder = builder.with_token(Some(token));
+            }
+            builder.build()?
+        };
         let model_api = api.model(gemma_repo.to_string());
 
         let tokenizer_path = model_api.get("tokenizer.json")?;
@@ -724,7 +733,7 @@ impl Ltx2 {
         let context = &context.to_dtype(DType::BF16)?;
 
         // 1. Setup: proj_in + adaln + caption projection + RoPE (local)
-        let (hidden, temb, embedded_ts, pe, ctx_projected) =
+        let (hidden, temb, embedded_ts, pe, ctx_projected, prompt_temb) =
             local.forward_setup(&latents, timestep, positions, context)?;
 
         // 2. Run local blocks
@@ -735,6 +744,7 @@ impl Ltx2 {
             &pe,
             &ctx_projected,
             Some(&context_mask_bf16),
+            prompt_temb.as_ref(),
         )?;
 
         // 3. Send to remote worker for remaining blocks + finalize
@@ -747,6 +757,7 @@ impl Ltx2 {
             ctx_projected,
             context_mask.clone(),
             embedded_ts,
+            prompt_temb,
             &mut self.context,
         )
         .await?;

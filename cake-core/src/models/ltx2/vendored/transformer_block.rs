@@ -33,6 +33,9 @@ pub struct BasicAVTransformerBlock {
     ff: Option<FeedForward>,         // video feedforward
     scale_shift_table: Option<Tensor>, // [adaln_params, video_dim]
 
+    // LTX-2.3: prompt-specific AdaLN modulation
+    prompt_scale_shift_table: Option<Tensor>, // [3, video_dim]
+
     // Audio stream (None in video-only mode)
     audio_attn1: Option<Attention>,
     audio_attn2: Option<Attention>,
@@ -74,6 +77,7 @@ impl BasicAVTransformerBlock {
         let audio_dim = config.audio_inner_dim();
         let has_video = config.model_type.is_video_enabled();
         let has_audio = config.model_type.is_audio_enabled();
+        let gated = config.gated_attention;
 
         // Video components
         let (attn1, attn2, ff, scale_shift_table) = if has_video {
@@ -83,6 +87,7 @@ impl BasicAVTransformerBlock {
                 config.num_attention_heads,
                 config.attention_head_dim,
                 norm_eps,
+                gated,
                 vb.pp("attn1"),
             )?;
             let attn2 = Attention::new(
@@ -91,6 +96,7 @@ impl BasicAVTransformerBlock {
                 config.num_attention_heads,
                 config.attention_head_dim,
                 norm_eps,
+                gated,
                 vb.pp("attn2"),
             )?;
             let ff = FeedForward::new(video_dim, video_dim, 4, vb.pp("ff"))?;
@@ -98,6 +104,13 @@ impl BasicAVTransformerBlock {
             (Some(attn1), Some(attn2), Some(ff), Some(sst))
         } else {
             (None, None, None, None)
+        };
+
+        // LTX-2.3: prompt modulation table (shift + scale, no gate)
+        let prompt_scale_shift_table = if has_video && config.prompt_modulation {
+            Some(vb.get((2, video_dim), "prompt_scale_shift_table")?)
+        } else {
+            None
         };
 
         // Audio components
@@ -108,6 +121,7 @@ impl BasicAVTransformerBlock {
                 config.audio_num_attention_heads,
                 config.audio_attention_head_dim,
                 norm_eps,
+                gated,
                 vb.pp("audio_attn1"),
             )?;
             let a2 = Attention::new(
@@ -116,6 +130,7 @@ impl BasicAVTransformerBlock {
                 config.audio_num_attention_heads,
                 config.audio_attention_head_dim,
                 norm_eps,
+                gated,
                 vb.pp("audio_attn2"),
             )?;
             let ff = FeedForward::new(audio_dim, audio_dim, 4, vb.pp("audio_ff"))?;
@@ -133,6 +148,7 @@ impl BasicAVTransformerBlock {
                 config.audio_num_attention_heads,
                 config.audio_attention_head_dim,
                 norm_eps,
+                gated,
                 vb.pp("audio_to_video_attn"),
             )?;
             let v2a = Attention::new(
@@ -141,6 +157,7 @@ impl BasicAVTransformerBlock {
                 config.audio_num_attention_heads,
                 config.audio_attention_head_dim,
                 norm_eps,
+                gated,
                 vb.pp("video_to_audio_attn"),
             )?;
             let sst_audio = vb.get((5, audio_dim), "audio_a2v_cross_attn_scale_shift_table")?;
@@ -155,6 +172,7 @@ impl BasicAVTransformerBlock {
             attn2,
             ff,
             scale_shift_table,
+            prompt_scale_shift_table,
             audio_attn1,
             audio_attn2,
             audio_ff,
@@ -208,6 +226,7 @@ impl BasicAVTransformerBlock {
     /// `pe`: RoPE (cos, sin)
     /// `context`: text embeddings
     /// `context_mask`: attention mask for text
+    /// `prompt_temb`: prompt timestep embedding for prompt modulation (LTX-2.3), `[B, 1, 3, dim]`
     pub fn forward_video_only(
         &self,
         video: &Tensor,
@@ -215,6 +234,7 @@ impl BasicAVTransformerBlock {
         pe: Option<&(Tensor, Tensor)>,
         context: &Tensor,
         context_mask: Option<&Tensor>,
+        prompt_temb: Option<&Tensor>,
     ) -> Result<Tensor> {
         let sst = self
             .scale_shift_table
@@ -237,8 +257,20 @@ impl BasicAVTransformerBlock {
         let attn_out = attn1.forward(&norm_x, None, pe, None, None)?;
         let vx = video.broadcast_add(&attn_out.broadcast_mul(gate_msa)?)?;
 
-        // Text cross-attention (no AdaLN on keys for non-adaln mode)
+        // Text cross-attention
         let norm_vx = rms_norm(&vx, self.norm_eps)?;
+
+        // Apply cross-attention AdaLN modulation if enabled (LTX-2.3)
+        let norm_vx = if self.adaln_params > 6 {
+            let ada_ca = Self::get_ada_values(sst, timesteps, 6, 9)?;
+            let (shift_ca, scale_ca) = (&ada_ca[0], &ada_ca[1]);
+            norm_vx
+                .broadcast_mul(&scale_ca.broadcast_add(&Tensor::ones_like(scale_ca)?)?)?
+                .broadcast_add(shift_ca)?
+        } else {
+            norm_vx
+        };
+
         // Expand context_mask from [B, L] to [B, T_q, L] for cross-attention
         let t_q = norm_vx.dim(1)?;
         let expanded_mask = context_mask.map(|m| {
@@ -247,7 +279,30 @@ impl BasicAVTransformerBlock {
                 .and_then(|m| m.contiguous())
         }).transpose()?;
         let ca_out = attn2.forward(&norm_vx, Some(context), None, None, expanded_mask.as_ref())?;
+
+        // Apply cross-attention gate if enabled
+        let ca_out = if self.adaln_params > 6 {
+            let ada_ca = Self::get_ada_values(sst, timesteps, 6, 9)?;
+            let gate_ca = &ada_ca[2];
+            ca_out.broadcast_mul(gate_ca)?
+        } else {
+            ca_out
+        };
         let vx = vx.broadcast_add(&ca_out)?;
+
+        // LTX-2.3: prompt modulation (shift + scale, no gate)
+        let vx = if let (Some(psst), Some(pt)) = (&self.prompt_scale_shift_table, prompt_temb) {
+            let prompt_ada = Self::get_ada_values(psst, pt, 0, 2)?;
+            let (p_shift, p_scale) = (&prompt_ada[0], &prompt_ada[1]);
+            let norm_vx = rms_norm(&vx, self.norm_eps)?;
+            vx.broadcast_add(
+                &norm_vx
+                    .broadcast_mul(&p_scale.broadcast_add(&Tensor::ones_like(p_scale)?)?)?
+                    .broadcast_add(p_shift)?,
+            )?
+        } else {
+            vx
+        };
 
         // FFN with AdaLN
         let ada_mlp = Self::get_ada_values(sst, timesteps, 3, 6)?;

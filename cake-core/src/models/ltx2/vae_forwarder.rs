@@ -38,19 +38,40 @@ impl std::fmt::Display for Ltx2Vae {
 }
 
 impl Ltx2Vae {
-    fn vae_config() -> AutoencoderKLLtxVideoConfig {
-        // LTX-2 VAE config from vae/config.json
-        // Only decoder fields matter since we skip the encoder.
-        AutoencoderKLLtxVideoConfig {
-            block_out_channels: vec![256, 512, 1024, 2048],
-            decoder_block_out_channels: vec![256, 512, 1024],
-            layers_per_block: vec![4, 6, 6, 2, 2],
-            decoder_layers_per_block: vec![5, 5, 5, 5],
-            latent_channels: 128,
-            patch_size: 4,
-            patch_size_t: 1,
-            timestep_conditioning: false,
-            ..Default::default()
+    fn vae_config(is_ltx23: bool) -> AutoencoderKLLtxVideoConfig {
+        if is_ltx23 {
+            // LTX-2.3 VAE: 4 up_blocks with different channel dims and strides
+            AutoencoderKLLtxVideoConfig {
+                block_out_channels: vec![256, 512, 1024, 2048],
+                decoder_block_out_channels: vec![256, 512, 512, 1024],
+                layers_per_block: vec![4, 6, 6, 2, 2],
+                decoder_layers_per_block: vec![4, 6, 4, 2, 2],
+                latent_channels: 128,
+                patch_size: 4,
+                patch_size_t: 1,
+                timestep_conditioning: false,
+                decoder_spatiotemporal_scaling: vec![true, true, true, true],
+                decoder_inject_noise: vec![false, false, false, false, false],
+                decoder_upsample_residual: vec![true, true, true, true],
+                decoder_upsample_factor: vec![2, 2, 1, 2],
+                // Per-block strides (un-reversed, matching decoder_block_out_channels order):
+                // After reversal: block0=(2,2,2), block1=(2,2,2), block2=(2,1,1), block3=(1,2,2)
+                decoder_strides: vec![(1, 2, 2), (2, 1, 1), (2, 2, 2), (2, 2, 2)],
+                ..Default::default()
+            }
+        } else {
+            // LTX-2 VAE: 3 up_blocks, same as LTX-Video structure
+            AutoencoderKLLtxVideoConfig {
+                block_out_channels: vec![256, 512, 1024, 2048],
+                decoder_block_out_channels: vec![256, 512, 1024],
+                layers_per_block: vec![4, 6, 6, 2, 2],
+                decoder_layers_per_block: vec![5, 5, 5, 5],
+                latent_channels: 128,
+                patch_size: 4,
+                patch_size_t: 1,
+                timestep_conditioning: false,
+                ..Default::default()
+            }
         }
     }
 
@@ -79,7 +100,9 @@ impl Ltx2Vae {
 
     fn load_inner(name: String, ctx: &Context) -> Result<Self> {
         let weights_path = Self::resolve_weights(ctx)?;
-        info!("Loading LTX-2 VAE (decoder-only) from {:?}...", weights_path);
+        let is_ltx23 = ctx.args.ltx_args.is_ltx23();
+        info!("Loading LTX-2{} VAE (decoder-only) from {:?}...",
+            if is_ltx23 { ".3" } else { "" }, weights_path);
 
         // LTX-2 VAE weights are BF16 — load as BF16 to avoid conversion artifacts
         let vb = unsafe {
@@ -90,7 +113,7 @@ impl Ltx2Vae {
             )?
         };
 
-        let config = Self::vae_config();
+        let config = Self::vae_config(is_ltx23);
 
         // Load latents_mean and latents_std from safetensors (registered buffers)
         let latents_mean: Vec<f32> = vb
@@ -110,22 +133,41 @@ impl Ltx2Vae {
         );
 
         // Load decoder directly — skip encoder (different architecture in LTX-2)
-        let decoder = LtxVideoDecoder3d::new(
-            config.latent_channels,
-            config.out_channels,
-            &config.decoder_block_out_channels,
-            &config.decoder_spatiotemporal_scaling,
-            &config.decoder_layers_per_block,
-            config.patch_size,
-            config.patch_size_t,
-            config.resnet_eps,
-            config.decoder_causal,
-            &config.decoder_inject_noise,
-            config.timestep_conditioning,
-            &config.decoder_upsample_residual,
-            &config.decoder_upsample_factor,
-            vb.pp("decoder"),
-        )?;
+        let decoder = if !config.decoder_strides.is_empty() {
+            LtxVideoDecoder3d::new_with_strides(
+                config.latent_channels,
+                config.out_channels,
+                &config.decoder_block_out_channels,
+                &config.decoder_strides,
+                &config.decoder_layers_per_block,
+                config.patch_size,
+                config.patch_size_t,
+                config.resnet_eps,
+                config.decoder_causal,
+                &config.decoder_inject_noise,
+                config.timestep_conditioning,
+                &config.decoder_upsample_residual,
+                &config.decoder_upsample_factor,
+                vb.pp("decoder"),
+            )?
+        } else {
+            LtxVideoDecoder3d::new(
+                config.latent_channels,
+                config.out_channels,
+                &config.decoder_block_out_channels,
+                &config.decoder_spatiotemporal_scaling,
+                &config.decoder_layers_per_block,
+                config.patch_size,
+                config.patch_size_t,
+                config.resnet_eps,
+                config.decoder_causal,
+                &config.decoder_inject_noise,
+                config.timestep_conditioning,
+                &config.decoder_upsample_residual,
+                &config.decoder_upsample_factor,
+                vb.pp("decoder"),
+            )?
+        };
 
         info!("LTX-2 VAE decoder loaded!");
 

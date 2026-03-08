@@ -243,12 +243,14 @@ impl Ltx2Transformer {
         context: Tensor,
         context_mask: Tensor,
         embedded_ts: Tensor,
+        prompt_temb: Option<Tensor>,
         ctx: &mut Context,
     ) -> Result<Tensor> {
-        let packed = pack_tensors(
-            vec![hidden, temb, pe_cos, pe_sin, context, context_mask, embedded_ts],
-            &ctx.device,
-        )?;
+        let mut tensors = vec![hidden, temb, pe_cos, pe_sin, context, context_mask, embedded_ts];
+        if let Some(pt) = prompt_temb {
+            tensors.push(pt);
+        }
+        let packed = pack_tensors(tensors, &ctx.device)?;
         // Use block_idx=1 to signal block-range format
         forwarder.forward_mut(&packed, 0, 1, ctx).await
     }
@@ -336,6 +338,11 @@ impl Forwarder for Ltx2Transformer {
             } else {
                 None
             };
+            let prompt_temb = if unpacked.len() > 7 {
+                Some(unpacked[7].to_dtype(dt)?)
+            } else {
+                None
+            };
 
             info!(
                 "LTX-2 transformer blocks forwarding (unpack: {}ms, hidden: {:?})",
@@ -351,6 +358,7 @@ impl Forwarder for Ltx2Transformer {
                 &context,
                 Some(&context_mask),
                 embedded_ts.as_ref(),
+                prompt_temb.as_ref(),
             )?;
 
             info!("LTX-2 transformer blocks done in {}ms", t0.elapsed().as_millis());

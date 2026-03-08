@@ -49,6 +49,9 @@ pub struct AutoencoderKLLtxVideoConfig {
     #[serde(alias = "upsample_factor")]
     pub decoder_upsample_factor: Vec<usize>,
     pub timestep_conditioning: bool,
+    /// Per-block upsampler strides (t, h, w). If empty, derived from decoder_spatiotemporal_scaling.
+    #[serde(default)]
+    pub decoder_strides: Vec<(usize, usize, usize)>,
     #[serde(default)]
     pub latents_mean: Vec<f32>,
     #[serde(default)]
@@ -83,6 +86,7 @@ impl Default for AutoencoderKLLtxVideoConfig {
             decoder_upsample_residual: vec![true, true, true],
             decoder_upsample_factor: vec![2, 2, 2],
             timestep_conditioning: true,
+            decoder_strides: vec![],
             latents_mean: vec![0.0; 128],
             latents_std: vec![1.0; 128],
             downsample_types: vec![
@@ -1109,6 +1113,33 @@ impl LtxVideoUpBlock3d {
         up_scale_factor: usize,
         vb: VarBuilder,
     ) -> Result<Self> {
+        let stride = if spatiotemporal_scale {
+            (2, 2, 2)
+        } else {
+            (1, 2, 2)
+        };
+        Self::new_with_stride(
+            in_channels, out_channels, num_layers, dropout, resnet_eps,
+            stride, is_causal, inject_noise, timestep_conditioning,
+            upsampler_residual, up_scale_factor, vb,
+        )
+    }
+
+    /// Create an up block with an explicit upsampler stride (t, h, w).
+    pub fn new_with_stride(
+        in_channels: usize,
+        out_channels: usize,
+        num_layers: usize,
+        dropout: f64,
+        resnet_eps: f64,
+        stride: (usize, usize, usize),
+        is_causal: bool,
+        inject_noise: bool,
+        timestep_conditioning: bool,
+        upsampler_residual: bool,
+        up_scale_factor: usize,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         // conv_in may not exist in some VAE configs (e.g. official 0.9.5)
         let conv_in = if in_channels != out_channels {
             Some(LtxVideoResnetBlock3d::new(
@@ -1126,28 +1157,15 @@ impl LtxVideoUpBlock3d {
             None
         };
 
-        let upsamplers = if spatiotemporal_scale {
-            Some(vec![LtxVideoUpsampler3d::new(
-                out_channels * up_scale_factor,
-                out_channels,
-                (2, 2, 2),
-                is_causal,
-                upsampler_residual,
-                up_scale_factor,
-                vb.pp("upsamplers.0"),
-            )?])
-        } else {
-            // Spatial only fallback
-            Some(vec![LtxVideoUpsampler3d::new(
-                out_channels * up_scale_factor,
-                out_channels,
-                (1, 2, 2),
-                is_causal,
-                upsampler_residual,
-                up_scale_factor,
-                vb.pp("upsamplers.0"),
-            )?])
-        };
+        let upsamplers = Some(vec![LtxVideoUpsampler3d::new(
+            out_channels * up_scale_factor,
+            out_channels,
+            stride,
+            is_causal,
+            upsampler_residual,
+            up_scale_factor,
+            vb.pp("upsamplers.0"),
+        )?]);
 
         let mut resnets = Vec::with_capacity(num_layers);
         for i in 0..num_layers {
@@ -1419,11 +1437,42 @@ impl LtxVideoDecoder3d {
         upsample_factor: &[usize],
         vb: VarBuilder,
     ) -> Result<Self> {
-        // decoder использует reversed списки
+        // Derive strides from spatiotemporal_scaling
+        let strides: Vec<(usize, usize, usize)> = spatiotemporal_scaling
+            .iter()
+            .map(|&s| if s { (2, 2, 2) } else { (1, 2, 2) })
+            .collect();
+        Self::new_with_strides(
+            in_channels, out_channels, block_out_channels, &strides,
+            layers_per_block, patch_size, patch_size_t, resnet_eps,
+            is_causal, inject_noise, timestep_conditioning,
+            upsampler_residual, upsample_factor, vb,
+        )
+    }
+
+    /// Create a decoder with explicit per-block upsampler strides.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_strides(
+        in_channels: usize,
+        out_channels: usize,
+        block_out_channels: &[usize],
+        strides: &[(usize, usize, usize)],
+        layers_per_block: &[usize],
+        patch_size: usize,
+        patch_size_t: usize,
+        resnet_eps: f64,
+        is_causal: bool,
+        inject_noise: &[bool],
+        timestep_conditioning: bool,
+        upsampler_residual: &[bool],
+        upsample_factor: &[usize],
+        vb: VarBuilder,
+    ) -> Result<Self> {
+        // decoder uses reversed lists
         let mut boc = block_out_channels.to_vec();
         boc.reverse();
-        let mut sts = spatiotemporal_scaling.to_vec();
-        sts.reverse();
+        let mut strides_rev = strides.to_vec();
+        strides_rev.reverse();
         let mut lpb = layers_per_block.to_vec();
         lpb.reverse();
 
@@ -1457,20 +1506,20 @@ impl LtxVideoDecoder3d {
         )?;
 
         let mut up_blocks = Vec::new();
-        let n = boc.len(); // 3
-        let mut current_channels = 1024; // Initial output from conv_in / mid_block (1024)
+        let n = boc.len();
+        let mut current_channels = boc[0];
 
         for i in 0..n {
             let output_channel = boc[i] / upf[i];
             let input_channel = output_channel;
 
-            let ub = LtxVideoUpBlock3d::new(
+            let ub = LtxVideoUpBlock3d::new_with_stride(
                 input_channel,
                 output_channel,
                 lpb[i + 1],
                 0.0,
                 resnet_eps,
-                sts[i],
+                strides_rev[i],
                 is_causal,
                 inj[i + 1],
                 timestep_conditioning,

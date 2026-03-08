@@ -66,6 +66,7 @@ impl Ltx2Gemma {
     pub fn load_model(ctx: &Context) -> Result<Box<dyn Forwarder>> {
         let ltx_args = &ctx.args.ltx_args;
         let ltx_repo = ltx_args.ltx_repo();
+        let is_ltx23 = ltx_args.is_ltx23();
 
         // Load connector weights only — Gemma encoder lives on the master
         let connector_path = resolve_hf_file(
@@ -74,7 +75,8 @@ impl Ltx2Gemma {
             &ctx.args.model,
         )?;
 
-        info!("Loading LTX-2 text connectors from {:?}...", connector_path);
+        info!("Loading LTX-2{} text connectors from {:?}...",
+            if is_ltx23 { ".3" } else { "" }, connector_path);
 
         // LTX-2 connector weights are BF16 — load as BF16 to avoid NaN
         let vb = unsafe {
@@ -85,7 +87,23 @@ impl Ltx2Gemma {
             )?
         };
 
-        let config = Ltx2ConnectorConfig::default();
+        let config = if is_ltx23 {
+            // Try loading config from connectors/config.json (created by conversion script)
+            let config_path = resolve_hf_file(
+                &ltx_repo,
+                "connectors/config.json",
+                &ctx.args.model,
+            );
+            match config_path {
+                Ok(path) => {
+                    let config_str = std::fs::read_to_string(&path)?;
+                    serde_json::from_str(&config_str).unwrap_or_else(|_| Ltx2ConnectorConfig::for_ltx23())
+                }
+                Err(_) => Ltx2ConnectorConfig::for_ltx23(),
+            }
+        } else {
+            Ltx2ConnectorConfig::default()
+        };
         let connector = Ltx2TextConnectors::new(&config, false, vb)?;
 
         info!("LTX-2 text connectors loaded!");
@@ -119,6 +137,7 @@ impl Forwarder for Ltx2Gemma {
     fn load(name: String, ctx: &Context) -> Result<Box<Self>> {
         let ltx_args = &ctx.args.ltx_args;
         let ltx_repo = ltx_args.ltx_repo();
+        let is_ltx23 = ltx_args.is_ltx23();
 
         let connector_path = resolve_hf_file(
             &ltx_repo,
@@ -135,7 +154,11 @@ impl Forwarder for Ltx2Gemma {
             )?
         };
 
-        let config = Ltx2ConnectorConfig::default();
+        let config = if is_ltx23 {
+            Ltx2ConnectorConfig::for_ltx23()
+        } else {
+            Ltx2ConnectorConfig::default()
+        };
         let connector = Ltx2TextConnectors::new(&config, false, vb)?;
 
         Ok(Box::new(Self {

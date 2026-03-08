@@ -55,6 +55,9 @@ pub struct Attention {
     to_out: Linear,
     norm_q: RmsNorm, // normalizes heads*d_head dim
     norm_k: RmsNorm, // normalizes heads*d_head dim
+    /// LTX-2.3: per-head gating (sigmoid gate on attention output).
+    /// Linear(inner_dim, heads) -> sigmoid -> gate per head.
+    to_gate_logits: Option<Linear>,
     heads: usize,
     d_head: usize,
 }
@@ -66,6 +69,7 @@ impl Attention {
         heads: usize,
         d_head: usize,
         norm_eps: f64,
+        gated: bool,
         vb: VarBuilder,
     ) -> Result<Self> {
         let inner_dim = heads * d_head;
@@ -80,6 +84,13 @@ impl Attention {
         let norm_q = RmsNorm::new(inner_dim, norm_eps, vb.pp("norm_q"))?;
         let norm_k = RmsNorm::new(inner_dim, norm_eps, vb.pp("norm_k"))?;
 
+        // LTX-2.3: per-head gated attention
+        let to_gate_logits = if gated {
+            Some(candle_nn::linear(inner_dim, heads, vb.pp("to_gate_logits"))?)
+        } else {
+            None
+        };
+
         Ok(Self {
             to_q,
             to_k,
@@ -87,6 +98,7 @@ impl Attention {
             to_out,
             norm_q,
             norm_k,
+            to_gate_logits,
             heads,
             d_head,
         })
@@ -161,11 +173,23 @@ impl Attention {
         let attn = candle_nn::ops::softmax_last_dim(&attn)?;
         let out = attn.matmul(&v)?; // [B, H, T_q, D_head]
 
-        // 7. Transpose back and flatten: [B, T_q, H*D_head]
+        // 7. Apply per-head gating (LTX-2.3)
+        let out = if let Some(ref gate_proj) = self.to_gate_logits {
+            // Compute gate from query input: [B, T_q, inner_dim] -> [B, T_q, H]
+            let gate = gate_proj.forward(x)?;
+            let gate = candle_nn::ops::sigmoid(&gate)?;
+            // gate: [B, T_q, H] -> [B, H, T_q, 1] to broadcast with [B, H, T_q, D_head]
+            let gate = gate.transpose(1, 2)?.unsqueeze(3)?;
+            out.broadcast_mul(&gate)?
+        } else {
+            out
+        };
+
+        // 8. Transpose back and flatten: [B, T_q, H*D_head]
         let out = out.transpose(1, 2)?.contiguous()?;
         let out = out.flatten_from(2)?;
 
-        // 8. Project out
+        // 9. Project out
         self.to_out.forward(&out)
     }
 }
@@ -183,7 +207,7 @@ mod tests {
         let d_head = 16;
 
         let vb = candle_nn::VarBuilder::zeros(DType::F32, &device);
-        let attn = Attention::new(dim, None, heads, d_head, 1e-6, vb).unwrap();
+        let attn = Attention::new(dim, None, heads, d_head, 1e-6, false, vb).unwrap();
 
         let x = Tensor::randn(0f32, 1f32, (1, 8, dim), &device).unwrap();
         let out = attn.forward(&x, None, None, None, None).unwrap();
@@ -199,7 +223,7 @@ mod tests {
         let d_head = 16;
 
         let vb = candle_nn::VarBuilder::zeros(DType::F32, &device);
-        let attn = Attention::new(q_dim, Some(kv_dim), heads, d_head, 1e-6, vb).unwrap();
+        let attn = Attention::new(q_dim, Some(kv_dim), heads, d_head, 1e-6, false, vb).unwrap();
 
         let x = Tensor::randn(0f32, 1f32, (1, 8, q_dim), &device).unwrap();
         let ctx = Tensor::randn(0f32, 1f32, (1, 12, kv_dim), &device).unwrap();

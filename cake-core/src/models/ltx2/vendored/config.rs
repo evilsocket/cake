@@ -71,6 +71,14 @@ pub struct Ltx2TransformerConfig {
     pub caption_channels: usize,
     #[serde(default = "default_2048")]
     pub audio_caption_channels: usize,
+
+    // LTX-2.3 features
+    /// Whether attention blocks use learned per-head gating (to_gate_logits).
+    #[serde(default)]
+    pub gated_attention: bool,
+    /// Whether blocks have prompt-specific AdaLN modulation (prompt_scale_shift_table).
+    #[serde(default)]
+    pub prompt_modulation: bool,
 }
 
 fn default_video_only() -> Ltx2ModelType { Ltx2ModelType::VideoOnly }
@@ -113,6 +121,9 @@ impl Default for Ltx2TransformerConfig {
             // Gemma-3 outputs 3840-dim embeddings (not 4096)
             caption_channels: 3840,
             audio_caption_channels: 2048,
+
+            gated_attention: false,
+            prompt_modulation: false,
         }
     }
 }
@@ -132,6 +143,12 @@ impl Ltx2TransformerConfig {
     /// 6 base (shift+scale+gate for self-attn and MLP) + 3 if cross_attention_adaln.
     pub fn adaln_params(&self) -> usize {
         6 + if self.cross_attention_adaln { 3 } else { 0 }
+    }
+
+    /// Number of prompt AdaLN parameters per block (LTX-2.3).
+    /// 2 params: shift + scale (no gate) for prompt modulation.
+    pub fn prompt_adaln_params(&self) -> usize {
+        if self.prompt_modulation { 2 } else { 0 }
     }
 }
 
@@ -157,6 +174,7 @@ impl Default for Ltx2SchedulerConfig {
 
 /// LTX-2 text connectors config (Gemma → transformer embedding projection).
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Ltx2ConnectorConfig {
     pub caption_channels: usize,
     pub video_connector_num_layers: usize,
@@ -170,6 +188,13 @@ pub struct Ltx2ConnectorConfig {
     pub text_proj_in_factor: usize,
     pub rope_theta: f32,
     pub connector_rope_base_seq_len: usize,
+    /// Whether connector uses gated attention (LTX-2.3).
+    pub gated_attention: bool,
+    /// Whether a separate feature_extractor is used instead of text_proj_in (LTX-2.3).
+    pub has_feature_extractor: bool,
+    /// Output dim for the feature extractor (LTX-2.3: 4096 = transformer cross_attention_dim).
+    /// Only used when has_feature_extractor is true. Defaults to 0 (use video_inner_dim).
+    pub feature_extractor_out_dim: usize,
 }
 
 impl Default for Ltx2ConnectorConfig {
@@ -187,11 +212,28 @@ impl Default for Ltx2ConnectorConfig {
             text_proj_in_factor: 49,
             rope_theta: 10000.0,
             connector_rope_base_seq_len: 4096,
+            gated_attention: false,
+            has_feature_extractor: false,
+            feature_extractor_out_dim: 0,
         }
     }
 }
 
 impl Ltx2ConnectorConfig {
+    /// Config for LTX-2.3 (8 connector blocks, 32 heads, gated attention, feature extractor).
+    pub fn for_ltx23() -> Self {
+        Self {
+            video_connector_num_layers: 8,
+            video_connector_num_attention_heads: 32,
+            audio_connector_num_layers: 8,
+            audio_connector_num_attention_heads: 32,
+            gated_attention: true,
+            has_feature_extractor: true,
+            feature_extractor_out_dim: 4096,
+            ..Default::default()
+        }
+    }
+
     pub fn video_inner_dim(&self) -> usize {
         self.video_connector_num_attention_heads * self.video_connector_attention_head_dim
     }
