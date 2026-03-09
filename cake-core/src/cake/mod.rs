@@ -95,7 +95,15 @@ impl Context {
         let data_path = PathBuf::from(&args.model);
         let data_path = if !data_path.exists() {
             if utils::hf::looks_like_hf_repo(&args.model) {
-                utils::hf::ensure_model_downloaded(&args.model)?
+                // Image models (LTX-2, Flux, etc.) use diffusers format without a root
+                // config.json — their forwarders handle HF resolution internally.
+                // Only download via the generic path for text models.
+                if args.model_type == ModelType::TextModel {
+                    utils::hf::ensure_model_downloaded(&args.model)?
+                } else {
+                    // Pass the repo ID through; forwarders resolve it themselves
+                    data_path
+                }
             } else {
                 bail!("model path does not exist: {}", data_path.display());
             }
