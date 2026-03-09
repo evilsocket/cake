@@ -174,10 +174,33 @@ impl Ltx2Transformer {
             if let Ok(path) = model_api.get("transformer/diffusion_pytorch_model.safetensors") {
                 path
             } else {
-                // Sharded model — get the index file, then resolve all shards from its directory
+                // Sharded model — get the index, parse shard filenames, download each shard
                 let index_path = model_api
                     .get("transformer/diffusion_pytorch_model.safetensors.index.json")?;
-                // Return the directory containing the index — find_weight_files will scan it
+                let index_str = std::fs::read_to_string(&index_path)?;
+                let index: serde_json::Value = serde_json::from_str(&index_str)?;
+
+                // Extract unique shard filenames from weight_map values
+                let mut shard_names: Vec<String> = Vec::new();
+                if let Some(weight_map) = index.get("weight_map").and_then(|m| m.as_object()) {
+                    for v in weight_map.values() {
+                        if let Some(name) = v.as_str() {
+                            if !shard_names.contains(&name.to_string()) {
+                                shard_names.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+                shard_names.sort();
+                info!("Downloading {} transformer weight shards from HF...", shard_names.len());
+
+                for shard in &shard_names {
+                    let hf_path = format!("transformer/{}", shard);
+                    info!("  downloading {}...", hf_path);
+                    model_api.get(&hf_path)?;
+                }
+
+                // Return the directory containing the downloaded shards
                 index_path.parent().unwrap().to_path_buf()
             };
 
