@@ -339,28 +339,37 @@ impl Forwarder for Ltx2Transformer {
             let pe_sin = unpacked[3].to_dtype(dt)?;
             let context = unpacked[4].to_dtype(dt)?;
             let context_mask = unpacked[5].to_dtype(dt)?;
+            // Determine how many optional tensors follow the 7 base tensors.
+            // For block_idx==2 (STG), the LAST tensor is always stg_blocks.
+            // Base: [hidden, temb, pe_cos, pe_sin, context, context_mask, embedded_ts] = 7
+            // Optional: prompt_temb (index 7), stg_blocks (last, only when block_idx==2)
+            let has_stg = block_idx == 2;
+            let num_base = 7;
+            let num_optional_after = unpacked.len() - num_base;
+            // If STG, last optional is stg_blocks. prompt_temb exists if there's more than just stg.
+            let (prompt_temb, stg_skip_blocks) = if has_stg {
+                let stg_tensor = &unpacked[unpacked.len() - 1];
+                let stg_vals: Vec<f32> = stg_tensor.to_vec1()?;
+                let stg_blocks: Vec<usize> = stg_vals.iter().map(|&v| v as usize).collect();
+                // prompt_temb at index 7 if there are 2+ optional tensors (prompt_temb + stg)
+                let pt = if num_optional_after >= 2 {
+                    Some(unpacked[7].to_dtype(dt)?)
+                } else {
+                    None
+                };
+                (pt, stg_blocks)
+            } else {
+                let pt = if unpacked.len() > 7 {
+                    Some(unpacked[7].to_dtype(dt)?)
+                } else {
+                    None
+                };
+                (pt, vec![])
+            };
             let embedded_ts = if unpacked.len() > 6 {
                 Some(unpacked[6].to_dtype(dt)?)
             } else {
                 None
-            };
-            let prompt_temb = if unpacked.len() > 7 {
-                Some(unpacked[7].to_dtype(dt)?)
-            } else {
-                None
-            };
-
-            // Decode STG skip blocks from the last tensor (block_idx == 2)
-            let stg_skip_blocks: Vec<usize> = if block_idx == 2 {
-                let stg_idx = if prompt_temb.is_some() { 8 } else { 7 };
-                if unpacked.len() > stg_idx {
-                    let stg_vals: Vec<f32> = unpacked[stg_idx].to_vec1()?;
-                    stg_vals.iter().map(|&v| v as usize).collect()
-                } else {
-                    vec![]
-                }
-            } else {
-                vec![]
             };
 
             info!(
