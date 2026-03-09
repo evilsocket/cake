@@ -127,6 +127,25 @@ impl Gemma3TextEncoder {
         let all_hidden = self.model.forward_all_hidden(&input_ids, 0, Some(&attention_mask))?;
         // all_hidden: Vec of 49 tensors, each [1, MAX_SEQ_LEN, 3840]
 
+        // Debug: check raw Gemma hidden state statistics
+        {
+            // Check embedding output (layer 0) and last layer
+            let emb_flat = all_hidden[0].flatten_all()?.to_dtype(DType::F32)?;
+            let last_flat = all_hidden[all_hidden.len()-1].flatten_all()?.to_dtype(DType::F32)?;
+            let emb_std: f32 = emb_flat.var(0)?.to_scalar::<f32>()?.sqrt();
+            let last_std: f32 = last_flat.var(0)?.to_scalar::<f32>()?.sqrt();
+            let emb_min: f32 = emb_flat.min(0)?.to_scalar()?;
+            let emb_max: f32 = emb_flat.max(0)?.to_scalar()?;
+            let last_min: f32 = last_flat.min(0)?.to_scalar()?;
+            let last_max: f32 = last_flat.max(0)?.to_scalar()?;
+            log::info!(
+                "Gemma raw hidden: embed std={:.4} [{:.2},{:.2}], layer48 std={:.4} [{:.2},{:.2}], {} layers, seq_len={}",
+                emb_std, emb_min, emb_max,
+                last_std, last_min, last_max,
+                all_hidden.len(), seq_len,
+            );
+        }
+
         // Stack to [B, seq_len, hidden_dim, num_layers]
         let stacked = Tensor::stack(&all_hidden, D::Minus1)?;
 
@@ -309,7 +328,7 @@ impl Gemma3AllHidden {
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         let vb_l = vb_m.pp("layers");
         for layer_idx in 0..cfg.num_hidden_layers {
-            let sliding_window = (layer_idx + 1) % cfg.sliding_window_pattern > 0;
+            let sliding_window = layer_idx % cfg.sliding_window_pattern != 0;
             let layer = Gemma3DecoderLayer::new(
                 use_flash_attn,
                 cfg,
@@ -396,13 +415,24 @@ impl Gemma3AllHidden {
             (Some(mask), Some(sliding_mask))
         };
 
-        for layer in self.layers.iter_mut() {
+        let num_layers = self.layers.len();
+        for i in 0..num_layers {
+            let layer = &mut self.layers[i];
             let mask = if layer.sliding_window.is_some() {
                 &sliding_attention_mask
             } else {
                 &attention_mask
             };
             xs = layer.forward(&xs, mask.as_ref(), seqlen_offset)?;
+
+            // Debug: log every 12th layer and last layer
+            if i % 12 == 0 || i == num_layers - 1 {
+                let flat = xs.flatten_all()?.to_dtype(DType::F32)?;
+                let std_val: f32 = flat.var(0)?.to_scalar::<f32>()?.sqrt();
+                let max_val: f32 = flat.max(0)?.to_scalar()?;
+                log::info!("Gemma layer {} hidden: std={:.2}, max={:.2}", i, std_val, max_val);
+            }
+
             all_hidden.push(xs.clone());
         }
 

@@ -9,7 +9,7 @@ use candle_core::{Result, Tensor};
 use candle_nn::{Linear, Module, VarBuilder};
 
 use super::adaln::{AdaLayerNormSingle, TextProjection};
-use super::attention::rms_norm;
+use super::attention::{layer_norm_no_affine, rms_norm};
 use super::config::Ltx2TransformerConfig;
 use super::rope::precompute_freqs_cis;
 use super::transformer_block::BasicAVTransformerBlock;
@@ -254,7 +254,8 @@ impl LTXModel {
         let shift = scale_shift.narrow(2, 0, 1)?.squeeze(2)?;
         let scale = scale_shift.narrow(2, 1, 1)?.squeeze(2)?;
 
-        let x = rms_norm(x, self.config.norm_eps)?;
+        // Python uses nn.LayerNorm (mean-subtraction + variance norm), NOT RMSNorm
+        let x = layer_norm_no_affine(x, self.config.norm_eps)?;
         let x = x
             .broadcast_mul(&scale.broadcast_add(&Tensor::ones_like(&scale)?)?)?
             .broadcast_add(&shift)?;

@@ -42,6 +42,18 @@ pub fn rms_norm(x: &Tensor, eps: f64) -> Result<Tensor> {
     x.to_dtype(dtype)
 }
 
+/// LayerNorm without learnable affine parameters (elementwise_affine=False).
+/// Subtracts mean and divides by std, matching `nn.LayerNorm(..., elementwise_affine=False)`.
+pub fn layer_norm_no_affine(x: &Tensor, eps: f64) -> Result<Tensor> {
+    let dtype = x.dtype();
+    let x = x.to_dtype(DType::F32)?;
+    let mean = x.mean_keepdim(D::Minus1)?;
+    let x_centered = x.broadcast_sub(&mean)?;
+    let variance = x_centered.sqr()?.mean_keepdim(D::Minus1)?;
+    let x = x_centered.broadcast_div(&(variance + eps)?.sqrt()?)?;
+    x.to_dtype(dtype)
+}
+
 /// Multi-head attention with QK-norm across heads, split RoPE.
 ///
 /// Matches HF `LTX2Attention`:
@@ -164,7 +176,7 @@ impl Attention {
             // mask: [B, T_q, T_kv] (1=attend, 0=masked) -> [B, 1, T_q, T_kv]
             let mask = mask.unsqueeze(1)?.to_dtype(attn.dtype())?;
             // (1 - mask) * -1e9 gives 0 for attend positions, -1e9 for masked
-            let additive_mask = mask.affine(-1.0, 1.0)?.affine(1e9, 0.0)?;
+            let additive_mask = mask.affine(-1.0, 1.0)?.affine(-1e9, 0.0)?;
             attn.broadcast_add(&additive_mask)?
         } else {
             attn
@@ -177,7 +189,7 @@ impl Attention {
         let out = if let Some(ref gate_proj) = self.to_gate_logits {
             // Compute gate from query input: [B, T_q, inner_dim] -> [B, T_q, H]
             let gate = gate_proj.forward(x)?;
-            let gate = candle_nn::ops::sigmoid(&gate)?;
+            let gate = (candle_nn::ops::sigmoid(&gate)? * 2.0)?;
             // gate: [B, T_q, H] -> [B, H, T_q, 1] to broadcast with [B, H, T_q, D_head]
             let gate = gate.transpose(1, 2)?.unsqueeze(3)?;
             out.broadcast_mul(&gate)?

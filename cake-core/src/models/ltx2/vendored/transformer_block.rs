@@ -257,18 +257,31 @@ impl BasicAVTransformerBlock {
         let attn_out = attn1.forward(&norm_x, None, pe, None, None)?;
         let vx = video.broadcast_add(&attn_out.broadcast_mul(gate_msa)?)?;
 
-        // Text cross-attention
+        // Text cross-attention with AdaLN
         let norm_vx = rms_norm(&vx, self.norm_eps)?;
 
-        // Apply cross-attention AdaLN modulation if enabled (LTX-2.3)
-        let norm_vx = if self.adaln_params > 6 {
+        // Cross-attention AdaLN: modulate query input (LTX-2.3)
+        let (norm_vx, gate_ca) = if self.adaln_params > 6 {
             let ada_ca = Self::get_ada_values(sst, timesteps, 6, 9)?;
-            let (shift_ca, scale_ca) = (&ada_ca[0], &ada_ca[1]);
-            norm_vx
+            let (shift_ca, scale_ca, gate) = (&ada_ca[0], &ada_ca[1], ada_ca[2].clone());
+            let modulated = norm_vx
                 .broadcast_mul(&scale_ca.broadcast_add(&Tensor::ones_like(scale_ca)?)?)?
-                .broadcast_add(shift_ca)?
+                .broadcast_add(shift_ca)?;
+            (modulated, Some(gate))
         } else {
-            norm_vx
+            (norm_vx, None)
+        };
+
+        // LTX-2.3: prompt modulation — modulate CONTEXT (key/value) for cross-attention
+        // Python: encoder_hidden_states = context * (1 + scale_kv) + shift_kv
+        let ca_context = if let (Some(psst), Some(pt)) = (&self.prompt_scale_shift_table, prompt_temb) {
+            let prompt_ada = Self::get_ada_values(psst, pt, 0, 2)?;
+            let (p_shift, p_scale) = (&prompt_ada[0], &prompt_ada[1]);
+            context
+                .broadcast_mul(&p_scale.broadcast_add(&Tensor::ones_like(p_scale)?)?)?
+                .broadcast_add(p_shift)?
+        } else {
+            context.clone()
         };
 
         // Expand context_mask from [B, L] to [B, T_q, L] for cross-attention
@@ -278,31 +291,15 @@ impl BasicAVTransformerBlock {
                 .and_then(|m| m.broadcast_as((m.dim(0)?, t_q, m.dim(2)?)))
                 .and_then(|m| m.contiguous())
         }).transpose()?;
-        let ca_out = attn2.forward(&norm_vx, Some(context), None, None, expanded_mask.as_ref())?;
+        let ca_out = attn2.forward(&norm_vx, Some(&ca_context), None, None, expanded_mask.as_ref())?;
 
-        // Apply cross-attention gate if enabled
-        let ca_out = if self.adaln_params > 6 {
-            let ada_ca = Self::get_ada_values(sst, timesteps, 6, 9)?;
-            let gate_ca = &ada_ca[2];
-            ca_out.broadcast_mul(gate_ca)?
+        // Apply cross-attention gate (LTX-2.3)
+        let ca_out = if let Some(ref gate) = gate_ca {
+            ca_out.broadcast_mul(gate)?
         } else {
             ca_out
         };
         let vx = vx.broadcast_add(&ca_out)?;
-
-        // LTX-2.3: prompt modulation (shift + scale, no gate)
-        let vx = if let (Some(psst), Some(pt)) = (&self.prompt_scale_shift_table, prompt_temb) {
-            let prompt_ada = Self::get_ada_values(psst, pt, 0, 2)?;
-            let (p_shift, p_scale) = (&prompt_ada[0], &prompt_ada[1]);
-            let norm_vx = rms_norm(&vx, self.norm_eps)?;
-            vx.broadcast_add(
-                &norm_vx
-                    .broadcast_mul(&p_scale.broadcast_add(&Tensor::ones_like(p_scale)?)?)?
-                    .broadcast_add(p_shift)?,
-            )?
-        } else {
-            vx
-        };
 
         // FFN with AdaLN
         let ada_mlp = Self::get_ada_values(sst, timesteps, 3, 6)?;

@@ -436,6 +436,17 @@ impl VideoGenerator for Ltx2 {
             (dummy, mask)
         };
 
+        // Debug: log Gemma output stats before connector
+        {
+            let ge_f32 = packed_embeds.to_dtype(DType::F32)?.flatten_all()?;
+            let ge_min: f32 = ge_f32.min(0)?.to_scalar()?;
+            let ge_max: f32 = ge_f32.max(0)?.to_scalar()?;
+            let ge_std: f32 = ge_f32.var(0)?.to_scalar::<f32>()?.sqrt();
+            info!(
+                "Gemma packed embeds (pre-connector): {:?}, min={:.4}, max={:.4}, std={:.4}",
+                packed_embeds.shape(), ge_min, ge_max, ge_std
+            );
+        }
         // Send packed embeddings to connector (local)
         info!("Sending packed embeddings to connector...");
         let prompt_embeds = Ltx2Gemma::encode(
@@ -490,6 +501,15 @@ impl VideoGenerator for Ltx2 {
                 (dummy, mask)
             };
 
+            // Debug: log negative Gemma output
+            {
+                let nge_f32 = neg_packed.to_dtype(DType::F32)?.flatten_all()?;
+                let nge_std: f32 = nge_f32.var(0)?.to_scalar::<f32>()?.sqrt();
+                info!(
+                    "Gemma uncond packed embeds std={:.4}",
+                    nge_std
+                );
+            }
             // Run through connector (same as positive prompt)
             let neg_embeds = Ltx2Gemma::encode(
                 &mut self.gemma_connector,
@@ -504,7 +524,25 @@ impl VideoGenerator for Ltx2 {
             let neg_ctx_mask = Tensor::ones((1, neg_ctx_len), DType::F32, &self.context.device)?
                 .to_dtype(self.context.dtype)?;
 
-            info!("Unconditional embeddings ready: {:?}", neg_embeds.shape());
+            {
+                let ne_f32 = neg_embeds.to_dtype(DType::F32)?.flatten_all()?;
+                let ne_min: f32 = ne_f32.min(0)?.to_scalar()?;
+                let ne_max: f32 = ne_f32.max(0)?.to_scalar()?;
+                let ne_mean: f32 = ne_f32.mean(0)?.to_scalar()?;
+                info!(
+                    "Unconditional embeds: {:?}, min={:.4}, max={:.4}, mean={:.4}",
+                    neg_embeds.shape(), ne_min, ne_max, ne_mean
+                );
+                // Compare cond vs uncond
+                let pe_f32 = prompt_embeds.to_dtype(DType::F32)?.flatten_all()?;
+                let diff = (&pe_f32 - &ne_f32)?;
+                let diff_std: f32 = diff.var(0)?.to_scalar::<f32>()?.sqrt();
+                let diff_mean: f32 = diff.mean(0)?.to_scalar()?;
+                info!(
+                    "Cond vs uncond context diff: mean={:.6}, std={:.6}",
+                    diff_mean, diff_std
+                );
+            }
             (Some(neg_embeds), Some(neg_ctx_mask))
         } else {
             (None, None)
@@ -636,14 +674,47 @@ impl VideoGenerator for Ltx2 {
 
                 // CFG: uncond + guidance_scale * (cond - uncond)
                 let diff = (&cond_velocity - &uncond_velocity)?;
+                if step < 3 {
+                    let diff_f32 = diff.to_dtype(DType::F32)?.flatten_all()?;
+                    let diff_std: f32 = diff_f32.var(0)?.to_scalar::<f32>()?.sqrt();
+                    let diff_mean: f32 = diff_f32.mean(0)?.to_scalar()?;
+                    info!(
+                        "step {} CFG diff (cond-uncond): mean={:.6}, std={:.6}",
+                        step + 1, diff_mean, diff_std
+                    );
+                }
                 (&uncond_velocity + diff.affine(guidance_scale as f64, 0.0)?)?
             } else {
                 cond_velocity
             };
 
+            // Debug: log velocity and latent statistics for first few steps
+            if step < 3 || step == num_steps - 1 {
+                let vel_f32 = velocity.to_dtype(DType::F32)?.flatten_all()?;
+                let vel_min: f32 = vel_f32.min(0)?.to_scalar()?;
+                let vel_max: f32 = vel_f32.max(0)?.to_scalar()?;
+                let vel_mean: f32 = vel_f32.mean(0)?.to_scalar()?;
+                let vel_std: f32 = vel_f32.var(0)?.to_scalar::<f32>()?.sqrt();
+                info!(
+                    "step {} velocity: min={:.4}, max={:.4}, mean={:.4}, std={:.4}",
+                    step + 1, vel_min, vel_max, vel_mean, vel_std
+                );
+            }
+
             // Euler step
             latents = euler_step(&latents.to_dtype(DType::F32)?, &velocity, sigma, sigma_next)?
                 .to_dtype(self.context.dtype)?;
+
+            if step < 3 || step == num_steps - 1 {
+                let lat_f32 = latents.to_dtype(DType::F32)?.flatten_all()?;
+                let lat_min: f32 = lat_f32.min(0)?.to_scalar()?;
+                let lat_max: f32 = lat_f32.max(0)?.to_scalar()?;
+                let lat_mean: f32 = lat_f32.mean(0)?.to_scalar()?;
+                info!(
+                    "step {} latents: min={:.4}, max={:.4}, mean={:.4}",
+                    step + 1, lat_min, lat_max, lat_mean
+                );
+            }
 
             let dt = start_time.elapsed().as_secs_f32();
             info!(
@@ -689,6 +760,19 @@ impl VideoGenerator for Ltx2 {
         info!("Decoding with VAE...");
         let decoded =
             Ltx2Vae::decode(&mut self.vae, latents_5d, &mut self.context).await?;
+
+        // Debug: check decoded tensor stats
+        {
+            let dec_f32 = decoded.to_dtype(DType::F32)?;
+            let flat = dec_f32.flatten_all()?;
+            let min_v: f32 = flat.min(0)?.to_scalar()?;
+            let max_v: f32 = flat.max(0)?.to_scalar()?;
+            let mean_v: f32 = flat.mean(0)?.to_scalar()?;
+            info!(
+                "Decoded video: shape={:?}, dtype={:?}, min={:.4}, max={:.4}, mean={:.4}",
+                decoded.shape(), decoded.dtype(), min_v, max_v, mean_v
+            );
+        }
 
         // 9. Convert video frames to images
         let frames = video_tensor_to_images(&decoded)?;
