@@ -152,12 +152,12 @@ impl Gemma3TextEncoder {
         // Compute sequence lengths for normalization
         let sequence_lengths = Tensor::new(&[seq_len as f32], &self.device)?;
 
-        // Pack and normalize
-        let packed = pack_text_embeds(
+        // Pack and normalize (V2: per-token RMS norm for LTX-2.3)
+        let packed = pack_text_embeds_v2(
             &stacked,
             &sequence_lengths,
             "left",
-            PACK_SCALE_FACTOR,
+            4096, // out_dim for LTX-2.3 feature_extractor
         )?
         .to_dtype(self.dtype)?;
 
@@ -191,11 +191,12 @@ impl Gemma3TextEncoder {
         // Compute sequence lengths from mask (sum of valid tokens per batch)
         let sequence_lengths = attention_mask_f.sum(1)?; // [B]
 
-        let packed = pack_text_embeds(
+        // Pack and normalize (V2: per-token RMS norm for LTX-2.3)
+        let packed = pack_text_embeds_v2(
             &stacked,
             &sequence_lengths,
             "left",
-            PACK_SCALE_FACTOR,
+            4096, // out_dim for LTX-2.3 feature_extractor
         )?
         .to_dtype(self.dtype)?;
 
@@ -295,6 +296,71 @@ pub fn pack_text_embeds(
         .contiguous()?;
 
     packed.broadcast_mul(&mask_flat)
+}
+
+/// Pack text embeddings using per-token RMS normalization (V2 / LTX-2.3).
+///
+/// This is the `FeatureExtractorV2._norm_and_concat` method from the Python reference.
+/// Unlike V1 which normalizes per-batch-per-layer, V2 normalizes per-token:
+/// 1. Compute RMS per token per layer: `rms = sqrt(mean(x^2, dim=hidden))`
+/// 2. Normalize: `x / (rms + eps)`
+/// 3. Rescale: `x * sqrt(out_dim / embedding_dim)`
+/// 4. Flatten last two dims and zero out padding
+///
+/// Input: `[B, seq_len, hidden_dim, num_layers]`
+/// Output: `[B, seq_len, hidden_dim * num_layers]`
+pub fn pack_text_embeds_v2(
+    text_hidden_states: &Tensor,
+    sequence_lengths: &Tensor,
+    padding_side: &str,
+    out_dim: usize,
+) -> candle_core::Result<Tensor> {
+    let eps = 1e-6f64;
+    let (batch_size, seq_len, hidden_dim, _num_layers) = text_hidden_states.dims4()?;
+    let device = text_hidden_states.device();
+
+    // Create padding mask [B, seq_len]
+    let token_indices = Tensor::arange(0u32, seq_len as u32, device)?
+        .to_dtype(DType::F32)?
+        .unsqueeze(0)?; // [1, seq_len]
+
+    let mask = match padding_side {
+        "left" => {
+            let start_indices = Tensor::full(seq_len as f32, (batch_size, 1), device)?
+                .broadcast_sub(&sequence_lengths.unsqueeze(1)?)?;
+            token_indices.broadcast_ge(&start_indices)?
+        }
+        "right" => {
+            token_indices.broadcast_lt(&sequence_lengths.unsqueeze(1)?)?
+        }
+        _ => candle_core::bail!("padding_side must be 'left' or 'right'"),
+    };
+
+    // Work in F32
+    let x = text_hidden_states.to_dtype(DType::F32)?;
+
+    // Per-token RMS norm: variance = mean(x^2, dim=hidden_dim), per token per layer
+    // x: [B, seq_len, hidden_dim, num_layers]
+    // variance: [B, seq_len, 1, num_layers]
+    let variance = x.sqr()?.mean_keepdim(2)?;
+    let rms = (variance + eps)?.sqrt()?;
+    let normed = x.broadcast_div(&rms)?;
+
+    // Rescale: x * sqrt(out_dim / embedding_dim)
+    let rescale = (out_dim as f64 / hidden_dim as f64).sqrt();
+    let normed = normed.affine(rescale, 0.0)?;
+
+    // Flatten: [B, seq_len, hidden_dim, num_layers] -> [B, seq_len, hidden_dim * num_layers]
+    let packed = normed.flatten(2, 3)?;
+
+    // Zero out padding positions
+    let mask_f = mask
+        .to_dtype(DType::F32)?
+        .unsqueeze(2)?
+        .broadcast_as((batch_size, seq_len, hidden_dim * _num_layers))?
+        .contiguous()?;
+
+    packed.broadcast_mul(&mask_f)
 }
 
 // ---------------------------------------------------------------------------
