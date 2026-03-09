@@ -268,7 +268,9 @@ impl BasicAVTransformerBlock {
         let norm_vx = rms_norm(&vx, self.norm_eps)?;
 
         // Cross-attention AdaLN: modulate query input (LTX-2.3)
-        let (norm_vx, gate_ca) = if self.adaln_params > 6 {
+        // Guard on actual temb tensor dim (not stored field) to handle config mismatches
+        let has_ca_adaln = self.adaln_params > 6 && timesteps.dim(2)? > 6;
+        let (norm_vx, gate_ca) = if has_ca_adaln {
             let ada_ca = Self::get_ada_values(sst, timesteps, 6, 9)?;
             let (shift_ca, scale_ca, gate) = (&ada_ca[0], &ada_ca[1], ada_ca[2].clone());
             let modulated = norm_vx
