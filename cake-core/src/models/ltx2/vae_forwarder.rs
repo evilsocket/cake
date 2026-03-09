@@ -90,10 +90,16 @@ impl Ltx2Vae {
 
         // Fall back to HF cache
         let repo = ltx_args.ltx_repo();
-        let mut cache_path = model_dir;
-        cache_path.push("hub");
-        let cache = Cache::new(cache_path);
-        let api = ApiBuilder::from_cache(cache).build()?;
+        let cache_path = model_dir.join("hub");
+        let api = if cache_path.is_dir() {
+            ApiBuilder::from_cache(Cache::new(cache_path)).build()?
+        } else {
+            let mut builder = ApiBuilder::new();
+            if let Ok(token) = std::env::var("HF_TOKEN") {
+                builder = builder.with_token(Some(token));
+            }
+            builder.build()?
+        };
         let model_api = api.model(repo);
         Ok(model_api.get("vae/diffusion_pytorch_model.safetensors")?)
     }

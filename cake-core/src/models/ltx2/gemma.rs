@@ -54,10 +54,16 @@ fn resolve_hf_file(repo: &str, filename: &str, model_base: &str) -> Result<PathB
     }
 
     // Fall back to HF cache
-    let mut cache_path = PathBuf::from(model_base);
-    cache_path.push("hub");
-    let cache = Cache::new(cache_path);
-    let api = ApiBuilder::from_cache(cache).build()?;
+    let cache_path = PathBuf::from(model_base).join("hub");
+    let api = if cache_path.is_dir() {
+        ApiBuilder::from_cache(Cache::new(cache_path)).build()?
+    } else {
+        let mut builder = ApiBuilder::new();
+        if let Ok(token) = std::env::var("HF_TOKEN") {
+            builder = builder.with_token(Some(token));
+        }
+        builder.build()?
+    };
     let model_api = api.model(repo.to_string());
     Ok(model_api.get(filename)?)
 }
