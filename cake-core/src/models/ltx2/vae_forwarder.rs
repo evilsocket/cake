@@ -91,7 +91,7 @@ impl Ltx2Vae {
         // Fall back to HF cache
         let repo = ltx_args.ltx_repo();
         let cache_path = model_dir.join("hub");
-        let api = if cache_path.is_dir() {
+        let api = if model_dir.is_dir() && cache_path.is_dir() {
             ApiBuilder::from_cache(Cache::new(cache_path)).build()?
         } else {
             let mut builder = ApiBuilder::new();

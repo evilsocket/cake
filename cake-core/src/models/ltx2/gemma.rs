@@ -54,8 +54,9 @@ fn resolve_hf_file(repo: &str, filename: &str, model_base: &str) -> Result<PathB
     }
 
     // Fall back to HF cache
-    let cache_path = PathBuf::from(model_base).join("hub");
-    let api = if cache_path.is_dir() {
+    let model_base_path = PathBuf::from(model_base);
+    let cache_path = model_base_path.join("hub");
+    let api = if model_base_path.is_dir() && cache_path.is_dir() {
         ApiBuilder::from_cache(Cache::new(cache_path)).build()?
     } else {
         let mut builder = ApiBuilder::new();

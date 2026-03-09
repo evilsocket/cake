@@ -140,8 +140,8 @@ impl Ltx2Transformer {
         // Fall back to HF cache resolution
         let repo = ltx_args.ltx_repo();
         let cache_path = model_dir.join("hub");
-        let api = if cache_path.is_dir() {
-            // Model-local cache (e.g., /path/to/LTX-2/hub/)
+        let api = if model_dir.is_dir() && cache_path.is_dir() {
+            // Model-local cache (e.g., /path/to/LTX-2/hub/) — only when --model is a real directory
             ApiBuilder::from_cache(Cache::new(cache_path)).build()?
         } else {
             // Use default HF cache (~/.cache/huggingface/hub)
