@@ -227,6 +227,7 @@ impl BasicAVTransformerBlock {
     /// `context`: text embeddings
     /// `context_mask`: attention mask for text
     /// `prompt_temb`: prompt timestep embedding for prompt modulation (LTX-2.3), `[B, 1, 3, dim]`
+    /// `skip_self_attn`: if true, bypass self-attention Q/K (STG perturbation)
     pub fn forward_video_only(
         &self,
         video: &Tensor,
@@ -235,6 +236,7 @@ impl BasicAVTransformerBlock {
         context: &Tensor,
         context_mask: Option<&Tensor>,
         prompt_temb: Option<&Tensor>,
+        skip_self_attn: bool,
     ) -> Result<Tensor> {
         let sst = self
             .scale_shift_table
@@ -254,7 +256,12 @@ impl BasicAVTransformerBlock {
             .broadcast_mul(&scale_msa.broadcast_add(&Tensor::ones_like(scale_msa)?)?)?
             .broadcast_add(shift_msa)?;
 
-        let attn_out = attn1.forward(&norm_x, None, pe, None, None)?;
+        // STG: skip Q/K attention, pass V through directly
+        let attn_out = if skip_self_attn {
+            attn1.forward_skip_attn(&norm_x, None)?
+        } else {
+            attn1.forward(&norm_x, None, pe, None, None)?
+        };
         let vx = video.broadcast_add(&attn_out.broadcast_mul(gate_msa)?)?;
 
         // Text cross-attention with AdaLN

@@ -244,15 +244,22 @@ impl Ltx2Transformer {
         context_mask: Tensor,
         embedded_ts: Tensor,
         prompt_temb: Option<Tensor>,
+        stg_skip_blocks: &[usize],
         ctx: &mut Context,
     ) -> Result<Tensor> {
         let mut tensors = vec![hidden, temb, pe_cos, pe_sin, context, context_mask, embedded_ts];
         if let Some(pt) = prompt_temb {
             tensors.push(pt);
         }
+        // Encode STG skip blocks as a 1D F32 tensor (block indices as floats)
+        if !stg_skip_blocks.is_empty() {
+            let stg_vals: Vec<f32> = stg_skip_blocks.iter().map(|&b| b as f32).collect();
+            tensors.push(Tensor::new(stg_vals, &ctx.device)?);
+        }
         let packed = pack_tensors(tensors, &ctx.device)?;
-        // Use block_idx=1 to signal block-range format
-        forwarder.forward_mut(&packed, 0, 1, ctx).await
+        // block_idx: 1 = normal block-range, 2 = block-range with STG
+        let block_idx = if stg_skip_blocks.is_empty() { 1 } else { 2 };
+        forwarder.forward_mut(&packed, 0, block_idx, ctx).await
     }
 
     /// Reference to the inner model (for master-side local execution).
@@ -322,10 +329,9 @@ impl Forwarder for Ltx2Transformer {
         let t0 = std::time::Instant::now();
         let unpacked = unpack_tensors(x)?;
 
-        // block_idx == 1 signals block-range format
-        if self.is_block_range || block_idx == 1 {
-            // Block-range format: [hidden, temb, pe_cos, pe_sin, context, context_mask, embedded_ts]
-            // Use model_dtype (BF16) to match loaded weights
+        // block_idx == 1 or 2 signals block-range format (2 = with STG)
+        if self.is_block_range || block_idx == 1 || block_idx == 2 {
+            // Block-range format: [hidden, temb, pe_cos, pe_sin, context, context_mask, embedded_ts, prompt_temb?, stg_blocks?]
             let dt = self.model_dtype;
             let hidden = unpacked[0].to_dtype(dt)?;
             let temb = unpacked[1].to_dtype(dt)?;
@@ -344,14 +350,28 @@ impl Forwarder for Ltx2Transformer {
                 None
             };
 
+            // Decode STG skip blocks from the last tensor (block_idx == 2)
+            let stg_skip_blocks: Vec<usize> = if block_idx == 2 {
+                let stg_idx = if prompt_temb.is_some() { 8 } else { 7 };
+                if unpacked.len() > stg_idx {
+                    let stg_vals: Vec<f32> = unpacked[stg_idx].to_vec1()?;
+                    stg_vals.iter().map(|&v| v as usize).collect()
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            };
+
             info!(
-                "LTX-2 transformer blocks forwarding (unpack: {}ms, hidden: {:?})",
+                "LTX-2 transformer blocks forwarding (unpack: {}ms, hidden: {:?}{})",
                 t0.elapsed().as_millis(),
-                hidden.shape()
+                hidden.shape(),
+                if stg_skip_blocks.is_empty() { String::new() } else { format!(", stg_skip={:?}", stg_skip_blocks) }
             );
 
             let pe = (pe_cos, pe_sin);
-            let result = self.model.forward_blocks_only(
+            let result = self.model.forward_blocks_only_with_stg(
                 &hidden,
                 &temb,
                 &pe,
@@ -359,6 +379,7 @@ impl Forwarder for Ltx2Transformer {
                 Some(&context_mask),
                 embedded_ts.as_ref(),
                 prompt_temb.as_ref(),
+                &stg_skip_blocks,
             )?;
 
             info!("LTX-2 transformer blocks done in {}ms", t0.elapsed().as_millis());

@@ -381,13 +381,15 @@ impl VideoGenerator for Ltx2 {
             ..
         } = args;
 
-        let ltx_args = &self.context.args.ltx_args;
-
-        let height = ltx_args.ltx_height;
-        let width = ltx_args.ltx_width;
-        let num_frames = ltx_args.ltx_num_frames;
-        let num_steps = ltx_args.ltx_num_steps.unwrap_or(30);
-        let frame_rate = ltx_args.ltx_fps;
+        // Copy all ltx_args values out to avoid borrow conflicts with &mut self later
+        let height = self.context.args.ltx_args.ltx_height;
+        let width = self.context.args.ltx_args.ltx_width;
+        let num_frames = self.context.args.ltx_args.ltx_num_frames;
+        let num_steps = self.context.args.ltx_args.ltx_num_steps.unwrap_or(30);
+        let frame_rate = self.context.args.ltx_args.ltx_fps;
+        let stg_scale_arg = self.context.args.ltx_args.ltx_stg_scale;
+        let stg_block_arg = self.context.args.ltx_args.ltx_stg_block;
+        let rescale_arg = self.context.args.ltx_args.ltx_rescale;
         let guidance_scale = guidance_scale.unwrap_or(4.0) as f32;
 
         if let Some(seed) = image_seed {
@@ -602,6 +604,20 @@ impl VideoGenerator for Ltx2 {
         // 5. Denoising loop
         let is_split = self.local_transformer.is_some();
 
+        // STG config: LTX-2.3 defaults
+        let stg_scale = stg_scale_arg.unwrap_or(1.0);
+        let stg_block: usize = stg_block_arg.unwrap_or(28);
+        let rescale_scale = rescale_arg.unwrap_or(0.7);
+        let do_stg = stg_scale > 0.0;
+        let stg_skip_blocks: Vec<usize> = if do_stg { vec![stg_block] } else { vec![] };
+
+        if do_stg {
+            info!(
+                "STG enabled: scale={:.1}, block={}, rescale={:.2}",
+                stg_scale, stg_block, rescale_scale
+            );
+        }
+
         for step in 0..num_steps {
             let start_time = std::time::Instant::now();
 
@@ -610,85 +626,93 @@ impl VideoGenerator for Ltx2 {
 
             let sigma_t = Tensor::full(sigma, (1,), &self.context.device)?
                 .to_dtype(self.context.dtype)?;
-            // Python diffusers passes sigma (not 1-sigma) as the timestep.
-            // forward_setup then scales by timestep_scale_multiplier (1000),
-            // matching Python's `timesteps = sigmas * num_train_timesteps`.
             let timestep_t = Tensor::full(sigma, (1,), &self.context.device)?
                 .to_dtype(self.context.dtype)?;
 
-            // Conditional forward pass
+            // Conditional forward pass (no STG perturbation)
             let cond_velocity = if is_split {
                 self.forward_split_transformer(
-                    &latents,
-                    &sigma_t,
-                    &timestep_t,
-                    &positions,
-                    &prompt_embeds,
-                    &context_mask,
-                )
-                .await?
+                    &latents, &sigma_t, &timestep_t, &positions,
+                    &prompt_embeds, &context_mask, &[],
+                ).await?
             } else {
                 Ltx2Transformer::forward_packed(
                     &mut self.transformer,
                     latents.to_dtype(self.context.dtype)?,
-                    sigma_t.clone(),
-                    timestep_t.clone(),
-                    positions.clone(),
-                    prompt_embeds.clone(),
-                    context_mask.clone(),
+                    sigma_t.clone(), timestep_t.clone(), positions.clone(),
+                    prompt_embeds.clone(), context_mask.clone(),
                     &mut self.context,
-                )
-                .await?
-                .to_dtype(DType::F32)?
+                ).await?.to_dtype(DType::F32)?
             };
 
-            // Apply classifier-free guidance
-            let velocity = if do_cfg {
+            // Apply guidance (CFG + STG)
+            let mut velocity = cond_velocity.clone();
+
+            // CFG: pred = cond + (cfg_scale - 1) * (cond - uncond)
+            if do_cfg {
                 let uncond_ctx = uncond_embeds.as_ref().unwrap();
                 let uncond_mask = uncond_mask.as_ref().unwrap();
 
                 let uncond_velocity = if is_split {
                     self.forward_split_transformer(
-                        &latents,
-                        &sigma_t,
-                        &timestep_t,
-                        &positions,
-                        uncond_ctx,
-                        uncond_mask,
-                    )
-                    .await?
+                        &latents, &sigma_t, &timestep_t, &positions,
+                        uncond_ctx, uncond_mask, &[],
+                    ).await?
                 } else {
                     Ltx2Transformer::forward_packed(
                         &mut self.transformer,
                         latents.to_dtype(self.context.dtype)?,
-                        sigma_t.clone(),
-                        timestep_t,
-                        positions.clone(),
-                        uncond_ctx.clone(),
-                        uncond_mask.clone(),
+                        sigma_t.clone(), timestep_t.clone(), positions.clone(),
+                        uncond_ctx.clone(), uncond_mask.clone(),
                         &mut self.context,
-                    )
-                    .await?
-                    .to_dtype(DType::F32)?
+                    ).await?.to_dtype(DType::F32)?
                 };
 
-                // CFG: uncond + guidance_scale * (cond - uncond)
-                let diff = (&cond_velocity - &uncond_velocity)?;
+                let cfg_diff = (&cond_velocity - &uncond_velocity)?;
                 if step < 3 {
-                    let diff_f32 = diff.to_dtype(DType::F32)?.flatten_all()?;
+                    let diff_f32 = cfg_diff.to_dtype(DType::F32)?.flatten_all()?;
                     let diff_std: f32 = diff_f32.var(0)?.to_scalar::<f32>()?.sqrt();
-                    let diff_mean: f32 = diff_f32.mean(0)?.to_scalar()?;
-                    info!(
-                        "step {} CFG diff (cond-uncond): mean={:.6}, std={:.6}",
-                        step + 1, diff_mean, diff_std
-                    );
+                    info!("step {} CFG diff std={:.6}", step + 1, diff_std);
                 }
-                (&uncond_velocity + diff.affine(guidance_scale as f64, 0.0)?)?
-            } else {
-                cond_velocity
-            };
+                velocity = (&velocity + cfg_diff.affine((guidance_scale - 1.0) as f64, 0.0)?)?;
+            }
 
-            // Debug: log velocity and latent statistics for first few steps
+            // STG: pred += stg_scale * (cond - perturbed)
+            if do_stg {
+                let stg_velocity = if is_split {
+                    self.forward_split_transformer(
+                        &latents, &sigma_t, &timestep_t, &positions,
+                        &prompt_embeds, &context_mask, &stg_skip_blocks,
+                    ).await?
+                } else {
+                    // For non-split mode, STG not yet supported
+                    // (would need a separate forward_packed variant)
+                    cond_velocity.clone()
+                };
+
+                let stg_diff = (&cond_velocity - &stg_velocity)?;
+                if step < 3 {
+                    let diff_f32 = stg_diff.to_dtype(DType::F32)?.flatten_all()?;
+                    let diff_std: f32 = diff_f32.var(0)?.to_scalar::<f32>()?.sqrt();
+                    info!("step {} STG diff std={:.6}", step + 1, diff_std);
+                }
+                velocity = (&velocity + stg_diff.affine(stg_scale as f64, 0.0)?)?;
+            }
+
+            // Rescale: prevent oversaturation from aggressive guidance
+            if rescale_scale > 0.0 && (do_cfg || do_stg) {
+                let cond_std: f32 = cond_velocity.to_dtype(DType::F32)?.flatten_all()?
+                    .var(0)?.to_scalar::<f32>()?.sqrt();
+                let pred_std: f32 = velocity.to_dtype(DType::F32)?.flatten_all()?
+                    .var(0)?.to_scalar::<f32>()?.sqrt();
+                if pred_std > 1e-8 {
+                    let factor = rescale_scale as f64 * (cond_std / pred_std) as f64
+                        + (1.0 - rescale_scale as f64);
+                    velocity = velocity.affine(factor, 0.0)?;
+                }
+            }
+
+            // Debug: log velocity and latent statistics
             if step < 3 || step == num_steps - 1 {
                 let vel_f32 = velocity.to_dtype(DType::F32)?.flatten_all()?;
                 let vel_min: f32 = vel_f32.min(0)?.to_scalar()?;
@@ -719,10 +743,7 @@ impl VideoGenerator for Ltx2 {
             let dt = start_time.elapsed().as_secs_f32();
             info!(
                 "step {}/{} done, sigma={:.4}, {:.2}s",
-                step + 1,
-                num_steps,
-                sigma,
-                dt
+                step + 1, num_steps, sigma, dt
             );
         }
 
@@ -804,6 +825,7 @@ impl Ltx2 {
         positions: &Tensor,
         context: &Tensor,
         context_mask: &Tensor,
+        stg_skip_blocks: &[usize],
     ) -> Result<Tensor> {
         let local = self
             .local_transformer
@@ -820,15 +842,16 @@ impl Ltx2 {
         let (hidden, temb, embedded_ts, pe, ctx_projected, prompt_temb) =
             local.forward_setup(&latents, timestep, positions, context)?;
 
-        // 2. Run local blocks
+        // 2. Run local blocks (with STG if applicable)
         let context_mask_bf16 = context_mask.to_dtype(DType::BF16)?;
-        let x = local.forward_blocks(
+        let x = local.forward_blocks_with_stg(
             &hidden,
             &temb,
             &pe,
             &ctx_projected,
             Some(&context_mask_bf16),
             prompt_temb.as_ref(),
+            stg_skip_blocks,
         )?;
 
         // 3. Send to remote worker for remaining blocks + finalize
@@ -842,6 +865,7 @@ impl Ltx2 {
             context_mask.clone(),
             embedded_ts,
             prompt_temb,
+            stg_skip_blocks,
             &mut self.context,
         )
         .await?;

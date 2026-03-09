@@ -459,6 +459,18 @@ pub struct LtxVideoArgs {
     /// Number of sampling steps (default from model config).
     #[arg(long = "ltx-num-steps")]
     pub ltx_num_steps: Option<usize>,
+
+    /// STG (Spatio-Temporal Guidance) scale. 0 to disable. Default: 1.0.
+    #[arg(long = "ltx-stg-scale")]
+    pub ltx_stg_scale: Option<f32>,
+
+    /// STG block index to perturb. Default: 28 (LTX-2.3).
+    #[arg(long = "ltx-stg-block")]
+    pub ltx_stg_block: Option<usize>,
+
+    /// Guidance rescale factor. Prevents oversaturation. Default: 0.7.
+    #[arg(long = "ltx-rescale")]
+    pub ltx_rescale: Option<f32>,
 }
 
 impl LtxVideoArgs {

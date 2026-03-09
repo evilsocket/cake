@@ -230,9 +230,27 @@ impl LTXModel {
         context_mask: Option<&Tensor>,
         prompt_temb: Option<&Tensor>,
     ) -> Result<Tensor> {
+        self.forward_blocks_with_stg(hidden, temb, pe, context, context_mask, prompt_temb, &[])
+    }
+
+    /// Run transformer blocks with optional STG perturbation.
+    ///
+    /// `stg_skip_blocks`: global block indices where self-attention should be skipped.
+    pub fn forward_blocks_with_stg(
+        &self,
+        hidden: &Tensor,
+        temb: &Tensor,
+        pe: &(Tensor, Tensor),
+        context: &Tensor,
+        context_mask: Option<&Tensor>,
+        prompt_temb: Option<&Tensor>,
+        stg_skip_blocks: &[usize],
+    ) -> Result<Tensor> {
         let mut x = hidden.clone();
-        for block in self.blocks.iter() {
-            x = block.forward_video_only(&x, temb, Some(pe), context, context_mask, prompt_temb)?;
+        for (i, block) in self.blocks.iter().enumerate() {
+            let global_idx = self.block_start + i;
+            let skip = stg_skip_blocks.contains(&global_idx);
+            x = block.forward_video_only(&x, temb, Some(pe), context, context_mask, prompt_temb, skip)?;
         }
         Ok(x)
     }
@@ -310,7 +328,26 @@ impl LTXModel {
         embedded_ts: Option<&Tensor>,
         prompt_temb: Option<&Tensor>,
     ) -> Result<Tensor> {
-        let x = self.forward_blocks(hidden, temb, pe, context, context_mask, prompt_temb)?;
+        self.forward_blocks_only_with_stg(
+            hidden, temb, pe, context, context_mask, embedded_ts, prompt_temb, &[],
+        )
+    }
+
+    /// Forward pass for block-range workers with optional STG perturbation.
+    pub fn forward_blocks_only_with_stg(
+        &self,
+        hidden: &Tensor,
+        temb: &Tensor,
+        pe: &(Tensor, Tensor),
+        context: &Tensor,
+        context_mask: Option<&Tensor>,
+        embedded_ts: Option<&Tensor>,
+        prompt_temb: Option<&Tensor>,
+        stg_skip_blocks: &[usize],
+    ) -> Result<Tensor> {
+        let x = self.forward_blocks_with_stg(
+            hidden, temb, pe, context, context_mask, prompt_temb, stg_skip_blocks,
+        )?;
 
         if self.has_finalize() {
             let ets = embedded_ts.expect("forward_blocks_only with finalize needs embedded_ts");

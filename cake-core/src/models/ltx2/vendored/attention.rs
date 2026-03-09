@@ -204,6 +204,38 @@ impl Attention {
         // 9. Project out
         self.to_out.forward(&out)
     }
+
+    /// STG forward: skip Q/K attention, pass V straight through.
+    ///
+    /// Computes `to_out(to_v(kv_input))` with gating but no attention.
+    pub fn forward_skip_attn(
+        &self,
+        x: &Tensor,
+        context: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        let kv_input = context.unwrap_or(x);
+
+        // Only V projection — skip Q, K, RoPE, softmax
+        let v = self.to_v.forward(kv_input)?;
+
+        // Apply per-head gating (LTX-2.3) — gate is computed from query input
+        let out = if let Some(ref gate_proj) = self.to_gate_logits {
+            let (b, t_q, _) = x.dims3()?;
+            let gate = gate_proj.forward(x)?;
+            let gate = (candle_nn::ops::sigmoid(&gate)? * 2.0)?;
+            // Reshape v to [B, H, T, D_head] then apply gate
+            let v = v.reshape((b, (), self.heads, self.d_head))?;
+            let v = v.transpose(1, 2)?.contiguous()?;
+            let gate = gate.transpose(1, 2)?.unsqueeze(3)?;
+            let out = v.broadcast_mul(&gate)?;
+            let out = out.transpose(1, 2)?.contiguous()?;
+            out.flatten_from(2)?
+        } else {
+            v
+        };
+
+        self.to_out.forward(&out)
+    }
 }
 
 #[cfg(test)]
