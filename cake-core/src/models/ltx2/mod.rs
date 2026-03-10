@@ -12,6 +12,7 @@ mod ltx2;
 mod ltx2_shardable;
 mod gemma;
 pub(crate) mod gemma_encoder;
+mod quantized_gemma;
 mod transformer;
 mod vae_forwarder;
 mod vocoder;

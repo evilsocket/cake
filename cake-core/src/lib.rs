@@ -465,6 +465,11 @@ pub struct LtxVideoArgs {
     /// Guidance rescale factor. Prevents oversaturation. Default: 0.7.
     #[arg(long = "ltx-rescale")]
     pub ltx_rescale: Option<f32>,
+
+    /// Path to a GGUF file for quantized Gemma-3 (runs on GPU instead of CPU).
+    /// Example: --ltx-gemma-gguf /path/to/gemma-3-12b-pt-Q4_K_M.gguf
+    #[arg(long = "ltx-gemma-gguf")]
+    pub ltx_gemma_gguf: Option<String>,
 }
 
 impl LtxVideoArgs {

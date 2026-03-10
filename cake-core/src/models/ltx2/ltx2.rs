@@ -4,6 +4,7 @@ use candle_core::{DType, Device, IndexOp, Tensor};
 use image::{ImageBuffer, Rgb};
 use log::info;
 use std::path::PathBuf;
+use std::collections::HashMap;
 
 use super::gemma::Ltx2Gemma;
 use super::gemma_encoder::{gemma3_12b_config, Gemma3TextEncoder};
@@ -41,7 +42,7 @@ use crate::ImageGenerationArgs;
 pub struct Ltx2 {
     /// Connector forwarder (runs locally on master GPU)
     gemma_connector: Box<dyn Forwarder>,
-    /// Gemma-3 12B text encoder (stays on CPU permanently)
+    /// Gemma-3 12B text encoder (GGUF on GPU or safetensors on CPU)
     gemma_encoder: Option<Gemma3TextEncoder>,
     /// Remote transformer forwarder (full model or block range)
     transformer: Box<dyn Forwarder>,
@@ -120,10 +121,10 @@ impl Generator for Ltx2 {
                 Ltx2Vocoder::load_model(context)?
             };
 
-        // Gemma-3 12B encoder — stays on master CPU permanently
+        // Gemma-3 12B encoder (GGUF on GPU if available, else safetensors on CPU)
         let gemma_encoder = match Self::try_load_gemma_encoder(context) {
             Ok(enc) => {
-                info!("Gemma-3 12B encoder loaded on master CPU — text prompts supported!");
+                info!("Gemma-3 12B encoder loaded — text prompts supported!");
                 Some(enc)
             }
             Err(e) => {
@@ -263,20 +264,22 @@ impl Ltx2 {
         Ok((transformer, None))
     }
 
-    /// Load Gemma-3 12B encoder on the master's CPU.
+    /// Load Gemma-3 12B encoder.
+    ///
+    /// Prefers quantized GGUF on GPU (if `--ltx-gemma-gguf` is set),
+    /// falls back to full-precision safetensors on CPU.
     fn try_load_gemma_encoder(ctx: &Context) -> Result<Gemma3TextEncoder> {
         use hf_hub::api::sync::ApiBuilder;
         use hf_hub::Cache;
 
         let gemma_repo = "google/gemma-3-12b-pt";
 
-        // Try model-local cache first, then standard HF cache, then download with token
+        // Resolve HF API for tokenizer (needed by both paths)
         let mut cache_path = PathBuf::from(&ctx.args.model);
         cache_path.push("hub");
         let api = if cache_path.exists() {
             ApiBuilder::from_cache(Cache::new(cache_path)).build()?
         } else {
-            // Use default HF cache (~/.cache/huggingface/hub) with optional token
             let mut builder = ApiBuilder::new();
             if let Ok(token) = std::env::var("HF_TOKEN") {
                 builder = builder.with_token(Some(token));
@@ -284,15 +287,29 @@ impl Ltx2 {
             builder.build()?
         };
         let model_api = api.model(gemma_repo.to_string());
-
         let tokenizer_path = model_api.get("tokenizer.json")?;
 
+        // Try GGUF path first (quantized on GPU)
+        if let Some(ref gguf_path) = ctx.args.ltx_args.ltx_gemma_gguf {
+            let gguf = PathBuf::from(gguf_path);
+            if gguf.exists() {
+                info!("Loading quantized Gemma-3 from GGUF on GPU...");
+                return Gemma3TextEncoder::load_gguf(
+                    &gguf,
+                    &tokenizer_path,
+                    &ctx.device,
+                );
+            } else {
+                log::warn!("GGUF path does not exist: {:?}, falling back to safetensors", gguf);
+            }
+        }
+
+        // Fall back to full-precision safetensors on CPU
         let config_path = model_api.get("config.json")?;
         let config_str = std::fs::read_to_string(&config_path)?;
         let gemma_config: candle_transformers::models::gemma3::Config =
             serde_json::from_str(&config_str).unwrap_or_else(|_| gemma3_12b_config());
 
-        // Find safetensors files (handle sharded models)
         let model_paths = if let Ok(index_file) = model_api.get("model.safetensors.index.json") {
             let index_str = std::fs::read_to_string(&index_file)?;
             let index: serde_json::Value = serde_json::from_str(&index_str)?;
@@ -405,7 +422,7 @@ impl VideoGenerator for Ltx2 {
             width, height, num_frames, num_steps, guidance_scale
         );
 
-        // 1. Encode prompt with Gemma-3 on master CPU → send packed embeddings to connector
+        // 1. Encode prompt with Gemma-3 → send packed embeddings to connector
         info!("Encoding prompt...");
         let prompt_text = if args.image_prompt.is_empty() {
             "a beautiful video"
@@ -414,7 +431,7 @@ impl VideoGenerator for Ltx2 {
         };
 
         let (packed_embeds, text_mask) = if let Some(ref mut encoder) = self.gemma_encoder {
-            info!("Encoding text with Gemma-3 (CPU): \"{}\"", prompt_text);
+            info!("Encoding text with Gemma-3: \"{}\"", prompt_text);
             let (embeds, mask) = encoder.encode(prompt_text)?;
             // Transfer from CPU to GPU for network serialization
             let embeds = embeds
@@ -453,95 +470,58 @@ impl VideoGenerator for Ltx2 {
             .to_dtype(DType::BF16)?;
 
         // Prepare unconditional context for classifier-free guidance
-        // Python diffusers encodes empty string "" through full Gemma + connector pipeline
+        // The uncond embedding (encoding "" through Gemma + connector) is always
+        // the same for a given model, so we cache it to disk after computing once.
         let do_cfg = guidance_scale > 1.0;
         let (uncond_embeds, uncond_mask) = if do_cfg {
             info!("Preparing unconditional embeddings for CFG (guidance_scale={:.1})", guidance_scale);
 
-            let (neg_packed, neg_mask) = if let Some(ref mut encoder) = self.gemma_encoder {
-                info!("Encoding empty string for unconditional embeddings...");
-                let (embeds, mask) = encoder.encode("")?;
-                let embeds = embeds
-                    .to_device(&self.context.device)?
-                    .to_dtype(DType::BF16)?;
-                let mask = mask.to_device(&self.context.device)?;
-                (embeds, mask)
+            let cache_path = Self::uncond_cache_path(&self.context);
+            if let Some((cached_embeds, cached_mask)) = Self::load_uncond_cache(&cache_path, &self.context.device) {
+                info!("Loaded cached unconditional embeddings from {:?}", cache_path);
+                (Some(cached_embeds), Some(cached_mask))
             } else {
-                // Without Gemma, use zeros as fallback
-                let seq_len = 1024usize;
-                let packed_dim = trans_config.caption_channels * 49;
-                let dummy = Tensor::zeros(
-                    (1, seq_len, packed_dim),
-                    DType::BF16,
-                    &self.context.device,
-                )?;
-                let mask = Tensor::zeros((1, seq_len), DType::F32, &self.context.device)?;
-                (dummy, mask)
-            };
+                let (neg_packed, neg_mask) = if let Some(ref mut encoder) = self.gemma_encoder {
+                    info!("Encoding empty string for unconditional embeddings...");
+                    let (embeds, mask) = encoder.encode("")?;
+                    let embeds = embeds
+                        .to_device(&self.context.device)?
+                        .to_dtype(DType::BF16)?;
+                    let mask = mask.to_device(&self.context.device)?;
+                    (embeds, mask)
+                } else {
+                    let seq_len = 1024usize;
+                    let packed_dim = trans_config.caption_channels * 49;
+                    let dummy = Tensor::zeros(
+                        (1, seq_len, packed_dim),
+                        DType::BF16,
+                        &self.context.device,
+                    )?;
+                    let mask = Tensor::zeros((1, seq_len), DType::F32, &self.context.device)?;
+                    (dummy, mask)
+                };
 
-            // Run through connector (same as positive prompt)
-            let neg_embeds = Ltx2Gemma::encode(
-                &mut self.gemma_connector,
-                neg_packed,
-                Some(neg_mask),
-                &mut self.context,
-            )
-            .await?
-            .to_dtype(DType::BF16)?;
-
-            let neg_ctx_len = neg_embeds.dim(1)?;
-            let neg_ctx_mask = Tensor::ones((1, neg_ctx_len), DType::F32, &self.context.device)?
+                let neg_embeds = Ltx2Gemma::encode(
+                    &mut self.gemma_connector,
+                    neg_packed,
+                    Some(neg_mask),
+                    &mut self.context,
+                )
+                .await?
                 .to_dtype(DType::BF16)?;
 
-            (Some(neg_embeds), Some(neg_ctx_mask))
+                let neg_ctx_len = neg_embeds.dim(1)?;
+                let neg_ctx_mask = Tensor::ones((1, neg_ctx_len), DType::F32, &self.context.device)?
+                    .to_dtype(DType::BF16)?;
+
+                // Cache for next time
+                Self::save_uncond_cache(&cache_path, &neg_embeds, &neg_ctx_mask);
+
+                (Some(neg_embeds), Some(neg_ctx_mask))
+            }
         } else {
             (None, None)
         };
-
-        // DEBUG: optionally load Python reference connector outputs for comparison/substitution
-        // Set LTX2_PYTHON_REF=/tmp/ltx2_connector_io.safetensors to enable
-        let (prompt_embeds, context_mask, uncond_embeds, uncond_mask) =
-            if let Ok(ref_path) = std::env::var("LTX2_PYTHON_REF") {
-                info!("Loading Python reference connector outputs from {}", ref_path);
-                let ref_tensors = candle_core::safetensors::load(&ref_path, &self.context.device)?;
-
-                let py_pos = ref_tensors.get("prompt_connector_out")
-                    .ok_or_else(|| anyhow::anyhow!("Missing prompt_connector_out"))?
-                    .to_dtype(DType::BF16)?;
-                let py_neg = ref_tensors.get("neg_connector_out")
-                    .ok_or_else(|| anyhow::anyhow!("Missing neg_connector_out"))?
-                    .to_dtype(DType::BF16)?;
-
-                // Compare Rust vs Python connector outputs
-                {
-                    let rust_pos_f32 = prompt_embeds.to_dtype(DType::F32)?.flatten_all()?;
-                    let py_pos_f32 = py_pos.to_dtype(DType::F32)?.flatten_all()?;
-                    let pos_diff = (&rust_pos_f32 - &py_pos_f32)?;
-                    info!("Rust vs Python connector pos: diff_std={:.6}, max_abs={:.6}",
-                        pos_diff.var(0)?.to_scalar::<f32>()?.sqrt(),
-                        pos_diff.abs()?.max(0)?.to_scalar::<f32>()?);
-                }
-                if let Some(ref rust_neg) = uncond_embeds {
-                    let rust_neg_f32 = rust_neg.to_dtype(DType::F32)?.flatten_all()?;
-                    let py_neg_f32 = py_neg.to_dtype(DType::F32)?.flatten_all()?;
-                    let neg_diff = (&rust_neg_f32 - &py_neg_f32)?;
-                    info!("Rust vs Python connector neg: diff_std={:.6}, max_abs={:.6}",
-                        neg_diff.var(0)?.to_scalar::<f32>()?.sqrt(),
-                        neg_diff.abs()?.max(0)?.to_scalar::<f32>()?);
-                }
-
-                // Substitute Python outputs
-                info!("SUBSTITUTING Python connector outputs for this run");
-                let pos_len = py_pos.dim(1)?;
-                let neg_len = py_neg.dim(1)?;
-                let pos_mask = Tensor::ones((1, pos_len), DType::F32, &self.context.device)?
-                    .to_dtype(DType::BF16)?;
-                let neg_mask = Tensor::ones((1, neg_len), DType::F32, &self.context.device)?
-                    .to_dtype(DType::BF16)?;
-                (py_pos, pos_mask, Some(py_neg), Some(neg_mask))
-            } else {
-                (prompt_embeds, context_mask, uncond_embeds, uncond_mask)
-            };
 
         // 2. Prepare latents
         let latent_h = height / vae_config.spatial_compression_ratio;
@@ -806,6 +786,67 @@ impl Ltx2 {
         .await?;
 
         Ok(result.to_dtype(DType::F32)?)
+    }
+
+    /// Path for cached unconditional embeddings (deterministic per model repo).
+    fn uncond_cache_path(ctx: &Context) -> PathBuf {
+        let ltx_repo = ctx.args.ltx_args.ltx_repo();
+        // Hash repo name + GGUF path (quantized outputs differ from F32)
+        let hash = {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(ltx_repo.as_bytes());
+            if let Some(ref gguf) = ctx.args.ltx_args.ltx_gemma_gguf {
+                hasher.update(b":gguf:");
+                hasher.update(gguf.as_bytes());
+            }
+            hex::encode(&hasher.finalize()[..8])
+        };
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("cake")
+            .join("uncond_cache");
+        cache_dir.join(format!("uncond_{}.safetensors", hash))
+    }
+
+    /// Load cached unconditional embeddings from disk.
+    fn load_uncond_cache(path: &PathBuf, device: &Device) -> Option<(Tensor, Tensor)> {
+        if !path.exists() {
+            return None;
+        }
+        match candle_core::safetensors::load(path, device) {
+            Ok(tensors) => {
+                let embeds = tensors.get("uncond_embeds")?.clone();
+                let mask = tensors.get("uncond_mask")?.clone();
+                Some((embeds, mask))
+            }
+            Err(e) => {
+                log::warn!("Failed to load uncond cache from {:?}: {}", path, e);
+                None
+            }
+        }
+    }
+
+    /// Save unconditional embeddings to disk cache.
+    fn save_uncond_cache(path: &PathBuf, embeds: &Tensor, mask: &Tensor) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Move tensors to CPU for saving
+        let save_result = (|| -> Result<()> {
+            let embeds_cpu = embeds.to_device(&Device::Cpu)?;
+            let mask_cpu = mask.to_device(&Device::Cpu)?;
+            let tensors: HashMap<String, Tensor> = HashMap::from([
+                ("uncond_embeds".to_string(), embeds_cpu),
+                ("uncond_mask".to_string(), mask_cpu),
+            ]);
+            candle_core::safetensors::save(&tensors, path)?;
+            info!("Cached unconditional embeddings to {:?}", path);
+            Ok(())
+        })();
+        if let Err(e) = save_result {
+            log::warn!("Failed to save uncond cache: {}", e);
+        }
     }
 }
 

@@ -12,6 +12,8 @@ use candle_transformers::models::gemma3;
 use log::info;
 use tokenizers::Tokenizer;
 
+use super::quantized_gemma::Gemma3QuantizedAllHidden;
+
 /// Gemma-3 config for the 12B model used by LTX-2.
 pub fn gemma3_12b_config() -> gemma3::Config {
     gemma3::Config {
@@ -47,13 +49,26 @@ pub const MAX_SEQ_LEN: usize = 1024;
 #[allow(dead_code)]
 pub const PACK_SCALE_FACTOR: f32 = 8.0;
 
+/// Backend for Gemma-3 model weights — either full-precision safetensors
+/// or quantized GGUF.
+enum GemmaBackend {
+    /// Full-precision model loaded from safetensors (typically F32 on CPU).
+    Full(Gemma3AllHidden),
+    /// Quantized model loaded from GGUF (typically Q4_K_M on GPU).
+    Quantized(Gemma3QuantizedAllHidden),
+}
+
 /// Gemma-3 text encoder that extracts all hidden states.
 ///
 /// Unlike the standard `gemma3::Model` which only returns logits,
 /// this version collects hidden states from all 49 layers
 /// (1 embedding + 48 transformer layers) for the LTX-2 connector.
+///
+/// Supports two backends:
+/// - **Safetensors** (F32 on CPU, ~24 GB) — via `load()`
+/// - **GGUF quantized** (Q4_K_M on GPU, ~7.4 GB) — via `load_gguf()`
 pub struct Gemma3TextEncoder {
-    model: Gemma3AllHidden,
+    model: GemmaBackend,
     #[allow(dead_code)]
     tokenizer: Tokenizer,
     device: Device,
@@ -86,13 +101,44 @@ impl Gemma3TextEncoder {
 
         let model = Gemma3AllHidden::new(false, config, vb)?;
 
-        info!("Gemma-3 model loaded!");
+        info!("Gemma-3 model loaded (safetensors)!");
 
         Ok(Self {
-            model,
+            model: GemmaBackend::Full(model),
             tokenizer,
             device: device.clone(),
             dtype,
+        })
+    }
+
+    /// Load Gemma-3 model from a GGUF file (quantized, runs on GPU).
+    ///
+    /// Q4_K_M of Gemma-3-12B is ~7.4 GB, fitting easily on a 24 GB GPU
+    /// alongside the LTX-2 connector (~5 GB) and VAE (~1.4 GB).
+    pub fn load_gguf(
+        gguf_path: &std::path::Path,
+        tokenizer_path: &std::path::Path,
+        device: &Device,
+    ) -> Result<Self> {
+        info!("Loading Gemma-3 tokenizer from {:?}...", tokenizer_path);
+        let tokenizer = Tokenizer::from_file(tokenizer_path)
+            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+
+        info!("Loading quantized Gemma-3 from GGUF: {:?}", gguf_path);
+        let mut file = std::fs::File::open(gguf_path)?;
+        let ct = candle_core::quantized::gguf_file::Content::read(&mut file)
+            .map_err(|e| anyhow::anyhow!("Failed to read GGUF: {}", e))?;
+        let model = Gemma3QuantizedAllHidden::from_gguf(ct, &mut file, device)
+            .map_err(|e| anyhow::anyhow!("Failed to load quantized Gemma-3: {}", e))?;
+
+        info!("Gemma-3 model loaded (GGUF quantized on {:?})!", device);
+
+        Ok(Self {
+            model: GemmaBackend::Quantized(model),
+            tokenizer,
+            device: device.clone(),
+            // Quantized models work in F32 intermediate dtype
+            dtype: DType::F32,
         })
     }
 
@@ -126,8 +172,8 @@ impl Gemma3TextEncoder {
             .unsqueeze(0)?; // [1, MAX_SEQ_LEN]
 
         // Run Gemma-3 forward pass, collecting all hidden states
-        self.model.clear_kv_cache();
-        let all_hidden = self.model.forward_all_hidden(&input_ids, 0, Some(&attention_mask))?;
+        self.clear_kv_cache();
+        let all_hidden = self.forward_all_hidden(&input_ids, 0, Some(&attention_mask))?;
         // all_hidden: Vec of 49 tensors, each [1, MAX_SEQ_LEN, 3840]
 
         // Stack to [B, seq_len, hidden_dim, num_layers]
@@ -166,8 +212,8 @@ impl Gemma3TextEncoder {
         let attention_mask_f = attention_mask.to_dtype(DType::F32)?.to_device(&self.device)?;
 
         // Run Gemma-3 forward pass
-        self.model.clear_kv_cache();
-        let all_hidden = self.model.forward_all_hidden(&input_ids, 0, Some(&attention_mask_f))?;
+        self.clear_kv_cache();
+        let all_hidden = self.forward_all_hidden(&input_ids, 0, Some(&attention_mask_f))?;
 
         // Stack to [B, seq_len, hidden_dim, num_layers]
         let stacked = Tensor::stack(&all_hidden, D::Minus1)?;
@@ -184,6 +230,25 @@ impl Gemma3TextEncoder {
         .to_dtype(self.dtype)?;
 
         Ok((packed, attention_mask_f))
+    }
+
+    fn forward_all_hidden(
+        &mut self,
+        input_ids: &Tensor,
+        seqlen_offset: usize,
+        padding_mask: Option<&Tensor>,
+    ) -> candle_core::Result<Vec<Tensor>> {
+        match &mut self.model {
+            GemmaBackend::Full(m) => m.forward_all_hidden(input_ids, seqlen_offset, padding_mask),
+            GemmaBackend::Quantized(m) => m.forward_all_hidden(input_ids, seqlen_offset, padding_mask),
+        }
+    }
+
+    fn clear_kv_cache(&mut self) {
+        match &mut self.model {
+            GemmaBackend::Full(m) => m.clear_kv_cache(),
+            GemmaBackend::Quantized(m) => m.clear_kv_cache(),
+        }
     }
 }
 
