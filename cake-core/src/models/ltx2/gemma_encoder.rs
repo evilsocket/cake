@@ -37,9 +37,11 @@ pub fn gemma3_12b_config() -> gemma3::Config {
 }
 
 /// Maximum sequence length for text encoding.
-/// Matches the default `max_sequence_length=256` in the Python LTX-2 pipeline.
-/// Using 1024 causes OOM on 32GB GPUs during the 48-layer forward pass.
-pub const MAX_SEQ_LEN: usize = 256;
+/// Matches the default `max_sequence_length=1024` in the Python LTX-2 pipeline.
+/// The connector's register tiling depends on this (seq_len / 128 = 8 tiles).
+/// Using 256 produces muddy output because the connector operates differently
+/// with only 2 register tiles vs 8.
+pub const MAX_SEQ_LEN: usize = 1024;
 
 /// Scale factor for normalization (matches Python pipeline).
 pub const PACK_SCALE_FACTOR: f32 = 8.0;
@@ -152,12 +154,11 @@ impl Gemma3TextEncoder {
         // Compute sequence lengths for normalization
         let sequence_lengths = Tensor::new(&[seq_len as f32], &self.device)?;
 
-        // Pack and normalize (V2: per-token RMS norm for LTX-2.3)
-        let packed = pack_text_embeds_v2(
+        let packed = pack_text_embeds(
             &stacked,
             &sequence_lengths,
             "left",
-            4096, // out_dim for LTX-2.3 feature_extractor
+            PACK_SCALE_FACTOR,
         )?
         .to_dtype(self.dtype)?;
 
@@ -191,12 +192,11 @@ impl Gemma3TextEncoder {
         // Compute sequence lengths from mask (sum of valid tokens per batch)
         let sequence_lengths = attention_mask_f.sum(1)?; // [B]
 
-        // Pack and normalize (V2: per-token RMS norm for LTX-2.3)
-        let packed = pack_text_embeds_v2(
+        let packed = pack_text_embeds(
             &stacked,
             &sequence_lengths,
             "left",
-            4096, // out_dim for LTX-2.3 feature_extractor
+            PACK_SCALE_FACTOR,
         )?
         .to_dtype(self.dtype)?;
 

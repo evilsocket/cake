@@ -167,14 +167,18 @@ impl Attention {
         let k = k.transpose(1, 2)?.contiguous()?;
         let v = v.transpose(1, 2)?.contiguous()?;
 
-        // 6. Scaled dot-product attention
+        // 6. Scaled dot-product attention (compute scores in F32 for numerical stability,
+        //    matching PyTorch's F.scaled_dot_product_attention which uses F32 internally)
+        let input_dtype = q.dtype();
         let scale = (self.d_head as f64).sqrt();
-        let attn = q.matmul(&k.transpose(2, 3)?.contiguous()?)?.affine(1.0 / scale, 0.0)?;
+        let q_f32 = q.to_dtype(DType::F32)?;
+        let k_f32 = k.to_dtype(DType::F32)?;
+        let attn = q_f32.matmul(&k_f32.transpose(2, 3)?.contiguous()?)?.affine(1.0 / scale, 0.0)?;
 
         // Apply mask (additive: masked positions get -inf)
         let attn = if let Some(mask) = mask {
             // mask: [B, T_q, T_kv] (1=attend, 0=masked) -> [B, 1, T_q, T_kv]
-            let mask = mask.unsqueeze(1)?.to_dtype(attn.dtype())?;
+            let mask = mask.unsqueeze(1)?.to_dtype(DType::F32)?;
             // (1 - mask) * -1e9 gives 0 for attend positions, -1e9 for masked
             let additive_mask = mask.affine(-1.0, 1.0)?.affine(-1e9, 0.0)?;
             attn.broadcast_add(&additive_mask)?
@@ -183,7 +187,8 @@ impl Attention {
         };
 
         let attn = candle_nn::ops::softmax_last_dim(&attn)?;
-        let out = attn.matmul(&v)?; // [B, H, T_q, D_head]
+        let v_f32 = v.to_dtype(DType::F32)?;
+        let out = attn.matmul(&v_f32)?.to_dtype(input_dtype)?; // [B, H, T_q, D_head]
 
         // 7. Apply per-head gating (LTX-2.3)
         let out = if let Some(ref gate_proj) = self.to_gate_logits {

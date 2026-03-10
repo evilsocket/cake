@@ -302,6 +302,28 @@ impl BasicAVTransformerBlock {
         }).transpose()?;
         let ca_out = attn2.forward(&norm_vx, Some(&ca_context), None, None, expanded_mask.as_ref())?;
 
+        // DEBUG: compute ca_out diff between consecutive calls (cond then uncond)
+        {
+            use std::sync::Mutex;
+            static CA_LOG: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            static CA_PREV: Mutex<Option<candle_core::Tensor>> = Mutex::new(None);
+            let n = CA_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 48 {
+                // Even calls: cond, odd calls: uncond (in pre-flight diagnostic)
+                if n % 2 == 0 {
+                    *CA_PREV.lock().unwrap() = Some(ca_out.clone());
+                } else {
+                    let block_idx = n / 2;
+                    if let Some(ref prev) = *CA_PREV.lock().unwrap() {
+                        let diff = (prev.to_dtype(candle_core::DType::F32)?
+                            - ca_out.to_dtype(candle_core::DType::F32)?)?;
+                        let diff_std: f32 = diff.flatten_all()?.var(0)?.to_scalar::<f32>()?.sqrt();
+                        log::info!("  block {:2} ca_diff_std={:.6}", block_idx, diff_std);
+                    }
+                }
+            }
+        }
+
         // Apply cross-attention gate (LTX-2.3)
         let ca_out = if let Some(ref gate) = gate_ca {
             ca_out.broadcast_mul(gate)?
@@ -320,8 +342,35 @@ impl BasicAVTransformerBlock {
             .broadcast_add(shift_mlp)?;
 
         let ff_out = ff.forward(&norm_vx)?;
+
+        // DEBUG: compute ff_out diff between consecutive calls
+        {
+            use std::sync::Mutex;
+            static FF_LOG: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            static FF_PREV: Mutex<Option<candle_core::Tensor>> = Mutex::new(None);
+            let n = FF_LOG.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 48 {
+                if n % 2 == 0 {
+                    *FF_PREV.lock().unwrap() = Some(ff_out.clone());
+                } else {
+                    let block_idx = n / 2;
+                    if let Some(ref prev) = *FF_PREV.lock().unwrap() {
+                        let diff = (prev.to_dtype(candle_core::DType::F32)?
+                            - ff_out.to_dtype(candle_core::DType::F32)?)?;
+                        let diff_std: f32 = diff.flatten_all()?.var(0)?.to_scalar::<f32>()?.sqrt();
+                        log::info!("  block {:2} ff_diff_std={:.6}", block_idx, diff_std);
+                    }
+                }
+            }
+        }
+
         let vx = vx.broadcast_add(&ff_out.broadcast_mul(gate_mlp)?)?;
 
         Ok(vx)
+    }
+
+    /// Accessor for cross-attention module (for diagnostics).
+    pub fn attn2(&self) -> &Attention {
+        self.attn2.as_ref().expect("video attn2 required")
     }
 }

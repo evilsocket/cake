@@ -146,6 +146,16 @@ impl LTXModel {
         &self.config
     }
 
+    /// Access the transformer blocks (for per-block diagnostics).
+    pub fn blocks(&self) -> &[BasicAVTransformerBlock] {
+        &self.blocks
+    }
+
+    /// The global index of the first block in this shard.
+    pub fn block_start(&self) -> usize {
+        self.block_start
+    }
+
     /// Whether this model shard includes the setup components (proj_in, adaln, caption).
     pub fn has_setup(&self) -> bool {
         self.proj_in.is_some()
@@ -195,7 +205,19 @@ impl LTXModel {
 
         // 3. Caption projection (LTX-2 only; LTX-2.3 does this in the connector)
         let context = if let Some(ref caption_proj) = self.caption_projection {
-            caption_proj.forward(context)?
+            let projected = caption_proj.forward(context)?;
+            // Debug: log caption_projection output stats (first call only)
+            {
+                let pf = projected.to_dtype(candle_core::DType::F32)?.flatten_all()?;
+                let p_min: f32 = pf.min(0)?.to_scalar()?;
+                let p_max: f32 = pf.max(0)?.to_scalar()?;
+                let p_std: f32 = pf.var(0)?.to_scalar::<f32>()?.sqrt();
+                log::info!(
+                    "caption_projection output: {:?}, min={:.4}, max={:.4}, std={:.4}",
+                    projected.shape(), p_min, p_max, p_std
+                );
+            }
+            projected
         } else {
             context.clone()
         };
