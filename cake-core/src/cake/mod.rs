@@ -138,12 +138,6 @@ impl Context {
                     "Qwen2ForCausalLM" => TextModelArch::Qwen2,
                     #[cfg(feature = "qwen3_5")]
                     "Qwen3_5ForConditionalGeneration" => TextModelArch::Qwen3_5,
-                    #[cfg(feature = "llava")]
-                    "LlavaForConditionalGeneration" | "LlavaLlamaForCausalLM" => {
-                        TextModelArch::Llava
-                    }
-                    #[cfg(feature = "mixtral")]
-                    "MixtralForCausalLM" => TextModelArch::Mixtral,
                     _ => TextModelArch::Llama,
                 };
             }
@@ -158,14 +152,6 @@ impl Context {
                 #[cfg(feature = "qwen3_5")]
                 TextModelArch::Qwen3_5 => {
                     crate::models::qwen3_5::Qwen3_5Config::from_path(&config_filename)?.into_config()
-                }
-                #[cfg(feature = "llava")]
-                TextModelArch::Llava => {
-                    crate::models::llava::LlavaConfig::from_path(&config_filename)?.into_config()
-                }
-                #[cfg(feature = "mixtral")]
-                TextModelArch::Mixtral => {
-                    crate::models::mixtral::MixtralConfig::from_path(&config_filename)?.into_config()
                 }
                 #[cfg(feature = "llama")]
                 TextModelArch::Llama => {

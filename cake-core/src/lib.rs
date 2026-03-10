@@ -33,8 +33,6 @@ pub enum ImageModelArch {
     LtxVideo,
     /// Lightricks LTX-2 (19B audio+video, Gemma-3 text encoder)
     Ltx2,
-    /// Tencent HunyuanVideo
-    HunyuanVideo,
 }
 
 /// Supported text model architectures.
@@ -49,10 +47,6 @@ pub enum TextModelArch {
     Qwen2,
     /// Qwen3.5 hybrid linear/full attention
     Qwen3_5,
-    /// LLaVA (vision-language, CLIP + LLaMA)
-    Llava,
-    /// Mixtral MoE (sparse mixture of experts)
-    Mixtral,
 }
 
 #[derive(Clone, Parser, Default, Debug)]
