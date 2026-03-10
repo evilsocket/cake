@@ -167,6 +167,7 @@ impl<G: Generator + 'static> Worker<G> {
                     dev.clone(),
                     &gpu_layer_groups[ordinal],
                     ctx.fp8,
+                    None,
                 )?;
                 log::info!("  GPU {} ready", ordinal);
                 gpu_devices.push(dev);

@@ -2,6 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use super::History;
+use crate::models::common::chatml_history::ChatMLHistory;
 use crate::models::common::text_model::TextModelBase;
 use crate::models::common::Transformer;
 use crate::models::TextGenerator;
@@ -13,10 +14,37 @@ use crate::{
 /// Default end of stream token if not found in configuration.
 const DEFAULT_EOS_TOKEN: &str = "<|eot_id|>";
 
+/// Chat history format: LLaMA-3 native or ChatML fallback (e.g. for SmolLM2).
+enum ChatHistory {
+    Llama(History),
+    ChatML(ChatMLHistory),
+}
+
+impl ChatHistory {
+    fn push(&mut self, msg: Message) {
+        match self {
+            Self::Llama(h) => h.push(msg),
+            Self::ChatML(h) => h.push(msg),
+        }
+    }
+    fn encode_dialog_to_prompt(&self) -> String {
+        match self {
+            Self::Llama(h) => h.encode_dialog_to_prompt(),
+            Self::ChatML(h) => h.encode_dialog_to_prompt(),
+        }
+    }
+    fn clear(&mut self) {
+        match self {
+            Self::Llama(h) => h.clear(),
+            Self::ChatML(h) => h.clear(),
+        }
+    }
+}
+
 /// LLama main class.
 pub struct LLama {
     base: TextModelBase,
-    history: History,
+    history: ChatHistory,
 }
 
 #[async_trait]
@@ -33,7 +61,16 @@ impl Generator for LLama {
             base.load_draft::<Transformer>(draft_model, DEFAULT_EOS_TOKEN).await?;
         }
 
-        let history = History::new();
+        // Auto-detect chat template: LLaMA-3 uses <|begin_of_text|>;
+        // other LlamaForCausalLM models (e.g. SmolLM2) may use ChatML (<|im_start|>).
+        let history = if base.tokenizer.token_to_id("<|begin_of_text|>").is_some() {
+            log::debug!("llama: using LLaMA-3 chat format");
+            ChatHistory::Llama(History::new())
+        } else {
+            log::info!("llama: tokenizer has no <|begin_of_text|>, falling back to ChatML format");
+            ChatHistory::ChatML(ChatMLHistory::new())
+        };
+
         Ok(Some(Box::new(Self { base, history })))
     }
 }

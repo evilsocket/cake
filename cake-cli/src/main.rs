@@ -139,6 +139,7 @@ async fn main() -> Result<()> {
                     args.cluster_key.as_ref().unwrap(),
                     &model_path,
                     timeout,
+                    args.min_workers,
                 )
                 .await?;
                 args.topology_override = Some(topology);
@@ -254,6 +255,69 @@ async fn run_master(ctx: Context) -> Result<()> {
         TextModelArch::Qwen3_5 => {
             run_with_image_model!(cake_core::models::qwen3_5::Qwen3_5, ctx)
         }
+        #[cfg(feature = "qwen3")]
+        TextModelArch::Qwen3 => {
+            Master::<cake_core::models::qwen3::Qwen3, cake_core::models::sd::SD>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
+        #[cfg(feature = "qwen3_moe")]
+        TextModelArch::Qwen3Moe => {
+            Master::<cake_core::models::qwen3_moe::Qwen3Moe, cake_core::models::sd::SD>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
+        #[cfg(feature = "qwen3_5_moe")]
+        TextModelArch::Qwen3_5Moe => {
+            Master::<cake_core::models::qwen3_5_moe::Qwen3_5Moe, cake_core::models::sd::SD>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
+        #[cfg(feature = "phi4")]
+        TextModelArch::Phi4 => {
+            Master::<cake_core::models::phi4::Phi4, cake_core::models::sd::SD>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
+        #[cfg(feature = "mistral")]
+        TextModelArch::Mistral => {
+            Master::<cake_core::models::mistral::Mistral, cake_core::models::sd::SD>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
+        #[cfg(feature = "gemma3")]
+        TextModelArch::Gemma3 => {
+            Master::<cake_core::models::gemma3::Gemma3, cake_core::models::sd::SD>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
+        #[cfg(feature = "falcon3")]
+        TextModelArch::Falcon3 => {
+            Master::<cake_core::models::falcon3::Falcon3, cake_core::models::sd::SD>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
+        #[cfg(feature = "olmo2")]
+        TextModelArch::OLMo2 => {
+            Master::<cake_core::models::olmo2::OLMo2, cake_core::models::sd::SD>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
+        #[cfg(feature = "exaone4")]
+        TextModelArch::EXAONE4 => {
+            Master::<cake_core::models::exaone4::EXAONE4, cake_core::models::sd::SD>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
         #[cfg(feature = "llama")]
         TextModelArch::Llama | TextModelArch::Auto => {
             run_with_image_model!(cake_core::models::llama3::LLama, ctx)
@@ -284,6 +348,69 @@ async fn run_worker(ctx: &mut Context) -> Result<()> {
             #[cfg(feature = "qwen3_5")]
             TextModelArch::Qwen3_5 => {
                 Worker::<cake_core::models::qwen3_5::Qwen3_5>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(feature = "qwen3")]
+            TextModelArch::Qwen3 => {
+                Worker::<cake_core::models::qwen3::Qwen3>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(feature = "qwen3_moe")]
+            TextModelArch::Qwen3Moe => {
+                Worker::<cake_core::models::qwen3_moe::Qwen3Moe>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(feature = "qwen3_5_moe")]
+            TextModelArch::Qwen3_5Moe => {
+                Worker::<cake_core::models::qwen3_5_moe::Qwen3_5Moe>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(feature = "phi4")]
+            TextModelArch::Phi4 => {
+                Worker::<cake_core::models::phi4::Phi4>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(feature = "mistral")]
+            TextModelArch::Mistral => {
+                Worker::<cake_core::models::mistral::Mistral>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(feature = "gemma3")]
+            TextModelArch::Gemma3 => {
+                Worker::<cake_core::models::gemma3::Gemma3>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(feature = "falcon3")]
+            TextModelArch::Falcon3 => {
+                Worker::<cake_core::models::falcon3::Falcon3>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(feature = "olmo2")]
+            TextModelArch::OLMo2 => {
+                Worker::<cake_core::models::olmo2::OLMo2>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(feature = "exaone4")]
+            TextModelArch::EXAONE4 => {
+                Worker::<cake_core::models::exaone4::EXAONE4>::new(ctx)
                     .await?
                     .run()
                     .await

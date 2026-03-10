@@ -138,6 +138,24 @@ impl Context {
                     "Qwen2ForCausalLM" => TextModelArch::Qwen2,
                     #[cfg(feature = "qwen3_5")]
                     "Qwen3_5ForConditionalGeneration" => TextModelArch::Qwen3_5,
+                    #[cfg(feature = "qwen3")]
+                    "Qwen3ForCausalLM" => TextModelArch::Qwen3,
+                    #[cfg(feature = "qwen3_moe")]
+                    "Qwen3MoeForCausalLM" => TextModelArch::Qwen3Moe,
+                    #[cfg(feature = "qwen3_5_moe")]
+                    "Qwen3_5MoeForConditionalGeneration" => TextModelArch::Qwen3_5Moe,
+                    #[cfg(feature = "phi4")]
+                    "Phi3ForCausalLM" | "Phi4ForCausalLM" => TextModelArch::Phi4,
+                    #[cfg(feature = "mistral")]
+                    "MistralForCausalLM" => TextModelArch::Mistral,
+                    #[cfg(feature = "gemma3")]
+                    "Gemma3ForCausalLM" => TextModelArch::Gemma3,
+                    #[cfg(feature = "falcon3")]
+                    "FalconForCausalLM" => TextModelArch::Falcon3,
+                    #[cfg(feature = "olmo2")]
+                    "OLMo2ForCausalLM" | "Olmo2ForCausalLM" => TextModelArch::OLMo2,
+                    #[cfg(feature = "exaone4")]
+                    "ExaoneForCausalLM" => TextModelArch::EXAONE4,
                     _ => TextModelArch::Llama,
                 };
             }
@@ -153,13 +171,47 @@ impl Context {
                 TextModelArch::Qwen3_5 => {
                     crate::models::qwen3_5::Qwen3_5Config::from_path(&config_filename)?.into_config()
                 }
+                #[cfg(feature = "qwen3")]
+                TextModelArch::Qwen3 => {
+                    crate::models::qwen3::Qwen3Config::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "qwen3_moe")]
+                TextModelArch::Qwen3Moe => {
+                    crate::models::qwen3_moe::Qwen3MoeConfig::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "qwen3_5_moe")]
+                TextModelArch::Qwen3_5Moe => {
+                    crate::models::qwen3_5_moe::Qwen3_5MoeConfig::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "phi4")]
+                TextModelArch::Phi4 => {
+                    crate::models::phi4::Phi4Config::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "mistral")]
+                TextModelArch::Mistral => {
+                    crate::models::mistral::MistralConfig::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "gemma3")]
+                TextModelArch::Gemma3 => {
+                    crate::models::gemma3::Gemma3Config::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "falcon3")]
+                TextModelArch::Falcon3 => {
+                    crate::models::falcon3::Falcon3Config::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "olmo2")]
+                TextModelArch::OLMo2 => {
+                    crate::models::olmo2::OLMo2Config::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "exaone4")]
+                TextModelArch::EXAONE4 => {
+                    crate::models::exaone4::EXAONE4Config::from_path(&config_filename)?.into_config()
+                }
                 #[cfg(feature = "llama")]
                 TextModelArch::Llama => {
                     crate::models::llama3::LlamaConfig::from_path(&config_filename)?.into_config()
                 }
                 _ => {
-                    // Fallback: use a generic config parser approach
-                    // Parse the raw JSON and construct Config directly
                     bail!("no text model feature enabled for architecture {:?}", text_model_arch)
                 }
             };
@@ -181,6 +233,13 @@ impl Context {
                 if fp8 {
                     log::info!("model uses FP8 quantization — weights will be dequantized at load time");
                 }
+                let gptq_group_size = if utils::gptq::is_gptq_quantized(&config_filename) {
+                    let gs = utils::gptq::gptq_group_size(&config_filename);
+                    log::info!("model uses GPTQ quantization (group_size={gs}) — weights will be dequantized at load time");
+                    Some(gs)
+                } else {
+                    None
+                };
                 let is_master = matches!(args.mode, Mode::Master);
                 let my_layers: Vec<String> = if !is_master {
                     topology.all_worker_layers().into_iter().collect()
@@ -197,6 +256,7 @@ impl Context {
                             dtype,
                             device.clone(),
                             fp8,
+                            gptq_group_size,
                         )?
                     } else {
                         utils::load_var_builder_for_local_layers(
@@ -205,6 +265,7 @@ impl Context {
                             device.clone(),
                             &worker_layers,
                             fp8,
+                            gptq_group_size,
                         )?
                     }
                 } else if !my_layers.is_empty() {
@@ -215,6 +276,7 @@ impl Context {
                         device.clone(),
                         &my_layers,
                         fp8,
+                        gptq_group_size,
                     )?
                 } else {
                     // Worker without known layers: load everything
@@ -223,6 +285,7 @@ impl Context {
                         dtype,
                         device.clone(),
                         fp8,
+                        gptq_group_size,
                     )?
                 });
             }

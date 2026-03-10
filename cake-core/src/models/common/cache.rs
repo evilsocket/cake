@@ -160,6 +160,29 @@ impl Cache {
         }
     }
 
+    /// Like `process_kv` but caps the KV cache to `window` tokens (sliding window attention).
+    pub fn process_kv_windowed(
+        &mut self,
+        block_idx: usize,
+        k: Tensor,
+        v: Tensor,
+        window: usize,
+    ) -> Result<(Tensor, Tensor)> {
+        if self.use_kv_cache {
+            let (k_out, v_out) = self.kvs[block_idx].append(&k, &v)?;
+            let k_seq_len = k_out.dims()[2];
+            if k_seq_len > window {
+                let k_trimmed = k_out.narrow(2, k_seq_len - window, window)?.contiguous()?;
+                let v_trimmed = v_out.narrow(2, k_seq_len - window, window)?.contiguous()?;
+                Ok((k_trimmed, v_trimmed))
+            } else {
+                Ok((k_out, v_out))
+            }
+        } else {
+            Ok((k, v))
+        }
+    }
+
     /// Get the recurrent state for a linear attention layer.
     pub fn get_recurrent_state(&self, block_idx: usize) -> Option<&Tensor> {
         self.recurrent_states[block_idx].as_ref()

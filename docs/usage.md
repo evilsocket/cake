@@ -140,7 +140,7 @@ Streaming responses use Server-Sent Events (SSE) format, compatible with the Ope
 | `--device` | `0` | GPU device index |
 | `--cpu` | `false` | Force CPU inference |
 | `--dtype` | - | Override dtype (default: f16) |
-| `--text-model-arch` | `auto` | Force model architecture |
+| `--text-model-arch` | `auto` | Force model architecture (`auto`, `llama`, `qwen2`, `qwen3`, `qwen3-moe`, `qwen3-5`, `phi4`, `mistral`, `gemma3`, `falcon3`, `ol-mo2`, `exaone4`) |
 | `--cluster-key` | - | Zero-config cluster key (or `CAKE_CLUSTER_KEY` env) |
 | `--discovery-timeout` | `10` | Worker discovery timeout in seconds |
 | `--ui-auth` | - | Basic auth for web UI (`user:pass`) |

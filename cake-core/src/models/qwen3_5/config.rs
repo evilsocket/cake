@@ -138,6 +138,20 @@ impl Qwen3_5Config {
             partial_rotary_factor,
             linear_attn,
             residual_rms_norm: true,
+            use_qk_norm: false,
+            pre_reshape_qk_norm: false,
+            sliding_window: None,
+            fused_qkv_proj: false,
+            fused_gate_up_proj: false,
+            use_gelu_mlp: false,
+            embed_scale: None,
+            moe_intermediate_size: None,
+            num_experts: 0,
+            num_experts_per_tok: 0,
+            norm_topk_prob: false,
+            shared_expert_intermediate_size: None,
+            attn_output_gate: false,
+            global_layers: vec![],
         }
     }
 }

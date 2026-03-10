@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
-use candle_core::{Device, IndexOp, Tensor};
+#[cfg(feature = "cuda")]
+use candle_core::Device;
+use candle_core::{IndexOp, Tensor};
 use candle_nn::{linear_no_bias as linear, Embedding, Linear, Module, RmsNorm};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
 use tokenizers::Tokenizer;
@@ -308,6 +310,10 @@ impl TextModelBase {
 
         let emb_start = std::time::Instant::now();
         let mut x = self.embedding.forward(x)?;
+        // Apply embedding scale if configured (Gemma scales by sqrt(hidden_size)).
+        if let Some(scale) = self.ctx.config.as_ref().and_then(|c| c.embed_scale) {
+            x = (x * scale as f64)?;
+        }
         let emb_elapsed = emb_start.elapsed();
 
         let num_blocks = self.blocks.len();

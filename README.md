@@ -24,7 +24,7 @@ Cake is a Rust framework for distributed inference of large language models and 
 ## Key Features
 
 - **Distributed Inference** — Shard transformer blocks across multiple devices to run models that don't fit on a single GPU. [Learn more](https://github.com/evilsocket/cake/blob/main/docs/clustering.md).
-- **Multi Model** — Support for [LLaMA 3.x, Qwen2/2.5, Qwen3.5](https://github.com/evilsocket/cake/blob/main/docs/models.md) and [Stable Diffusion](https://github.com/evilsocket/cake/blob/main/docs/stable_diffusion.md).
+- **Multi Model** — Support for [LLaMA 3.x, SmolLM2, Qwen2/2.5/3/3.5, Phi-4, Mistral, Gemma 3, Falcon3, OLMo 2, EXAONE 4.0](https://github.com/evilsocket/cake/blob/main/docs/models.md) and [Stable Diffusion](https://github.com/evilsocket/cake/blob/main/docs/stable_diffusion.md).
 - **Multi Platform** — CUDA, Metal, and CPU backends across [Linux, macOS, Windows, iOS, and Android](https://github.com/evilsocket/cake/blob/main/docs/install.md).
 - **Zero-Config Clustering** — mDNS discovery, automatic layer assignment, and model data push with a single `--cluster-key` flag. [Learn more](https://github.com/evilsocket/cake/blob/main/docs/clustering.md#zero-config-cluster-mdns-discovery).
 - **OpenAI-Compatible API** — REST API with streaming support, plus a [built-in web UI and TUI chat client](https://github.com/evilsocket/cake/blob/main/docs/usage.md#web-ui).
@@ -52,8 +52,19 @@ Cake is a Rust framework for distributed inference of large language models and 
 | Model | Type | Feature Flag | Status |
 |-------|------|-------------|--------|
 | LLaMA 3.x | Text | `llama` (default) | ✅ |
+| SmolLM2 | Text | `llama` (default) | ✅ |
 | Qwen2 / Qwen2.5 | Text | `qwen2` (default) | ✅ |
+| Qwen3 (dense) | Text | `qwen3` (default) | ✅ |
+| Qwen3 MoE | Text | `qwen3_moe` (default) | ✅ |
 | Qwen3.5 | Text | `qwen3_5` (default) | ✅ |
+| Qwen3.5 MoE (GPTQ-Int4) | Text | `qwen3_5_moe` (default) | ✅ |
+| Phi-4-mini / Phi-4 | Text | `phi4` (default) | ✅ |
+| Mistral | Text | `mistral` (default) | ✅ |
+| Gemma 3 | Text | `gemma3` (default) | ✅ |
+| Falcon3 | Text | `falcon3` (default) | ✅ |
+| OLMo 2 | Text | `olmo2` (default) | ✅ |
+| EXAONE 4.0 | Text | `exaone4` (default) | ✅ |
+| DeepSeek-R1 (distilled) | Text | `llama` / `qwen2` (default) | ✅ |
 | Stable Diffusion (1.5, 2.1, XL, XL Turbo) | Image | - | ✅ |
 
 ## Quick Start
