@@ -14,7 +14,7 @@ use super::vocoder::Ltx2Vocoder;
 use super::vendored::config::{Ltx2SchedulerConfig, Ltx2TransformerConfig, Ltx2VaeConfig};
 use super::vendored::model::LTXModel;
 use super::vendored::pipeline::{
-    build_video_positions, denormalize_latents, normalize_latents, pack_latents, unpack_latents,
+    build_video_positions, denormalize_latents, pack_latents, unpack_latents,
 };
 use super::vendored::scheduler::{euler_step, Ltx2Scheduler};
 use crate::cake::{Context, Forwarder};
@@ -438,19 +438,7 @@ impl VideoGenerator for Ltx2 {
             (dummy, mask)
         };
 
-        // Debug: log Gemma output stats before connector
-        {
-            let ge_f32 = packed_embeds.to_dtype(DType::F32)?.flatten_all()?;
-            let ge_min: f32 = ge_f32.min(0)?.to_scalar()?;
-            let ge_max: f32 = ge_f32.max(0)?.to_scalar()?;
-            let ge_std: f32 = ge_f32.var(0)?.to_scalar::<f32>()?.sqrt();
-            info!(
-                "Gemma packed embeds (pre-connector): {:?}, min={:.4}, max={:.4}, std={:.4}",
-                packed_embeds.shape(), ge_min, ge_max, ge_std
-            );
-        }
         // Send packed embeddings to connector (local)
-        info!("Sending packed embeddings to connector...");
         let prompt_embeds = Ltx2Gemma::encode(
             &mut self.gemma_connector,
             packed_embeds,
@@ -463,18 +451,6 @@ impl VideoGenerator for Ltx2 {
         let ctx_seq_len = prompt_embeds.dim(1)?;
         let context_mask = Tensor::ones((1, ctx_seq_len), DType::F32, &self.context.device)?
             .to_dtype(DType::BF16)?;
-
-        // Debug: log prompt embedding statistics
-        {
-            let pe_f32 = prompt_embeds.to_dtype(DType::F32)?.flatten_all()?;
-            let pe_min: f32 = pe_f32.min(0)?.to_scalar()?;
-            let pe_max: f32 = pe_f32.max(0)?.to_scalar()?;
-            let pe_mean: f32 = pe_f32.mean(0)?.to_scalar()?;
-            info!(
-                "Text connector done: {:?}, min={:.4}, max={:.4}, mean={:.4}",
-                prompt_embeds.shape(), pe_min, pe_max, pe_mean
-            );
-        }
 
         // Prepare unconditional context for classifier-free guidance
         // Python diffusers encodes empty string "" through full Gemma + connector pipeline
@@ -503,15 +479,6 @@ impl VideoGenerator for Ltx2 {
                 (dummy, mask)
             };
 
-            // Debug: log negative Gemma output
-            {
-                let nge_f32 = neg_packed.to_dtype(DType::F32)?.flatten_all()?;
-                let nge_std: f32 = nge_f32.var(0)?.to_scalar::<f32>()?.sqrt();
-                info!(
-                    "Gemma uncond packed embeds std={:.4}",
-                    nge_std
-                );
-            }
             // Run through connector (same as positive prompt)
             let neg_embeds = Ltx2Gemma::encode(
                 &mut self.gemma_connector,
@@ -526,44 +493,6 @@ impl VideoGenerator for Ltx2 {
             let neg_ctx_mask = Tensor::ones((1, neg_ctx_len), DType::F32, &self.context.device)?
                 .to_dtype(DType::BF16)?;
 
-            {
-                let ne_f32 = neg_embeds.to_dtype(DType::F32)?.flatten_all()?;
-                let ne_min: f32 = ne_f32.min(0)?.to_scalar()?;
-                let ne_max: f32 = ne_f32.max(0)?.to_scalar()?;
-                let ne_mean: f32 = ne_f32.mean(0)?.to_scalar()?;
-                info!(
-                    "Unconditional embeds: {:?}, min={:.4}, max={:.4}, mean={:.4}",
-                    neg_embeds.shape(), ne_min, ne_max, ne_mean
-                );
-                // Compare cond vs uncond (overall)
-                let pe_f32 = prompt_embeds.to_dtype(DType::F32)?.flatten_all()?;
-                let diff = (&pe_f32 - &ne_f32)?;
-                let diff_std: f32 = diff.var(0)?.to_scalar::<f32>()?.sqrt();
-                let diff_mean: f32 = diff.mean(0)?.to_scalar()?;
-                info!(
-                    "Cond vs uncond context diff: mean={:.6}, std={:.6}",
-                    diff_mean, diff_std
-                );
-                // Per-position analysis: compare first 30 vs last 30 tokens
-                // Python shows: first 30 diff_std=0.421, last 30 diff_std=0.009
-                let pe_2d = prompt_embeds.to_dtype(DType::F32)?; // [1, L, D]
-                let ne_2d = neg_embeds.to_dtype(DType::F32)?;
-                let diff_2d = (&pe_2d - &ne_2d)?;
-                let seq = diff_2d.dim(1)?;
-                let n_check = 30.min(seq);
-                let first_diff = diff_2d.narrow(1, 0, n_check)?.flatten_all()?;
-                let last_diff = diff_2d.narrow(1, seq - n_check, n_check)?.flatten_all()?;
-                let first_std: f32 = first_diff.var(0)?.to_scalar::<f32>()?.sqrt();
-                let last_std: f32 = last_diff.var(0)?.to_scalar::<f32>()?.sqrt();
-                // Per-token L2 norms
-                let per_tok = diff_2d.sqr()?.sum(2)?.sqrt()?.squeeze(0)?; // [L]
-                let tok_vals: Vec<f32> = per_tok.to_vec1()?;
-                let nonzero = tok_vals.iter().filter(|&&v| v > 0.01).count();
-                info!(
-                    "  first {} tokens diff_std={:.6}, last {} diff_std={:.6}, nonzero(>0.01)={}/{}",
-                    n_check, first_std, n_check, last_std, nonzero, seq
-                );
-            }
             (Some(neg_embeds), Some(neg_ctx_mask))
         } else {
             (None, None)
@@ -683,88 +612,6 @@ impl VideoGenerator for Ltx2 {
             );
         }
 
-        // DEBUG: per-block diff diagnostic (cond vs uncond through local blocks)
-        if is_split && do_cfg {
-            let local = self.local_transformer.as_ref().unwrap();
-            let sigma_test = Tensor::full(sigmas[0], (1,), &self.context.device)?
-                .to_dtype(DType::BF16)?;
-            let pos_f32 = positions.to_dtype(DType::F32)?;
-            let lat_bf16 = latents.to_dtype(DType::BF16)?;
-
-            // Setup for both contexts
-            let ctx_cond = prompt_embeds.to_dtype(DType::BF16)?;
-            let (hidden_c, temb_c, _ets_c, pe_c, ctx_proj_c, _ptc) =
-                local.forward_setup(&lat_bf16, &sigma_test, &pos_f32, &ctx_cond)?;
-
-            let uncond_ctx_t = uncond_embeds.as_ref().unwrap().to_dtype(DType::BF16)?;
-            let (_hidden_u, _temb_u, _ets_u, _pe_u, ctx_proj_u, _ptu) =
-                local.forward_setup(&lat_bf16, &sigma_test, &pos_f32, &uncond_ctx_t)?;
-
-            // Caption projection diff
-            let ctx_diff = (&ctx_proj_c.to_dtype(DType::F32)? - &ctx_proj_u.to_dtype(DType::F32)?)?;
-            let ctx_diff_std: f32 = ctx_diff.flatten_all()?.var(0)?.to_scalar::<f32>()?.sqrt();
-            info!("PRE-FLIGHT: caption_projection diff: std={:.6}", ctx_diff_std);
-
-            // Run blocks one-by-one, comparing cond vs uncond after each
-            let mask_bf16 = context_mask.to_dtype(DType::BF16)?;
-            let uncond_mask_bf16 = uncond_mask.as_ref().unwrap().to_dtype(DType::BF16)?;
-            let mut x_c = hidden_c.clone();
-            let mut x_u = hidden_c.clone(); // same initial hidden (from same latents)
-            for (i, block) in local.blocks().iter().enumerate() {
-                let global_idx = local.block_start() + i;
-                x_c = block.forward_video_only(&x_c, &temb_c, Some(&pe_c), &ctx_proj_c, Some(&mask_bf16), None, false)?;
-                x_u = block.forward_video_only(&x_u, &temb_c, Some(&pe_c), &ctx_proj_u, Some(&uncond_mask_bf16), None, false)?;
-
-                let diff = (&x_c.to_dtype(DType::F32)? - &x_u.to_dtype(DType::F32)?)?;
-                let diff_std: f32 = diff.flatten_all()?.var(0)?.to_scalar::<f32>()?.sqrt();
-                let pos_std: f32 = x_c.to_dtype(DType::F32)?.flatten_all()?.var(0)?.to_scalar::<f32>()?.sqrt();
-                info!("  block {:2}: diff_std={:.6}, pos_std={:.6}", global_idx, diff_std, pos_std);
-            }
-
-            // TEST: load Python's exact ca_query and ca_kv, run through block 0's attn2
-            if let Ok(ref_path) = std::env::var("LTX2_CA_REF") {
-                info!("Loading Python cross-attention reference from {}", ref_path);
-                let ref_tensors = candle_core::safetensors::load(&ref_path, &self.context.device)?;
-
-                let py_query = ref_tensors.get("ca_query").unwrap(); // [2, 2112, 4096] F32
-                let py_kv = ref_tensors.get("ca_kv").unwrap(); // [2, 1024, 4096] F32
-                let py_ca_out = ref_tensors.get("ca_out").unwrap(); // [2, 2112, 4096] F32
-
-                // Run through Rust's block 0 attn2 with Python's exact inputs
-                let block0 = &local.blocks()[0];
-                let attn2 = block0.attn2();
-
-                // Neg batch
-                let q_neg = py_query.i(0..1)?.to_dtype(DType::BF16)?;
-                let kv_neg = py_kv.i(0..1)?.to_dtype(DType::BF16)?;
-                let rust_neg = attn2.forward(&q_neg, Some(&kv_neg), None, None, None)?;
-
-                // Pos batch
-                let q_pos = py_query.i(1..2)?.to_dtype(DType::BF16)?;
-                let kv_pos = py_kv.i(1..2)?.to_dtype(DType::BF16)?;
-                let rust_pos = attn2.forward(&q_pos, Some(&kv_pos), None, None, None)?;
-
-                // Compare output diff
-                let rust_diff = (&rust_pos.to_dtype(DType::F32)? - &rust_neg.to_dtype(DType::F32)?)?;
-                let rust_diff_std: f32 = rust_diff.flatten_all()?.var(0)?.to_scalar::<f32>()?.sqrt();
-
-                let py_neg_out = py_ca_out.i(0..1)?;
-                let py_pos_out = py_ca_out.i(1..2)?;
-                let py_diff = (&py_pos_out - &py_neg_out)?;
-                let py_diff_std: f32 = py_diff.flatten_all()?.var(0)?.to_scalar::<f32>()?.sqrt();
-
-                // Also check absolute match
-                let rust_vs_py_neg = (&rust_neg.to_dtype(DType::F32)? - &py_neg_out)?;
-                let neg_match_std: f32 = rust_vs_py_neg.flatten_all()?.var(0)?.to_scalar::<f32>()?.sqrt();
-                let neg_match_max: f32 = rust_vs_py_neg.flatten_all()?.abs()?.max(0)?.to_scalar()?;
-
-                info!("ATTN2 TEST: Rust ca_diff_std={:.6}, Python ca_diff_std={:.6}, ratio={:.3}",
-                    rust_diff_std, py_diff_std, rust_diff_std / py_diff_std);
-                info!("ATTN2 TEST: Rust vs Python neg output: diff_std={:.6}, max_abs={:.6}",
-                    neg_match_std, neg_match_max);
-            }
-        }
-
         for step in 0..num_steps {
             let start_time = std::time::Instant::now();
 
@@ -816,11 +663,6 @@ impl VideoGenerator for Ltx2 {
                 };
 
                 let cfg_diff = (&cond_velocity - &uncond_velocity)?;
-                if step < 3 {
-                    let diff_f32 = cfg_diff.to_dtype(DType::F32)?.flatten_all()?;
-                    let diff_std: f32 = diff_f32.var(0)?.to_scalar::<f32>()?.sqrt();
-                    info!("step {} CFG diff std={:.6}", step + 1, diff_std);
-                }
                 velocity = (&velocity + cfg_diff.affine((guidance_scale - 1.0) as f64, 0.0)?)?;
             }
 
@@ -838,11 +680,6 @@ impl VideoGenerator for Ltx2 {
                 };
 
                 let stg_diff = (&cond_velocity - &stg_velocity)?;
-                if step < 3 {
-                    let diff_f32 = stg_diff.to_dtype(DType::F32)?.flatten_all()?;
-                    let diff_std: f32 = diff_f32.var(0)?.to_scalar::<f32>()?.sqrt();
-                    info!("step {} STG diff std={:.6}", step + 1, diff_std);
-                }
                 velocity = (&velocity + stg_diff.affine(stg_scale as f64, 0.0)?)?;
             }
 
@@ -859,33 +696,9 @@ impl VideoGenerator for Ltx2 {
                 }
             }
 
-            // Debug: log velocity and latent statistics
-            if step < 3 || step == num_steps - 1 {
-                let vel_f32 = velocity.to_dtype(DType::F32)?.flatten_all()?;
-                let vel_min: f32 = vel_f32.min(0)?.to_scalar()?;
-                let vel_max: f32 = vel_f32.max(0)?.to_scalar()?;
-                let vel_mean: f32 = vel_f32.mean(0)?.to_scalar()?;
-                let vel_std: f32 = vel_f32.var(0)?.to_scalar::<f32>()?.sqrt();
-                info!(
-                    "step {} velocity: min={:.4}, max={:.4}, mean={:.4}, std={:.4}",
-                    step + 1, vel_min, vel_max, vel_mean, vel_std
-                );
-            }
-
             // Euler step (keep in BF16 to match transformer weight precision)
             latents = euler_step(&latents.to_dtype(DType::F32)?, &velocity, sigma, sigma_next)?
                 .to_dtype(DType::BF16)?;
-
-            if step < 3 || step == num_steps - 1 {
-                let lat_f32 = latents.to_dtype(DType::F32)?.flatten_all()?;
-                let lat_min: f32 = lat_f32.min(0)?.to_scalar()?;
-                let lat_max: f32 = lat_f32.max(0)?.to_scalar()?;
-                let lat_mean: f32 = lat_f32.mean(0)?.to_scalar()?;
-                info!(
-                    "step {} latents: min={:.4}, max={:.4}, mean={:.4}",
-                    step + 1, lat_min, lat_max, lat_mean
-                );
-            }
 
             let dt = start_time.elapsed().as_secs_f32();
             info!(
@@ -912,35 +725,10 @@ impl VideoGenerator for Ltx2 {
         .to_dtype(DType::BF16)?;
 
         // Debug: check latent statistics before VAE
-        {
-            let lat_f32 = latents_5d.to_dtype(DType::F32)?;
-            let flat = lat_f32.flatten_all()?;
-            let min_v: f32 = flat.min(0)?.to_scalar()?;
-            let max_v: f32 = flat.max(0)?.to_scalar()?;
-            let mean_v: f32 = flat.mean(0)?.to_scalar()?;
-            info!(
-                "Latents before VAE: shape={:?}, min={:.4}, max={:.4}, mean={:.4}",
-                latents_5d.shape(), min_v, max_v, mean_v
-            );
-        }
-
         // 8. Decode with VAE
         info!("Decoding with VAE...");
         let decoded =
             Ltx2Vae::decode(&mut self.vae, latents_5d, &mut self.context).await?;
-
-        // Debug: check decoded tensor stats
-        {
-            let dec_f32 = decoded.to_dtype(DType::F32)?;
-            let flat = dec_f32.flatten_all()?;
-            let min_v: f32 = flat.min(0)?.to_scalar()?;
-            let max_v: f32 = flat.max(0)?.to_scalar()?;
-            let mean_v: f32 = flat.mean(0)?.to_scalar()?;
-            info!(
-                "Decoded video: shape={:?}, dtype={:?}, min={:.4}, max={:.4}, mean={:.4}",
-                decoded.shape(), decoded.dtype(), min_v, max_v, mean_v
-            );
-        }
 
         // 9. Convert video frames to images
         let frames = video_tensor_to_images(&decoded)?;
@@ -989,17 +777,6 @@ impl Ltx2 {
         let (hidden, temb, embedded_ts, pe, ctx_projected, prompt_temb) =
             local.forward_setup(&latents, timestep, positions, context)?;
 
-        // DEBUG: log caption_projection output and context diff for first few calls
-        {
-            static CALL_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let call = CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if call < 6 {
-                let ctx_f32 = ctx_projected.to_dtype(DType::F32)?.flatten_all()?;
-                let ctx_std: f32 = ctx_f32.var(0)?.to_scalar::<f32>()?.sqrt();
-                info!("split_transformer call {}: ctx_projected std={:.6}, stg_skip={:?}", call, ctx_std, stg_skip_blocks);
-            }
-        }
-
         // 2. Run local blocks (with STG if applicable)
         let context_mask_bf16 = context_mask.to_dtype(DType::BF16)?;
         let x = local.forward_blocks_with_stg(
@@ -1011,19 +788,6 @@ impl Ltx2 {
             prompt_temb.as_ref(),
             stg_skip_blocks,
         )?;
-
-        // DEBUG: log hidden state after local blocks
-        {
-            static LOCAL_CALL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let call = LOCAL_CALL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if call < 6 {
-                let xf = x.to_dtype(DType::F32)?.flatten_all()?;
-                let x_std: f32 = xf.var(0)?.to_scalar::<f32>()?.sqrt();
-                let x_min: f32 = xf.min(0)?.to_scalar()?;
-                let x_max: f32 = xf.max(0)?.to_scalar()?;
-                info!("after local blocks (call {}): hidden std={:.6}, range=[{:.4},{:.4}]", call, x_std, x_min, x_max);
-            }
-        }
 
         // 3. Send to remote worker for remaining blocks + finalize
         let result = Ltx2Transformer::forward_blocks_packed(

@@ -179,7 +179,7 @@ impl Forwarder for Ltx2Gemma {
         x: &Tensor,
         _index_pos: usize,
         _block_idx: usize,
-        ctx: &mut Context,
+        _ctx: &mut Context,
     ) -> Result<Tensor> {
         let connector = self
             .connector

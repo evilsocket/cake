@@ -185,6 +185,7 @@ impl Ltx2Vae {
         })
     }
 
+    #[allow(dead_code)]
     pub fn load_model(ctx: &Context) -> Result<Box<dyn Forwarder>> {
         Ok(Box::new(Self::load_inner("ltx2-vae".to_string(), ctx)?))
     }
@@ -223,7 +224,7 @@ impl Forwarder for Ltx2Vae {
         x: &Tensor,
         _index_pos: usize,
         _block_idx: usize,
-        ctx: &mut Context,
+        _ctx: &mut Context,
     ) -> Result<Tensor> {
         let unpacked = unpack_tensors(x)?;
         let direction_vec: Vec<f32> = unpacked[0].to_vec1()?;

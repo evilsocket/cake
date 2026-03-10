@@ -225,7 +225,7 @@ impl Attention {
 
         // Apply per-head gating (LTX-2.3) — gate is computed from query input
         let out = if let Some(ref gate_proj) = self.to_gate_logits {
-            let (b, t_q, _) = x.dims3()?;
+            let (b, _t_q, _) = x.dims3()?;
             let gate = gate_proj.forward(x)?;
             let gate = (candle_nn::ops::sigmoid(&gate)? * 2.0)?;
             // Reshape v to [B, H, T, D_head] then apply gate

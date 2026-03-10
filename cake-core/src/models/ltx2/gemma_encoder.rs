@@ -44,6 +44,7 @@ pub fn gemma3_12b_config() -> gemma3::Config {
 pub const MAX_SEQ_LEN: usize = 1024;
 
 /// Scale factor for normalization (matches Python pipeline).
+#[allow(dead_code)]
 pub const PACK_SCALE_FACTOR: f32 = 8.0;
 
 /// Gemma-3 text encoder that extracts all hidden states.
@@ -129,25 +130,6 @@ impl Gemma3TextEncoder {
         let all_hidden = self.model.forward_all_hidden(&input_ids, 0, Some(&attention_mask))?;
         // all_hidden: Vec of 49 tensors, each [1, MAX_SEQ_LEN, 3840]
 
-        // Debug: check raw Gemma hidden state statistics
-        {
-            // Check embedding output (layer 0) and last layer
-            let emb_flat = all_hidden[0].flatten_all()?.to_dtype(DType::F32)?;
-            let last_flat = all_hidden[all_hidden.len()-1].flatten_all()?.to_dtype(DType::F32)?;
-            let emb_std: f32 = emb_flat.var(0)?.to_scalar::<f32>()?.sqrt();
-            let last_std: f32 = last_flat.var(0)?.to_scalar::<f32>()?.sqrt();
-            let emb_min: f32 = emb_flat.min(0)?.to_scalar()?;
-            let emb_max: f32 = emb_flat.max(0)?.to_scalar()?;
-            let last_min: f32 = last_flat.min(0)?.to_scalar()?;
-            let last_max: f32 = last_flat.max(0)?.to_scalar()?;
-            log::info!(
-                "Gemma raw hidden: embed std={:.4} [{:.2},{:.2}], layer48 std={:.4} [{:.2},{:.2}], {} layers, seq_len={}",
-                emb_std, emb_min, emb_max,
-                last_std, last_min, last_max,
-                all_hidden.len(), seq_len,
-            );
-        }
-
         // Stack to [B, seq_len, hidden_dim, num_layers]
         let stacked = Tensor::stack(&all_hidden, D::Minus1)?;
 
@@ -171,6 +153,7 @@ impl Gemma3TextEncoder {
     /// `attention_mask`: `[B, L]` float mask (1=valid, 0=padding)
     ///
     /// Returns `(packed_embeds, attention_mask)` same as `encode()`.
+    #[allow(dead_code)]
     pub fn encode_from_tokens(
         &mut self,
         input_ids: &Tensor,
@@ -309,6 +292,7 @@ pub fn pack_text_embeds(
 ///
 /// Input: `[B, seq_len, hidden_dim, num_layers]`
 /// Output: `[B, seq_len, hidden_dim * num_layers]`
+#[allow(dead_code)]
 pub fn pack_text_embeds_v2(
     text_hidden_states: &Tensor,
     sequence_lengths: &Tensor,
@@ -490,15 +474,6 @@ impl Gemma3AllHidden {
                 &attention_mask
             };
             xs = layer.forward(&xs, mask.as_ref(), seqlen_offset)?;
-
-            // Debug: log every 12th layer and last layer
-            if i % 12 == 0 || i == num_layers - 1 {
-                let flat = xs.flatten_all()?.to_dtype(DType::F32)?;
-                let std_val: f32 = flat.var(0)?.to_scalar::<f32>()?.sqrt();
-                let max_val: f32 = flat.max(0)?.to_scalar()?;
-                log::info!("Gemma layer {} hidden: std={:.2}, max={:.2}", i, std_val, max_val);
-            }
-
             all_hidden.push(xs.clone());
         }
 

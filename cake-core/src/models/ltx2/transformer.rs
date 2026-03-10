@@ -89,6 +89,7 @@ impl Ltx2Transformer {
     }
 
     /// Load a block range (e.g., blocks 0-23).
+    #[allow(dead_code)]
     pub fn load_block_range(
         name: String,
         ctx: &Context,
@@ -294,6 +295,7 @@ impl Ltx2Transformer {
     }
 
     /// Reference to the inner model (for master-side local execution).
+    #[allow(dead_code)]
     pub fn model(&self) -> &LTXModel {
         &self.model
     }
@@ -355,7 +357,7 @@ impl Forwarder for Ltx2Transformer {
         x: &Tensor,
         _index_pos: usize,
         block_idx: usize,
-        ctx: &mut Context,
+        _ctx: &mut Context,
     ) -> Result<Tensor> {
         let t0 = std::time::Instant::now();
         let unpacked = unpack_tensors(x)?;
