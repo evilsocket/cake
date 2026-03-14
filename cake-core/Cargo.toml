@@ -52,7 +52,7 @@ tracing-subscriber = "0.3.18"
 base64 = "0.22.1"
 
 [features]
-default = ["master", "llama", "qwen2", "qwen3_5", "qwen3", "qwen3_moe", "qwen3_5_moe", "phi4", "mistral", "gemma3", "falcon3", "olmo2", "exaone4"]
+default = ["master", "llama", "qwen2", "qwen3_5", "qwen3", "qwen3_moe", "qwen3_5_moe", "phi4", "mistral", "gemma3", "falcon3", "olmo2", "exaone4", "flux"]
 
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:candle-flash-attn"]
@@ -71,3 +71,4 @@ gemma3 = []
 falcon3 = []
 olmo2 = []
 exaone4 = []
+flux = []
