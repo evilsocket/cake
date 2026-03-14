@@ -1,8 +1,12 @@
 //! Sparse MoE FFN for Qwen3.5 MoE.
 //!
-//! Expert weights are stored as batched 3D tensors (not per-expert):
-//!   mlp.experts.gate_up_proj  (num_experts, 2*moe_intermediate_size, hidden_size)
-//!   mlp.experts.down_proj     (num_experts, hidden_size, moe_intermediate_size)
+//! Per-expert weights are stored as individual linear layers:
+//!   mlp.experts.{j}.gate_proj.weight  (moe_intermediate_size, hidden_size)
+//!   mlp.experts.{j}.up_proj.weight    (moe_intermediate_size, hidden_size)
+//!   mlp.experts.{j}.down_proj.weight  (hidden_size, moe_intermediate_size)
+//!
+//! When loaded from a GPTQ-Int4 model, the GPTQ backend transparently
+//! dequantizes each weight matrix (intercepting `*.weight` → `*.qweight`).
 //!
 //! A shared (always-active) expert is added to the routed output:
 //!   output = routed_output + sigmoid(shared_expert_gate(x)) * shared_expert(x)
@@ -23,10 +27,12 @@ use crate::models::common::Config;
 pub struct Qwen3_5MoeSparseMlp {
     /// Router: (num_experts, hidden_size)
     gate: Linear,
-    /// Batched fused gate+up expert projections: (num_experts, 2*moe_intermediate_size, hidden_size)
-    experts_gate_up: Tensor,
-    /// Batched expert down projections: (num_experts, hidden_size, moe_intermediate_size)
-    experts_down: Tensor,
+    /// Per-expert gate projections (hidden_size → moe_intermediate_size)
+    experts_gate: Vec<Linear>,
+    /// Per-expert up projections (hidden_size → moe_intermediate_size)
+    experts_up: Vec<Linear>,
+    /// Per-expert down projections (moe_intermediate_size → hidden_size)
+    experts_down: Vec<Linear>,
     /// Shared expert gate projection (hidden_size → shared_intermediate_size)
     shared_gate_proj: Linear,
     /// Shared expert up projection (hidden_size → shared_intermediate_size)
@@ -38,7 +44,6 @@ pub struct Qwen3_5MoeSparseMlp {
 
     num_experts: usize,
     num_experts_per_tok: usize,
-    moe_intermediate_size: usize,
 }
 
 impl Qwen3_5MoeSparseMlp {
@@ -52,11 +57,20 @@ impl Qwen3_5MoeSparseMlp {
         let gate_w = vb.pp("gate").get((n, h), "weight")?;
         let gate = Linear::new(gate_w, None);
 
-        // Batched expert projections stored as 3-D tensors
-        let experts_gate_up = vb.pp("experts").get((n, 2 * i, h), "gate_up_proj")?;
-        let experts_down = vb.pp("experts").get((n, h, i), "down_proj")?;
+        // Per-expert projections — GPTQ backend transparently dequantizes
+        // each *.weight request by looking for *.qweight + *.scales + *.qzeros.
+        let mut experts_gate = Vec::with_capacity(n);
+        let mut experts_up = Vec::with_capacity(n);
+        let mut experts_down = Vec::with_capacity(n);
+        let experts_vb = vb.pp("experts");
+        for j in 0..n {
+            let evb = experts_vb.pp(j.to_string());
+            experts_gate.push(linear(h, i, evb.pp("gate_proj"))?);
+            experts_up.push(linear(h, i, evb.pp("up_proj"))?);
+            experts_down.push(linear(i, h, evb.pp("down_proj"))?);
+        }
 
-        // Shared expert (standard SwiGLU MLP)
+        // Shared expert (standard SwiGLU MLP, not quantized)
         let se = vb.pp("shared_expert");
         let shared_gate_proj = linear(h, si, se.pp("gate_proj"))?;
         let shared_up_proj = linear(h, si, se.pp("up_proj"))?;
@@ -68,7 +82,8 @@ impl Qwen3_5MoeSparseMlp {
 
         Ok(Self {
             gate,
-            experts_gate_up,
+            experts_gate,
+            experts_up,
             experts_down,
             shared_gate_proj,
             shared_up_proj,
@@ -76,7 +91,6 @@ impl Qwen3_5MoeSparseMlp {
             shared_expert_gate,
             num_experts: n,
             num_experts_per_tok: cfg.num_experts_per_tok,
-            moe_intermediate_size: i,
         })
     }
 
@@ -176,8 +190,6 @@ impl Qwen3_5MoeSparseMlp {
         let mut output = Tensor::zeros((n_tok, h), compute_dtype, x_flat.device())
             .map_err(|e| anyhow!("output zeros: {e}"))?;
 
-        let i = self.moe_intermediate_size;
-
         // Dispatch: gather → expert FFN → weighted scatter-add
         for (exp_idx, tokens) in expert_tokens.iter().enumerate() {
             if tokens.is_empty() {
@@ -194,37 +206,21 @@ impl Qwen3_5MoeSparseMlp {
                 .index_select(&idx, 0)
                 .map_err(|e| anyhow!("index_select: {e}"))?; // (n_sel, h)
 
-            // Fetch this expert's fused gate+up: (2*i, h) → split into gate (i,h) and up (i,h)
-            let gate_up = self
-                .experts_gate_up
-                .get(exp_idx)
-                .map_err(|e| anyhow!("gate_up.get({exp_idx}): {e}"))?; // (2*i, h)
-            let gate_w = gate_up
-                .narrow(0, 0, i)
-                .map_err(|e| anyhow!("gate narrow: {e}"))?; // (i, h)
-            let up_w = gate_up
-                .narrow(0, i, i)
-                .map_err(|e| anyhow!("up narrow: {e}"))?; // (i, h)
-            let down_w = self
-                .experts_down
-                .get(exp_idx)
-                .map_err(|e| anyhow!("down.get({exp_idx}): {e}"))?; // (h, i)
-
-            let gate_out = selected
-                .matmul(&gate_w.t().map_err(|e| anyhow!("gate_w.t: {e}"))?)
-                .map_err(|e| anyhow!("gate matmul: {e}"))?;
-            let up_out = selected
-                .matmul(&up_w.t().map_err(|e| anyhow!("up_w.t: {e}"))?)
-                .map_err(|e| anyhow!("up matmul: {e}"))?;
+            let gate_out = self.experts_gate[exp_idx]
+                .forward(&selected)
+                .map_err(|e| anyhow!("expert gate: {e}"))?; // (n_sel, i)
+            let up_out = self.experts_up[exp_idx]
+                .forward(&selected)
+                .map_err(|e| anyhow!("expert up: {e}"))?; // (n_sel, i)
 
             let hidden = (candle_nn::ops::silu(&gate_out)
                 .map_err(|e| anyhow!("silu: {e}"))?
                 * up_out)
                 .map_err(|e| anyhow!("gate*up: {e}"))?;
 
-            let expert_out = hidden
-                .matmul(&down_w.t().map_err(|e| anyhow!("down_w.t: {e}"))?)
-                .map_err(|e| anyhow!("down matmul: {e}"))?; // (n_sel, h)
+            let expert_out = self.experts_down[exp_idx]
+                .forward(&hidden)
+                .map_err(|e| anyhow!("expert down: {e}"))?; // (n_sel, h)
 
             // Scale by routing weight
             let w_t = Tensor::new(weights.as_slice(), x_flat.device())

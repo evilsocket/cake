@@ -177,6 +177,15 @@ impl Qwen3_5FullAttention {
         // Attention
         #[allow(unused_labels)]
         let y = 'attn: {
+            // Flash Attention on CUDA — fused kernel, native GQA (no repeat_kv needed)
+            #[cfg(feature = "cuda")]
+            if matches!(q.device(), candle_core::Device::Cuda(_)) {
+                let scale = 1.0 / (self.head_dim as f32).sqrt();
+                break 'attn crate::utils::flash_attn::flash_attention(
+                    &q, &k, &v, scale, seq_len > 1,
+                ).map_err(|e| anyhow!("flash_attn: {e}"))?;
+            }
+
             // Fused SDPA on Metal — single kernel, native GQA (no repeat_kv needed)
             #[cfg(feature = "metal")]
             if matches!(q.device(), candle_core::Device::Metal(_)) {
@@ -185,7 +194,7 @@ impl Qwen3_5FullAttention {
                     .map_err(|e| anyhow!("sdpa: {e}"))?;
             }
 
-            // Manual attention with GQA head expansion (CUDA, CPU)
+            // Manual attention with GQA head expansion (CPU fallback)
             let k = self.repeat_kv(k).map_err(|e| anyhow!("repeat_kv k: {e}"))?;
             let v = self.repeat_kv(v).map_err(|e| anyhow!("repeat_kv v: {e}"))?;
 

@@ -1,6 +1,8 @@
 //! Utility functions and abstractions.
 
 pub mod fp8;
+#[cfg(feature = "cuda")]
+pub mod flash_attn;
 pub mod gptq;
 pub mod hf;
 pub mod models;

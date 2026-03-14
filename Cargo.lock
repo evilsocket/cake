@@ -327,6 +327,9 @@ name = "anyhow"
 version = "1.0.91"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c042108f3ed77fd83760a5fd79b53be043192bb3b9dba91d8c574c0ada7850c8"
+dependencies = [
+ "backtrace",
+]
 
 [[package]]
 name = "arbitrary"
@@ -707,6 +710,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "candle-core",
+ "candle-flash-attn",
  "candle-nn",
  "candle-transformers",
  "clap",
@@ -789,6 +793,28 @@ dependencies = [
  "thiserror 2.0.18",
  "yoke 0.8.1",
  "zip",
+]
+
+[[package]]
+name = "candle-flash-attn"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c94ddd2e7bb828777b0a8d999ed40d2d6c3c96c9ef2a3111a69e0d96efc436d2"
+dependencies = [
+ "anyhow",
+ "bindgen_cuda",
+ "candle-core",
+ "candle-flash-attn-build",
+ "half",
+]
+
+[[package]]
+name = "candle-flash-attn-build"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4bd79da06f2a3b831cb4f5a1ee393d6f2c5a913e28f5000c678a84108519a78c"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]
