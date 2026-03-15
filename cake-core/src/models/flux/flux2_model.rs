@@ -470,6 +470,7 @@ impl Flux2Transformer {
         let mut img = self.x_embedder.forward(&img)?;
         let mut txt = self.context_embedder.forward(&txt)?;
 
+
         // Timestep conditioning (compute in F32, cast back)
         let vec = timestep_embedding(&timesteps.to_dtype(DType::F32)?, 256, DType::F32)?
             .to_dtype(w_dtype)?;
