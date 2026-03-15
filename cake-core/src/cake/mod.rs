@@ -93,7 +93,11 @@ impl Context {
         );
 
         let data_path = PathBuf::from(&args.model);
-        let data_path = if !data_path.exists() {
+        let data_path = if args.model_type == ModelType::ImageModel {
+            // Image models (SD, FLUX) download components on-demand via their own
+            // ModelFile::get() methods. Just use the path or repo ID as-is.
+            data_path
+        } else if !data_path.exists() {
             if utils::hf::looks_like_hf_repo(&args.model) {
                 // Image models (LTX-2, Flux, etc.) use diffusers format without a root
                 // config.json — their forwarders handle HF resolution internally.

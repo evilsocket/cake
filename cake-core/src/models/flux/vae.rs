@@ -1,29 +1,55 @@
+//! FLUX.2 VAE Forwarder.
+//!
+//! Uses candle-transformers' SD `AutoEncoderKL` with FLUX.2-specific config.
+//! Denormalization uses batch norm running statistics (not scale_factor/shift_factor).
+
 use crate::cake::{Context, Forwarder};
-use crate::models::sd::{pack_tensors, unpack_tensors};
+use crate::models::sd::util::{pack_tensors, unpack_tensors};
 use async_trait::async_trait;
-use candle_core::Tensor;
-use candle_transformers::models::flux::autoencoder::{self, AutoEncoder};
-use log::info;
+use candle_core::{DType, Device, Tensor};
+use candle_nn::VarBuilder;
+use candle_transformers::models::stable_diffusion::vae as sd_vae;
+use log::{debug, info};
 use std::fmt::{Debug, Display, Formatter};
 
-#[derive(Debug)]
-pub struct FluxVae {
-    model: AutoEncoder,
+use super::config::FluxModelFile;
+
+/// FLUX.2-klein VAE config matching `vae/config.json`.
+fn flux2_vae_config() -> sd_vae::AutoEncoderKLConfig {
+    sd_vae::AutoEncoderKLConfig {
+        block_out_channels: vec![128, 256, 512, 512],
+        layers_per_block: 2,
+        latent_channels: 32,
+        norm_num_groups: 32,
+        use_quant_conv: true,
+        use_post_quant_conv: true,
+    }
 }
 
-impl Display for FluxVae {
+const BN_EPS: f64 = 0.0001;
+
+#[derive(Debug)]
+pub struct FluxVAE {
+    model: sd_vae::AutoEncoderKL,
+    /// Batch norm running mean: (128,) — patchified latent channels
+    pub bn_running_mean: Tensor,
+    /// Batch norm running var: (128,)
+    pub bn_running_var: Tensor,
+}
+
+impl Display for FluxVAE {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "flux-vae (local)")
+        write!(f, "FluxVAE (local)")
     }
 }
 
 #[async_trait]
-impl Forwarder for FluxVae {
+impl Forwarder for FluxVAE {
     fn load(_name: String, ctx: &Context) -> anyhow::Result<Box<Self>>
     where
         Self: Sized,
     {
-        Self::load_model(ctx)
+        Self::load_model(&ctx.device, ctx.dtype, &ctx.args.model)
     }
 
     async fn forward(
@@ -31,22 +57,20 @@ impl Forwarder for FluxVae {
         x: &Tensor,
         _index_pos: usize,
         _block_idx: usize,
-        ctx: &mut Context,
+        _ctx: &mut Context,
     ) -> anyhow::Result<Tensor> {
-        info!("Flux VAE forwarding...");
-
         let unpacked = unpack_tensors(x)?;
+        let direction_vec = unpacked[0].to_vec1::<f32>()?;
+        let direction = direction_vec[0];
+        let input = &unpacked[1].to_dtype(DType::F32)?;
 
-        // First tensor is direction: 1.0 = encode, 0.0 = decode
-        let direction_vec: Vec<f32> = unpacked[0].to_vec1()?;
-        let direction = *direction_vec.first().expect("Error retrieving direction");
-
-        let input = unpacked[1].to_dtype(ctx.dtype)?;
+        debug!("FluxVAE forwarding (direction={direction})...");
 
         if direction == 1.0 {
-            Ok(self.model.encode(&input)?)
+            anyhow::bail!("FluxVAE encode not implemented")
         } else {
-            Ok(self.model.decode(&input)?)
+            // Input is already unpatchified spatial latent: (b, 32, h, w)
+            Ok(self.model.decode(input)?)
         }
     }
 
@@ -61,62 +85,58 @@ impl Forwarder for FluxVae {
     }
 
     fn layer_name(&self) -> &str {
-        "flux-vae"
+        "flux_vae"
     }
 }
 
-impl FluxVae {
-    pub fn load_model(ctx: &Context) -> anyhow::Result<Box<Self>> {
-        let variant = ctx.args.flux_args.flux_variant;
+impl FluxVAE {
+    pub fn load_model(
+        device: &Device,
+        _dtype: DType,
+        model_repo: &str,
+    ) -> anyhow::Result<Box<Self>> {
+        // VAE always runs in F32 for numerical stability
+        let dtype = DType::F32;
+        let cfg = flux2_vae_config();
 
-        let weights_path = super::flux::FluxModelFile::Vae.get(
-            ctx.args.flux_args.flux_vae.clone(),
-            variant,
-            &ctx.args.model,
-        )?;
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .to_string_lossy()
+            .to_string();
 
-        info!("Loading Flux VAE from {:?}...", weights_path);
-
-        let cfg = autoencoder::Config::dev();
+        let weights_path = FluxModelFile::Vae.get(model_repo, &cache_dir)?;
+        info!("loading FLUX VAE from {}", weights_path.display());
 
         let vb = unsafe {
-            candle_nn::VarBuilder::from_mmaped_safetensors(
-                &[weights_path],
-                ctx.dtype,
-                &ctx.device,
-            )?
+            VarBuilder::from_mmaped_safetensors(&[weights_path], dtype, device)?
         };
-        let model = AutoEncoder::new(&cfg, vb)?;
 
-        info!("Flux VAE loaded!");
+        // Load batch norm running statistics
+        // BN operates on the 128-dim patchified representation (32 channels × 2×2 patch)
+        let bn_running_mean = vb.get(128, "bn.running_mean")?.to_dtype(DType::F32)?;
+        let bn_running_var = vb.get(128, "bn.running_var")?.to_dtype(DType::F32)?;
 
-        Ok(Box::new(Self { model }))
+        let model = sd_vae::AutoEncoderKL::new(vb, 3, 3, cfg)?;
+        info!("FLUX VAE loaded");
+
+        Ok(Box::new(Self {
+            model,
+            bn_running_mean,
+            bn_running_var,
+        }))
     }
 
-    #[allow(dead_code)]
-    pub async fn encode(
-        forwarder: &mut Box<dyn Forwarder>,
-        image: Tensor,
-        ctx: &mut Context,
-    ) -> anyhow::Result<Tensor> {
-        let tensors = vec![
-            Tensor::from_slice(&[1f32], 1, &ctx.device)?,
-            image,
-        ];
-        let packed = pack_tensors(tensors, &ctx.device)?;
-        forwarder.forward_mut(&packed, 0, 0, ctx).await
-    }
-
+    /// Decode latents to image (used by pipeline directly).
     pub async fn decode(
         forwarder: &mut Box<dyn Forwarder>,
         latents: Tensor,
         ctx: &mut Context,
     ) -> anyhow::Result<Tensor> {
         let tensors = vec![
-            Tensor::from_slice(&[0f32], 1, &ctx.device)?,
+            Tensor::from_slice(&[0f32], 1, &ctx.device)?, // decode direction
             latents,
         ];
-        let packed = pack_tensors(tensors, &ctx.device)?;
-        forwarder.forward_mut(&packed, 0, 0, ctx).await
+        let combined = pack_tensors(tensors, &ctx.device)?;
+        forwarder.forward_mut(&combined, 0, 0, ctx).await
     }
 }

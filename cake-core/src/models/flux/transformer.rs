@@ -1,30 +1,34 @@
+//! FLUX.2-klein MMDiT transformer Forwarder.
+
 use crate::cake::{Context, Forwarder};
-use crate::models::sd::{pack_tensors, unpack_tensors};
-use crate::FluxVariant;
+use crate::models::sd::util::{pack_tensors, unpack_tensors};
 use async_trait::async_trait;
-use candle_core::Tensor;
-use candle_transformers::models::flux::{self, model::Flux as FluxModel};
+use candle_core::{DType, Device, Tensor};
+use candle_nn::VarBuilder;
 use log::info;
 use std::fmt::{Debug, Display, Formatter};
 
+use super::config::FluxModelFile;
+use super::flux2_model::{Flux2Config, Flux2Transformer};
+
 #[derive(Debug)]
-pub struct FluxTransformer {
-    model: FluxModel,
+pub struct FluxTransformerForwarder {
+    model: Flux2Transformer,
 }
 
-impl Display for FluxTransformer {
+impl Display for FluxTransformerForwarder {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "flux-transformer (local)")
+        write!(f, "FluxTransformer (local)")
     }
 }
 
 #[async_trait]
-impl Forwarder for FluxTransformer {
+impl Forwarder for FluxTransformerForwarder {
     fn load(_name: String, ctx: &Context) -> anyhow::Result<Box<Self>>
     where
         Self: Sized,
     {
-        Self::load_model(ctx)
+        Self::load_model(&ctx.device, ctx.dtype, &ctx.args.model)
     }
 
     async fn forward(
@@ -32,27 +36,19 @@ impl Forwarder for FluxTransformer {
         x: &Tensor,
         _index_pos: usize,
         _block_idx: usize,
-        ctx: &mut Context,
+        _ctx: &mut Context,
     ) -> anyhow::Result<Tensor> {
+        // Unpack: [img, img_ids, txt, txt_ids, timesteps]
         let unpacked = unpack_tensors(x)?;
-        let img = unpacked[0].to_dtype(ctx.dtype)?;
-        let img_ids = unpacked[1].to_dtype(ctx.dtype)?;
-        let txt = unpacked[2].to_dtype(ctx.dtype)?;
-        let txt_ids = unpacked[3].to_dtype(ctx.dtype)?;
-        let timesteps = unpacked[4].to_dtype(ctx.dtype)?;
-        let y = unpacked[5].to_dtype(ctx.dtype)?;
-        let guidance = if unpacked.len() > 6 {
-            Some(unpacked[6].to_dtype(ctx.dtype)?)
-        } else {
-            None
-        };
+        let img = &unpacked[0];
+        let img_ids = &unpacked[1];
+        let txt = &unpacked[2];
+        let txt_ids = &unpacked[3];
+        let timesteps = &unpacked[4];
 
-        info!("Flux transformer forwarding...");
-
-        use flux::WithForward;
-        Ok(self
-            .model
-            .forward(&img, &img_ids, &txt, &txt_ids, &timesteps, &y, guidance.as_ref())?)
+        info!("FluxTransformer forwarding...");
+        let result = self.model.forward(img, img_ids, txt, txt_ids, timesteps)?;
+        Ok(result)
     }
 
     async fn forward_mut(
@@ -66,56 +62,49 @@ impl Forwarder for FluxTransformer {
     }
 
     fn layer_name(&self) -> &str {
-        "flux-transformer"
+        "flux_transformer"
     }
 }
 
-impl FluxTransformer {
-    pub fn load_model(ctx: &Context) -> anyhow::Result<Box<Self>> {
-        let variant = ctx.args.flux_args.flux_variant;
-        let cfg = match variant {
-            FluxVariant::Dev => flux::model::Config::dev(),
-            FluxVariant::Schnell => flux::model::Config::schnell(),
-        };
+impl FluxTransformerForwarder {
+    pub fn load_model(
+        device: &Device,
+        dtype: DType,
+        model_repo: &str,
+    ) -> anyhow::Result<Box<Self>> {
+        // Load in the requested dtype (F16). The model's forward() handles
+        // F32 upcasting internally for ops that need it (RoPE, LayerNorm).
+        let cfg = Flux2Config::klein_4b();
 
-        let weights_path = super::flux::FluxModelFile::Transformer.get(
-            ctx.args.flux_args.flux_transformer.clone(),
-            variant,
-            &ctx.args.model,
-        )?;
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .to_string_lossy()
+            .to_string();
 
-        info!("Loading Flux transformer from {:?}...", weights_path);
+        let weights_path = FluxModelFile::Transformer.get(model_repo, &cache_dir)?;
+        info!("loading FLUX transformer from {}", weights_path.display());
 
         let vb = unsafe {
-            candle_nn::VarBuilder::from_mmaped_safetensors(
-                &[weights_path],
-                ctx.dtype,
-                &ctx.device,
-            )?
+            VarBuilder::from_mmaped_safetensors(&[weights_path], dtype, device)?
         };
-        let model = FluxModel::new(&cfg, vb)?;
 
-        info!("Flux transformer loaded!");
+        let model = Flux2Transformer::load(vb, &cfg)?;
+        info!("FLUX transformer loaded ({} double + {} single blocks)", cfg.depth, cfg.depth_single);
 
         Ok(Box::new(Self { model }))
     }
 
-    pub async fn forward_packed(
+    /// Forward with unpacked tensors (used by the pipeline directly).
+    pub async fn forward_unpacked(
         forwarder: &mut Box<dyn Forwarder>,
         img: Tensor,
         img_ids: Tensor,
         txt: Tensor,
         txt_ids: Tensor,
         timesteps: Tensor,
-        y: Tensor,
-        guidance: Option<Tensor>,
         ctx: &mut Context,
     ) -> anyhow::Result<Tensor> {
-        let mut tensors = vec![img, img_ids, txt, txt_ids, timesteps, y];
-        if let Some(g) = guidance {
-            tensors.push(g);
-        }
-        let packed = pack_tensors(tensors, &ctx.device)?;
-        forwarder.forward_mut(&packed, 0, 0, ctx).await
+        let combined = pack_tensors(vec![img, img_ids, txt, txt_ids, timesteps], &ctx.device)?;
+        forwarder.forward_mut(&combined, 0, 0, ctx).await
     }
 }

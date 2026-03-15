@@ -34,6 +34,7 @@ pub mod qwen3_moe;
 pub mod qwen3_5;
 #[cfg(feature = "qwen3_5_moe")]
 pub mod qwen3_5_moe;
+#[cfg(feature = "flux")]
 pub mod flux;
 pub mod ltx_video;
 pub mod ltx2;

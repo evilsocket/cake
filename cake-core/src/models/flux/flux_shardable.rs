@@ -1,8 +1,9 @@
+//! FLUX component router for distributed workers.
+
 use crate::cake::{Context, Forwarder};
-use crate::models::flux::clip::FluxClip;
-use crate::models::flux::t5::FluxT5;
-use crate::models::flux::transformer::FluxTransformer;
-use crate::models::flux::vae::FluxVae;
+use crate::models::flux::text_encoder::FluxTextEncoder;
+use crate::models::flux::transformer::FluxTransformerForwarder;
+use crate::models::flux::vae::FluxVAE;
 use async_trait::async_trait;
 use candle_core::Tensor;
 use std::fmt::{Debug, Display, Formatter};
@@ -26,11 +27,10 @@ impl Forwarder for FluxShardable {
         Self: Sized,
     {
         let model: Box<dyn Forwarder> = match name.as_str() {
-            "flux-transformer" => FluxTransformer::load(name.clone(), ctx)?,
-            "flux-t5" => FluxT5::load(name.clone(), ctx)?,
-            "flux-clip" => FluxClip::load(name.clone(), ctx)?,
-            "flux-vae" => FluxVae::load(name.clone(), ctx)?,
-            _ => anyhow::bail!("Flux component name not recognized: {}", name),
+            "flux_text_encoder" => FluxTextEncoder::load(name.clone(), ctx)?,
+            "flux_transformer" => FluxTransformerForwarder::load(name.clone(), ctx)?,
+            "flux_vae" => FluxVAE::load(name.clone(), ctx)?,
+            _ => anyhow::bail!("Unknown FLUX component: {name}"),
         };
 
         Ok(Box::new(Self {

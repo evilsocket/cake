@@ -226,23 +226,26 @@ impl CausalSelfAttention {
 
         let in_dtype = q.dtype();
 
-        // The actual kv seq_len (may differ from query seq_len with sliding window)
-        let kv_seq_len = k.dims()[2];
 
         #[allow(unused_labels)]
         let y = 'attn: {
-            // Flash Attention on CUDA — fused kernel, O(N) memory, native GQA
+            // Flash Attention on CUDA — fused kernel, native GQA (no repeat_kv needed)
             #[cfg(feature = "cuda")]
             if matches!(q.device(), candle_core::Device::Cuda(_)) {
-                // flash-attn expects F16/BF16 input
-                let q_fa = if q.dtype() == DType::F32 { q.to_dtype(DType::F16)? } else { q.clone() };
-                let k_fa = if k.dtype() == DType::F32 { k.to_dtype(DType::F16)? } else { k.clone() };
-                let v_fa = if v.dtype() == DType::F32 { v.to_dtype(DType::F16)? } else { v.clone() };
-                let softmax_scale = 1.0 / (self.head_dim as f32).sqrt();
-                let y = candle_flash_attn::flash_attn(&q_fa, &k_fa, &v_fa, softmax_scale, seq_len > 1)
-                    .map_err(|e| anyhow!("flash_attn: {e}"))?;
-                break 'attn y.to_dtype(in_dtype)?;
+                let scale = 1.0 / (self.head_dim as f32).sqrt();
+                break 'attn crate::utils::flash_attn::flash_attention(
+                    &q, &k, &v, scale, seq_len > 1,
+                ).map_err(|e| anyhow!("flash_attn: {e}"))?;
             }
+
+            // Compute attention in F32 for numerical stability (Metal, CPU).
+            let q = q.to_dtype(DType::F32)?;
+            let k = k.to_dtype(DType::F32)?;
+            let v = v.to_dtype(DType::F32)?;
+
+            // The actual kv seq_len (may differ from query seq_len with sliding window)
+            let kv_seq_len = k.dims()[2];
+
 
             // Fused SDPA on Metal — single kernel, native GQA (no repeat_kv needed)
             #[cfg(feature = "metal")]
@@ -256,11 +259,7 @@ impl CausalSelfAttention {
                 break 'attn y.to_dtype(in_dtype)?;
             }
 
-            // Fallback: manual attention with GQA head expansion (CPU)
-            let q = q.to_dtype(DType::F32)?;
-            let k = k.to_dtype(DType::F32)?;
-            let v = v.to_dtype(DType::F32)?;
-
+            // Manual attention with GQA head expansion (CPU fallback)
             let k = self
                 .repeat_kv(k)
                 .map_err(|e| anyhow!("repeat_kv(k) -> {e}"))?;

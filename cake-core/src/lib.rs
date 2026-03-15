@@ -25,9 +25,9 @@ pub enum ImageModelArch {
     /// Auto-detect (defaults to Stable Diffusion)
     #[default]
     Auto,
-    /// Stable Diffusion family
-    StableDiffusion,
-    /// Black Forest Labs Flux
+    /// Stable Diffusion (v1.5, v2.1, XL, Turbo)
+    SD,
+    /// FLUX.2-klein (flow-matching transformer)
     Flux,
     /// Lightricks LTX-Video (0.9.x series)
     LtxVideo,
@@ -180,6 +180,25 @@ pub struct Args {
 
     #[clap(flatten)]
     pub ltx_args: LtxVideoArgs,
+}
+
+#[derive(Clone, clap::Args, Default, Debug)]
+pub struct FluxArgs {
+    /// Image height for FLUX generation.
+    #[arg(long = "flux-height", default_value_t = 1024, id = "flux_height")]
+    pub height: usize,
+
+    /// Image width for FLUX generation.
+    #[arg(long = "flux-width", default_value_t = 1024, id = "flux_width")]
+    pub width: usize,
+
+    /// Number of denoising steps (4 for distilled FLUX.2-klein).
+    #[arg(long = "flux-steps", default_value_t = 4, id = "flux_steps")]
+    pub num_steps: usize,
+
+    /// Guidance scale for classifier-free guidance.
+    #[arg(long = "flux-guidance", default_value_t = 3.5, id = "flux_guidance")]
+    pub guidance_scale: f64,
 }
 
 #[derive(Clone, Parser, Default, Debug)]
@@ -368,63 +387,6 @@ impl StableDiffusionVersion {
     }
 }
 
-#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq, Default)]
-pub enum FluxVariant {
-    #[default]
-    Dev,
-    Schnell,
-}
-
-#[derive(Clone, Parser, Default, Debug)]
-pub struct FluxArgs {
-    /// Flux model variant (dev or schnell).
-    #[arg(long = "flux-variant", value_enum, default_value = "dev")]
-    pub flux_variant: FluxVariant,
-
-    /// Override path to Flux transformer weights (safetensors).
-    #[arg(long = "flux-transformer")]
-    pub flux_transformer: Option<String>,
-
-    /// Override path to T5-XXL encoder weights (safetensors, comma-separated for sharded).
-    #[arg(long = "flux-t5")]
-    pub flux_t5: Option<String>,
-
-    /// Override path to T5 config.json.
-    #[arg(long = "flux-t5-config")]
-    pub flux_t5_config: Option<String>,
-
-    /// Override path to T5 tokenizer (tokenizer.json).
-    #[arg(long = "flux-t5-tokenizer")]
-    pub flux_t5_tokenizer: Option<String>,
-
-    /// Override path to CLIP-L weights (safetensors).
-    #[arg(long = "flux-clip")]
-    pub flux_clip: Option<String>,
-
-    /// Override path to CLIP tokenizer (tokenizer.json).
-    #[arg(long = "flux-clip-tokenizer")]
-    pub flux_clip_tokenizer: Option<String>,
-
-    /// Override path to Flux VAE weights (ae.safetensors).
-    #[arg(long = "flux-vae")]
-    pub flux_vae: Option<String>,
-
-    /// Guidance scale for Flux-dev (ignored for schnell).
-    #[arg(long = "flux-guidance-scale", default_value_t = 3.5)]
-    pub flux_guidance_scale: f64,
-
-    /// Output image height.
-    #[arg(long = "flux-height", default_value_t = 1024)]
-    pub flux_height: usize,
-
-    /// Output image width.
-    #[arg(long = "flux-width", default_value_t = 1024)]
-    pub flux_width: usize,
-
-    /// Number of sampling steps (default: 50 for dev, 4 for schnell).
-    #[arg(long = "flux-num-steps")]
-    pub flux_num_steps: Option<usize>,
-}
 
 #[derive(Clone, Parser, Default, Debug)]
 pub struct LtxVideoArgs {

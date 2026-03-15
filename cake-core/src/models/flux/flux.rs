@@ -1,246 +1,76 @@
+//! FLUX.2-klein image generation pipeline.
+//!
+//! Implements `Generator` + `ImageGenerator` for the FLUX.2-klein-4B model.
+//! Components (text encoder, transformer, VAE) can each run locally or
+//! on remote workers via the Forwarder abstraction.
+
 use crate::cake::{Context, Forwarder};
-use crate::models::flux::clip::FluxClip;
+use crate::models::flux::config::FluxModelFile;
 use crate::models::flux::flux_shardable::FluxShardable;
-use crate::models::flux::t5::FluxT5;
-use crate::models::flux::transformer::FluxTransformer;
-use crate::models::flux::vae::FluxVae;
+use crate::models::flux::text_encoder::FluxTextEncoder;
+use crate::models::flux::transformer::FluxTransformerForwarder;
+use crate::models::flux::vae::FluxVAE;
+use crate::models::sd::util::unpack_tensors;
 use crate::models::{Generator, ImageGenerator};
-use crate::{FluxVariant, ImageGenerationArgs};
-use anyhow::{Error as E, Result};
+use crate::ImageGenerationArgs;
+use anyhow::Result;
 use async_trait::async_trait;
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_transformers::models::flux::sampling;
-use hf_hub::api::sync::ApiBuilder;
-use hf_hub::Cache;
 use image::{ImageBuffer, Rgb};
-use log::{debug, info};
-use std::path::PathBuf;
+use log::info;
 use tokenizers::Tokenizer;
 
-const FLUX_DEV_REPO: &str = "black-forest-labs/FLUX.1-dev";
-const FLUX_SCHNELL_REPO: &str = "black-forest-labs/FLUX.1-schnell";
-
-/// Identifies a Flux model file for HuggingFace resolution.
-#[derive(Debug, Clone, Copy)]
-pub enum FluxModelFile {
-    Transformer,
-    Vae,
-    ClipWeights,
-    ClipTokenizer,
-    T5Config,
-    T5Tokenizer,
-}
-
-impl FluxModelFile {
-    fn repo_and_path(&self, variant: FluxVariant) -> (&'static str, &'static str) {
-        let flux_repo = match variant {
-            FluxVariant::Dev => FLUX_DEV_REPO,
-            FluxVariant::Schnell => FLUX_SCHNELL_REPO,
-        };
-        match self {
-            Self::Transformer => (
-                flux_repo,
-                match variant {
-                    FluxVariant::Dev => "flux1-dev.safetensors",
-                    FluxVariant::Schnell => "flux1-schnell.safetensors",
-                },
-            ),
-            Self::Vae => (flux_repo, "ae.safetensors"),
-            Self::ClipWeights => (flux_repo, "text_encoder/model.safetensors"),
-            Self::ClipTokenizer => (flux_repo, "tokenizer/tokenizer.json"),
-            Self::T5Config => (flux_repo, "text_encoder_2/config.json"),
-            Self::T5Tokenizer => (flux_repo, "tokenizer_2/tokenizer.json"),
-        }
-    }
-
-    pub fn get(
-        &self,
-        override_path: Option<String>,
-        variant: FluxVariant,
-        cache_dir: &str,
-    ) -> Result<PathBuf> {
-        if let Some(path) = override_path {
-            return Ok(PathBuf::from(path));
-        }
-        let (repo, file) = self.repo_and_path(variant);
-        let mut cache_path = PathBuf::from(cache_dir);
-        cache_path.push("hub");
-        let cache = Cache::new(cache_path);
-        let api = ApiBuilder::from_cache(cache).build()?;
-        let filename = api.model(repo.to_string()).get(file)?;
-        Ok(filename)
-    }
-}
-
-/// Get T5 weight file paths (handles sharded weights).
-pub fn get_t5_weight_files(
-    override_path: Option<String>,
-    variant: FluxVariant,
-    cache_dir: &str,
-) -> Result<Vec<PathBuf>> {
-    if let Some(path) = override_path {
-        // If user specifies a path, use it directly (single file or comma-separated)
-        return Ok(path.split(',').map(|p| PathBuf::from(p.trim())).collect());
-    }
-
-    let flux_repo = match variant {
-        FluxVariant::Dev => FLUX_DEV_REPO,
-        FluxVariant::Schnell => FLUX_SCHNELL_REPO,
-    };
-
-    let mut cache_path = PathBuf::from(cache_dir);
-    cache_path.push("hub");
-    let cache = Cache::new(cache_path);
-    let api = ApiBuilder::from_cache(cache).build()?;
-    let model_api = api.model(flux_repo.to_string());
-
-    // Try single file first
-    if let Ok(path) = model_api.get("text_encoder_2/model.safetensors") {
-        return Ok(vec![path]);
-    }
-
-    // Fall back to 2-shard format
-    let shard1 = model_api.get("text_encoder_2/model-00001-of-00002.safetensors")?;
-    let shard2 = model_api.get("text_encoder_2/model-00002-of-00002.safetensors")?;
-    Ok(vec![shard1, shard2])
-}
-
-pub struct Flux {
-    t5_tokenizer: Tokenizer,
-    clip_tokenizer: Tokenizer,
-    t5_encoder: Box<dyn Forwarder>,
-    clip_encoder: Box<dyn Forwarder>,
-    transformer: Box<dyn Forwarder>,
-    vae: Box<dyn Forwarder>,
-    variant: FluxVariant,
+pub struct FluxGen {
+    tokenizer: Tokenizer,
+    // Components are loaded on-demand to fit in VRAM.
+    // Text encoder is run once then dropped before the transformer loads.
     context: Context,
+    height: usize,
+    width: usize,
 }
 
 #[async_trait]
-impl Generator for Flux {
+impl Generator for FluxGen {
     type Shardable = FluxShardable;
     const MODEL_NAME: &'static str = "flux";
 
     async fn load(context: &mut Context) -> Result<Option<Box<Self>>> {
-        let flux_args = &context.args.flux_args;
-        let variant = flux_args.flux_variant;
+        let model_repo = &context.args.model;
 
-        // Load T5 tokenizer
-        info!("Loading T5 tokenizer...");
-        let t5_tokenizer_path = FluxModelFile::T5Tokenizer.get(
-            flux_args.flux_t5_tokenizer.clone(),
-            variant,
-            &context.args.model,
-        )?;
-        let t5_tokenizer = Tokenizer::from_file(&t5_tokenizer_path).map_err(E::msg)?;
-        info!("T5 tokenizer loaded!");
+        let cache_dir = dirs::cache_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .to_string_lossy()
+            .to_string();
 
-        // Load CLIP tokenizer
-        info!("Loading CLIP tokenizer...");
-        let clip_tokenizer_path = FluxModelFile::ClipTokenizer.get(
-            flux_args.flux_clip_tokenizer.clone(),
-            variant,
-            &context.args.model,
-        )?;
-        let clip_tokenizer = Tokenizer::from_file(&clip_tokenizer_path).map_err(E::msg)?;
-        info!("CLIP tokenizer loaded!");
+        // Load tokenizer (lightweight, always in memory)
+        info!("Loading FLUX tokenizer...");
+        let tokenizer_path = FluxModelFile::Tokenizer.get(model_repo, &cache_dir)?;
+        let tokenizer = Tokenizer::from_file(tokenizer_path)
+            .map_err(|e| anyhow!("failed to load tokenizer: {e}"))?;
+        info!("FLUX tokenizer loaded");
 
-        // T5 encoder
-        info!("Loading T5 encoder...");
-        let t5_encoder: Box<dyn Forwarder> =
-            if let Some((node_name, node)) = context.topology.get_node_for_layer("flux-t5") {
-                info!("node {node_name} will serve flux-t5");
-                Box::new(
-                    crate::cake::Client::new(
-                        context.device.clone(),
-                        &node.host,
-                        "flux-t5",
-                        context.args.cluster_key.as_deref(),
-                    )
-                    .await?,
-                )
-            } else {
-                info!("T5 encoder will be served locally");
-                FluxT5::load_model(context)?
-            };
-        info!("T5 encoder ready!");
+        // Pre-download all component files so generate_image doesn't block on network
+        info!("Pre-downloading FLUX model files...");
+        let _ = FluxModelFile::TextEncoder.get_all(model_repo, &cache_dir)?;
+        let _ = FluxModelFile::Transformer.get(model_repo, &cache_dir)?;
+        let _ = FluxModelFile::Vae.get(model_repo, &cache_dir)?;
+        info!("All FLUX model files ready");
 
-        // CLIP encoder
-        info!("Loading CLIP encoder...");
-        let clip_encoder: Box<dyn Forwarder> =
-            if let Some((node_name, node)) = context.topology.get_node_for_layer("flux-clip") {
-                info!("node {node_name} will serve flux-clip");
-                Box::new(
-                    crate::cake::Client::new(
-                        context.device.clone(),
-                        &node.host,
-                        "flux-clip",
-                        context.args.cluster_key.as_deref(),
-                    )
-                    .await?,
-                )
-            } else {
-                info!("CLIP encoder will be served locally");
-                FluxClip::load_model(context)?
-            };
-        info!("CLIP encoder ready!");
-
-        // VAE
-        info!("Loading Flux VAE...");
-        let vae: Box<dyn Forwarder> =
-            if let Some((node_name, node)) = context.topology.get_node_for_layer("flux-vae") {
-                info!("node {node_name} will serve flux-vae");
-                Box::new(
-                    crate::cake::Client::new(
-                        context.device.clone(),
-                        &node.host,
-                        "flux-vae",
-                        context.args.cluster_key.as_deref(),
-                    )
-                    .await?,
-                )
-            } else {
-                info!("Flux VAE will be served locally");
-                FluxVae::load_model(context)?
-            };
-        info!("Flux VAE ready!");
-
-        // Transformer
-        info!("Loading Flux transformer...");
-        let transformer: Box<dyn Forwarder> = if let Some((node_name, node)) =
-            context.topology.get_node_for_layer("flux-transformer")
-        {
-            info!("node {node_name} will serve flux-transformer");
-            Box::new(
-                crate::cake::Client::new(
-                    context.device.clone(),
-                    &node.host,
-                    "flux-transformer",
-                    context.args.cluster_key.as_deref(),
-                )
-                .await?,
-            )
-        } else {
-            info!("Flux transformer will be served locally");
-            FluxTransformer::load_model(context)?
-        };
-        info!("Flux transformer ready!");
+        let height = context.args.flux_args.height;
+        let width = context.args.flux_args.width;
 
         Ok(Some(Box::new(Self {
-            t5_tokenizer,
-            clip_tokenizer,
-            t5_encoder,
-            clip_encoder,
-            transformer,
-            vae,
-            variant,
+            tokenizer,
             context: context.clone(),
+            height,
+            width,
         })))
     }
 }
 
 #[async_trait]
-impl ImageGenerator for Flux {
+impl ImageGenerator for FluxGen {
     async fn generate_image<F>(
         &mut self,
         args: &ImageGenerationArgs,
@@ -251,171 +81,200 @@ impl ImageGenerator for Flux {
     {
         let ImageGenerationArgs {
             image_prompt,
-            num_samples,
             image_seed,
             ..
         } = args;
 
-        let flux_args = &self.context.args.flux_args;
-        let height = flux_args.flux_height;
-        let width = flux_args.flux_width;
-        let guidance_scale = flux_args.flux_guidance_scale;
-        let num_steps = flux_args.flux_num_steps.unwrap_or(match self.variant {
-            FluxVariant::Dev => 50,
-            FluxVariant::Schnell => 4,
-        });
+        let num_steps = self.context.args.flux_args.num_steps;
 
         if let Some(seed) = image_seed {
             self.context.device.set_seed(*seed)?;
         }
 
-        info!(
-            "Generating Flux image: {}x{}, {} steps, guidance={}, variant={:?}",
-            width, height, num_steps, guidance_scale, self.variant
+        let dev = self.context.device.clone();
+
+        // 1. Tokenize with chat template (required for FLUX.2-klein Qwen3 encoder)
+        info!("Tokenizing prompt: \"{}\"", image_prompt);
+        let chat_text = format!(
+            "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+            image_prompt
         );
+        let tokens = self
+            .tokenizer
+            .encode(chat_text.as_str(), false)
+            .map_err(|e| anyhow!("tokenizer: {e}"))?;
+        let token_ids = tokens.get_ids().to_vec();
+        info!("Tokenized to {} tokens", token_ids.len());
+        let token_tensor =
+            Tensor::new(token_ids.as_slice(), &dev)?.unsqueeze(0)?;
 
-        // 1. Encode prompt with T5
-        info!("Encoding prompt with T5...");
-        let t5_tokens = self
-            .t5_tokenizer
-            .encode(image_prompt.as_str(), true)
-            .map_err(E::msg)?;
-        let t5_token_ids = t5_tokens.get_ids().to_vec();
-        let t5_input =
-            Tensor::new(t5_token_ids.as_slice(), &self.context.device)?.unsqueeze(0)?;
-        let txt = FluxT5::encode(&mut self.t5_encoder, t5_input, &mut self.context)
-            .await?
-            .to_dtype(self.context.dtype)?;
-        info!("T5 encoding done: {:?}", txt.shape());
-
-        // 2. Encode prompt with CLIP
-        info!("Encoding prompt with CLIP...");
-        let clip_tokens = self
-            .clip_tokenizer
-            .encode(image_prompt.as_str(), true)
-            .map_err(E::msg)?;
-        let mut clip_token_ids = clip_tokens.get_ids().to_vec();
-        // Pad CLIP tokens to max_position_embeddings (77)
-        let clip_pad_id = *self
-            .clip_tokenizer
-            .get_vocab(true)
-            .get("<|endoftext|>")
-            .unwrap_or(&49407);
-        while clip_token_ids.len() < 77 {
-            clip_token_ids.push(clip_pad_id);
-        }
-        clip_token_ids.truncate(77);
-        let clip_input =
-            Tensor::new(clip_token_ids.as_slice(), &self.context.device)?.unsqueeze(0)?;
-        let vec = FluxClip::encode(&mut self.clip_encoder, clip_input, &mut self.context)
-            .await?
-            .to_dtype(self.context.dtype)?;
-        info!("CLIP encoding done: {:?}", vec.shape());
-
-        for sample_idx in 0..(*num_samples) {
-            info!("Generating sample {}/{}...", sample_idx + 1, num_samples);
-
-            // 3. Generate initial noise
-            let img = sampling::get_noise(1, height, width, &self.context.device)?
-                .to_dtype(self.context.dtype)?;
-
-            // 4. Create state (sets up img_ids, txt_ids, etc.)
-            let state = sampling::State::new(&txt, &vec, &img)?;
-
-            // 5. Get timestep schedule
-            let img_seq_len = state.img.dim(1)?;
-            let timesteps = sampling::get_schedule(
-                num_steps,
-                match self.variant {
-                    FluxVariant::Dev => Some((img_seq_len, 0.5, 1.15)),
-                    FluxVariant::Schnell => None,
-                },
-            );
-
-            debug!("Timesteps: {:?}", timesteps);
-
-            // 6. Denoising loop (rectified flow Euler integration)
-            let mut img = state.img.clone();
-            let guidance_tensor = if self.variant == FluxVariant::Dev {
-                Some(
-                    Tensor::full(guidance_scale as f32, img.dims()[0], &self.context.device)?
-                        .to_dtype(self.context.dtype)?,
-                )
-            } else {
-                None
+        // 2. Text encode — run on CPU to avoid GPU VRAM contention
+        info!("Loading and running text encoder (CPU)...");
+        let txt = {
+            let cpu_ctx = Context {
+                device: Device::Cpu,
+                dtype: DType::F32,
+                ..self.context.clone()
             };
-
-            for (step, (&t_curr, &t_prev)) in
-                timesteps.iter().zip(timesteps[1..].iter()).enumerate()
-            {
-                let start_time = std::time::Instant::now();
-
-                let t_vec = Tensor::full(t_curr as f32, img.dims()[0], &self.context.device)?
-                    .to_dtype(self.context.dtype)?;
-
-                let pred = FluxTransformer::forward_packed(
-                    &mut self.transformer,
-                    img.clone(),
-                    state.img_ids.clone(),
-                    state.txt.clone(),
-                    state.txt_ids.clone(),
-                    t_vec,
-                    state.vec.clone(),
-                    guidance_tensor.clone(),
-                    &mut self.context,
-                )
+            let mut text_encoder = FluxTextEncoder::load(
+                FluxModelFile::TextEncoder.name().to_string(),
+                &cpu_ctx,
+            )?;
+            let mut cpu_ctx = cpu_ctx;
+            let enc_output = text_encoder
+                .forward_mut(&token_tensor.to_device(&Device::Cpu)?, 0, 0, &mut cpu_ctx)
                 .await?;
+            let enc_tensors = unpack_tensors(&enc_output)?;
+            enc_tensors[0].clone()
+        };
+        info!("Text encoding done (shape={:?})", txt.shape());
 
-                img = (&img + &pred * (t_prev - t_curr))?;
+        // 3. Load transformer (now fits in VRAM)
+        info!("Loading transformer...");
+        let mut transformer: Box<dyn Forwarder> = FluxTransformerForwarder::load(
+            FluxModelFile::Transformer.name().to_string(),
+            &self.context,
+        )?;
 
-                let dt = start_time.elapsed().as_secs_f32();
-                info!("step {}/{} done, {:.2}s", step + 1, num_steps, dt);
-            }
+        // Move text embeddings back to GPU
+        let txt = txt.to_device(&dev)?;
 
-            // 7. Unpack from patches back to spatial
-            let img = sampling::unpack(&img, height, width)?;
+        // 4. Generate noise latents (32-channel for FLUX.2-klein)
+        info!("Generating noise latents ({}x{})...", self.height, self.width);
+        let h_lat2 = self.height.div_ceil(16) * 2;
+        let w_lat2 = self.width.div_ceil(16) * 2;
+        let img = Tensor::randn(0f32, 1., (1, 32, h_lat2, w_lat2), &dev)?;
+        let h_half = h_lat2 / 2;
+        let w_half = w_lat2 / 2;
 
-            // 8. Decode with VAE
-            info!("Decoding with VAE...");
-            let decoded = FluxVae::decode(&mut self.vae, img, &mut self.context).await?;
+        let img_packed = img
+            .reshape((1, 32, h_half, 2, w_half, 2))?
+            .permute((0, 2, 4, 1, 3, 5))?
+            .reshape((1, h_half * w_half, 32 * 4))?; // (1, seq, 128)
 
-            // 9. Convert to image
-            let images = self.tensor_to_images(&decoded)?;
-            callback(images);
+        // Build 4-axis image IDs: [T=0, H=h_coord, W=w_coord, L=0]
+        let dtype = img_packed.dtype();
+        let img_ids = Tensor::stack(
+            &[
+                Tensor::full(0u32, (h_half, w_half), &dev)?,   // T axis
+                Tensor::arange(0u32, h_half as u32, &dev)?     // H axis
+                    .reshape((h_half, 1))?
+                    .broadcast_as((h_half, w_half))?,
+                Tensor::arange(0u32, w_half as u32, &dev)?     // W axis
+                    .reshape((1, w_half))?
+                    .broadcast_as((h_half, w_half))?,
+                Tensor::full(0u32, (h_half, w_half), &dev)?,   // L axis
+            ],
+            2,
+        )?
+        .to_dtype(dtype)?
+        .reshape((1, h_half * w_half, 4))?;
+
+        // Text IDs: [T=0, H=0, W=0, L=seq_pos]
+        let txt_seq_len = txt.dim(1)?;
+        let txt_l = Tensor::arange(0u32, txt_seq_len as u32, &dev)?
+            .to_dtype(dtype)?
+            .unsqueeze(0)?; // (1, seq)
+        let txt_zeros = Tensor::zeros((1, txt_seq_len), dtype, &dev)?;
+        let txt_ids = Tensor::stack(
+            &[&txt_zeros, &txt_zeros, &txt_zeros, &txt_l],
+            2, // stack along last dim
+        )?; // (1, seq, 4)
+
+        // 5. Schedule (flow-matching Euler steps with dynamic shifting)
+        let image_seq_len = h_half * w_half;
+        // Dynamic shift: mu = base_shift + (max_shift - base_shift) * (seq_len - 256) / (4096 - 256)
+        let base_shift = 0.5_f64;
+        let max_shift = 1.15_f64;
+        let timesteps = sampling::get_schedule(num_steps, Some((image_seq_len, base_shift, max_shift)));
+
+        // Debug: print tensor norms
+        let txt_norm: f32 = txt.sqr()?.mean_all()?.sqrt()?.to_scalar()?;
+        let img_norm: f32 = img_packed.sqr()?.mean_all()?.sqrt()?.to_scalar()?;
+        info!("txt_norm={txt_norm:.4}, img_norm={img_norm:.4}, txt_shape={:?}, img_shape={:?}",
+              txt.shape(), img_packed.shape());
+        info!("Starting denoising ({num_steps} steps)...");
+
+        // 6. Denoise loop (flow-matching Euler ODE)
+        let mut img = img_packed;
+
+        for (step, window) in timesteps.windows(2).enumerate() {
+            let (t_curr, t_prev) = (window[0], window[1]);
+            let t_vec = Tensor::full(t_curr as f32, 1, &dev)?;
+
+            let pred = FluxTransformerForwarder::forward_unpacked(
+                &mut transformer,
+                img.clone(),
+                img_ids.clone(),
+                txt.clone(),
+                txt_ids.clone(),
+                t_vec,
+                &mut self.context,
+            )
+            .await?;
+
+            let pred_norm: f32 = pred.to_dtype(DType::F32)?.sqr()?.mean_all()?.sqrt()?.to_scalar()?;
+            // Euler step: img = img + pred * (t_prev - t_curr)
+            let pred = pred.to_dtype(img.dtype())?;
+            img = (img + pred * (t_prev - t_curr))?;
+            let img_norm_after: f32 = img.to_dtype(DType::F32)?.sqr()?.mean_all()?.sqrt()?.to_scalar()?;
+
+            info!("step {}/{num_steps}: t={t_curr:.3}→{t_prev:.3}, pred_norm={pred_norm:.4}, img_norm={img_norm_after:.4}", step + 1);
         }
+
+        // Drop transformer to free VRAM for VAE
+        drop(transformer);
+
+        // 7. BN denormalization on patchified latents: (b, seq, 128)
+        info!("Loading VAE and decoding latents...");
+        let vae_loaded = FluxVAE::load_model(
+            &self.context.device,
+            self.context.dtype,
+            &self.context.args.model,
+        )?;
+        // Access the BN stats from the loaded VAE for denormalization
+        let bn_mean = &vae_loaded.bn_running_mean;
+        let bn_var = &vae_loaded.bn_running_var;
+        let bn_eps = 0.0001_f64;
+        let bn_std = bn_var
+            .to_dtype(DType::F32)?
+            .broadcast_add(&Tensor::new(&[bn_eps as f32], bn_var.device())?)?
+            .sqrt()?;
+        // img: (b, seq, 128), bn_std/bn_mean: (128,) → broadcast as (1, 1, 128)
+        let img = img.to_dtype(DType::F32)?;
+        let img = img
+            .broadcast_mul(&bn_std.unsqueeze(0)?.unsqueeze(0)?)?
+            .broadcast_add(&bn_mean.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(0)?)?;
+
+        // 8. Unpatchify: (b, h*w, 128) → (b, 32, h*2, w*2)
+        let img = img
+            .reshape((1, h_half, w_half, 32, 2, 2))?    // (b, h, w, c, ph, pw)
+            .permute((0, 3, 1, 4, 2, 5))?               // (b, c, h, ph, w, pw)
+            .reshape((1, 32, h_half * 2, w_half * 2))?;  // (b, 32, h_lat, w_lat)
+
+        // 9. VAE decode
+        let mut vae: Box<dyn Forwarder> = vae_loaded;
+        let decoded = FluxVAE::decode(&mut vae, img, &mut self.context).await?;
+
+        // 9. Convert to RGB images
+        let images = ((decoded / 2.)? + 0.5)?.to_device(&Device::Cpu)?;
+        let images = (images.clamp(0f32, 1.)? * 255.)?.to_dtype(DType::U8)?;
+
+        let image_tensor = images.i(0)?;
+        let (channel, height, width) = image_tensor.dims3()?;
+        if channel != 3 {
+            anyhow::bail!("expected 3 channels, got {channel}");
+        }
+        let image_tensor = image_tensor.permute((1, 2, 0))?.flatten_all()?;
+        let pixels = image_tensor.to_vec1::<u8>()?;
+
+        let image: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_raw(width as u32, height as u32, pixels)
+                .ok_or_else(|| anyhow!("failed to create image buffer"))?;
+
+        info!("Image generated ({}x{})", width, height);
+        callback(vec![image]);
 
         Ok(())
-    }
-}
-
-impl Flux {
-    fn tensor_to_images(
-        &self,
-        images: &Tensor,
-    ) -> Result<Vec<ImageBuffer<Rgb<u8>, Vec<u8>>>> {
-        let mut result = Vec::new();
-
-        // Flux VAE output is in [-1, 1] range, convert to [0, 255]
-        let images = ((images.clamp(-1f32, 1f32)? + 1.0)? * 127.5)?
-            .to_dtype(DType::U8)?
-            .to_device(&Device::Cpu)?;
-
-        let bsize = images.dim(0)?;
-        for batch in 0..bsize {
-            let image_tensor = images.i(batch)?;
-            let (channel, height, width) = image_tensor.dims3()?;
-            if channel != 3 {
-                anyhow::bail!("Expected 3 channels, got {}", channel);
-            }
-            let image_tensor = image_tensor.permute((1, 2, 0))?.flatten_all()?;
-            let pixels = image_tensor.to_vec1::<u8>()?;
-
-            let image: ImageBuffer<Rgb<u8>, Vec<u8>> =
-                ImageBuffer::from_raw(width as u32, height as u32, pixels)
-                    .ok_or_else(|| anyhow::anyhow!("Error creating image buffer"))?;
-            result.push(image);
-        }
-
-        Ok(result)
     }
 }
