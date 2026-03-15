@@ -101,13 +101,18 @@ impl ImageGenerator for FluxGen {
 
         let dev = self.context.device.clone();
 
-        // 1. Tokenize
+        // 1. Tokenize with chat template (required for FLUX.2-klein Qwen3 encoder)
         info!("Tokenizing prompt: \"{}\"", image_prompt);
+        let chat_text = format!(
+            "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+            image_prompt
+        );
         let tokens = self
             .tokenizer
-            .encode(image_prompt.as_str(), true)
+            .encode(chat_text.as_str(), false)
             .map_err(|e| anyhow!("tokenizer: {e}"))?;
         let token_ids = tokens.get_ids().to_vec();
+        info!("Tokenized to {} tokens", token_ids.len());
         let token_tensor =
             Tensor::new(token_ids.as_slice(), &dev)?.unsqueeze(0)?;
 
