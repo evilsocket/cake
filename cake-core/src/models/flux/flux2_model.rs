@@ -4,14 +4,12 @@
 //! matching the `Flux2Transformer2DModel` from diffusers. Weight names follow
 //! the diffusers convention (not the BFL FLUX.1 convention).
 
-use candle_core::{DType, Module, Result, Tensor, D};
+use candle_core::{DType, Result, Tensor, D, Module};
 use candle_nn::{Linear, VarBuilder};
-
-use candle_transformers::models::flux::model::EmbedNd;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor> {
+pub(crate) fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor> {
     const TIME_FACTOR: f64 = 1000.;
     const MAX_PERIOD: f64 = 10000.;
     if dim % 2 == 1 {
@@ -29,21 +27,88 @@ fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor> {
     Tensor::cat(&[args.cos()?, args.sin()?], D::Minus1)?.to_dtype(dtype)
 }
 
-fn apply_rope(x: &Tensor, freq_cis: &Tensor) -> Result<Tensor> {
-    let dims = x.dims();
-    let (b_sz, n_head, seq_len, n_embd) = x.dims4()?;
-    let x = x.reshape((b_sz, n_head, seq_len, n_embd / 2, 2))?;
-    let x0 = x.narrow(D::Minus1, 0, 1)?;
-    let x1 = x.narrow(D::Minus1, 1, 1)?;
-    let fr0 = freq_cis.get_on_dim(D::Minus1, 0)?;
-    let fr1 = freq_cis.get_on_dim(D::Minus1, 1)?;
-    (fr0.broadcast_mul(&x0)? + fr1.broadcast_mul(&x1)?)?.reshape(dims.to_vec())
+/// Positional embedding matching diffusers Flux2PosEmbed exactly.
+/// Returns (cos, sin) each of shape [S, head_dim] with repeat_interleave.
+#[derive(Debug, Clone)]
+struct Flux2PosEmbed {
+    theta: usize,
+    axes_dim: Vec<usize>,
 }
 
-fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe: &Tensor) -> Result<Tensor> {
+impl Flux2PosEmbed {
+    fn new(theta: usize, axes_dim: Vec<usize>) -> Self {
+        Self { theta, axes_dim }
+    }
+
+    /// Compute (cos, sin) PE for given position IDs [S, num_axes].
+    fn forward(&self, ids: &Tensor) -> Result<(Tensor, Tensor)> {
+        let mut all_cos = Vec::new();
+        let mut all_sin = Vec::new();
+        let pos = ids.to_dtype(DType::F64)?;
+
+        for i in 0..self.axes_dim.len() {
+            let dim = self.axes_dim[i];
+            let half = dim / 2;
+            let p = pos.get_on_dim(D::Minus1, i)?; // [S]
+            let theta = self.theta as f64;
+
+            let inv_freq: Vec<f64> = (0..dim)
+                .step_by(2)
+                .map(|j| 1.0 / theta.powf(j as f64 / dim as f64))
+                .collect();
+            let inv_freq = Tensor::from_vec(inv_freq, (1, half), ids.device())?
+                .to_dtype(DType::F64)?;
+
+            let freqs = p.unsqueeze(1)?.broadcast_mul(&inv_freq)?; // [S, half]
+            let cos = freqs.cos()?.to_dtype(DType::F32)?;
+            let sin = freqs.sin()?.to_dtype(DType::F32)?;
+
+            // repeat_interleave(2): each frequency applies to a pair of elements
+            // [S, half] → [S, dim] by repeating each value twice
+            let cos = cos.unsqueeze(2)?.broadcast_as((ids.dim(0)?, half, 2))?.reshape((ids.dim(0)?, dim))?;
+            let sin = sin.unsqueeze(2)?.broadcast_as((ids.dim(0)?, half, 2))?.reshape((ids.dim(0)?, dim))?;
+
+            all_cos.push(cos);
+            all_sin.push(sin);
+        }
+
+        let cos = Tensor::cat(&all_cos, D::Minus1)?; // [S, head_dim]
+        let sin = Tensor::cat(&all_sin, D::Minus1)?;
+        Ok((cos, sin))
+    }
+}
+
+/// Apply rotary embeddings matching diffusers apply_rotary_emb exactly.
+/// x: [B, H, S, D], cos/sin: [S, D]
+fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+    let (b, h, s, d) = x.dims4()?;
+    let dtype = x.dtype();
+
+    // cos/sin: [S, D] → [1, 1, S, D] for broadcasting
+    let cos = cos.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(0)?;
+    let sin = sin.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(0)?;
+
+    let x = x.to_dtype(DType::F32)?;
+
+    // Split into interleaved pairs: reshape to (..., D/2, 2), unbind last dim
+    let x_pairs = x.reshape((b, h, s, d / 2, 2))?;
+    let x_real = x_pairs.narrow(D::Minus1, 0, 1)?.squeeze(D::Minus1)?; // [B, H, S, D/2]
+    let x_imag = x_pairs.narrow(D::Minus1, 1, 1)?.squeeze(D::Minus1)?;
+
+    // x_rotated = [-x_imag, x_real] interleaved
+    let neg_x_imag = x_imag.neg()?;
+    let x_rotated = Tensor::stack(&[&neg_x_imag, &x_real], D::Minus1)?
+        .reshape((b, h, s, d))?;
+
+    // out = x * cos + x_rotated * sin
+    let out = (x.broadcast_mul(&cos)? + x_rotated.broadcast_mul(&sin)?)?;
+    out.to_dtype(dtype)
+}
+
+fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe_cos: &Tensor, pe_sin: &Tensor) -> Result<Tensor> {
     let w_dtype = q.dtype();
-    let q = apply_rope(q, pe)?.contiguous()?;
-    let k = apply_rope(k, pe)?.contiguous()?;
+    let q = apply_rope(q, pe_cos, pe_sin)?.contiguous()?;
+    let k = apply_rope(k, pe_cos, pe_sin)?.contiguous()?;
     let dim = q.dim(D::Minus1)?;
     let scale = 1.0 / (dim as f64).sqrt();
     let mut batch_dims = q.dims().to_vec();
@@ -89,7 +154,7 @@ impl QkNorm {
 // ── MLP ────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-struct GatedMLP {
+pub(crate) struct GatedMLP {
     linear_in: Linear,  // fused gate + up: (hidden, 2*mlp_hidden)
     linear_out: Linear, // down: (mlp_hidden, hidden)
     mlp_hidden: usize,
@@ -104,6 +169,7 @@ impl GatedMLP {
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let fused = self.linear_in.forward(x)?;
+
         let gate = fused.narrow(D::Minus1, 0, self.mlp_hidden)?;
         let up = fused.narrow(D::Minus1, self.mlp_hidden, self.mlp_hidden)?;
         let x = (gate.silu()? * up)?;
@@ -114,7 +180,7 @@ impl GatedMLP {
 // ── Double Stream Block ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-struct DoubleStreamBlock {
+pub(crate) struct DoubleStreamBlock {
     // Image attention
     to_q: Linear,
     to_k: Linear,
@@ -164,9 +230,10 @@ impl DoubleStreamBlock {
         &self,
         img: &Tensor,
         txt: &Tensor,
-        img_mod: &[Tensor],  // 6 modulation tensors: shift, scale, gate, shift2, scale2, gate2
-        txt_mod: &[Tensor],  // 6 modulation tensors
-        pe: &Tensor,
+        img_mod: &[Tensor],
+        txt_mod: &[Tensor],
+        pe_cos: &Tensor,
+        pe_sin: &Tensor,
     ) -> Result<(Tensor, Tensor)> {
         let head_dim = img.dim(D::Minus1)? / self.num_heads;
 
@@ -207,7 +274,7 @@ impl DoubleStreamBlock {
         let k = Tensor::cat(&[&txt_k, &img_k], 2)?;
         let v = Tensor::cat(&[&txt_v, &img_v], 2)?;
 
-        let attn_out = attention(&q, &k, &v, pe)?; // (b, txt+img, hidden)
+        let attn_out = attention(&q, &k, &v, pe_cos, pe_sin)?; // (b, txt+img, hidden)
 
         // Split attention output
         let txt_attn = attn_out.narrow(1, 0, txt_seq)?;
@@ -218,8 +285,10 @@ impl DoubleStreamBlock {
         let txt = (txt + txt_mod[2].unsqueeze(1)?.broadcast_mul(&self.to_add_out.forward(&txt_attn)?)?)?;
 
         // MLP with modulation
-        let img_ff = self.ff.forward(&modulate(&img, &img_mod[3], &img_mod[4])?)?;
-        let txt_ff = self.ff_context.forward(&modulate(&txt, &txt_mod[3], &txt_mod[4])?)?;
+        let img_mod_mlp = modulate(&img, &img_mod[3], &img_mod[4])?;
+        let img_ff = self.ff.forward(&img_mod_mlp)?;
+        let txt_mod_mlp = modulate(&txt, &txt_mod[3], &txt_mod[4])?;
+        let txt_ff = self.ff_context.forward(&txt_mod_mlp)?;
 
         let img = (img + img_mod[5].unsqueeze(1)?.broadcast_mul(&img_ff)?)?;
         let txt = (txt + txt_mod[5].unsqueeze(1)?.broadcast_mul(&txt_ff)?)?;
@@ -264,8 +333,9 @@ impl SingleStreamBlock {
     fn forward(
         &self,
         x: &Tensor,
-        mod_tensors: &[Tensor], // 3 modulation tensors: shift, scale, gate
-        pe: &Tensor,
+        mod_tensors: &[Tensor],
+        pe_cos: &Tensor,
+        pe_sin: &Tensor,
     ) -> Result<Tensor> {
         let (b, seq, _) = x.dims3()?;
         let head_dim = self.hidden_size / self.num_heads;
@@ -288,7 +358,7 @@ impl SingleStreamBlock {
         let v = v.reshape((b, seq, self.num_heads, head_dim))?.transpose(1, 2)?;
 
         // Attention
-        let attn_out = attention(&q, &k, &v, pe)?; // (b, seq, hidden)
+        let attn_out = attention(&q, &k, &v, pe_cos, pe_sin)?; // (b, seq, hidden)
 
         // MLP: gated SiLU
         let gate = mlp_fused.narrow(D::Minus1, 0, self.mlp_hidden)?;
@@ -330,19 +400,19 @@ fn layer_norm_forward(x: &Tensor) -> Result<Tensor> {
 // ── MLP Embedder ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-struct MlpEmbedder {
+pub(crate) struct MlpEmbedder {
     linear_1: Linear,
     linear_2: Linear,
 }
 
 impl MlpEmbedder {
-    fn load(vb: VarBuilder) -> Result<Self> {
+    pub(crate) fn load(vb: VarBuilder) -> Result<Self> {
         let linear_1 = candle_nn::linear_no_bias(256, 3072, vb.pp("linear_1"))?;
         let linear_2 = candle_nn::linear_no_bias(3072, 3072, vb.pp("linear_2"))?;
         Ok(Self { linear_1, linear_2 })
     }
 
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+    pub(crate) fn forward(&self, x: &Tensor) -> Result<Tensor> {
         x.apply(&self.linear_1)?.silu()?.apply(&self.linear_2)
     }
 }
@@ -387,7 +457,7 @@ pub struct Flux2Transformer {
     x_embedder: Linear,
     context_embedder: Linear,
     time_embedder: MlpEmbedder,
-    pe_embedder: EmbedNd,
+    pe_embedder: Flux2PosEmbed,
     // Shared modulation
     double_mod_img: Linear,
     double_mod_txt: Linear,
@@ -409,7 +479,7 @@ impl Flux2Transformer {
         let context_embedder = candle_nn::linear_no_bias(cfg.context_in_dim, h, vb.pp("context_embedder"))?;
         let time_embedder = MlpEmbedder::load(vb.pp("time_guidance_embed").pp("timestep_embedder"))?;
 
-        let pe_embedder = EmbedNd::new(cfg.head_dim, cfg.theta, cfg.axes_dim.clone());
+        let pe_embedder = Flux2PosEmbed::new(cfg.theta, cfg.axes_dim.clone());
 
         // Shared modulation layers
         let double_mod_img = candle_nn::linear_no_bias(h, 6 * h, vb.pp("double_stream_modulation_img").pp("linear"))?;
@@ -465,37 +535,37 @@ impl Flux2Transformer {
         let img = img.to_dtype(w_dtype)?;
         let txt = txt.to_dtype(w_dtype)?;
 
-
         // Embed inputs
         let mut img = self.x_embedder.forward(&img)?;
         let mut txt = self.context_embedder.forward(&txt)?;
-
 
         // Timestep conditioning (compute in F32, cast back)
         let vec = timestep_embedding(&timesteps.to_dtype(DType::F32)?, 256, DType::F32)?
             .to_dtype(w_dtype)?;
         let vec = self.time_embedder.forward(&vec)?;
 
-        // Positional embeddings (compute in F32 for trig precision, cast back)
-        let ids = Tensor::cat(&[&txt_ids.to_dtype(DType::F32)?, &img_ids.to_dtype(DType::F32)?], 1)?;
-        let pe = self.pe_embedder.forward(&ids)?.to_dtype(w_dtype)?;
-
+        // Positional embeddings
+        let img_ids_2d = if img_ids.dims().len() == 3 { img_ids.squeeze(0)? } else { img_ids.clone() };
+        let txt_ids_2d = if txt_ids.dims().len() == 3 { txt_ids.squeeze(0)? } else { txt_ids.clone() };
+        let (img_cos, img_sin) = self.pe_embedder.forward(&img_ids_2d)?;
+        let (txt_cos, txt_sin) = self.pe_embedder.forward(&txt_ids_2d)?;
+        let pe_cos = Tensor::cat(&[&txt_cos, &img_cos], 0)?.to_dtype(w_dtype)?;
+        let pe_sin = Tensor::cat(&[&txt_sin, &img_sin], 0)?.to_dtype(w_dtype)?;
 
         // Compute shared modulations
         let vec_silu = vec.silu()?;
-        let img_mod_all = self.double_mod_img.forward(&vec_silu)?;
-        let txt_mod_all = self.double_mod_txt.forward(&vec_silu)?;
-        let single_mod_all = self.single_mod.forward(&vec_silu)?;
+        let img_mod_all = Module::forward(&self.double_mod_img, &vec_silu)?;
+        let txt_mod_all = Module::forward(&self.double_mod_txt, &vec_silu)?;
+        let single_mod_all = Module::forward(&self.single_mod, &vec_silu)?;
 
         // Split modulations into chunks
         let img_mods = img_mod_all.chunk(6, D::Minus1)?;
         let txt_mods = txt_mod_all.chunk(6, D::Minus1)?;
         let single_mods = single_mod_all.chunk(3, D::Minus1)?;
 
-
         // Double stream blocks
         for block in &self.double_blocks {
-            let (new_img, new_txt) = block.forward(&img, &txt, &img_mods, &txt_mods, &pe)?;
+            let (new_img, new_txt) = block.forward(&img, &txt, &img_mods, &txt_mods, &pe_cos, &pe_sin)?;
             img = new_img;
             txt = new_txt;
         }
@@ -504,14 +574,14 @@ impl Flux2Transformer {
         let txt_seq = txt.dim(1)?;
         let mut merged = Tensor::cat(&[&txt, &img], 1)?;
         for block in &self.single_blocks {
-            merged = block.forward(&merged, &single_mods, &pe)?;
+            merged = block.forward(&merged, &single_mods, &pe_cos, &pe_sin)?;
         }
 
         // Extract image portion
         let img = merged.narrow(1, txt_seq, merged.dim(1)? - txt_seq)?;
 
         // Final layer: adaptive norm + projection
-        let final_mod = vec.silu()?.apply(&self.norm_out)?;
+        let final_mod = Module::forward(&self.norm_out, &vec.silu()?)?;
         let final_chunks = final_mod.chunk(2, D::Minus1)?;
         let img = modulate(&img, &final_chunks[0], &final_chunks[1])?;
         self.proj_out.forward(&img)

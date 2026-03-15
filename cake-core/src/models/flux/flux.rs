@@ -16,7 +16,6 @@ use crate::ImageGenerationArgs;
 use anyhow::Result;
 use async_trait::async_trait;
 use candle_core::{DType, Device, IndexOp, Tensor};
-use candle_transformers::models::flux::sampling;
 use image::{ImageBuffer, Rgb};
 use log::info;
 use tokenizers::Tokenizer;
@@ -93,7 +92,7 @@ impl ImageGenerator for FluxGen {
 
         let dev = self.context.device.clone();
 
-        // 1. Tokenize with chat template (required for FLUX.2-klein Qwen3 encoder)
+        // 1. Tokenize with chat template and pad to max_length=512 (required by FLUX.2-klein)
         info!("Tokenizing prompt: \"{}\"", image_prompt);
         let chat_text = format!(
             "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
@@ -103,54 +102,61 @@ impl ImageGenerator for FluxGen {
             .tokenizer
             .encode(chat_text.as_str(), false)
             .map_err(|e| anyhow!("tokenizer: {e}"))?;
-        let token_ids = tokens.get_ids().to_vec();
-        info!("Tokenized to {} tokens", token_ids.len());
+        let mut token_ids = tokens.get_ids().to_vec();
+        let real_len = token_ids.len();
+        // Pad to max_length=512 with pad_token_id
+        let pad_id = self.tokenizer.get_vocab(true).get("<|endoftext|>")
+            .copied().unwrap_or(151643);
+        const MAX_SEQ_LEN: usize = 512;
+        token_ids.resize(MAX_SEQ_LEN, pad_id);
+        info!("Tokenized to {} real tokens, padded to {}", real_len, MAX_SEQ_LEN);
         let token_tensor =
             Tensor::new(token_ids.as_slice(), &dev)?.unsqueeze(0)?;
 
-        // 2. Text encode — run on CPU to avoid GPU VRAM contention
+        // 2. Text encode on CPU (lightweight, dropped before transformer loads)
         info!("Loading and running text encoder (CPU)...");
-        let txt = {
-            let cpu_ctx = Context {
-                device: Device::Cpu,
-                dtype: DType::F32,
-                ..self.context.clone()
-            };
-            let mut text_encoder = FluxTextEncoder::load(
-                FluxModelFile::TextEncoder.name().to_string(),
-                &cpu_ctx,
-            )?;
-            let mut cpu_ctx = cpu_ctx;
-            let enc_output = text_encoder
-                .forward_mut(&token_tensor.to_device(&Device::Cpu)?, 0, 0, &mut cpu_ctx)
-                .await?;
-            let enc_tensors = unpack_tensors(&enc_output)?;
-            enc_tensors[0].clone()
+        let cpu_ctx = Context {
+            device: Device::Cpu,
+            dtype: DType::F32,
+            ..self.context.clone()
         };
+        let mut text_encoder = FluxTextEncoder::load(
+            FluxModelFile::TextEncoder.name().to_string(),
+            &cpu_ctx,
+        )?;
+        let mut cpu_ctx = cpu_ctx;
+        let enc_output = text_encoder
+            .forward_mut(&token_tensor.to_device(&Device::Cpu)?, real_len, 0, &mut cpu_ctx)
+            .await?;
+        let enc_tensors = unpack_tensors(&enc_output)?;
+        let txt = enc_tensors[0].clone();
         info!("Text encoding done (shape={:?})", txt.shape());
 
         // 3. Load transformer (now fits in VRAM)
         info!("Loading transformer...");
-        let mut transformer: Box<dyn Forwarder> = FluxTransformerForwarder::load(
+        let transformer = FluxTransformerForwarder::load(
             FluxModelFile::Transformer.name().to_string(),
             &self.context,
         )?;
 
         // Move text embeddings back to GPU
+        // Note: FLUX.2-klein is distilled — no CFG needed (is_distilled=true)
         let txt = txt.to_device(&dev)?;
 
         // 4. Generate noise latents (32-channel for FLUX.2-klein)
         info!("Generating noise latents ({}x{})...", self.height, self.width);
         let h_lat2 = self.height.div_ceil(16) * 2;
         let w_lat2 = self.width.div_ceil(16) * 2;
-        let img = Tensor::randn(0f32, 1., (1, 32, h_lat2, w_lat2), &dev)?;
         let h_half = h_lat2 / 2;
         let w_half = w_lat2 / 2;
 
-        let img_packed = img
-            .reshape((1, 32, h_half, 2, w_half, 2))?
-            .permute((0, 2, 4, 1, 3, 5))?
-            .reshape((1, h_half * w_half, 32 * 4))?; // (1, seq, 128)
+        // Generate noise in patchified space: (1, 128, h_half, w_half) matching diffusers
+        // This is important — diffusers generates noise as (B, C*4, H/2, W/2) and packs to (B, H*W/4, C*4)
+        let img_packed = {
+            let noise = Tensor::randn(0f32, 1., (1, 128, h_half, w_half), &dev)?;
+            // Pack: (1, 128, h_half, w_half) → (1, h_half*w_half, 128)
+            noise.permute((0, 2, 3, 1))?.reshape((1, h_half * w_half, 128))?
+        };
 
         // Build 4-axis image IDs: [T=0, H=h_coord, W=w_coord, L=0]
         let dtype = img_packed.dtype();
@@ -182,17 +188,54 @@ impl ImageGenerator for FluxGen {
         )?; // (1, seq, 4)
 
         // 5. Schedule (flow-matching Euler steps with dynamic shifting)
+        // Must match diffusers FlowMatchEulerDiscreteScheduler exactly:
+        // - Base sigmas: linspace(1, 0, num_steps) — N values, NOT N+1
+        // - Apply exponential time shift with dynamic mu
+        // - Append terminal 0
         let image_seq_len = h_half * w_half;
-        // Dynamic shift: mu = base_shift + (max_shift - base_shift) * (seq_len - 256) / (4096 - 256)
-        let base_shift = 0.5_f64;
-        let max_shift = 1.15_f64;
-        let timesteps = sampling::get_schedule(num_steps, Some((image_seq_len, base_shift, max_shift)));
+        // Use empirical mu matching diffusers compute_empirical_mu
+        let mu = {
+            let seq = image_seq_len as f64;
+            let (a1, b1) = (8.73809524e-05, 1.89833333);
+            let (a2, b2) = (0.00016927, 0.45666666);
+            if seq > 4300.0 {
+                a2 * seq + b2
+            } else {
+                let m_200 = a2 * seq + b2;
+                let m_10 = a1 * seq + b1;
+                let a = (m_200 - m_10) / 190.0;
+                let b = m_200 - 200.0 * a;
+                a * num_steps as f64 + b
+            }
+        };
+        let timesteps: Vec<f64> = {
+            // Match diffusers FlowMatchEulerDiscreteScheduler exactly:
+            // timesteps = linspace(sigma_to_t(1.0), sigma_to_t(0.0), num_steps) / 1000
+            // sigma_to_t is identity since num_train_timesteps=1000 and sigma_max=1
+            let num_train = 1000.0_f64;
+            let base: Vec<f64> = (0..num_steps)
+                .map(|i| {
+                    let t = num_train * (1.0 - i as f64 / (num_steps as f64 - 1.0).max(1.0));
+                    t / num_train // back to [0,1]
+                })
+                .collect();
+            // Apply exponential time shift
+            let shifted: Vec<f64> = base
+                .iter()
+                .map(|&t| {
+                    if t <= 1e-10 { t } // preserve near-zero values
+                    else {
+                        let e = mu.exp();
+                        e / (e + (1.0 / t - 1.0))
+                    }
+                })
+                .collect();
+            // Append terminal 0
+            let mut ts = shifted;
+            ts.push(0.0);
+            ts
+        };
 
-        // Debug: print tensor norms
-        let txt_norm: f32 = txt.sqr()?.mean_all()?.sqrt()?.to_scalar()?;
-        let img_norm: f32 = img_packed.sqr()?.mean_all()?.sqrt()?.to_scalar()?;
-        info!("txt_norm={txt_norm:.4}, img_norm={img_norm:.4}, txt_shape={:?}, img_shape={:?}",
-              txt.shape(), img_packed.shape());
         info!("Starting denoising ({num_steps} steps)...");
 
         // 6. Denoise loop (flow-matching Euler ODE)
@@ -202,24 +245,15 @@ impl ImageGenerator for FluxGen {
             let (t_curr, t_prev) = (window[0], window[1]);
             let t_vec = Tensor::full(t_curr as f32, 1, &dev)?;
 
-            let pred = FluxTransformerForwarder::forward_unpacked(
-                &mut transformer,
-                img.clone(),
-                img_ids.clone(),
-                txt.clone(),
-                txt_ids.clone(),
-                t_vec,
-                &mut self.context,
-            )
-            .await?;
+            let pred = transformer.forward_direct(
+                &img, &img_ids, &txt, &txt_ids, &t_vec,
+            ).map_err(|e| anyhow!("transformer: {e}"))?;
 
-            let pred_norm: f32 = pred.to_dtype(DType::F32)?.sqr()?.mean_all()?.sqrt()?.to_scalar()?;
             // Euler step: img = img + pred * (t_prev - t_curr)
             let pred = pred.to_dtype(img.dtype())?;
             img = (img + pred * (t_prev - t_curr))?;
-            let img_norm_after: f32 = img.to_dtype(DType::F32)?.sqr()?.mean_all()?.sqrt()?.to_scalar()?;
 
-            info!("step {}/{num_steps}: t={t_curr:.3}→{t_prev:.3}, pred_norm={pred_norm:.4}, img_norm={img_norm_after:.4}", step + 1);
+            info!("step {}/{num_steps}: t={t_curr:.3}→{t_prev:.3}", step + 1);
         }
 
         // Drop transformer to free VRAM for VAE
@@ -246,11 +280,14 @@ impl ImageGenerator for FluxGen {
             .broadcast_mul(&bn_std.unsqueeze(0)?.unsqueeze(0)?)?
             .broadcast_add(&bn_mean.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(0)?)?;
 
-        // 8. Unpatchify: (b, h*w, 128) → (b, 32, h*2, w*2)
+        // 8. Unpack + unpatchify: (b, h*w, 128) → (b, 128, h, w) → (b, 32, h*2, w*2)
         let img = img
-            .reshape((1, h_half, w_half, 32, 2, 2))?    // (b, h, w, c, ph, pw)
-            .permute((0, 3, 1, 4, 2, 5))?               // (b, c, h, ph, w, pw)
-            .reshape((1, 32, h_half * 2, w_half * 2))?;  // (b, 32, h_lat, w_lat)
+            .reshape((1, h_half, w_half, 128))?           // (b, h, w, 128)
+            .permute((0, 3, 1, 2))?;                      // (b, 128, h, w)
+        let img = img
+            .reshape((1, 32, 2, 2, h_half, w_half))?      // (b, c, ph, pw, h, w)
+            .permute((0, 1, 4, 2, 5, 3))?                 // (b, c, h, ph, w, pw)
+            .reshape((1, 32, h_half * 2, w_half * 2))?;   // (b, 32, h*2, w*2)
 
         // 9. VAE decode
         let mut vae: Box<dyn Forwarder> = vae_loaded;

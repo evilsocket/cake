@@ -75,7 +75,8 @@ impl EncoderBlock {
         })
     }
 
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+    /// attn_mask: optional (1, seq) tensor with 1 for real tokens, 0 for padding
+    fn forward_with_mask(&self, x: &Tensor, attn_mask: Option<&Tensor>) -> Result<Tensor> {
         let (b, seq, _h) = x.dims3()?;
 
         // Pre-norm + attention
@@ -119,7 +120,6 @@ impl EncoderBlock {
             let cos = freqs.cos()?;
             let sin = freqs.sin()?;
 
-            // Apply rotary: split x into two halves, rotate
             let apply = |x: &Tensor| -> Result<Tensor> {
                 let x1 = x.narrow(D::Minus1, 0, half_dim)?;
                 let x2 = x.narrow(D::Minus1, half_dim, half_dim)?;
@@ -148,22 +148,33 @@ impl EncoderBlock {
             v
         };
 
-        // Causal attention (Qwen3 is a causal LM — must preserve causal masking)
+        // Causal attention with optional padding mask
         let scale = (self.head_dim as f64).sqrt();
         let att = (q.matmul(&k.t()?)? / scale)?;
-        // Apply causal mask for seq_len > 1
         let att = if seq > 1 {
-            // Build lower-triangular mask: mask[i][j] = 1 if j > i (future positions)
+            // Causal mask: mask[i][j] = true if j > i (future positions)
             let rows = Tensor::arange(0u32, seq as u32, att.device())?
                 .reshape((seq, 1))?;
             let cols = Tensor::arange(0u32, seq as u32, att.device())?
                 .reshape((1, seq))?;
-            let mask = cols.broadcast_gt(&rows)?; // true where j > i (future)
+            let causal_mask = cols.broadcast_gt(&rows)?; // true = masked
+
+            // Combine with attention mask (padding mask) if provided
+            let full_mask = if let Some(am) = attn_mask {
+                // am is (1, seq) with 1=real, 0=padding. We want to mask where am=0.
+                let pad_mask = am.eq(0.0)?.reshape((1, 1, 1, seq))?
+                    .broadcast_as(att.shape())?;
+                let causal_mask = causal_mask.broadcast_as(att.shape())?;
+                // Mask where causal OR padding
+                causal_mask.add(&pad_mask)?.gt(0.0)?
+            } else {
+                causal_mask.broadcast_as(att.shape())?
+            };
+
             let on_true = Tensor::new(f32::NEG_INFINITY, att.device())?
                 .to_dtype(att.dtype())?
                 .broadcast_as(att.shape())?;
-            let mask = mask.broadcast_as(att.shape())?;
-            mask.where_cond(&on_true, &att)?
+            full_mask.where_cond(&on_true, &att)?
         } else {
             att
         };
@@ -243,18 +254,26 @@ impl Forwarder for FluxTextEncoder {
     async fn forward(
         &self,
         x: &Tensor,
-        _index_pos: usize,
+        index_pos: usize,  // used as real_len for attention mask
         _block_idx: usize,
         ctx: &mut Context,
     ) -> anyhow::Result<Tensor> {
         info!("FluxTextEncoder forwarding...");
 
-        // x is token IDs: (batch, seq_len)
-        let hidden = self.encode(x)?;
+        // x is token IDs: (batch, seq_len) — padded to max_length
+        // index_pos carries the real (unpadded) token count for the attention mask
+        let seq_len = x.dim(1)?;
+        let attn_mask = if index_pos > 0 && index_pos < seq_len {
+            // Build attention mask: 1 for real tokens, 0 for padding
+            let mut mask_data = vec![1.0f32; index_pos];
+            mask_data.resize(seq_len, 0.0);
+            Some(Tensor::new(mask_data.as_slice(), x.device())?.unsqueeze(0)?)
+        } else {
+            None
+        };
 
-        // Pack hidden states for the pipeline.
-        // hidden: (batch, seq_len, hidden_size=2560)
-        // The pipeline will handle any needed projection to joint_attention_dim.
+        let hidden = self.encode(x, attn_mask.as_ref())?;
+
         let tensors = vec![hidden];
         let packed = pack_tensors(tensors, &ctx.device)?;
         Ok(packed)
@@ -343,17 +362,15 @@ impl FluxTextEncoder {
     ///
     /// FLUX.2-klein extracts hidden states from layers [9, 18, 27] (0-indexed)
     /// and concatenates them: 3 × 2560 = 7680 = joint_attention_dim.
-    fn encode(&self, token_ids: &Tensor) -> Result<Tensor> {
-        // Layer indices to extract. In HuggingFace convention, hidden_states[k] where
-        // hidden_states[0]=embedding, hidden_states[i]=output of layer i-1.
-        // OUTPUT_LAYERS_QWEN3 = [9, 18, 27] in HF → block indices [8, 17, 26] in our code.
+    /// Encode with attention mask. attn_mask: (1, seq) with 1=real, 0=padding.
+    fn encode(&self, token_ids: &Tensor, attn_mask: Option<&Tensor>) -> Result<Tensor> {
         const OUTPUT_LAYERS: [usize; 3] = [8, 17, 26];
 
         let mut x = self.embeddings.forward(token_ids)?;
         let mut layer_outputs: Vec<Tensor> = Vec::new();
 
         for (i, block) in self.blocks.iter().enumerate() {
-            x = block.forward(&x)?;
+            x = block.forward_with_mask(&x, attn_mask)?;
             if OUTPUT_LAYERS.contains(&i) {
                 layer_outputs.push(x.clone());
             }

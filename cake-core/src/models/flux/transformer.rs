@@ -38,7 +38,6 @@ impl Forwarder for FluxTransformerForwarder {
         _block_idx: usize,
         _ctx: &mut Context,
     ) -> anyhow::Result<Tensor> {
-        // Unpack: [img, img_ids, txt, txt_ids, timesteps]
         let unpacked = unpack_tensors(x)?;
         let img = &unpacked[0];
         let img_ids = &unpacked[1];
@@ -46,7 +45,6 @@ impl Forwarder for FluxTransformerForwarder {
         let txt_ids = &unpacked[3];
         let timesteps = &unpacked[4];
 
-        info!("FluxTransformer forwarding...");
         let result = self.model.forward(img, img_ids, txt, txt_ids, timesteps)?;
         Ok(result)
     }
@@ -67,14 +65,23 @@ impl Forwarder for FluxTransformerForwarder {
 }
 
 impl FluxTransformerForwarder {
+    /// Direct forward bypassing pack/unpack serialization.
+    pub fn forward_direct(
+        &self,
+        img: &Tensor,
+        img_ids: &Tensor,
+        txt: &Tensor,
+        txt_ids: &Tensor,
+        timesteps: &Tensor,
+    ) -> anyhow::Result<Tensor> {
+        Ok(self.model.forward(img, img_ids, txt, txt_ids, timesteps)?)
+    }
+
     pub fn load_model(
         device: &Device,
         _dtype: DType,
         model_repo: &str,
     ) -> anyhow::Result<Box<Self>> {
-        // Force F32 for quality — F16 causes visible noise artifacts in the output.
-        // With sequential loading (text encoder freed first), ~8GB fits in 16GB VRAM.
-        let dtype = DType::F32;
         let cfg = Flux2Config::klein_4b();
 
         let cache_dir = dirs::cache_dir()
@@ -85,8 +92,9 @@ impl FluxTransformerForwarder {
         let weights_path = FluxModelFile::Transformer.get(model_repo, &cache_dir)?;
         info!("loading FLUX transformer from {}", weights_path.display());
 
+        // Load as native BF16 via mmap. The model handles dtype casting internally.
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[weights_path], dtype, device)?
+            VarBuilder::from_mmaped_safetensors(&[weights_path], DType::BF16, device)?
         };
 
         let model = Flux2Transformer::load(vb, &cfg)?;
