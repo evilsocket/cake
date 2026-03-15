@@ -29,6 +29,12 @@ impl Generator for Qwen3_5 {
     /// Load this model from the context.
     async fn load(ctx: &mut Context) -> Result<Option<Box<Self>>> {
         let mut base = TextModelBase::load::<Qwen3_5Block>(ctx, DEFAULT_EOS_TOKEN).await?;
+
+        if let Some(ref draft_model) = ctx.args.draft_model.clone() {
+            // Draft model uses standard Transformer blocks (dense model)
+            base.load_draft::<crate::models::common::Transformer>(draft_model, DEFAULT_EOS_TOKEN).await?;
+        }
+
         // Qwen3.5 config sets eos_token_id=<|endoftext|> but ChatML uses <|im_end|> as turn terminator.
         // Add <|im_end|> to the EOS set so generation stops at turn boundaries.
         if let Some(im_end_id) = base.tokenizer.token_to_id("<|im_end|>") {
@@ -41,6 +47,7 @@ impl Generator for Qwen3_5 {
                 None => EosTokenId::Single(im_end_id),
             });
         }
+
         let history = ChatMLHistory::new();
         Ok(Some(Box::new(Self { base, history })))
     }

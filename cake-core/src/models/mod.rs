@@ -5,6 +5,7 @@ use image::{ImageBuffer, Rgb};
 use chat::Message;
 
 use crate::cake::{Context, Forwarder};
+use crate::video::VideoOutput;
 use crate::ImageGenerationArgs;
 
 pub mod chat;
@@ -35,7 +36,10 @@ pub mod qwen3_5;
 pub mod qwen3_5_moe;
 #[cfg(feature = "flux")]
 pub mod flux;
+pub mod ltx_video;
+pub mod ltx2;
 pub mod sd;
+pub mod speculative;
 
 /// A token.
 pub struct Token {
@@ -99,3 +103,15 @@ pub trait ImageGenerator: Generator {
     where
         F: FnMut(Vec<ImageBuffer<Rgb<u8>, Vec<u8>>>) + Send + 'static;
 }
+
+/// A model that generates video (sequence of frames with temporal metadata).
+#[async_trait]
+pub trait VideoGenerator: Generator {
+    /// Generate a video from the given arguments.
+    /// Returns a `VideoOutput` containing all frames, fps, and dimensions.
+    async fn generate_video(
+        &mut self,
+        args: &ImageGenerationArgs,
+    ) -> Result<VideoOutput>;
+}
+

@@ -196,6 +196,56 @@ async fn main() -> Result<()> {
 #[cfg(feature = "master")]
 async fn run_master(ctx: Context) -> Result<()> {
     use cake_core::cake::Master;
+    use cake_core::cake::master::VideoMaster;
+
+    // Video models use VideoMaster (VideoGenerator trait) instead of Master (ImageGenerator)
+    if ctx.args.model_type == ModelType::ImageModel {
+        match ctx.args.image_model_arch {
+            ImageModelArch::LtxVideo => {
+                #[cfg(feature = "llama")]
+                {
+                    let master = VideoMaster::<cake_core::models::llama3::LLama, cake_core::models::ltx_video::LtxVideo>::new(ctx).await?;
+                    return master.run().await;
+                }
+                #[cfg(not(feature = "llama"))]
+                anyhow::bail!("ltx-video master requires the llama feature as a type placeholder");
+            }
+            ImageModelArch::Ltx2 => {
+                #[cfg(feature = "llama")]
+                {
+                    let master = VideoMaster::<cake_core::models::llama3::LLama, cake_core::models::ltx2::Ltx2>::new(ctx).await?;
+                    return master.run().await;
+                }
+                #[cfg(not(feature = "llama"))]
+                anyhow::bail!("ltx-2 master requires the llama feature as a type placeholder");
+            }
+            _ => {} // Non-video image models handled below
+        }
+    }
+
+    macro_rules! run_with_image_model {
+        ($text_model:ty, $ctx:expr) => {
+            match $ctx.args.image_model_arch {
+                #[cfg(feature = "flux")]
+                ImageModelArch::Flux => {
+                    Master::<$text_model, cake_core::models::flux::FluxGen>::new($ctx)
+                        .await?
+                        .run()
+                        .await
+                }
+                ImageModelArch::LtxVideo | ImageModelArch::Ltx2 => {
+                    // Handled above via VideoMaster
+                    unreachable!()
+                }
+                ImageModelArch::SD | ImageModelArch::Auto => {
+                    Master::<$text_model, cake_core::models::sd::SD>::new($ctx)
+                        .await?
+                        .run()
+                        .await
+                }
+            }
+        };
+    }
 
     // Image model dispatch — early return to avoid duplicating text arch arms
     if ctx.args.model_type == ModelType::ImageModel {
@@ -205,17 +255,11 @@ async fn run_master(ctx: Context) -> Result<()> {
     match ctx.text_model_arch {
         #[cfg(feature = "qwen2")]
         TextModelArch::Qwen2 => {
-            Master::<cake_core::models::qwen2::Qwen2, cake_core::models::sd::SD>::new(ctx)
-                .await?
-                .run()
-                .await
+            run_with_image_model!(cake_core::models::qwen2::Qwen2, ctx)
         }
         #[cfg(feature = "qwen3_5")]
         TextModelArch::Qwen3_5 => {
-            Master::<cake_core::models::qwen3_5::Qwen3_5, cake_core::models::sd::SD>::new(ctx)
-                .await?
-                .run()
-                .await
+            run_with_image_model!(cake_core::models::qwen3_5::Qwen3_5, ctx)
         }
         #[cfg(feature = "qwen3")]
         TextModelArch::Qwen3 => {
@@ -282,10 +326,7 @@ async fn run_master(ctx: Context) -> Result<()> {
         }
         #[cfg(feature = "llama")]
         TextModelArch::Llama | TextModelArch::Auto => {
-            Master::<cake_core::models::llama3::LLama, cake_core::models::sd::SD>::new(ctx)
-                .await?
-                .run()
-                .await
+            run_with_image_model!(cake_core::models::llama3::LLama, ctx)
         }
         #[allow(unreachable_patterns)]
         _ => anyhow::bail!(
@@ -301,7 +342,7 @@ async fn run_master_image(ctx: Context) -> Result<()> {
 
     // Use LLama as dummy TG — it's never loaded for ImageModel.
     match ctx.args.image_model_arch {
-        ImageModelArch::SD => {
+        ImageModelArch::SD | ImageModelArch::Auto => {
             Master::<cake_core::models::llama3::LLama, cake_core::models::sd::SD>::new(ctx)
                 .await?
                 .run()
@@ -313,6 +354,10 @@ async fn run_master_image(ctx: Context) -> Result<()> {
                 .await?
                 .run()
                 .await
+        }
+        ImageModelArch::LtxVideo | ImageModelArch::Ltx2 => {
+            // Handled by run_master_video, should not reach here
+            unreachable!("video models should be dispatched via VideoMaster")
         }
         #[allow(unreachable_patterns)]
         _ => anyhow::bail!(
@@ -421,7 +466,7 @@ async fn run_worker(ctx: &mut Context) -> Result<()> {
             ),
         },
         ModelType::ImageModel => match ctx.args.image_model_arch {
-            ImageModelArch::SD => {
+            ImageModelArch::SD | ImageModelArch::Auto => {
                 Worker::<cake_core::models::sd::SD>::new(ctx)
                     .await?
                     .run()
@@ -434,12 +479,24 @@ async fn run_worker(ctx: &mut Context) -> Result<()> {
                     .run()
                     .await
             }
+            ImageModelArch::LtxVideo => {
+                Worker::<cake_core::models::ltx_video::LtxVideo>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            ImageModelArch::Ltx2 => {
+                Worker::<cake_core::models::ltx2::Ltx2>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
             #[allow(unreachable_patterns)]
             _ => anyhow::bail!(
                 "no image model feature enabled for architecture {:?}",
                 ctx.args.image_model_arch
             ),
-        }
+        },
     }
 }
 

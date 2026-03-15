@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
+use super::RequestQueue;
+
 #[derive(Deserialize)]
 pub struct ChatRequest {
     pub messages: Vec<Message>,
@@ -101,6 +103,7 @@ struct StreamResponse {
 
 pub async fn generate_text<TG, IG>(
     state: web::Data<Arc<RwLock<Master<TG, IG>>>>,
+    queue: web::Data<Arc<RequestQueue>>,
     req: HttpRequest,
     body: web::Json<ChatRequest>,
 ) -> impl Responder
@@ -114,11 +117,32 @@ where
         .unwrap_or_else(|| "unknown".to_string());
     let stream = body.0.stream.unwrap_or(false);
 
-    log::info!("starting chat for {} (stream={}) ...", &client, stream);
+    // Acquire queue slot or reject with 503
+    let _guard = match queue.try_acquire() {
+        Some(guard) => guard,
+        None => {
+            log::warn!("rejecting request from {} — queue full ({}/{})",
+                &client, queue.pending(), queue.max_pending());
+            return HttpResponse::ServiceUnavailable()
+                .json(serde_json::json!({
+                    "error": {
+                        "message": "Server is busy, please retry later",
+                        "type": "server_error",
+                        "code": "queue_full"
+                    }
+                }));
+        }
+    };
+
+    log::info!("starting chat for {} (stream={}, queue={}/{}) ...",
+        &client, stream, queue.pending(), queue.max_pending());
 
     if stream {
-        generate_text_stream(state, body.0).await
+        // For streaming, the guard is moved into the spawned task so the slot
+        // stays occupied for the full generation duration.
+        generate_text_stream(state, body.0, _guard).await
     } else {
+        // Blocking: _guard lives until this function returns (after generation completes)
         generate_text_blocking(state, body.0).await
     }
 }
@@ -188,6 +212,7 @@ where
 async fn generate_text_stream<TG, IG>(
     state: web::Data<Arc<RwLock<Master<TG, IG>>>>,
     request: ChatRequest,
+    queue_guard: super::QueueGuard,
 ) -> HttpResponse
 where
     TG: TextGenerator + Send + Sync + 'static,
@@ -204,6 +229,8 @@ where
 
     let state_clone = state.clone();
     tokio::spawn(async move {
+        // Hold queue guard for the full duration of generation
+        let _guard = queue_guard;
         let mut master = state_clone.write().await;
 
         if let Err(e) = master.reset() {

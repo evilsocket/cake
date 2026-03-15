@@ -10,6 +10,7 @@ use serde::Deserialize;
 pub mod cake;
 pub mod models;
 pub mod utils;
+pub mod video;
 
 #[derive(Copy, Clone, Parser, Default, Debug, Eq, PartialEq, PartialOrd, Ord, ValueEnum)]
 pub enum ModelType {
@@ -21,11 +22,17 @@ pub enum ModelType {
 /// Supported image model architectures.
 #[derive(Copy, Clone, Parser, Default, Debug, Eq, PartialEq, PartialOrd, Ord, ValueEnum)]
 pub enum ImageModelArch {
-    /// Stable Diffusion (v1.5, v2.1, XL, Turbo)
+    /// Auto-detect (defaults to Stable Diffusion)
     #[default]
+    Auto,
+    /// Stable Diffusion (v1.5, v2.1, XL, Turbo)
     SD,
     /// FLUX.2-klein (flow-matching transformer)
     Flux,
+    /// Lightricks LTX-Video (0.9.x series)
+    LtxVideo,
+    /// Lightricks LTX-2 (19B audio+video, Gemma-3 text encoder)
+    Ltx2,
 }
 
 /// Supported text model architectures.
@@ -137,6 +144,16 @@ pub struct Args {
     #[arg(skip)]
     pub topology_override: Option<cake::Topology>,
 
+    /// Draft model for speculative decoding (path or HuggingFace repo).
+    /// Must share the same tokenizer as the main model.
+    /// Example: --draft-model Qwen/Qwen2.5-0.5B-Instruct
+    #[arg(long)]
+    pub draft_model: Option<String>,
+
+    /// Number of speculative tokens to draft before verification (default: 4).
+    #[arg(long, default_value_t = 4)]
+    pub spec_tokens: usize,
+
     /// Run on CPU rather than on GPU.
     #[arg(long, default_value_t = false)]
     pub cpu: bool,
@@ -148,18 +165,21 @@ pub struct Args {
     #[arg(long, default_value = "auto")]
     pub text_model_arch: TextModelArch,
 
-    /// Image model architecture (only used with --model-type image-model).
-    #[arg(long, default_value = "sd")]
+    /// Image model architecture (defaults to auto/stable-diffusion).
+    #[arg(long, default_value = "auto")]
     pub image_model_arch: ImageModelArch,
 
     #[clap(flatten)]
     pub sd_args: SDArgs,
 
     #[clap(flatten)]
+    pub sd_img_gen_args: ImageGenerationArgs,
+
+    #[clap(flatten)]
     pub flux_args: FluxArgs,
 
     #[clap(flatten)]
-    pub sd_img_gen_args: ImageGenerationArgs,
+    pub ltx_args: LtxVideoArgs,
 }
 
 #[derive(Clone, clap::Args, Default, Debug)]
@@ -364,5 +384,115 @@ impl StableDiffusionVersion {
                 }
             }
         }
+    }
+}
+
+
+#[derive(Clone, Parser, Default, Debug)]
+pub struct LtxVideoArgs {
+    /// LTX-Video model version (e.g., "0.9.8-13b-distilled").
+    #[arg(long = "ltx-version", default_value = "0.9.8-13b-distilled")]
+    pub ltx_version: String,
+
+    /// Override HuggingFace repo for LTX-Video weights.
+    #[arg(long = "ltx-model")]
+    pub ltx_model: Option<String>,
+
+    /// Override path to LTX transformer weights (safetensors).
+    #[arg(long = "ltx-transformer")]
+    pub ltx_transformer: Option<String>,
+
+    /// Override path to T5-XXL encoder weights (safetensors, comma-separated for sharded).
+    #[arg(long = "ltx-t5")]
+    pub ltx_t5: Option<String>,
+
+    /// Override path to T5 config.json.
+    #[arg(long = "ltx-t5-config")]
+    pub ltx_t5_config: Option<String>,
+
+    /// Override path to T5 tokenizer (tokenizer.json).
+    #[arg(long = "ltx-t5-tokenizer")]
+    pub ltx_t5_tokenizer: Option<String>,
+
+    /// Override path to LTX VAE weights (safetensors).
+    #[arg(long = "ltx-vae")]
+    pub ltx_vae: Option<String>,
+
+    /// Number of video frames to generate.
+    #[arg(long = "ltx-num-frames", default_value_t = 41)]
+    pub ltx_num_frames: usize,
+
+    /// Video frame rate.
+    #[arg(long = "ltx-fps", default_value_t = 24)]
+    pub ltx_fps: usize,
+
+    /// Output video height.
+    #[arg(long = "ltx-height", default_value_t = 512)]
+    pub ltx_height: usize,
+
+    /// Output video width.
+    #[arg(long = "ltx-width", default_value_t = 704)]
+    pub ltx_width: usize,
+
+    /// Number of sampling steps (default from model config).
+    #[arg(long = "ltx-num-steps")]
+    pub ltx_num_steps: Option<usize>,
+
+    /// STG (Spatio-Temporal Guidance) scale. 0 to disable. Default: 1.0.
+    #[arg(long = "ltx-stg-scale")]
+    pub ltx_stg_scale: Option<f32>,
+
+    /// STG block index to perturb. Default: 28 (LTX-2.3).
+    #[arg(long = "ltx-stg-block")]
+    pub ltx_stg_block: Option<usize>,
+
+    /// Guidance rescale factor. Prevents oversaturation. Default: 0.7.
+    #[arg(long = "ltx-rescale")]
+    pub ltx_rescale: Option<f32>,
+
+    /// Path to a GGUF file for quantized Gemma-3 (runs on GPU instead of CPU).
+    /// Example: --ltx-gemma-gguf /path/to/gemma-3-12b-pt-Q4_K_M.gguf
+    #[arg(long = "ltx-gemma-gguf")]
+    pub ltx_gemma_gguf: Option<String>,
+}
+
+impl LtxVideoArgs {
+    /// Get the HuggingFace repo ID for the LTX-Video model.
+    pub fn ltx_repo(&self) -> String {
+        if let Some(ref repo) = self.ltx_model {
+            return repo.clone();
+        }
+        match self.ltx_version.as_str() {
+            // LTX-2.3 (22B, improved training + gated attention)
+            "2.3" | "2.3-dev" | "2.3-22b-dev" => "Lightricks/LTX-2.3".to_string(),
+            "2.3-distilled" | "2.3-22b-distilled" => "Lightricks/LTX-2.3".to_string(),
+
+            // LTX-2 (19B, audio+video, Gemma-3 text encoder)
+            "2-19b-dev" | "2.0" | "2" => "Lightricks/LTX-2".to_string(),
+            "2-19b-distilled" => "Lightricks/LTX-2".to_string(),
+
+            // LTX-Video 0.9.8
+            "0.9.8-13b-distilled" | "0.9.8-13b" => {
+                "Lightricks/LTX-Video-0.9.8-13b-distilled".to_string()
+            }
+            "0.9.8-13b-dev" => "Lightricks/LTX-Video-0.9.8-13b-dev".to_string(),
+            "0.9.8-2b-distilled" | "0.9.8-distilled" => {
+                "Lightricks/LTX-Video-0.9.8-distilled".to_string()
+            }
+
+            // LTX-Video 0.9.6
+            "0.9.6-distilled" | "0.9.6-2b-distilled" => {
+                "Lightricks/LTX-Video-0.9.6-distilled".to_string()
+            }
+            "0.9.6-dev" | "0.9.6-2b-dev" => "Lightricks/LTX-Video-0.9.6-dev".to_string(),
+
+            _ => "Lightricks/LTX-Video".to_string(),
+        }
+    }
+
+    /// Whether this is an LTX-2.3 model (gated attention, 8 connector blocks).
+    pub fn is_ltx23(&self) -> bool {
+        let repo = self.ltx_repo();
+        repo.contains("LTX-2.3") || self.ltx_version.starts_with("2.3")
     }
 }

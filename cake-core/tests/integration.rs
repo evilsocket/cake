@@ -3,8 +3,10 @@
 //! These tests validate that a model integration works correctly end-to-end:
 //! loading, token generation, chat coherence, state management, and API compatibility.
 //!
-//! LLaMA tests require CAKE_TEST_MODEL (default: ./cake-data/Llama-3.2-1B-Instruct/).
-//! Qwen2 tests require CAKE_TEST_QWEN2_MODEL env var (skipped if not set).
+//! All model tests require model files on disk. They skip gracefully when not available.
+//! Set env vars to enable:
+//!   CAKE_TEST_MODEL=./path/to/Llama-3.2-1B-Instruct/
+//!   CAKE_TEST_QWEN2_MODEL=./path/to/Qwen2-0.5B/
 //!
 //! Run with: cargo test --test integration -- --test-threads=1
 
@@ -65,8 +67,17 @@ where
     response
 }
 
+/// Returns the model path from `env_var`, or None if not set / path doesn't exist.
+fn resolve_model_path(env_var: &str, default_path: &str) -> Option<String> {
+    let path = env::var(env_var).unwrap_or_else(|_| default_path.into());
+    if path.is_empty() || !std::path::Path::new(&path).exists() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
 /// Macro to generate the full test suite for a given model type.
-/// This avoids duplicating all test bodies between LLaMA and Qwen2.
 macro_rules! model_test_suite {
     (
         module_name: $mod_name:ident,
@@ -76,7 +87,6 @@ macro_rules! model_test_suite {
         env_var: $env_var:expr,
         default_path: $default_path:expr,
         arch: $arch:expr,
-        skip_if_missing: $skip:expr,
     ) => {
         mod $mod_name {
             use super::*;
@@ -87,11 +97,7 @@ macro_rules! model_test_suite {
             static MODEL: OnceCell<Arc<Mutex<TestMaster>>> = OnceCell::const_new();
 
             fn get_model_path() -> Option<String> {
-                if $skip {
-                    env::var($env_var).ok()
-                } else {
-                    Some(env::var($env_var).unwrap_or_else(|_| $default_path.into()))
-                }
+                resolve_model_path($env_var, $default_path)
             }
 
             async fn get_or_load_model() -> Option<Arc<Mutex<TestMaster>>> {
@@ -597,13 +603,12 @@ model_test_suite! {
     image_model: cake_core::models::sd::SD,
     model_name_const: "llama3",
     env_var: "CAKE_TEST_MODEL",
-    default_path: "./cake-data/Llama-3.2-1B-Instruct/",
+    default_path: "",
     arch: TextModelArch::Llama,
-    skip_if_missing: false,
 }
 
 // =============================================================================
-// Qwen2 test suite (same tests, different model)
+// Qwen2 test suite
 // =============================================================================
 
 #[cfg(feature = "qwen2")]
@@ -615,5 +620,4 @@ model_test_suite! {
     env_var: "CAKE_TEST_QWEN2_MODEL",
     default_path: "",
     arch: TextModelArch::Qwen2,
-    skip_if_missing: true,
 }

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use candle_core::{DType, Device, Result, Tensor};
+use candle_nn::kv_cache::KvCache;
 
 use super::Config;
 
@@ -12,8 +13,7 @@ pub struct Cache {
 
     masks: HashMap<usize, Tensor>,
     use_kv_cache: bool,
-    kvs: Vec<Option<(Tensor, Tensor)>>,
-    max_seq_len: usize,
+    kvs: Vec<KvCache>,
 
     /// Recurrent state matrices for linear attention layers (Gated DeltaNet).
     /// Shape per entry: (batch=1, num_heads, key_dim, value_dim).
@@ -104,8 +104,7 @@ impl Cache {
         Ok(Self {
             masks: HashMap::new(),
             use_kv_cache,
-            kvs: vec![None; num_layers],
-            max_seq_len,
+            kvs: (0..num_layers).map(|_| KvCache::new(2, max_seq_len)).collect(),
             recurrent_states: vec![None; num_layers],
             conv_states: vec![None; num_layers],
             device: device.clone(),
@@ -144,14 +143,21 @@ impl Cache {
         self.masks.get(&seq_len).unwrap().clone().to_device(device)
     }
 
-    /// Process the input k and v by either generating their cache entry or applying a previously cached one.
+    /// Process the input k and v using pre-allocated KV cache.
+    ///
+    /// Uses candle-nn's KvCache with `slice_set` for O(1) per-token append
+    /// instead of O(N) concatenation, making total generation O(N) instead of O(N²).
     pub fn process_kv(
         &mut self,
         block_idx: usize,
         k: Tensor,
         v: Tensor,
     ) -> Result<(Tensor, Tensor)> {
-        self.process_kv_inner(block_idx, k, v, self.max_seq_len)
+        if self.use_kv_cache {
+            self.kvs[block_idx].append(&k, &v)
+        } else {
+            Ok((k, v))
+        }
     }
 
     /// Like `process_kv` but caps the KV cache to `window` tokens (sliding window attention).
@@ -162,35 +168,19 @@ impl Cache {
         v: Tensor,
         window: usize,
     ) -> Result<(Tensor, Tensor)> {
-        let limit = window.min(self.max_seq_len);
-        self.process_kv_inner(block_idx, k, v, limit)
-    }
-
-    fn process_kv_inner(
-        &mut self,
-        block_idx: usize,
-        mut k: Tensor,
-        mut v: Tensor,
-        limit: usize,
-    ) -> Result<(Tensor, Tensor)> {
         if self.use_kv_cache {
-            if let Some((cache_k, cache_v)) = &self.kvs[block_idx] {
-                // tensor shape is (batch, num_heads, seq_len, head_dim)
-                k = Tensor::cat(&[cache_k, &k], 2)?.contiguous()?;
-                v = Tensor::cat(&[cache_v, &v], 2)?.contiguous()?;
-
-                let k_seq_len = k.dims()[2];
-                if k_seq_len > limit {
-                    k = k.narrow(2, k_seq_len - limit, limit)?.contiguous()?;
-                }
-                let v_seq_len = v.dims()[2];
-                if v_seq_len > limit {
-                    v = v.narrow(2, v_seq_len - limit, limit)?.contiguous()?;
-                }
+            let (k_out, v_out) = self.kvs[block_idx].append(&k, &v)?;
+            let k_seq_len = k_out.dims()[2];
+            if k_seq_len > window {
+                let k_trimmed = k_out.narrow(2, k_seq_len - window, window)?.contiguous()?;
+                let v_trimmed = v_out.narrow(2, k_seq_len - window, window)?.contiguous()?;
+                Ok((k_trimmed, v_trimmed))
+            } else {
+                Ok((k_out, v_out))
             }
-            self.kvs[block_idx] = Some((k.clone(), v.clone()))
+        } else {
+            Ok((k, v))
         }
-        Ok((k, v))
     }
 
     /// Get the recurrent state for a linear attention layer.
@@ -223,7 +213,9 @@ impl Cache {
     /// Clear the cache.
     pub fn clear(&mut self) {
         self.masks.clear();
-        self.kvs = vec![None; self.kvs.len()];
+        for kv in &mut self.kvs {
+            kv.reset();
+        }
         self.recurrent_states = vec![None; self.recurrent_states.len()];
         self.conv_states = vec![None; self.conv_states.len()];
     }

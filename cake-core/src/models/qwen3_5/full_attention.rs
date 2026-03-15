@@ -161,7 +161,7 @@ impl Qwen3_5FullAttention {
         let (q, k, v) = if seq_len == 1 {
             (q.squeeze(1)?.unsqueeze(2)?, k.squeeze(1)?.unsqueeze(2)?, v.squeeze(1)?.unsqueeze(2)?)
         } else {
-            (q.transpose(1, 2)?.contiguous()?, k.transpose(1, 2)?.contiguous()?, v.transpose(1, 2)?)
+            (q.transpose(1, 2)?.contiguous()?, k.transpose(1, 2)?.contiguous()?, v.transpose(1, 2)?.contiguous()?)
         };
 
         // Apply partial RoPE
@@ -175,6 +175,7 @@ impl Qwen3_5FullAttention {
             .map_err(|e| anyhow!("process_kv: {e}"))?;
 
         // Attention
+        let in_dtype = q.dtype();
         #[allow(unused_labels)]
         let y = 'attn: {
             // Flash Attention on CUDA — fused kernel, native GQA (no repeat_kv needed)
@@ -210,7 +211,7 @@ impl Qwen3_5FullAttention {
                     .map_err(|e| anyhow!("masked_fill: {e}"))?
             };
             let att = candle_nn::ops::softmax_last_dim(&att)?;
-            att.matmul(&v.contiguous()?)?
+            att.matmul(&v)?
         };
 
         // Reshape: (batch, heads, seq, head_dim) -> (batch, seq, hidden_size)

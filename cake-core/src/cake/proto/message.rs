@@ -174,9 +174,18 @@ impl Message {
     // Yes, I could use GRPC, but this is simpler and faster.
     // Check speedy benchmarks ;)
 
-    /// Serializes the message to raw bytes.
+    /// Serializes the message to raw bytes (used by tests and `from_bytes`).
+    #[cfg(test)]
     fn to_bytes(&self) -> Result<Vec<u8>> {
         Ok(self.write_to_vec_with_ctx(BigEndian::default())?)
+    }
+
+    /// Serialize this message directly into `buf`, appending after any existing content.
+    /// Uses speedy's `Write` impl on `Vec<u8>` to avoid an intermediate allocation.
+    fn serialize_into(&self, buf: &mut Vec<u8>) -> Result<()> {
+        use speedy::Writable;
+        self.write_to_stream_with_ctx(BigEndian::default(), buf)?;
+        Ok(())
     }
 
     /// Deserializes a Message from raw bytes.
@@ -226,26 +235,32 @@ impl Message {
     }
 
     /// Write a Message, reusing `buf` to avoid per-message heap allocation.
+    ///
+    /// Serializes directly into `buf` (via speedy's `Write` impl on `Vec<u8>`)
+    /// to avoid an intermediate `to_bytes()` allocation — eliminates one full
+    /// copy of tensor data on the hot path.
     pub async fn to_writer_buf<W>(&self, writer: &mut W, buf: &mut Vec<u8>) -> Result<usize>
     where
         W: AsyncWriteExt + Unpin,
     {
-        let payload = self.to_bytes()?;
-        let payload_size = payload.len() as u32;
+        buf.clear();
+        // Reserve 8 bytes for the header (magic + size), filled in after serialization.
+        buf.extend_from_slice(&[0u8; 8]);
+        // Serialize message directly into buf (appends after the header placeholder).
+        self.serialize_into(buf)?;
+
+        let payload_size = (buf.len() - 8) as u32;
         if payload_size > super::MESSAGE_MAX_SIZE {
             return Err(anyhow!("request size {payload_size} > MESSAGE_MAX_SIZE"));
         }
 
-        // Coalesce header + payload into a single write to avoid Nagle delays.
-        let frame_len = 8 + payload.len();
-        buf.clear();
-        buf.reserve(frame_len);
-        buf.extend_from_slice(&super::PROTO_MAGIC.to_be_bytes());
-        buf.extend_from_slice(&payload_size.to_be_bytes());
-        buf.extend_from_slice(&payload);
+        // Fill in the header now that we know the payload size.
+        buf[0..4].copy_from_slice(&super::PROTO_MAGIC.to_be_bytes());
+        buf[4..8].copy_from_slice(&payload_size.to_be_bytes());
+
         writer.write_all(buf).await?;
 
-        Ok(frame_len)
+        Ok(buf.len())
     }
 }
 

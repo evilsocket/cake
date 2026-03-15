@@ -54,7 +54,12 @@ impl Generator for LLama {
 
     /// Load this model from the context.
     async fn load(ctx: &mut Context) -> Result<Option<Box<Self>>> {
-        let base = TextModelBase::load::<Transformer>(ctx, DEFAULT_EOS_TOKEN).await?;
+        let mut base = TextModelBase::load::<Transformer>(ctx, DEFAULT_EOS_TOKEN).await?;
+
+        // Load draft model for speculative decoding if requested
+        if let Some(ref draft_model) = ctx.args.draft_model.clone() {
+            base.load_draft::<Transformer>(draft_model, DEFAULT_EOS_TOKEN).await?;
+        }
 
         // Auto-detect chat template: LLaMA-3 uses <|begin_of_text|>;
         // other LlamaForCausalLM models (e.g. SmolLM2) may use ChatML (<|im_start|>).

@@ -31,7 +31,10 @@ where
     TG: TextGenerator + Send + Sync + 'static,
     IG: ImageGenerator + Send + Sync + 'static,
 {
-    let client = req.peer_addr().unwrap();
+    let client = req
+        .peer_addr()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
 
     log::info!("starting generating image for {} ...", &client);
 
@@ -40,7 +43,7 @@ where
     let result_images = Arc::new(Mutex::new(Vec::new()));
     let result_images_cloned = Arc::clone(&result_images);
 
-    master
+    if let Err(e) = master
         .generate_image(image_request.image_args.clone(), move |images| {
             let mut base64_images: Vec<String> = images
                 .iter()
@@ -60,7 +63,11 @@ where
             locked_result_images.append(&mut base64_images);
         })
         .await
-        .expect("Error generating images");
+    {
+        log::error!("image generation failed: {}", e);
+        return HttpResponse::InternalServerError()
+            .json(serde_json::json!({"error": e.to_string()}));
+    }
 
     let locked_result_images = result_images.lock().expect("Error acquiring lock");
     let response = ImageResponse {

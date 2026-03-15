@@ -14,17 +14,6 @@ build_release:
 	cargo build --release
 
 
-sync_bahamut:
-	@echo "@ bahamut sync && build ..."
-	@rsync -rvzc --exclude=cake-data --exclude=.git --exclude=target . bahamut.local:/home/evilsocket/cake
-	@rsync -rvzc cake-data/8b-test/bahamut-node bahamut.local:/home/evilsocket/cake-data
-
-sync_blade:
-	@echo "@ blade sync && build ..."
-	@rsync -rvzc --exclude=cake-data --exclude=.git --exclude=target . blade.local:/home/evilsocket/cake
-	@rsync -rvzc cake-data/8b-test/blade-node blade.local:/home/evilsocket/cake-data
-	
-sync: sync_bahamut sync_blade
 
 publish:
 	cargo publish -p cake-core

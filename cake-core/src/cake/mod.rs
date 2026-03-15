@@ -17,10 +17,10 @@ use candle_nn::VarBuilder;
 #[cfg(feature = "master")]
 pub mod api;
 #[cfg(feature = "master")]
-mod master;
+pub mod master;
 
 pub mod auth;
-mod client;
+pub mod client;
 pub mod discovery;
 mod proto;
 pub mod setup;
@@ -99,7 +99,15 @@ impl Context {
             data_path
         } else if !data_path.exists() {
             if utils::hf::looks_like_hf_repo(&args.model) {
-                utils::hf::ensure_model_downloaded(&args.model)?
+                // Image models (LTX-2, Flux, etc.) use diffusers format without a root
+                // config.json — their forwarders handle HF resolution internally.
+                // Only download via the generic path for text models.
+                if args.model_type == ModelType::TextModel {
+                    utils::hf::ensure_model_downloaded(&args.model)?
+                } else {
+                    // Pass the repo ID through; forwarders resolve it themselves
+                    data_path
+                }
             } else {
                 bail!("model path does not exist: {}", data_path.display());
             }
@@ -212,29 +220,70 @@ impl Context {
                 }
             };
 
-            let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
-            fp8 = utils::fp8::is_fp8_quantized(&config_filename);
-            if fp8 {
-                log::info!("model uses FP8 quantization — weights will be dequantized at load time");
-            }
-            let gptq_group_size = if utils::gptq::is_gptq_quantized(&config_filename) {
-                let gs = utils::gptq::gptq_group_size(&config_filename);
-                log::info!("model uses GPTQ quantization (group_size={gs}) — weights will be dequantized at load time");
-                Some(gs)
-            } else {
-                None
-            };
-            let is_master = matches!(args.mode, Mode::Master);
-            let my_layers: Vec<String> = if !is_master {
-                topology.all_worker_layers().into_iter().collect()
-            } else {
-                vec![]
-            };
+            // Check for GGUF file first, then fall back to safetensors
+            let gguf_file = utils::gguf::detect_gguf_file(&data_path);
 
-            var_builder = Some(if is_master {
-                // Master: exclude shards that only contain remote-worker tensors
-                let worker_layers = topology.all_worker_layers();
-                if worker_layers.is_empty() {
+            if let Some(ref gguf_path) = gguf_file {
+                log::info!("detected GGUF model: {}", gguf_path.display());
+                var_builder = Some(utils::gguf::load_var_builder_from_gguf(
+                    gguf_path,
+                    dtype,
+                    device.clone(),
+                    &config_internal.model_prefix,
+                )?);
+            } else {
+                let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
+                fp8 = utils::fp8::is_fp8_quantized(&config_filename);
+                if fp8 {
+                    log::info!("model uses FP8 quantization — weights will be dequantized at load time");
+                }
+                let gptq_group_size = if utils::gptq::is_gptq_quantized(&config_filename) {
+                    let gs = utils::gptq::gptq_group_size(&config_filename);
+                    log::info!("model uses GPTQ quantization (group_size={gs}) — weights will be dequantized at load time");
+                    Some(gs)
+                } else {
+                    None
+                };
+                let is_master = matches!(args.mode, Mode::Master);
+                let my_layers: Vec<String> = if !is_master {
+                    topology.all_worker_layers().into_iter().collect()
+                } else {
+                    vec![]
+                };
+
+                var_builder = Some(if is_master {
+                    // Master: exclude shards that only contain remote-worker tensors
+                    let worker_layers = topology.all_worker_layers();
+                    if worker_layers.is_empty() {
+                        utils::load_var_builder_from_index(
+                            model_tensors_index,
+                            dtype,
+                            device.clone(),
+                            fp8,
+                            gptq_group_size,
+                        )?
+                    } else {
+                        utils::load_var_builder_for_local_layers(
+                            model_tensors_index,
+                            dtype,
+                            device.clone(),
+                            &worker_layers,
+                            fp8,
+                            gptq_group_size,
+                        )?
+                    }
+                } else if !my_layers.is_empty() {
+                    // Worker with known layers: only load shards containing our layers
+                    utils::load_var_builder_for_specific_layers(
+                        model_tensors_index,
+                        dtype,
+                        device.clone(),
+                        &my_layers,
+                        fp8,
+                        gptq_group_size,
+                    )?
+                } else {
+                    // Worker without known layers: load everything
                     utils::load_var_builder_from_index(
                         model_tensors_index,
                         dtype,
@@ -242,36 +291,8 @@ impl Context {
                         fp8,
                         gptq_group_size,
                     )?
-                } else {
-                    utils::load_var_builder_for_local_layers(
-                        model_tensors_index,
-                        dtype,
-                        device.clone(),
-                        &worker_layers,
-                        fp8,
-                        gptq_group_size,
-                    )?
-                }
-            } else if !my_layers.is_empty() {
-                // Worker with known layers: only load shards containing our layers
-                utils::load_var_builder_for_specific_layers(
-                    model_tensors_index,
-                    dtype,
-                    device.clone(),
-                    &my_layers,
-                    fp8,
-                    gptq_group_size,
-                )?
-            } else {
-                // Worker without known layers: load everything
-                utils::load_var_builder_from_index(
-                    model_tensors_index,
-                    dtype,
-                    device.clone(),
-                    fp8,
-                    gptq_group_size,
-                )?
-            });
+                });
+            }
             cache = Some(Cache::new(true, dtype, &config_internal, &device)?);
             config = Some(config_internal);
         }

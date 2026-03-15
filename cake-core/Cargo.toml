@@ -40,6 +40,8 @@ candle-nn = { version = "0.9" }
 candle-transformers = { version = "0.9" }
 candle-flash-attn = { version = "0.9", optional = true }
 image = "0.25.2"
+statrs = "0.18"
+thiserror = "2"
 hf-hub = "0.5"
 libc = "0.2"
 sha2 = "0.10"
