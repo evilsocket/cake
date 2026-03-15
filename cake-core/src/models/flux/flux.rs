@@ -87,14 +87,6 @@ impl ImageGenerator for FluxGen {
 
         let num_steps = self.context.args.flux_args.num_steps;
 
-        // Quick F16 op test
-        {
-            let test_dev = &self.context.device;
-            let test = Tensor::randn(0f32, 1., (2, 4), test_dev)?.to_dtype(self.context.dtype)?;
-            let _ = test.silu()?;
-            info!("F16 silu test passed (dtype={:?})", self.context.dtype);
-        }
-
         if let Some(seed) = image_seed {
             self.context.device.set_seed(*seed)?;
         }
@@ -136,9 +128,6 @@ impl ImageGenerator for FluxGen {
             enc_tensors[0].clone()
         };
         info!("Text encoding done (shape={:?})", txt.shape());
-
-        // DEBUG: try zero text conditioning to isolate transformer/VAE issues
-        // let txt = Tensor::zeros_like(&txt)?;
 
         // 3. Load transformer (now fits in VRAM)
         info!("Loading transformer...");

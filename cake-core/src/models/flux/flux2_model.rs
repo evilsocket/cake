@@ -11,11 +11,6 @@ use candle_transformers::models::flux::model::EmbedNd;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-fn layer_norm_no_bias(dim: usize) -> Result<candle_nn::LayerNorm> {
-    let ws = Tensor::ones(dim, DType::F32, &candle_core::Device::Cpu)?;
-    Ok(candle_nn::LayerNorm::new_no_bias(ws, 1e-6))
-}
-
 fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor> {
     const TIME_FACTOR: f64 = 1000.;
     const MAX_PERIOD: f64 = 10000.;
@@ -176,11 +171,8 @@ impl DoubleStreamBlock {
         let head_dim = img.dim(D::Minus1)? / self.num_heads;
 
         // Modulate + norm (adaptive LayerNorm)
-        log::debug!("dblock: img={:?} mod0={:?} mod1={:?}", img.dtype(), img_mod[0].dtype(), img_mod[1].dtype());
         let img_norm = modulate(img, &img_mod[0], &img_mod[1])?;
-        log::debug!("dblock: img_norm={:?}", img_norm.dtype());
         let txt_norm = modulate(txt, &txt_mod[0], &txt_mod[1])?;
-        log::debug!("dblock: txt_norm={:?}", txt_norm.dtype());
 
         // Image Q/K/V
         let img_q = self.to_q.forward(&img_norm)?;
@@ -192,7 +184,6 @@ impl DoubleStreamBlock {
         let txt_k = self.add_k_proj.forward(&txt_norm)?;
         let txt_v = self.add_v_proj.forward(&txt_norm)?;
 
-        log::debug!("dblock: qkv img_q={:?} txt_q={:?} pe={:?}", img_q.dtype(), txt_q.dtype(), pe.dtype());
 
         // Reshape to (b, heads, seq, head_dim) and apply QK-norm
         let (b, img_seq, _) = img_q.dims3()?;
@@ -211,8 +202,6 @@ impl DoubleStreamBlock {
         let txt_k = reshape_norm(txt_k, &self.norm_added_k, txt_seq)?;
         let txt_v = txt_v.reshape((b, txt_seq, self.num_heads, head_dim))?.transpose(1, 2)?;
 
-        log::debug!("dblock: after norm img_q={:?} txt_q={:?} pe={:?}", img_q.dtype(), txt_q.dtype(), pe.dtype());
-        log::debug!("dblock: img_v={:?} txt_v={:?}", img_v.dtype(), txt_v.dtype());
         // Joint attention: concat text + image
         let q = Tensor::cat(&[&txt_q, &img_q], 2)?; // (b, heads, txt+img, head_dim)
         let k = Tensor::cat(&[&txt_k, &img_k], 2)?;
@@ -476,12 +465,10 @@ impl Flux2Transformer {
         let img = img.to_dtype(w_dtype)?;
         let txt = txt.to_dtype(w_dtype)?;
 
-        log::debug!("flux2 fwd: w_dtype={:?} img={:?} txt={:?}", w_dtype, img.dtype(), txt.dtype());
 
         // Embed inputs
         let mut img = self.x_embedder.forward(&img)?;
         let mut txt = self.context_embedder.forward(&txt)?;
-        log::debug!("flux2 after embed: img={:?} txt={:?}", img.dtype(), txt.dtype());
 
         // Timestep conditioning (compute in F32, cast back)
         let vec = timestep_embedding(&timesteps.to_dtype(DType::F32)?, 256, DType::F32)?
@@ -492,7 +479,6 @@ impl Flux2Transformer {
         let ids = Tensor::cat(&[&txt_ids.to_dtype(DType::F32)?, &img_ids.to_dtype(DType::F32)?], 1)?;
         let pe = self.pe_embedder.forward(&ids)?.to_dtype(w_dtype)?;
 
-        log::debug!("flux2 vec={:?} pe={:?}", vec.dtype(), pe.dtype());
 
         // Compute shared modulations
         let vec_silu = vec.silu()?;
@@ -505,11 +491,9 @@ impl Flux2Transformer {
         let txt_mods = txt_mod_all.chunk(6, D::Minus1)?;
         let single_mods = single_mod_all.chunk(3, D::Minus1)?;
 
-        log::debug!("flux2 mods: img_mod[0]={:?} single_mod[0]={:?}", img_mods[0].dtype(), single_mods[0].dtype());
 
         // Double stream blocks
-        for (bi, block) in self.double_blocks.iter().enumerate() {
-            log::debug!("flux2 double block {bi}: img={:?} txt={:?}", img.dtype(), txt.dtype());
+        for block in &self.double_blocks {
             let (new_img, new_txt) = block.forward(&img, &txt, &img_mods, &txt_mods, &pe)?;
             img = new_img;
             txt = new_txt;
@@ -518,22 +502,17 @@ impl Flux2Transformer {
         // Single stream blocks
         let txt_seq = txt.dim(1)?;
         let mut merged = Tensor::cat(&[&txt, &img], 1)?;
-        for (si, block) in self.single_blocks.iter().enumerate() {
-            log::debug!("single block {si}: merged={:?}", merged.dtype());
+        for block in &self.single_blocks {
             merged = block.forward(&merged, &single_mods, &pe)?;
         }
 
         // Extract image portion
         let img = merged.narrow(1, txt_seq, merged.dim(1)? - txt_seq)?;
 
-        log::debug!("final layer: img={:?} vec={:?}", img.dtype(), vec.dtype());
         // Final layer: adaptive norm + projection
         let final_mod = vec.silu()?.apply(&self.norm_out)?;
-        log::debug!("final layer: final_mod={:?}", final_mod.dtype());
         let final_chunks = final_mod.chunk(2, D::Minus1)?;
-        log::debug!("final: chunks[0]={:?} chunks[1]={:?}", final_chunks[0].dtype(), final_chunks[1].dtype());
         let img = modulate(&img, &final_chunks[0], &final_chunks[1])?;
-        log::debug!("final: after modulate img={:?}", img.dtype());
         self.proj_out.forward(&img)
     }
 }
