@@ -69,11 +69,12 @@ impl Forwarder for FluxTransformerForwarder {
 impl FluxTransformerForwarder {
     pub fn load_model(
         device: &Device,
-        dtype: DType,
+        _dtype: DType,
         model_repo: &str,
     ) -> anyhow::Result<Box<Self>> {
-        // Load in the requested dtype (F16). The model's forward() handles
-        // F32 upcasting internally for ops that need it (RoPE, LayerNorm).
+        // Force F32 for quality — F16 causes visible noise artifacts in the output.
+        // With sequential loading (text encoder freed first), ~8GB fits in 16GB VRAM.
+        let dtype = DType::F32;
         let cfg = Flux2Config::klein_4b();
 
         let cache_dir = dirs::cache_dir()

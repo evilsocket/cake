@@ -7,6 +7,7 @@
 mod config;
 mod flux;
 mod flux2_model;
+mod flux2_vae;
 mod flux_shardable;
 mod text_encoder;
 mod transformer;
