@@ -363,7 +363,7 @@ impl FluxTextEncoder {
     /// FLUX.2-klein extracts hidden states from layers [9, 18, 27] (0-indexed)
     /// and concatenates them: 3 × 2560 = 7680 = joint_attention_dim.
     /// Encode with attention mask. attn_mask: (1, seq) with 1=real, 0=padding.
-    fn encode(&self, token_ids: &Tensor, attn_mask: Option<&Tensor>) -> Result<Tensor> {
+    pub fn encode(&self, token_ids: &Tensor, attn_mask: Option<&Tensor>) -> Result<Tensor> {
         const OUTPUT_LAYERS: [usize; 3] = [8, 17, 26];
 
         let mut x = self.embeddings.forward(token_ids)?;

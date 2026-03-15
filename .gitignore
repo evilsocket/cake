@@ -80,3 +80,4 @@ opencode.json
 split-output/
 topology.yml
 *.safetensors
+flux-tests/target/

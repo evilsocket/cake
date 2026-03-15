@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["cake-core", "cake-cli", "cake-mobile"]
+exclude = ["flux-tests"]
 
 [workspace.package]
 version = "0.1.0"

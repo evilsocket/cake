@@ -9,7 +9,7 @@ use candle_nn::{Linear, VarBuilder};
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-pub(crate) fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor> {
+pub fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor> {
     const TIME_FACTOR: f64 = 1000.;
     const MAX_PERIOD: f64 = 10000.;
     if dim % 2 == 1 {
@@ -30,7 +30,7 @@ pub(crate) fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result
 /// Positional embedding matching diffusers Flux2PosEmbed exactly.
 /// Returns (cos, sin) each of shape [S, head_dim] with repeat_interleave.
 #[derive(Debug, Clone)]
-struct Flux2PosEmbed {
+pub struct Flux2PosEmbed {
     theta: usize,
     axes_dim: Vec<usize>,
 }
@@ -41,7 +41,7 @@ impl Flux2PosEmbed {
     }
 
     /// Compute (cos, sin) PE for given position IDs [S, num_axes].
-    fn forward(&self, ids: &Tensor) -> Result<(Tensor, Tensor)> {
+    pub fn forward(&self, ids: &Tensor) -> Result<(Tensor, Tensor)> {
         let mut all_cos = Vec::new();
         let mut all_sin = Vec::new();
         let pos = ids.to_dtype(DType::F64)?;
@@ -154,7 +154,7 @@ impl QkNorm {
 // ── MLP ────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-pub(crate) struct GatedMLP {
+pub struct GatedMLP {
     linear_in: Linear,  // fused gate + up: (hidden, 2*mlp_hidden)
     linear_out: Linear, // down: (mlp_hidden, hidden)
     mlp_hidden: usize,
@@ -180,7 +180,7 @@ impl GatedMLP {
 // ── Double Stream Block ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-pub(crate) struct DoubleStreamBlock {
+pub struct DoubleStreamBlock {
     // Image attention
     to_q: Linear,
     to_k: Linear,
@@ -226,7 +226,7 @@ impl DoubleStreamBlock {
         })
     }
 
-    fn forward(
+    pub fn forward(
         &self,
         img: &Tensor,
         txt: &Tensor,
@@ -400,19 +400,19 @@ fn layer_norm_forward(x: &Tensor) -> Result<Tensor> {
 // ── MLP Embedder ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-pub(crate) struct MlpEmbedder {
+pub struct MlpEmbedder {
     linear_1: Linear,
     linear_2: Linear,
 }
 
 impl MlpEmbedder {
-    pub(crate) fn load(vb: VarBuilder) -> Result<Self> {
+    pub fn load(vb: VarBuilder) -> Result<Self> {
         let linear_1 = candle_nn::linear_no_bias(256, 3072, vb.pp("linear_1"))?;
         let linear_2 = candle_nn::linear_no_bias(3072, 3072, vb.pp("linear_2"))?;
         Ok(Self { linear_1, linear_2 })
     }
 
-    pub(crate) fn forward(&self, x: &Tensor) -> Result<Tensor> {
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         x.apply(&self.linear_1)?.silu()?.apply(&self.linear_2)
     }
 }
@@ -454,21 +454,18 @@ impl Flux2Config {
 /// FLUX.2-klein MMDiT transformer.
 #[derive(Debug, Clone)]
 pub struct Flux2Transformer {
-    x_embedder: Linear,
-    context_embedder: Linear,
-    time_embedder: MlpEmbedder,
-    pe_embedder: Flux2PosEmbed,
-    // Shared modulation
-    double_mod_img: Linear,
-    double_mod_txt: Linear,
-    single_mod: Linear,
-    // Blocks
-    double_blocks: Vec<DoubleStreamBlock>,
-    single_blocks: Vec<SingleStreamBlock>,
-    // Final layer
-    norm_out: Linear,
-    proj_out: Linear,
-    cfg: Flux2Config,
+    pub x_embedder: Linear,
+    pub context_embedder: Linear,
+    pub time_embedder: MlpEmbedder,
+    pub pe_embedder: Flux2PosEmbed,
+    pub double_mod_img: Linear,
+    pub double_mod_txt: Linear,
+    pub single_mod: Linear,
+    pub double_blocks: Vec<DoubleStreamBlock>,
+    pub single_blocks: Vec<SingleStreamBlock>,
+    pub norm_out: Linear,
+    pub proj_out: Linear,
+    pub cfg: Flux2Config,
 }
 
 impl Flux2Transformer {

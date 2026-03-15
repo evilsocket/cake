@@ -6,11 +6,11 @@
 
 mod config;
 mod flux;
-mod flux2_model;
+pub mod flux2_model;
 mod flux2_vae;
 mod flux_shardable;
-mod text_encoder;
-mod transformer;
+pub mod text_encoder;
+pub mod transformer;
 mod vae;
 
 pub use flux::FluxGen;

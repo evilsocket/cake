@@ -13,7 +13,7 @@ use super::flux2_model::{Flux2Config, Flux2Transformer};
 
 #[derive(Debug)]
 pub struct FluxTransformerForwarder {
-    model: Flux2Transformer,
+    pub model: Flux2Transformer,
 }
 
 impl Display for FluxTransformerForwarder {
