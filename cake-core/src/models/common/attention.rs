@@ -193,13 +193,29 @@ impl CausalSelfAttention {
             } else { k }
         } else { k };
 
-        // Transpose to (b, heads, seq, head_dim)
-        let q = q.transpose(1, 2)?.contiguous()
-            .map_err(|e| anyhow!("q.transpose -> {e}"))?;
-        let k = k.transpose(1, 2)?.contiguous()
-            .map_err(|e| anyhow!("k.transpose -> {e}"))?;
-        let v = v.transpose(1, 2)
-            .map_err(|e| anyhow!("v.transpose -> {e}"))?;
+        // Transpose to (b, heads, seq, head_dim).
+        // For generation (seq_len=1), squeeze+unsqueeze avoids the contiguous
+        // copy that transpose triggers — the memory layout is already correct
+        // when the swapped dimension has size 1.
+        let (q, k, v) = if seq_len == 1 {
+            (
+                q.squeeze(1)?.unsqueeze(2)
+                    .map_err(|e| anyhow!("q.squeeze/unsqueeze -> {e}"))?,
+                k.squeeze(1)?.unsqueeze(2)
+                    .map_err(|e| anyhow!("k.squeeze/unsqueeze -> {e}"))?,
+                v.squeeze(1)?.unsqueeze(2)
+                    .map_err(|e| anyhow!("v.squeeze/unsqueeze -> {e}"))?,
+            )
+        } else {
+            (
+                q.transpose(1, 2)?.contiguous()
+                    .map_err(|e| anyhow!("q.transpose -> {e}"))?,
+                k.transpose(1, 2)?.contiguous()
+                    .map_err(|e| anyhow!("k.transpose -> {e}"))?,
+                v.transpose(1, 2)
+                    .map_err(|e| anyhow!("v.transpose -> {e}"))?,
+            )
+        };
 
         // Apply RoPE (optional — Gemma3 local layers skip this)
         let q = if self.use_rope {
@@ -295,7 +311,13 @@ impl CausalSelfAttention {
         };
 
         let y = y.to_dtype(in_dtype)?;
-        let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, self.size_q])?;
+        // For generation (seq_len=1), squeeze+reshape avoids the contiguous
+        // copy that transpose(1,2) would trigger before reshape.
+        let y = if seq_len == 1 {
+            y.squeeze(2)?.reshape(&[b_sz, 1, self.size_q])?
+        } else {
+            y.transpose(1, 2)?.reshape(&[b_sz, seq_len, self.size_q])?
+        };
         let y = self.o_proj.forward(&y)?;
 
         Ok(y)

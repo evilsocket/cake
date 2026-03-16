@@ -167,6 +167,61 @@ impl Qwen3_5MoeSparseMlp {
                 .map_err(|e| anyhow!("router div: {e}"))?
         };
 
+        // Fast path for single-token generation: iterate directly over k
+        // selected experts instead of building a dispatch table for all experts.
+        if n_tok == 1 {
+            let k = self.num_experts_per_tok;
+            let compute_dtype = x_flat.dtype();
+
+            let expert_indices: Vec<u32> = top_k_idx
+                .squeeze(0)
+                .map_err(|e| anyhow!("idx squeeze: {e}"))?
+                .to_dtype(DType::U32)
+                .map_err(|e| anyhow!("idx u32: {e}"))?
+                .to_vec1::<u32>()
+                .map_err(|e| anyhow!("idx to_vec: {e}"))?;
+
+            let expert_weights: Vec<f32> = top_k_w
+                .squeeze(0)
+                .map_err(|e| anyhow!("w squeeze: {e}"))?
+                .to_dtype(DType::F32)
+                .map_err(|e| anyhow!("w f32: {e}"))?
+                .to_vec1::<f32>()
+                .map_err(|e| anyhow!("w to_vec: {e}"))?;
+
+            let mut output = Tensor::zeros((1, h), compute_dtype, x_flat.device())
+                .map_err(|e| anyhow!("output zeros: {e}"))?;
+
+            for idx in 0..k {
+                let exp = expert_indices[idx] as usize;
+                let w = expert_weights[idx];
+
+                let gate_out = self.experts_gate[exp]
+                    .forward(&x_flat)
+                    .map_err(|e| anyhow!("expert gate: {e}"))?;
+                let up_out = self.experts_up[exp]
+                    .forward(&x_flat)
+                    .map_err(|e| anyhow!("expert up: {e}"))?;
+                let hidden = (candle_nn::ops::silu(&gate_out)
+                    .map_err(|e| anyhow!("silu: {e}"))?
+                    * up_out)
+                    .map_err(|e| anyhow!("gate*up: {e}"))?;
+                let expert_out = self.experts_down[exp]
+                    .forward(&hidden)
+                    .map_err(|e| anyhow!("expert down: {e}"))?;
+
+                output = (output + (expert_out * w as f64)
+                    .map_err(|e| anyhow!("scale: {e}"))?)
+                    .map_err(|e| anyhow!("accumulate: {e}"))?;
+            }
+
+            let output = (output + &shared_out)
+                .map_err(|e| anyhow!("add shared: {e}"))?;
+            return output
+                .reshape((b, s, h))
+                .map_err(|e| anyhow!("output reshape: {e}"));
+        }
+
         // CPU dispatch table
         let top_k_idx_flat: Vec<u32> = top_k_idx
             .to_dtype(DType::U32)

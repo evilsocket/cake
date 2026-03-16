@@ -119,6 +119,72 @@ impl SparseMoeMlp {
             top_k_w
         };
 
+        // Fast path for single-token generation: batch all k experts into
+        // 3 batched matmuls instead of 3k individual matmuls + CPU dispatch.
+        if n_tok == 1 {
+            let k = self.num_experts_per_tok;
+            let expert_indices = top_k_idx
+                .squeeze(0)
+                .map_err(|e| anyhow!("moe squeeze idx -> {e}"))?;
+
+            // Gather expert weights: (k, i, h), (k, i, h), (k, h, i)
+            let sel_gate = self
+                .gate_proj
+                .index_select(&expert_indices, 0)
+                .map_err(|e| anyhow!("moe sel gate_proj -> {e}"))?;
+            let sel_up = self
+                .up_proj
+                .index_select(&expert_indices, 0)
+                .map_err(|e| anyhow!("moe sel up_proj -> {e}"))?;
+            let sel_down = self
+                .down_proj
+                .index_select(&expert_indices, 0)
+                .map_err(|e| anyhow!("moe sel down_proj -> {e}"))?;
+
+            // x_flat: (1, h) → broadcast to (k, 1, h)
+            let x_exp = x_flat
+                .unsqueeze(0)
+                .map_err(|e| anyhow!("moe x unsqueeze -> {e}"))?
+                .expand((k, 1, h))
+                .map_err(|e| anyhow!("moe x expand -> {e}"))?;
+
+            // Batched matmul: (k, 1, h) @ (k, h, i) = (k, 1, i)
+            let gate_out = x_exp
+                .matmul(&sel_gate.t().map_err(|e| anyhow!("moe sel gp.t -> {e}"))?)
+                .map_err(|e| anyhow!("moe batched gate matmul -> {e}"))?;
+            let up_out = x_exp
+                .matmul(&sel_up.t().map_err(|e| anyhow!("moe sel up.t -> {e}"))?)
+                .map_err(|e| anyhow!("moe batched up matmul -> {e}"))?;
+
+            let hidden = (candle_nn::ops::silu(&gate_out)
+                .map_err(|e| anyhow!("moe silu -> {e}"))?
+                * up_out)
+                .map_err(|e| anyhow!("moe gate*up -> {e}"))?;
+
+            // Down proj: (k, 1, i) @ (k, i, h) = (k, 1, h)
+            let expert_outs = hidden
+                .matmul(&sel_down.t().map_err(|e| anyhow!("moe sel dp.t -> {e}"))?)
+                .map_err(|e| anyhow!("moe batched down matmul -> {e}"))?;
+
+            // Weight by routing probabilities and sum: (k, 1, h) → (1, h)
+            let weights = top_k_w
+                .squeeze(0)
+                .map_err(|e| anyhow!("moe squeeze weights -> {e}"))?
+                .to_dtype(x_flat.dtype())
+                .map_err(|e| anyhow!("moe weights dtype -> {e}"))?
+                .reshape((k, 1, 1))
+                .map_err(|e| anyhow!("moe weights reshape -> {e}"))?;
+            let output = expert_outs
+                .broadcast_mul(&weights)
+                .map_err(|e| anyhow!("moe weighted -> {e}"))?
+                .sum(0)
+                .map_err(|e| anyhow!("moe sum experts -> {e}"))?;
+
+            return output
+                .reshape((b, s, h))
+                .map_err(|e| anyhow!("moe output reshape -> {e}"));
+        }
+
         // Pull routing decisions to CPU (tiny: n_tok × k integers + floats).
         let top_k_idx_flat: Vec<u32> = top_k_idx
             .to_dtype(DType::U32)

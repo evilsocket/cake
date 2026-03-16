@@ -230,22 +230,24 @@ impl Message {
     where
         W: AsyncWriteExt + Unpin,
     {
-        let payload = self.to_bytes()?;
-        let payload_size = payload.len() as u32;
+        // Reserve 8 bytes for the header (magic + length), then serialize the
+        // message directly into `buf` via speedy's stream writer.  This avoids
+        // the intermediate `Vec<u8>` that `write_to_vec_with_ctx` would create.
+        buf.clear();
+        buf.extend_from_slice(&[0u8; 8]); // placeholder for header
+        self.write_to_stream_with_ctx(BigEndian::default(), &mut *buf)?;
+
+        let payload_size = (buf.len() - 8) as u32;
         if payload_size > super::MESSAGE_MAX_SIZE {
             return Err(anyhow!("request size {payload_size} > MESSAGE_MAX_SIZE"));
         }
 
-        // Coalesce header + payload into a single write to avoid Nagle delays.
-        let frame_len = 8 + payload.len();
-        buf.clear();
-        buf.reserve(frame_len);
-        buf.extend_from_slice(&super::PROTO_MAGIC.to_be_bytes());
-        buf.extend_from_slice(&payload_size.to_be_bytes());
-        buf.extend_from_slice(&payload);
-        writer.write_all(buf).await?;
+        // Fill in the header in-place.
+        buf[0..4].copy_from_slice(&super::PROTO_MAGIC.to_be_bytes());
+        buf[4..8].copy_from_slice(&payload_size.to_be_bytes());
 
-        Ok(frame_len)
+        writer.write_all(buf).await?;
+        Ok(buf.len())
     }
 }
 
