@@ -78,7 +78,7 @@ pub fn gptq_group_size(config_path: &Path) -> usize {
 /// - `qzeros`:  int32, shape `(groups, out_features / 8)`
 ///
 /// Output: F32 tensor of shape `(out_features, in_features)`.
-fn dequantize_gptq_4bit(
+pub fn dequantize_gptq_4bit(
     qweight: &Tensor,
     scales: &Tensor,
     qzeros: &Tensor,

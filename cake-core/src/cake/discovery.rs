@@ -411,14 +411,14 @@ struct DiscoveryResponse {
     os: String,
 }
 
-fn encode_packet(payload: &[u8]) -> Vec<u8> {
+pub fn encode_packet(payload: &[u8]) -> Vec<u8> {
     let mut pkt = Vec::with_capacity(4 + payload.len());
     pkt.extend_from_slice(MAGIC);
     pkt.extend_from_slice(payload);
     pkt
 }
 
-fn decode_packet(data: &[u8]) -> Option<&[u8]> {
+pub fn decode_packet(data: &[u8]) -> Option<&[u8]> {
     if data.len() > 4 && data[..4] == *MAGIC {
         Some(&data[4..])
     } else {

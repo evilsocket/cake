@@ -2,6 +2,7 @@
 name = "cake-core"
 version.workspace = true
 edition.workspace = true
+autobenches = false
 description.workspace = true
 repository.workspace = true
 keywords.workspace = true

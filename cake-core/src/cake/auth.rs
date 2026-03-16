@@ -23,7 +23,7 @@ const NONCE_SIZE: usize = 32;
 const HMAC_SIZE: usize = 32;
 
 /// Compute HMAC-SHA256(key, data).
-fn compute_hmac(key: &[u8], data: &[u8]) -> [u8; HMAC_SIZE] {
+pub fn compute_hmac(key: &[u8], data: &[u8]) -> [u8; HMAC_SIZE] {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(data);
     mac.finalize().into_bytes().into()
@@ -37,7 +37,7 @@ fn random_nonce() -> [u8; NONCE_SIZE] {
 }
 
 /// Constant-time comparison of two byte slices.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

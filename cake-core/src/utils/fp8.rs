@@ -40,7 +40,7 @@ pub fn is_fp8_quantized(config_path: &Path) -> bool {
 }
 
 /// Dequantize a 2-D FP8 weight tensor using its per-block scale factor.
-fn dequantize_fp8_blockwise(weight: &Tensor, scale_inv: &Tensor) -> candle_core::Result<Tensor> {
+pub fn dequantize_fp8_blockwise(weight: &Tensor, scale_inv: &Tensor) -> candle_core::Result<Tensor> {
     let (m, n) = weight.dims2()?;
     let bm = FP8_BLOCK_SIZE;
     let bn = FP8_BLOCK_SIZE;

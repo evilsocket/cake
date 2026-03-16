@@ -175,12 +175,12 @@ impl Message {
     // Check speedy benchmarks ;)
 
     /// Serializes the message to raw bytes.
-    fn to_bytes(&self) -> Result<Vec<u8>> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
         Ok(self.write_to_vec_with_ctx(BigEndian::default())?)
     }
 
     /// Deserializes a Message from raw bytes.
-    fn from_bytes(raw: &[u8]) -> Result<Self> {
+    pub fn from_bytes(raw: &[u8]) -> Result<Self> {
         Ok(Self::read_from_buffer_with_ctx(BigEndian::default(), raw)?)
     }
 
