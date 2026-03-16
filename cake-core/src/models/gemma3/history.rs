@@ -75,3 +75,63 @@ impl Gemma3History {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_system_stored_separately() {
+        let mut h = Gemma3History::new();
+        h.push(Message::system("You are helpful.".into()));
+        h.push(Message::user("Hello".into()));
+        // System message should not appear as a separate turn
+        assert_eq!(h.turns.len(), 1);
+        assert_eq!(h.system, "You are helpful.");
+    }
+
+    #[test]
+    fn test_system_prepended_to_first_user() {
+        let mut h = Gemma3History::new();
+        h.push(Message::system("Be brief.".into()));
+        h.push(Message::user("Hi".into()));
+
+        let prompt = h.encode_dialog_to_prompt();
+        assert!(prompt.starts_with("<bos>"));
+        // System prepended before user content in first turn
+        assert!(prompt.contains("<start_of_turn>user\nBe brief.\nHi<end_of_turn>"));
+        assert!(prompt.ends_with("<start_of_turn>model\n"));
+    }
+
+    #[test]
+    fn test_no_system_prompt() {
+        let mut h = Gemma3History::new();
+        h.push(Message::user("Hello".into()));
+
+        let prompt = h.encode_dialog_to_prompt();
+        assert!(prompt.contains("<start_of_turn>user\nHello<end_of_turn>"));
+        assert!(prompt.ends_with("<start_of_turn>model\n"));
+    }
+
+    #[test]
+    fn test_multi_turn() {
+        let mut h = Gemma3History::new();
+        h.push(Message::user("Hi".into()));
+        h.push(Message::assistant("Hello!".into()));
+        h.push(Message::user("How are you?".into()));
+
+        let prompt = h.encode_dialog_to_prompt();
+        assert!(prompt.contains("<start_of_turn>model\nHello!<end_of_turn>"));
+        assert!(prompt.contains("<start_of_turn>user\nHow are you?<end_of_turn>"));
+    }
+
+    #[test]
+    fn test_clear() {
+        let mut h = Gemma3History::new();
+        h.push(Message::system("sys".into()));
+        h.push(Message::user("usr".into()));
+        h.clear();
+        assert!(h.system.is_empty());
+        assert!(h.turns.is_empty());
+    }
+}

@@ -1,6 +1,6 @@
 //! Gemma 3 model implementation (Gemma3ForCausalLM).
 mod block;
-mod config;
+pub mod config;
 mod history;
 mod model;
 

@@ -89,3 +89,76 @@ where
     .await
     .map_err(|e| anyhow!(e))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ModelObject / ModelsResponse serialization ──────────────
+
+    #[test]
+    fn test_model_object_serialization() {
+        let obj = ModelObject {
+            id: "test-model-v1".into(),
+            object: "model".into(),
+            owned_by: "cake".into(),
+        };
+        let json = serde_json::to_value(&obj).unwrap();
+        assert_eq!(json["id"], "test-model-v1");
+        assert_eq!(json["object"], "model");
+        assert_eq!(json["owned_by"], "cake");
+    }
+
+    #[test]
+    fn test_models_response_serialization() {
+        let resp = ModelsResponse {
+            object: "list".into(),
+            data: vec![
+                ModelObject {
+                    id: "model-a".into(),
+                    object: "model".into(),
+                    owned_by: "cake".into(),
+                },
+                ModelObject {
+                    id: "model-b".into(),
+                    object: "model".into(),
+                    owned_by: "cake".into(),
+                },
+            ],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["object"], "list");
+        assert_eq!(json["data"].as_array().unwrap().len(), 2);
+        assert_eq!(json["data"][0]["id"], "model-a");
+        assert_eq!(json["data"][1]["id"], "model-b");
+    }
+
+    #[test]
+    fn test_models_response_empty_data() {
+        let resp = ModelsResponse {
+            object: "list".into(),
+            data: vec![],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["data"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_models_response_openai_compatible_structure() {
+        // Verify the response matches OpenAI /v1/models format
+        let resp = ModelsResponse {
+            object: "list".into(),
+            data: vec![ModelObject {
+                id: "Qwen/Qwen3.5-0.8B".into(),
+                object: "model".into(),
+                owned_by: "cake".into(),
+            }],
+        };
+        let json_str = serde_json::to_string(&resp).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        // OpenAI spec requires "object": "list" at top level
+        assert_eq!(parsed["object"], "list");
+        // Each model entry must have "object": "model"
+        assert_eq!(parsed["data"][0]["object"], "model");
+    }
+}

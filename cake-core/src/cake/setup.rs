@@ -1178,3 +1178,141 @@ async fn receive_model_data(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn layer_prefix_for_config_qwen3_5() {
+        let config = serde_json::json!({
+            "architectures": ["Qwen3_5ForConditionalGeneration"]
+        });
+        assert_eq!(
+            layer_prefix_for_config(&config),
+            "model.language_model.layers"
+        );
+    }
+
+    #[test]
+    fn layer_prefix_for_config_llama() {
+        let config = serde_json::json!({
+            "architectures": ["LlamaForCausalLM"]
+        });
+        assert_eq!(layer_prefix_for_config(&config), "model.layers");
+    }
+
+    #[test]
+    fn layer_prefix_for_config_qwen2() {
+        let config = serde_json::json!({
+            "architectures": ["Qwen2ForCausalLM"]
+        });
+        assert_eq!(layer_prefix_for_config(&config), "model.layers");
+    }
+
+    #[test]
+    fn layer_prefix_for_config_no_architectures() {
+        let config = serde_json::json!({"hidden_size": 1024});
+        assert_eq!(layer_prefix_for_config(&config), "model.layers");
+    }
+
+    #[test]
+    fn layer_prefix_for_config_empty_architectures() {
+        let config = serde_json::json!({"architectures": []});
+        assert_eq!(layer_prefix_for_config(&config), "model.layers");
+    }
+
+    #[test]
+    fn has_valid_model_cache_no_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layers = vec!["model.layers.0".to_string()];
+        assert!(!has_valid_model_cache(tmp.path(), &layers));
+    }
+
+    #[test]
+    fn has_valid_model_cache_single_safetensors() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        fs::write(tmp.path().join("model.safetensors"), "data").unwrap();
+        let layers = vec!["model.layers.0".to_string()];
+        assert!(has_valid_model_cache(tmp.path(), &layers));
+    }
+
+    #[test]
+    fn has_valid_model_cache_sharded_complete() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        let index = serde_json::json!({
+            "weight_map": {
+                "model.layers.0.attn.weight": "shard-00001.safetensors",
+                "model.layers.1.mlp.weight": "shard-00002.safetensors"
+            }
+        });
+        fs::write(
+            tmp.path().join("model.safetensors.index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+        fs::write(tmp.path().join("shard-00001.safetensors"), "data").unwrap();
+        fs::write(tmp.path().join("shard-00002.safetensors"), "data").unwrap();
+
+        let layers = vec![
+            "model.layers.0".to_string(),
+            "model.layers.1".to_string(),
+        ];
+        assert!(has_valid_model_cache(tmp.path(), &layers));
+    }
+
+    #[test]
+    fn has_valid_model_cache_sharded_missing_layer() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        let index = serde_json::json!({
+            "weight_map": {
+                "model.layers.0.attn.weight": "shard-00001.safetensors"
+            }
+        });
+        fs::write(
+            tmp.path().join("model.safetensors.index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+        fs::write(tmp.path().join("shard-00001.safetensors"), "data").unwrap();
+
+        // Request layer 1 which is not in the weight map at all
+        let layers = vec![
+            "model.layers.0".to_string(),
+            "model.layers.1".to_string(),
+        ];
+        assert!(!has_valid_model_cache(tmp.path(), &layers));
+    }
+
+    #[test]
+    fn has_valid_model_cache_sharded_missing_shard_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        let index = serde_json::json!({
+            "weight_map": {
+                "model.layers.0.attn.weight": "shard-00001.safetensors"
+            }
+        });
+        fs::write(
+            tmp.path().join("model.safetensors.index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+        // Don't create shard-00001.safetensors
+
+        let layers = vec!["model.layers.0".to_string()];
+        assert!(!has_valid_model_cache(tmp.path(), &layers));
+    }
+
+    #[test]
+    fn has_valid_model_cache_config_only_no_weights() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        let layers = vec!["model.layers.0".to_string()];
+        assert!(!has_valid_model_cache(tmp.path(), &layers));
+    }
+}

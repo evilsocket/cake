@@ -130,6 +130,58 @@ impl Fp8Backend {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dequantize_fp8_blockwise_identity_scale() {
+        // Create F8E4M3 tensor via candle's DType::F8E4M3
+        // Start from F32 0.5, cast to F8E4M3, then dequantize with scale=1.0
+        let f32_weight =
+            Tensor::from_vec(vec![0.5f32; 128 * 128], (128, 128), &Device::Cpu).unwrap();
+        let weight = f32_weight.to_dtype(DType::F8E4M3).unwrap();
+        let scale_inv = Tensor::from_vec(vec![1.0f32], (1, 1), &Device::Cpu).unwrap();
+        let result = dequantize_fp8_blockwise(&weight, &scale_inv).unwrap();
+        assert_eq!(result.dims(), &[128, 128]);
+        let first: f32 = result.flatten_all().unwrap().to_vec1::<f32>().unwrap()[0];
+        assert!(
+            (first - 0.5).abs() < 0.05,
+            "identity scale should preserve value, got {first}"
+        );
+    }
+
+    #[test]
+    fn test_dequantize_fp8_blockwise_scaling() {
+        let f32_weight =
+            Tensor::from_vec(vec![1.0f32; 128 * 128], (128, 128), &Device::Cpu).unwrap();
+        let weight = f32_weight.to_dtype(DType::F8E4M3).unwrap();
+        let scale_inv = Tensor::from_vec(vec![2.0f32], (1, 1), &Device::Cpu).unwrap();
+        let result = dequantize_fp8_blockwise(&weight, &scale_inv).unwrap();
+        let first: f32 = result.flatten_all().unwrap().to_vec1::<f32>().unwrap()[0];
+        assert!(
+            (first - 2.0).abs() < 0.1,
+            "scale=2.0 should double value, got {first}"
+        );
+    }
+
+    #[test]
+    fn test_is_fp8_quantized() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            r#"{"quantization_config": {"quant_method": "fp8"}}"#,
+        )
+        .unwrap();
+        assert!(is_fp8_quantized(&config_path));
+
+        let config_path2 = dir.path().join("config2.json");
+        std::fs::write(&config_path2, r#"{"hidden_size": 4096}"#).unwrap();
+        assert!(!is_fp8_quantized(&config_path2));
+    }
+}
+
 /// Create a VarBuilder that transparently dequantizes FP8 weights.
 ///
 /// # Safety

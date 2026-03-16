@@ -89,3 +89,65 @@ impl OLMo2Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_json() -> &'static str {
+        r#"{
+            "hidden_size": 4096,
+            "intermediate_size": 11008,
+            "vocab_size": 100278,
+            "num_hidden_layers": 32,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+            "rms_norm_eps": 1e-5,
+            "rope_theta": 500000.0,
+            "bos_token_id": 100257,
+            "eos_token_id": 100257,
+            "tie_word_embeddings": false,
+            "max_position_embeddings": 4096
+        }"#
+    }
+
+    #[test]
+    fn test_olmo2_deserialize() {
+        let cfg: OLMo2Config = serde_json::from_str(sample_json()).unwrap();
+        assert_eq!(cfg.hidden_size, 4096);
+        assert_eq!(cfg.num_hidden_layers, 32);
+        assert_eq!(cfg.num_key_value_heads, Some(8));
+        assert_eq!(cfg.rms_norm_eps, 1e-5);
+    }
+
+    #[test]
+    fn test_olmo2_into_config() {
+        let cfg: OLMo2Config = serde_json::from_str(sample_json()).unwrap();
+        let c = cfg.into_config();
+        assert_eq!(c.hidden_size, 4096);
+        assert_eq!(c.num_key_value_heads, 8);
+        assert_eq!(c.max_seq_len, 4096);
+        assert!(c.use_qk_norm, "OLMo2 must enable QK-norm");
+        assert!(c.pre_reshape_qk_norm, "OLMo2 QK-norm is pre-reshape");
+        assert!(!c.use_qkv_bias);
+        assert_eq!(c.model_prefix, "model");
+    }
+
+    #[test]
+    fn test_olmo2_defaults() {
+        let json = r#"{
+            "hidden_size": 2048,
+            "intermediate_size": 8192,
+            "vocab_size": 100278,
+            "num_hidden_layers": 16,
+            "num_attention_heads": 16,
+            "rms_norm_eps": 1e-5
+        }"#;
+        let cfg: OLMo2Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.rope_theta, 500_000.0);
+        assert_eq!(cfg.max_position_embeddings, 4096);
+        assert!(cfg.num_key_value_heads.is_none());
+        let c = cfg.into_config();
+        assert_eq!(c.num_key_value_heads, 16);
+    }
+}

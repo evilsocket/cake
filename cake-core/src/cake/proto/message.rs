@@ -501,6 +501,177 @@ mod tests {
         );
     }
 
+    // ── dtype round-trips ─────────────────────────────────────────
+
+    #[test]
+    fn test_dtype_roundtrip_all() {
+        let dtypes = [
+            DType::U8,
+            DType::U32,
+            DType::I64,
+            DType::BF16,
+            DType::F16,
+            DType::F32,
+            DType::F64,
+            DType::F8E4M3,
+        ];
+        for dt in dtypes {
+            let tag = dtype_to_u8(dt);
+            let recovered = u8_to_dtype(tag).unwrap();
+            assert_eq!(recovered, dt, "round-trip failed for {:?} (tag={})", dt, tag);
+        }
+    }
+
+    #[test]
+    fn test_dtype_tags_unique() {
+        let tags: Vec<u8> = [
+            DType::U8, DType::U32, DType::I64, DType::BF16,
+            DType::F16, DType::F32, DType::F64, DType::F8E4M3,
+        ].iter().map(|d| dtype_to_u8(*d)).collect();
+        let mut deduped = tags.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(tags.len(), deduped.len(), "dtype tags must be unique");
+    }
+
+    #[test]
+    fn test_dtype_unknown_tag() {
+        assert!(u8_to_dtype(255).is_err());
+        assert!(u8_to_dtype(100).is_err());
+    }
+
+    // ── RawTensor with BF16 ─────────────────────────────────────
+
+    #[test]
+    fn test_raw_tensor_roundtrip_bf16() {
+        let original = make_f32_tensor(&[2, 32]).to_dtype(DType::BF16).unwrap();
+        let raw = RawTensor::from_tensor(&original);
+        assert_eq!(raw.dtype, dtype_to_u8(DType::BF16));
+        assert_eq!(raw.shape, vec![2, 32]);
+        assert_eq!(raw.data.len(), 2 * 32 * 2); // BF16 = 2 bytes
+
+        let recovered = raw.to_tensor(&Device::Cpu).unwrap();
+        assert_eq!(recovered.dtype(), DType::BF16);
+        assert_eq!(recovered.shape().dims(), &[2, 32]);
+        // Verify data integrity
+        assert_eq!(original.data().to_vec(), recovered.data().to_vec());
+    }
+
+    // ── RawTensor with empty data ───────────────────────────────
+
+    #[test]
+    fn test_raw_tensor_empty() {
+        let original = Tensor::zeros((0, 64), DType::F32, &Device::Cpu).unwrap();
+        let raw = RawTensor::from_tensor(&original);
+        assert_eq!(raw.dtype, dtype_to_u8(DType::F32));
+        assert_eq!(raw.shape, vec![0, 64]);
+        assert_eq!(raw.data.len(), 0);
+
+        let recovered = raw.to_tensor(&Device::Cpu).unwrap();
+        assert_eq!(recovered.shape().dims(), &[0, 64]);
+    }
+
+    // ── Message::LayerAssignment round-trip ──────────────────────
+
+    #[test]
+    fn test_message_layer_assignment_roundtrip() {
+        let msg = Message::LayerAssignment {
+            layers: vec![
+                "model.layers.0".into(),
+                "model.layers.1".into(),
+                "model.layers.2".into(),
+            ],
+            model_hash: "abc12345".into(),
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        match decoded {
+            Message::LayerAssignment { layers, model_hash } => {
+                assert_eq!(layers.len(), 3);
+                assert_eq!(layers[0], "model.layers.0");
+                assert_eq!(layers[2], "model.layers.2");
+                assert_eq!(model_hash, "abc12345");
+            }
+            other => panic!("expected LayerAssignment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_message_layer_assignment_empty_layers() {
+        let msg = Message::LayerAssignment {
+            layers: vec![],
+            model_hash: "".into(),
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        match decoded {
+            Message::LayerAssignment { layers, model_hash } => {
+                assert!(layers.is_empty());
+                assert!(model_hash.is_empty());
+            }
+            other => panic!("expected LayerAssignment, got {:?}", other),
+        }
+    }
+
+    // ── Message::ModelDataChunk round-trip ───────────────────────
+
+    #[test]
+    fn test_message_model_data_chunk_roundtrip() {
+        let data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x42];
+        let msg = Message::ModelDataChunk {
+            filename: "model-00001-of-00003.safetensors".into(),
+            offset: 1024,
+            total_size: 4_000_000_000,
+            data: data.clone(),
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        match decoded {
+            Message::ModelDataChunk { filename, offset, total_size, data: d } => {
+                assert_eq!(filename, "model-00001-of-00003.safetensors");
+                assert_eq!(offset, 1024);
+                assert_eq!(total_size, 4_000_000_000);
+                assert_eq!(d, data);
+            }
+            other => panic!("expected ModelDataChunk, got {:?}", other),
+        }
+    }
+
+    // ── Message::WorkerReady round-trip ──────────────────────────
+
+    #[test]
+    fn test_message_worker_ready_roundtrip() {
+        let bytes = Message::WorkerReady.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        assert!(matches!(decoded, Message::WorkerReady));
+    }
+
+    // ── Message::ModelDataDone round-trip ────────────────────────
+
+    #[test]
+    fn test_message_model_data_done_roundtrip() {
+        let bytes = Message::ModelDataDone.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        assert!(matches!(decoded, Message::ModelDataDone));
+    }
+
+    // ── Message::LayerAssignmentAck round-trip ───────────────────
+
+    #[test]
+    fn test_message_layer_assignment_ack_roundtrip() {
+        for needs in [true, false] {
+            let msg = Message::LayerAssignmentAck { needs_data: needs };
+            let bytes = msg.to_bytes().unwrap();
+            let decoded = Message::from_bytes(&bytes).unwrap();
+            match decoded {
+                Message::LayerAssignmentAck { needs_data } => {
+                    assert_eq!(needs_data, needs);
+                }
+                other => panic!("expected LayerAssignmentAck, got {:?}", other),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn test_wire_multiple_messages() {
         let (mut writer, mut reader) = tokio::io::duplex(64 * 1024);

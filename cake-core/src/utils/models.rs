@@ -280,3 +280,154 @@ fn read_model_name_from_config(dir: &Path) -> Option<String> {
                 .map(|s| s.to_string())
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn check_model_dir_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(check_model_dir(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn check_model_dir_config_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        let result = check_model_dir(tmp.path());
+        assert!(result.is_some());
+        let (status, _size) = result.unwrap();
+        assert_eq!(status, ModelStatus::Partial { have: 0, total: 1 });
+    }
+
+    #[test]
+    fn check_model_dir_single_safetensors() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        fs::write(tmp.path().join("model.safetensors"), "fake-tensor-data").unwrap();
+        let result = check_model_dir(tmp.path());
+        assert!(result.is_some());
+        let (status, size) = result.unwrap();
+        assert_eq!(status, ModelStatus::Complete);
+        assert!(size > 0);
+    }
+
+    #[test]
+    fn check_model_dir_sharded_complete() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        let index = serde_json::json!({
+            "weight_map": {
+                "layer.0.weight": "shard-00001.safetensors",
+                "layer.1.weight": "shard-00002.safetensors"
+            }
+        });
+        fs::write(
+            tmp.path().join("model.safetensors.index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+        fs::write(tmp.path().join("shard-00001.safetensors"), "data1").unwrap();
+        fs::write(tmp.path().join("shard-00002.safetensors"), "data2").unwrap();
+
+        let result = check_model_dir(tmp.path());
+        assert!(result.is_some());
+        let (status, _size) = result.unwrap();
+        assert_eq!(status, ModelStatus::Complete);
+    }
+
+    #[test]
+    fn check_model_dir_sharded_missing_shard() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        let index = serde_json::json!({
+            "weight_map": {
+                "layer.0.weight": "shard-00001.safetensors",
+                "layer.1.weight": "shard-00002.safetensors"
+            }
+        });
+        fs::write(
+            tmp.path().join("model.safetensors.index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+        fs::write(tmp.path().join("shard-00001.safetensors"), "data1").unwrap();
+        // shard-00002 missing
+
+        let result = check_model_dir(tmp.path());
+        assert!(result.is_some());
+        let (status, _size) = result.unwrap();
+        assert_eq!(status, ModelStatus::Partial { have: 1, total: 2 });
+    }
+
+    #[test]
+    fn read_model_name_from_config_name_or_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = serde_json::json!({
+            "_name_or_path": "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+        });
+        fs::write(
+            tmp.path().join("config.json"),
+            serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+        let result = read_model_name_from_config(tmp.path());
+        assert_eq!(result, Some("Qwen/Qwen2.5-Coder-1.5B-Instruct".to_string()));
+    }
+
+    #[test]
+    fn read_model_name_from_config_model_type_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = serde_json::json!({
+            "model_type": "llama"
+        });
+        fs::write(
+            tmp.path().join("config.json"),
+            serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+        let result = read_model_name_from_config(tmp.path());
+        assert_eq!(result, Some("llama".to_string()));
+    }
+
+    #[test]
+    fn read_model_name_from_config_missing_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), r#"{"hidden_size": 1024}"#).unwrap();
+        let result = read_model_name_from_config(tmp.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_model_name_from_config_no_config_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = read_model_name_from_config(tmp.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn model_status_display() {
+        assert_eq!(format!("{}", ModelStatus::Complete), "complete");
+        assert_eq!(
+            format!("{}", ModelStatus::Partial { have: 3, total: 5 }),
+            "partial (3/5 shards)"
+        );
+    }
+
+    #[test]
+    fn model_source_display() {
+        assert_eq!(format!("{}", ModelSource::HuggingFaceCache), "huggingface");
+        assert_eq!(format!("{}", ModelSource::Local), "local");
+        assert_eq!(
+            format!(
+                "{}",
+                ModelSource::ClusterCache {
+                    cluster_hash: "abc".to_string()
+                }
+            ),
+            "cluster (abc)"
+        );
+    }
+}

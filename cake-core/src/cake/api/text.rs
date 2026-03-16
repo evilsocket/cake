@@ -308,3 +308,234 @@ where
         .insert_header(("Connection", "keep-alive"))
         .streaming(stream)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ChatRequest deserialization ──────────────────────────────
+
+    #[test]
+    fn test_chat_request_full() {
+        let json = r#"{
+            "messages": [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hello"}
+            ],
+            "model": "test-model",
+            "stream": true,
+            "max_tokens": 100,
+            "temperature": 0.7
+        }"#;
+        let req: ChatRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.messages.len(), 2);
+        assert_eq!(req.model.as_deref(), Some("test-model"));
+        assert_eq!(req.stream, Some(true));
+        assert_eq!(req.max_tokens, Some(100));
+        assert!((req.temperature.unwrap() - 0.7).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_chat_request_minimal() {
+        // Only messages required; all other fields default to None
+        let json = r#"{"messages": [{"role": "user", "content": "Hi"}]}"#;
+        let req: ChatRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.messages.len(), 1);
+        assert!(req.model.is_none());
+        assert!(req.stream.is_none());
+        assert!(req.max_tokens.is_none());
+        assert!(req.temperature.is_none());
+    }
+
+    #[test]
+    fn test_chat_request_empty_messages() {
+        let json = r#"{"messages": []}"#;
+        let req: ChatRequest = serde_json::from_str(json).unwrap();
+        assert!(req.messages.is_empty());
+    }
+
+    #[test]
+    fn test_chat_request_stream_false() {
+        let json = r#"{"messages": [{"role": "user", "content": "test"}], "stream": false}"#;
+        let req: ChatRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.stream, Some(false));
+    }
+
+    #[test]
+    fn test_chat_request_missing_messages_fails() {
+        let json = r#"{"model": "test"}"#;
+        let result = serde_json::from_str::<ChatRequest>(json);
+        assert!(result.is_err(), "missing messages field should fail");
+    }
+
+    // ── ChatResponse serialization ──────────────────────────────
+
+    #[test]
+    fn test_chat_response_new_structure() {
+        let resp = ChatResponse::new(
+            "gpt-test".into(),
+            "Hello there!".into(),
+            5,
+            10,
+            "stop".into(),
+        );
+        assert!(resp.id.starts_with("chatcmpl-"));
+        assert_eq!(resp.object, "chat.completion");
+        assert_eq!(resp.model, "gpt-test");
+        assert!(resp.created > 0);
+        assert_eq!(resp.choices.len(), 1);
+        assert_eq!(resp.choices[0].index, 0);
+        assert_eq!(resp.choices[0].finish_reason, "stop");
+        assert_eq!(resp.usage.prompt_tokens, 5);
+        assert_eq!(resp.usage.completion_tokens, 10);
+        assert_eq!(resp.usage.total_tokens, 15);
+    }
+
+    #[test]
+    fn test_chat_response_serializes_to_json() {
+        let resp = ChatResponse::new(
+            "model-x".into(),
+            "answer".into(),
+            3,
+            7,
+            "length".into(),
+        );
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["object"], "chat.completion");
+        assert_eq!(json["model"], "model-x");
+        assert_eq!(json["choices"][0]["message"]["role"], "assistant");
+        assert_eq!(json["choices"][0]["message"]["content"], "answer");
+        assert_eq!(json["choices"][0]["finish_reason"], "length");
+        assert_eq!(json["usage"]["prompt_tokens"], 3);
+        assert_eq!(json["usage"]["completion_tokens"], 7);
+        assert_eq!(json["usage"]["total_tokens"], 10);
+    }
+
+    #[test]
+    fn test_chat_response_unique_ids() {
+        let r1 = ChatResponse::new("m".into(), "a".into(), 0, 0, "stop".into());
+        let r2 = ChatResponse::new("m".into(), "a".into(), 0, 0, "stop".into());
+        assert_ne!(r1.id, r2.id, "each response should get a unique UUID-based id");
+    }
+
+    #[test]
+    fn test_chat_response_zero_tokens() {
+        let resp = ChatResponse::new("m".into(), "".into(), 0, 0, "stop".into());
+        assert_eq!(resp.usage.total_tokens, 0);
+        assert_eq!(resp.choices[0].message.content, "");
+    }
+
+    // ── Usage serialization ─────────────────────────────────────
+
+    #[test]
+    fn test_usage_serialization() {
+        let usage = Usage {
+            prompt_tokens: 42,
+            completion_tokens: 58,
+            total_tokens: 100,
+        };
+        let json = serde_json::to_value(&usage).unwrap();
+        assert_eq!(json["prompt_tokens"], 42);
+        assert_eq!(json["completion_tokens"], 58);
+        assert_eq!(json["total_tokens"], 100);
+    }
+
+    // ── StreamDelta serialization ───────────────────────────────
+
+    #[test]
+    fn test_stream_delta_skips_none_fields() {
+        let delta = StreamDelta {
+            role: None,
+            content: Some("hello".into()),
+        };
+        let json = serde_json::to_value(&delta).unwrap();
+        assert!(json.get("role").is_none(), "None role should be skipped");
+        assert_eq!(json["content"], "hello");
+    }
+
+    #[test]
+    fn test_stream_delta_both_none() {
+        let delta = StreamDelta {
+            role: None,
+            content: None,
+        };
+        let json = serde_json::to_value(&delta).unwrap();
+        assert!(json.get("role").is_none());
+        assert!(json.get("content").is_none());
+    }
+
+    #[test]
+    fn test_stream_delta_role_only() {
+        let delta = StreamDelta {
+            role: Some("assistant".into()),
+            content: None,
+        };
+        let json = serde_json::to_value(&delta).unwrap();
+        assert_eq!(json["role"], "assistant");
+        assert!(json.get("content").is_none());
+    }
+
+    // ── StreamResponse serialization ────────────────────────────
+
+    #[test]
+    fn test_stream_response_chunk_format() {
+        let resp = StreamResponse {
+            id: "chatcmpl-test".into(),
+            object: "chat.completion.chunk".into(),
+            created: 1700000000,
+            model: "test-model".into(),
+            choices: vec![StreamChoice {
+                index: 0,
+                delta: StreamDelta {
+                    role: None,
+                    content: Some("word".into()),
+                },
+                finish_reason: None,
+            }],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["object"], "chat.completion.chunk");
+        assert_eq!(json["choices"][0]["delta"]["content"], "word");
+        assert!(json["choices"][0]["finish_reason"].is_null());
+    }
+
+    #[test]
+    fn test_stream_response_final_chunk() {
+        let resp = StreamResponse {
+            id: "chatcmpl-done".into(),
+            object: "chat.completion.chunk".into(),
+            created: 1700000000,
+            model: "m".into(),
+            choices: vec![StreamChoice {
+                index: 0,
+                delta: StreamDelta {
+                    role: None,
+                    content: None,
+                },
+                finish_reason: Some("stop".into()),
+            }],
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["choices"][0]["finish_reason"], "stop");
+    }
+
+    // ── SSE format ──────────────────────────────────────────────
+
+    #[test]
+    fn test_sse_data_line_format() {
+        // Verify the "data: {json}\n\n" format used in streaming
+        let resp = StreamResponse {
+            id: "id".into(),
+            object: "chat.completion.chunk".into(),
+            created: 0,
+            model: "m".into(),
+            choices: vec![],
+        };
+        let line = format!("data: {}\n\n", serde_json::to_string(&resp).unwrap());
+        assert!(line.starts_with("data: {"));
+        assert!(line.ends_with("}\n\n"));
+        // The JSON inside should be parseable
+        let inner = line.strip_prefix("data: ").unwrap().trim();
+        let _: serde_json::Value = serde_json::from_str(inner).unwrap();
+    }
+}

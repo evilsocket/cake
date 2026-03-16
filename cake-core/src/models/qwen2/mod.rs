@@ -1,5 +1,5 @@
 //! Qwen2/Qwen2.5 model implementation.
-mod config;
+pub mod config;
 mod history;
 mod qwen;
 

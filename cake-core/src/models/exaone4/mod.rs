@@ -1,6 +1,6 @@
 //! EXAONE 4.0 model implementation (ExaoneForCausalLM).
 mod block;
-mod config;
+pub mod config;
 mod model;
 
 pub use block::*;

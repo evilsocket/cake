@@ -1,6 +1,6 @@
-mod block;
-mod config;
-mod moe;
+pub mod block;
+pub mod config;
+pub mod moe;
 mod model;
 
 pub use config::*;

@@ -1,5 +1,5 @@
 //! LLaMA3 model implementation.
-mod config;
+pub mod config;
 mod history;
 mod llama;
 

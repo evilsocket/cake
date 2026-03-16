@@ -734,6 +734,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "speedy",
+ "tempfile",
  "tokenizers",
  "tokio",
  "tracing-chrome",

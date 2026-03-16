@@ -112,3 +112,83 @@ impl EXAONE4Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_json() -> &'static str {
+        r#"{
+            "hidden_size": 2560,
+            "intermediate_size": 6912,
+            "vocab_size": 102400,
+            "num_hidden_layers": 32,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+            "rms_norm_eps": 1e-6,
+            "rope_theta": 500000.0,
+            "sliding_window": 4096,
+            "global_layer_period": 4,
+            "max_position_embeddings": 131072
+        }"#
+    }
+
+    #[test]
+    fn test_exaone4_deserialize() {
+        let cfg: EXAONE4Config = serde_json::from_str(sample_json()).unwrap();
+        assert_eq!(cfg.hidden_size, 2560);
+        assert_eq!(cfg.num_hidden_layers, 32);
+        assert_eq!(cfg.sliding_window, 4096);
+        assert_eq!(cfg.global_layer_period, Some(4));
+    }
+
+    #[test]
+    fn test_exaone4_global_layer_pattern() {
+        let cfg: EXAONE4Config = serde_json::from_str(sample_json()).unwrap();
+        // With period=4: layers 3, 7, 11, 15, ... are global
+        assert!(!cfg.is_global_layer(0));
+        assert!(!cfg.is_global_layer(1));
+        assert!(!cfg.is_global_layer(2));
+        assert!(cfg.is_global_layer(3));
+        assert!(!cfg.is_global_layer(4));
+        assert!(cfg.is_global_layer(7));
+        assert!(cfg.is_global_layer(11));
+    }
+
+    #[test]
+    fn test_exaone4_into_config() {
+        let cfg: EXAONE4Config = serde_json::from_str(sample_json()).unwrap();
+        let c = cfg.into_config();
+        assert_eq!(c.hidden_size, 2560);
+        assert_eq!(c.num_key_value_heads, 8);
+        assert!(c.use_qk_norm, "EXAONE 4.0 uses QK-norm");
+        assert!(!c.pre_reshape_qk_norm);
+        assert_eq!(c.sliding_window, Some(4096));
+        assert_eq!(c.global_layers.len(), 32);
+        // Verify the 3:1 pattern in global_layers
+        assert!(!c.global_layers[0]);
+        assert!(c.global_layers[3]);
+        assert!(c.global_layers[7]);
+        assert!(!c.global_layers[30]);
+        assert!(c.global_layers[31]);
+    }
+
+    #[test]
+    fn test_exaone4_defaults() {
+        let json = r#"{
+            "hidden_size": 2560,
+            "intermediate_size": 6912,
+            "vocab_size": 102400,
+            "num_hidden_layers": 8,
+            "num_attention_heads": 32,
+            "rms_norm_eps": 1e-6
+        }"#;
+        let cfg: EXAONE4Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.sliding_window, 4096); // default
+        assert_eq!(cfg.rope_theta, 500_000.0);
+        assert!(cfg.global_layer_period.is_none());
+        // Default period is 4
+        assert!(cfg.is_global_layer(3));
+        assert!(!cfg.is_global_layer(2));
+    }
+}

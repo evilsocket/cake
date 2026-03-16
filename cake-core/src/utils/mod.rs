@@ -321,3 +321,78 @@ pub(crate) fn panic_on_nan(t: &Tensor, name: &str) {
         panic!("\ntensor '{name}' contains NaN: \n{t}");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn load_safetensors_from_model_returns_single_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = load_safetensors_from_model(tmp.path()).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], tmp.path().join("model.safetensors"));
+    }
+
+    #[test]
+    fn load_safetensors_paths_from_index_basic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index = serde_json::json!({
+            "weight_map": {
+                "model.layers.0.weight": "shard-00001.safetensors",
+                "model.layers.1.weight": "shard-00001.safetensors",
+                "model.layers.2.weight": "shard-00002.safetensors"
+            }
+        });
+        let index_path = tmp.path().join("model.safetensors.index.json");
+        fs::write(&index_path, serde_json::to_string(&index).unwrap()).unwrap();
+
+        let paths = load_safetensors_paths_from_index(index_path).unwrap();
+        // Two unique shard files
+        assert_eq!(paths.len(), 2);
+        let names: std::collections::HashSet<String> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(names.contains("shard-00001.safetensors"));
+        assert!(names.contains("shard-00002.safetensors"));
+        // All paths should be under the temp dir
+        for p in &paths {
+            assert_eq!(p.parent().unwrap(), tmp.path());
+        }
+    }
+
+    #[test]
+    fn load_safetensors_paths_from_index_missing_file() {
+        let result = load_safetensors_paths_from_index(PathBuf::from("/nonexistent/index.json"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_safetensors_paths_from_index_invalid_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_path = tmp.path().join("model.safetensors.index.json");
+        fs::write(&index_path, "not valid json").unwrap();
+        let result = load_safetensors_paths_from_index(index_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_safetensors_paths_from_index_no_weight_map() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_path = tmp.path().join("model.safetensors.index.json");
+        fs::write(&index_path, r#"{"metadata": {}}"#).unwrap();
+        let result = load_safetensors_paths_from_index(index_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_safetensors_paths_from_index_empty_weight_map() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_path = tmp.path().join("model.safetensors.index.json");
+        fs::write(&index_path, r#"{"weight_map": {}}"#).unwrap();
+        let paths = load_safetensors_paths_from_index(index_path).unwrap();
+        assert!(paths.is_empty());
+    }
+}

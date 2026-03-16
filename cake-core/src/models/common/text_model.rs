@@ -510,3 +510,285 @@ impl TextModelBase {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::Device;
+
+    /// Helper: create a 1-D F32 tensor from a slice.
+    fn f32_tensor(data: &[f32]) -> Tensor {
+        Tensor::from_slice(data, (data.len(),), &Device::Cpu).unwrap()
+    }
+
+    // ── apply_repeat_penalty_gpu ─────────────────────────────────
+
+    #[test]
+    fn test_repeat_penalty_positive_logits_divided() {
+        // Positive logits should be divided by penalty (multiplied by 1/penalty).
+        let logits = f32_tensor(&[0.0, 10.0, 20.0, 5.0]);
+        let penalty = 2.0;
+        let context = vec![1u32, 2]; // penalize indices 1 and 2
+
+        let result = apply_repeat_penalty_gpu(&logits, penalty, &context).unwrap();
+        let vals: Vec<f32> = result.to_vec1().unwrap();
+
+        assert!((vals[0] - 0.0).abs() < 1e-6, "index 0 unchanged");
+        assert!((vals[1] - 5.0).abs() < 1e-6, "10.0 / 2.0 = 5.0, got {}", vals[1]);
+        assert!((vals[2] - 10.0).abs() < 1e-6, "20.0 / 2.0 = 10.0, got {}", vals[2]);
+        assert!((vals[3] - 5.0).abs() < 1e-6, "index 3 unchanged");
+    }
+
+    #[test]
+    fn test_repeat_penalty_negative_logits_multiplied() {
+        // Negative logits should be multiplied by penalty (made more negative).
+        let logits = f32_tensor(&[0.0, -10.0, -4.0, 5.0]);
+        let penalty = 2.0;
+        let context = vec![1u32, 2]; // penalize indices 1 and 2
+
+        let result = apply_repeat_penalty_gpu(&logits, penalty, &context).unwrap();
+        let vals: Vec<f32> = result.to_vec1().unwrap();
+
+        assert!((vals[0] - 0.0).abs() < 1e-6, "index 0 unchanged");
+        assert!((vals[1] - (-20.0)).abs() < 1e-6, "-10.0 * 2.0 = -20.0, got {}", vals[1]);
+        assert!((vals[2] - (-8.0)).abs() < 1e-6, "-4.0 * 2.0 = -8.0, got {}", vals[2]);
+        assert!((vals[3] - 5.0).abs() < 1e-6, "index 3 unchanged");
+    }
+
+    #[test]
+    fn test_repeat_penalty_one_returns_unchanged() {
+        // penalty = 1.0: logits >=0 divided by 1, logits <0 multiplied by 1 — no change.
+        let logits = f32_tensor(&[-5.0, 0.0, 3.0, 10.0]);
+        let context = vec![0u32, 1, 2, 3];
+
+        let result = apply_repeat_penalty_gpu(&logits, 1.0, &context).unwrap();
+        let orig: Vec<f32> = logits.to_vec1().unwrap();
+        let vals: Vec<f32> = result.to_vec1().unwrap();
+
+        for (i, (o, v)) in orig.iter().zip(vals.iter()).enumerate() {
+            assert!((o - v).abs() < 1e-6, "index {} changed: {} -> {}", i, o, v);
+        }
+    }
+
+    #[test]
+    fn test_repeat_penalty_empty_context_returns_unchanged() {
+        let logits = f32_tensor(&[1.0, -2.0, 3.0]);
+        let context: Vec<u32> = vec![];
+
+        let result = apply_repeat_penalty_gpu(&logits, 2.0, &context).unwrap();
+        let orig: Vec<f32> = logits.to_vec1().unwrap();
+        let vals: Vec<f32> = result.to_vec1().unwrap();
+        assert_eq!(orig, vals);
+    }
+
+    #[test]
+    fn test_repeat_penalty_deduplicates_context() {
+        // Duplicate tokens in context should be deduplicated (applied once, not twice).
+        let logits = f32_tensor(&[0.0, 10.0, 0.0]);
+        let context = vec![1u32, 1, 1]; // index 1 repeated
+
+        let result = apply_repeat_penalty_gpu(&logits, 2.0, &context).unwrap();
+        let vals: Vec<f32> = result.to_vec1().unwrap();
+
+        // 10.0 / 2.0 = 5.0 (applied once, not three times)
+        assert!((vals[1] - 5.0).abs() < 1e-6, "got {}", vals[1]);
+    }
+
+    #[test]
+    fn test_repeat_penalty_zero_logit() {
+        // Zero logits: ge(0) is true, so divided by penalty. 0/penalty = 0.
+        let logits = f32_tensor(&[0.0, 0.0]);
+        let context = vec![0u32, 1];
+
+        let result = apply_repeat_penalty_gpu(&logits, 3.0, &context).unwrap();
+        let vals: Vec<f32> = result.to_vec1().unwrap();
+        assert!((vals[0]).abs() < 1e-6);
+        assert!((vals[1]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_repeat_penalty_mixed_signs() {
+        // Mix of positive and negative at penalized positions
+        let logits = f32_tensor(&[6.0, -3.0, 0.0, 9.0, -1.0]);
+        let penalty = 3.0;
+        let context = vec![0u32, 1, 2, 3, 4];
+
+        let result = apply_repeat_penalty_gpu(&logits, penalty, &context).unwrap();
+        let vals: Vec<f32> = result.to_vec1().unwrap();
+
+        assert!((vals[0] - 2.0).abs() < 1e-6, "6/3=2, got {}", vals[0]);
+        assert!((vals[1] - (-9.0)).abs() < 1e-6, "-3*3=-9, got {}", vals[1]);
+        assert!((vals[2] - 0.0).abs() < 1e-6, "0/3=0, got {}", vals[2]);
+        assert!((vals[3] - 3.0).abs() < 1e-6, "9/3=3, got {}", vals[3]);
+        assert!((vals[4] - (-3.0)).abs() < 1e-6, "-1*3=-3, got {}", vals[4]);
+    }
+
+    // ── apply_repeat_penalty_gpu: additional edge cases ─────────
+
+    #[test]
+    fn test_repeat_penalty_single_element_logits() {
+        let logits = f32_tensor(&[7.0]);
+        let context = vec![0u32];
+        let result = apply_repeat_penalty_gpu(&logits, 7.0, &context).unwrap();
+        let vals: Vec<f32> = result.to_vec1().unwrap();
+        assert!((vals[0] - 1.0).abs() < 1e-6, "7/7=1, got {}", vals[0]);
+    }
+
+    #[test]
+    fn test_repeat_penalty_large_vocab_sparse_context() {
+        // Large-ish vocab, only a few tokens penalized
+        let mut data = vec![1.0f32; 1000];
+        data[500] = 10.0;
+        data[999] = -4.0;
+        let logits = f32_tensor(&data);
+        let context = vec![500u32, 999];
+        let result = apply_repeat_penalty_gpu(&logits, 2.0, &context).unwrap();
+        let vals: Vec<f32> = result.to_vec1().unwrap();
+        // Unpenalized positions unchanged
+        assert!((vals[0] - 1.0).abs() < 1e-6);
+        assert!((vals[499] - 1.0).abs() < 1e-6);
+        // Penalized positions
+        assert!((vals[500] - 5.0).abs() < 1e-6, "10/2=5, got {}", vals[500]);
+        assert!((vals[999] - (-8.0)).abs() < 1e-6, "-4*2=-8, got {}", vals[999]);
+    }
+
+    #[test]
+    fn test_repeat_penalty_fractional_penalty() {
+        // Penalty < 1.0: positive logits get multiplied (boosted), negative get divided
+        let logits = f32_tensor(&[4.0, -4.0]);
+        let context = vec![0u32, 1];
+        let result = apply_repeat_penalty_gpu(&logits, 0.5, &context).unwrap();
+        let vals: Vec<f32> = result.to_vec1().unwrap();
+        // 4.0 >= 0 -> 4.0 / 0.5 = 8.0 (boosted by reciprocal)
+        assert!((vals[0] - 8.0).abs() < 1e-6, "4/0.5=8, got {}", vals[0]);
+        // -4.0 < 0 -> -4.0 * 0.5 = -2.0 (reduced magnitude)
+        assert!((vals[1] - (-2.0)).abs() < 1e-6, "-4*0.5=-2, got {}", vals[1]);
+    }
+
+    // ── create_logits_processor: sampling strategy selection ─────
+
+    /// Helper to build a minimal Context for testing create_logits_processor.
+    fn make_test_context(temperature: f64, top_k: Option<usize>, top_p: Option<f64>, seed: u64) -> crate::cake::Context {
+        use crate::cake::{Context, Topology};
+        use crate::Args;
+        use candle_core::DType;
+        use std::path::PathBuf;
+        use std::sync::{Arc, Mutex};
+
+        let mut args = Args::default();
+        args.temperature = temperature;
+        args.top_k = top_k;
+        args.top_p = top_p;
+        args.seed = seed;
+
+        Context {
+            args,
+            dtype: DType::F32,
+            topology: Topology::new(),
+            data_path: PathBuf::from("/tmp"),
+            device: Device::Cpu,
+            config: None,
+            cache: None,
+            var_builder: None,
+            text_model_arch: crate::TextModelArch::Llama,
+            fp8: false,
+            listener_override: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn test_create_logits_processor_argmax_at_zero_temp() {
+        // temperature <= 0 should select ArgMax (greedy decoding)
+        let ctx = make_test_context(0.0, None, None, 42);
+        let mut lp = create_logits_processor(&ctx);
+        // ArgMax should always pick the highest logit
+        let logits = f32_tensor(&[-10.0, 5.0, 3.0, 1.0]);
+        let token = lp.sample(&logits).unwrap();
+        assert_eq!(token, 1, "argmax should pick index 1 (value 5.0)");
+    }
+
+    #[test]
+    fn test_create_logits_processor_argmax_negative_temp() {
+        let ctx = make_test_context(-1.0, Some(10), Some(0.9), 42);
+        let mut lp = create_logits_processor(&ctx);
+        // Even with top_k/top_p set, negative temp should force ArgMax
+        let logits = f32_tensor(&[0.0, 0.0, 100.0, 0.0]);
+        let token = lp.sample(&logits).unwrap();
+        assert_eq!(token, 2, "argmax should pick index 2 (value 100.0)");
+    }
+
+    #[test]
+    fn test_create_logits_processor_gumbel_softmax_default() {
+        // temperature > 0 with no top_k/top_p should use GumbelSoftmax
+        let ctx = make_test_context(0.7, None, None, 42);
+        let lp = create_logits_processor(&ctx);
+        // We can't inspect the sampling variant directly, but we can verify it
+        // produces valid output (i.e., doesn't panic).
+        let logits = f32_tensor(&[1.0, 2.0, 3.0]);
+        let mut lp = lp;
+        let token = lp.sample(&logits).unwrap();
+        assert!(token < 3, "token should be a valid index");
+    }
+
+    #[test]
+    fn test_create_logits_processor_top_k_only() {
+        let ctx = make_test_context(0.5, Some(2), None, 42);
+        let mut lp = create_logits_processor(&ctx);
+        // With top_k=2, only the top 2 logits should be candidates
+        // Make one logit overwhelmingly large to deterministically test
+        let logits = f32_tensor(&[0.0, 0.0, 1000.0, 0.0]);
+        let token = lp.sample(&logits).unwrap();
+        // The token with value 1000.0 should almost always be picked
+        assert_eq!(token, 2);
+    }
+
+    #[test]
+    fn test_create_logits_processor_top_p_only() {
+        let ctx = make_test_context(0.5, None, Some(0.1), 42);
+        let mut lp = create_logits_processor(&ctx);
+        let logits = f32_tensor(&[0.0, 0.0, 1000.0, 0.0]);
+        let token = lp.sample(&logits).unwrap();
+        assert_eq!(token, 2);
+    }
+
+    #[test]
+    fn test_create_logits_processor_top_k_then_top_p() {
+        let ctx = make_test_context(0.5, Some(3), Some(0.5), 42);
+        let mut lp = create_logits_processor(&ctx);
+        let logits = f32_tensor(&[0.0, 0.0, 1000.0, 0.0]);
+        let token = lp.sample(&logits).unwrap();
+        assert_eq!(token, 2);
+    }
+
+    #[test]
+    fn test_create_logits_processor_deterministic_with_same_seed() {
+        // Same seed with TopK should produce identical token sequences
+        let logits = f32_tensor(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+
+        let ctx1 = make_test_context(1.0, Some(3), None, 12345);
+        let mut lp1 = create_logits_processor(&ctx1);
+        let tokens1: Vec<u32> = (0..10).map(|_| lp1.sample(&logits).unwrap()).collect();
+
+        let ctx2 = make_test_context(1.0, Some(3), None, 12345);
+        let mut lp2 = create_logits_processor(&ctx2);
+        let tokens2: Vec<u32> = (0..10).map(|_| lp2.sample(&logits).unwrap()).collect();
+
+        assert_eq!(tokens1, tokens2, "same seed should produce identical sequences");
+    }
+
+    #[test]
+    fn test_create_logits_processor_different_seeds_differ() {
+        // Different seeds should (very likely) produce different sequences with TopK sampling
+        let logits = f32_tensor(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+
+        let ctx1 = make_test_context(1.0, Some(10), None, 1);
+        let mut lp1 = create_logits_processor(&ctx1);
+        let tokens1: Vec<u32> = (0..20).map(|_| lp1.sample(&logits).unwrap()).collect();
+
+        let ctx2 = make_test_context(1.0, Some(10), None, 999);
+        let mut lp2 = create_logits_processor(&ctx2);
+        let tokens2: Vec<u32> = (0..20).map(|_| lp2.sample(&logits).unwrap()).collect();
+
+        assert_ne!(tokens1, tokens2, "different seeds should produce different sequences");
+    }
+}

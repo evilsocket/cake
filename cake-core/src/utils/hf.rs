@@ -192,3 +192,161 @@ pub fn ensure_model_downloaded(repo_id: &str) -> Result<PathBuf> {
     log::info!("model files ready at {}", snapshot_dir.display());
     Ok(snapshot_dir)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn looks_like_hf_repo_valid() {
+        assert!(looks_like_hf_repo("Qwen/Qwen2.5-Coder-1.5B-Instruct"));
+        assert!(looks_like_hf_repo("org/model"));
+        assert!(looks_like_hf_repo("meta-llama/Llama-3-8B"));
+    }
+
+    #[test]
+    fn looks_like_hf_repo_too_many_slashes() {
+        assert!(!looks_like_hf_repo("path/to/dir"));
+        assert!(!looks_like_hf_repo("a/b/c"));
+    }
+
+    #[test]
+    fn looks_like_hf_repo_empty() {
+        assert!(!looks_like_hf_repo(""));
+    }
+
+    #[test]
+    fn looks_like_hf_repo_single_segment() {
+        assert!(!looks_like_hf_repo("single"));
+        assert!(!looks_like_hf_repo("model-name"));
+    }
+
+    #[test]
+    fn looks_like_hf_repo_path_prefixes() {
+        assert!(!looks_like_hf_repo("/absolute/path"));
+        assert!(!looks_like_hf_repo("./relative/path"));
+        assert!(!looks_like_hf_repo("~/home/path"));
+    }
+
+    #[test]
+    fn looks_like_hf_repo_empty_parts() {
+        assert!(!looks_like_hf_repo("/trailing"));
+        assert!(!looks_like_hf_repo("leading/"));
+    }
+
+    // Mutex to serialize env-var-dependent tests (env vars are process-global).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn find_cached_model_complete_single() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+        std::env::set_var("HF_HUB_CACHE", cache.to_str().unwrap());
+
+        let snap = cache
+            .join("models--test--model")
+            .join("snapshots")
+            .join("abc123");
+        fs::create_dir_all(&snap).unwrap();
+        fs::write(snap.join("config.json"), "{}").unwrap();
+        fs::write(snap.join("model.safetensors"), "data").unwrap();
+
+        let result = find_cached_model("test/model");
+        assert_eq!(result, Some(snap));
+
+        std::env::remove_var("HF_HUB_CACHE");
+    }
+
+    #[test]
+    fn find_cached_model_complete_sharded() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+        std::env::set_var("HF_HUB_CACHE", cache.to_str().unwrap());
+
+        let snap = cache
+            .join("models--org--sharded")
+            .join("snapshots")
+            .join("def456");
+        fs::create_dir_all(&snap).unwrap();
+        fs::write(snap.join("config.json"), "{}").unwrap();
+        let index = serde_json::json!({
+            "weight_map": {
+                "layer.0.weight": "shard-00001.safetensors",
+                "layer.1.weight": "shard-00002.safetensors"
+            }
+        });
+        fs::write(
+            snap.join("model.safetensors.index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+        fs::write(snap.join("shard-00001.safetensors"), "data").unwrap();
+        fs::write(snap.join("shard-00002.safetensors"), "data").unwrap();
+
+        let result = find_cached_model("org/sharded");
+        assert_eq!(result, Some(snap));
+
+        std::env::remove_var("HF_HUB_CACHE");
+    }
+
+    #[test]
+    fn find_cached_model_missing_shard() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+        std::env::set_var("HF_HUB_CACHE", cache.to_str().unwrap());
+
+        let snap = cache
+            .join("models--org--partial")
+            .join("snapshots")
+            .join("ghi789");
+        fs::create_dir_all(&snap).unwrap();
+        fs::write(snap.join("config.json"), "{}").unwrap();
+        let index = serde_json::json!({
+            "weight_map": {
+                "layer.0.weight": "shard-00001.safetensors",
+                "layer.1.weight": "shard-00002.safetensors"
+            }
+        });
+        fs::write(
+            snap.join("model.safetensors.index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+        fs::write(snap.join("shard-00001.safetensors"), "data").unwrap();
+
+        let result = find_cached_model("org/partial");
+        assert!(result.is_none());
+
+        std::env::remove_var("HF_HUB_CACHE");
+    }
+
+    #[test]
+    fn find_cached_model_not_present() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path();
+        std::env::set_var("HF_HUB_CACHE", cache.to_str().unwrap());
+
+        let result = find_cached_model("nonexistent/model");
+        assert!(result.is_none());
+
+        std::env::remove_var("HF_HUB_CACHE");
+    }
+
+    #[test]
+    fn hf_cache_dir_returns_path_when_set() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("HF_HUB_CACHE", tmp.path().to_str().unwrap());
+
+        let result = hf_cache_dir();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), tmp.path());
+
+        std::env::remove_var("HF_HUB_CACHE");
+    }
+}

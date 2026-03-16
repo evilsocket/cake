@@ -107,3 +107,82 @@ pub fn get_sd_config(ctx: &Context) -> Result<StableDiffusionConfig> {
     };
     Ok(sd_config)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::DType;
+
+    #[test]
+    fn test_pack_unpack_single_tensor() {
+        let device = Device::Cpu;
+        let t = Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2, 3), &device).unwrap();
+        let packed = pack_tensors(vec![t.clone()], &device).unwrap();
+        let unpacked = unpack_tensors(&packed).unwrap();
+
+        assert_eq!(unpacked.len(), 1);
+        assert_eq!(unpacked[0].shape().dims(), &[2, 3]);
+        let orig: Vec<f32> = t.flatten_all().unwrap().to_vec1().unwrap();
+        let recv: Vec<f32> = unpacked[0].flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(orig, recv);
+    }
+
+    #[test]
+    fn test_pack_unpack_multiple_tensors() {
+        let device = Device::Cpu;
+        let t1 = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (1, 3), &device).unwrap();
+        let t2 = Tensor::from_vec(vec![4.0f32, 5.0, 6.0, 7.0], (2, 2), &device).unwrap();
+        let t3 = Tensor::from_vec(vec![8.0f32], (1, 1), &device).unwrap();
+
+        let packed = pack_tensors(vec![t1.clone(), t2.clone(), t3.clone()], &device).unwrap();
+        let unpacked = unpack_tensors(&packed).unwrap();
+
+        assert_eq!(unpacked.len(), 3);
+        assert_eq!(unpacked[0].shape().dims(), &[1, 3]);
+        assert_eq!(unpacked[1].shape().dims(), &[2, 2]);
+        assert_eq!(unpacked[2].shape().dims(), &[1, 1]);
+
+        let v0: Vec<f32> = unpacked[0].flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(v0, vec![1.0, 2.0, 3.0]);
+        let v1: Vec<f32> = unpacked[1].flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(v1, vec![4.0, 5.0, 6.0, 7.0]);
+        let v2: Vec<f32> = unpacked[2].flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(v2, vec![8.0]);
+    }
+
+    #[test]
+    fn test_pack_unpack_3d_tensor() {
+        let device = Device::Cpu;
+        let data: Vec<f32> = (0..24).map(|i| i as f32).collect();
+        let t = Tensor::from_vec(data, (2, 3, 4), &device).unwrap();
+
+        let packed = pack_tensors(vec![t.clone()], &device).unwrap();
+        let unpacked = unpack_tensors(&packed).unwrap();
+
+        assert_eq!(unpacked.len(), 1);
+        assert_eq!(unpacked[0].shape().dims(), &[2, 3, 4]);
+        let orig: Vec<f32> = t.flatten_all().unwrap().to_vec1().unwrap();
+        let recv: Vec<f32> = unpacked[0].flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(orig, recv);
+    }
+
+    #[test]
+    fn test_pack_unpack_f16_cast_to_f32() {
+        // pack_tensors casts to F32 internally, so F16 input data is preserved
+        // only approximately (within F16 precision)
+        let device = Device::Cpu;
+        let t = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (3,), &device)
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap();
+
+        let packed = pack_tensors(vec![t.clone()], &device).unwrap();
+        let unpacked = unpack_tensors(&packed).unwrap();
+
+        assert_eq!(unpacked.len(), 1);
+        assert_eq!(unpacked[0].shape().dims(), &[3]);
+        // Unpacked is F32 (pack converts to F32)
+        let recv: Vec<f32> = unpacked[0].to_vec1().unwrap();
+        assert_eq!(recv, vec![1.0, 2.0, 3.0]);
+    }
+}

@@ -1,5 +1,5 @@
 //! Mistral model implementation (MistralForCausalLM).
-mod config;
+pub mod config;
 mod model;
 
 pub use config::*;

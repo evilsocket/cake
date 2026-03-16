@@ -89,3 +89,72 @@ impl Falcon3Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_json() -> &'static str {
+        r#"{
+            "hidden_size": 2048,
+            "intermediate_size": 8192,
+            "vocab_size": 65024,
+            "num_hidden_layers": 24,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 8,
+            "rms_norm_eps": 1e-6,
+            "rope_theta": 500000.0,
+            "bos_token_id": 11,
+            "eos_token_id": 11,
+            "tie_word_embeddings": false,
+            "max_position_embeddings": 8192
+        }"#
+    }
+
+    #[test]
+    fn test_falcon3_deserialize() {
+        let cfg: Falcon3Config = serde_json::from_str(sample_json()).unwrap();
+        assert_eq!(cfg.hidden_size, 2048);
+        assert_eq!(cfg.intermediate_size, 8192);
+        assert_eq!(cfg.vocab_size, 65024);
+        assert_eq!(cfg.num_hidden_layers, 24);
+        assert_eq!(cfg.num_attention_heads, 16);
+        assert_eq!(cfg.num_key_value_heads, Some(8));
+        assert_eq!(cfg.rope_theta, 500_000.0);
+    }
+
+    #[test]
+    fn test_falcon3_into_config() {
+        let cfg: Falcon3Config = serde_json::from_str(sample_json()).unwrap();
+        let c = cfg.into_config();
+        assert_eq!(c.hidden_size, 2048);
+        assert_eq!(c.intermediate_size, 8192);
+        assert_eq!(c.num_key_value_heads, 8);
+        assert_eq!(c.max_seq_len, 8192);
+        assert!(!c.use_qkv_bias);
+        assert!(!c.use_qk_norm);
+        assert_eq!(c.model_prefix, "model");
+        assert_eq!(c.partial_rotary_factor, 1.0);
+        assert!(c.linear_attn.is_none());
+        assert!(c.sliding_window.is_none());
+    }
+
+    #[test]
+    fn test_falcon3_defaults() {
+        let json = r#"{
+            "hidden_size": 1024,
+            "intermediate_size": 4096,
+            "vocab_size": 65024,
+            "num_hidden_layers": 12,
+            "num_attention_heads": 16,
+            "rms_norm_eps": 1e-6
+        }"#;
+        let cfg: Falcon3Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.rope_theta, 500_000.0);
+        assert_eq!(cfg.max_position_embeddings, 131072);
+        assert!(cfg.num_key_value_heads.is_none());
+        let c = cfg.into_config();
+        // num_kv_heads falls back to num_attention_heads
+        assert_eq!(c.num_key_value_heads, 16);
+    }
+}

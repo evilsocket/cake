@@ -103,3 +103,75 @@ impl Qwen3MoeConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_json() -> &'static str {
+        r#"{
+            "hidden_size": 2048,
+            "intermediate_size": 8192,
+            "moe_intermediate_size": 1024,
+            "vocab_size": 151936,
+            "num_hidden_layers": 28,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 4,
+            "rms_norm_eps": 1e-6,
+            "rope_theta": 1000000.0,
+            "num_experts": 128,
+            "num_experts_per_tok": 8,
+            "norm_topk_prob": true,
+            "max_position_embeddings": 131072
+        }"#
+    }
+
+    #[test]
+    fn test_qwen3_moe_deserialize() {
+        let cfg: Qwen3MoeConfig = serde_json::from_str(sample_json()).unwrap();
+        assert_eq!(cfg.hidden_size, 2048);
+        assert_eq!(cfg.moe_intermediate_size, 1024);
+        assert_eq!(cfg.num_experts, 128);
+        assert_eq!(cfg.num_experts_per_tok, 8);
+        assert!(cfg.norm_topk_prob);
+    }
+
+    #[test]
+    fn test_qwen3_moe_into_config() {
+        let cfg: Qwen3MoeConfig = serde_json::from_str(sample_json()).unwrap();
+        let c = cfg.into_config();
+        assert_eq!(c.hidden_size, 2048);
+        assert_eq!(c.intermediate_size, 8192); // dense intermediate preserved
+        assert_eq!(c.moe_intermediate_size, Some(1024));
+        assert_eq!(c.num_experts, 128);
+        assert_eq!(c.num_experts_per_tok, 8);
+        assert!(c.norm_topk_prob);
+        assert!(c.use_qk_norm, "Qwen3 MoE uses QK-norm");
+        assert!(!c.pre_reshape_qk_norm);
+        assert_eq!(c.num_key_value_heads, 4);
+        assert_eq!(c.rope_theta, 1_000_000.0);
+        assert!(c.shared_expert_intermediate_size.is_none());
+    }
+
+    #[test]
+    fn test_qwen3_moe_defaults() {
+        let json = r#"{
+            "hidden_size": 2048,
+            "intermediate_size": 8192,
+            "moe_intermediate_size": 1024,
+            "vocab_size": 151936,
+            "num_hidden_layers": 28,
+            "num_attention_heads": 16,
+            "rms_norm_eps": 1e-6,
+            "num_experts": 64,
+            "num_experts_per_tok": 4
+        }"#;
+        let cfg: Qwen3MoeConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.rope_theta, 1_000_000.0); // default
+        assert_eq!(cfg.max_position_embeddings, 131072); // default
+        assert!(cfg.norm_topk_prob); // default_true
+        assert!(cfg.num_key_value_heads.is_none());
+        let c = cfg.into_config();
+        assert_eq!(c.num_key_value_heads, 16); // falls back to num_attention_heads
+    }
+}

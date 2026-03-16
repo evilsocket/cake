@@ -1,5 +1,5 @@
 //! Qwen3 dense model implementation (Qwen3ForCausalLM).
-mod config;
+pub mod config;
 mod model;
 
 pub use config::*;

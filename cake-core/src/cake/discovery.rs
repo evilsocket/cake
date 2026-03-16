@@ -750,3 +750,641 @@ pub async fn discover_workers(
     log::info!("discovery complete: {} worker(s) found", workers.len());
     Ok(workers.into_values().collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── cluster_hash ─────────────────────────────────────────────
+
+    #[test]
+    fn test_cluster_hash_deterministic() {
+        let h1 = cluster_hash("my-secret");
+        let h2 = cluster_hash("my-secret");
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn test_cluster_hash_different_keys() {
+        let h1 = cluster_hash("key-a");
+        let h2 = cluster_hash("key-b");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_cluster_hash_length() {
+        // First 4 bytes of SHA-256 = 8 hex chars
+        let h = cluster_hash("anything");
+        assert_eq!(h.len(), 8);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_cluster_hash_known_value() {
+        // SHA-256("test") = 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+        // First 4 bytes = 9f86d081, hex = "9f86d081"
+        let h = cluster_hash("test");
+        assert_eq!(h, "9f86d081");
+    }
+
+    #[test]
+    fn test_cluster_hash_empty_key() {
+        // SHA-256("") = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        let h = cluster_hash("");
+        assert_eq!(h, "e3b0c442");
+    }
+
+    // ── encode_packet / decode_packet ────────────────────────────
+
+    #[test]
+    fn test_packet_roundtrip() {
+        let payload = b"hello world";
+        let pkt = encode_packet(payload);
+        let decoded = decode_packet(&pkt);
+        assert_eq!(decoded, Some(&payload[..]));
+    }
+
+    #[test]
+    fn test_decode_packet_too_short() {
+        // 4 bytes of magic only, no payload — len == 4, not > 4
+        assert_eq!(decode_packet(MAGIC), None);
+    }
+
+    #[test]
+    fn test_decode_packet_wrong_magic() {
+        let bad = b"BADXpayload";
+        assert_eq!(decode_packet(bad), None);
+    }
+
+    #[test]
+    fn test_decode_packet_empty() {
+        assert_eq!(decode_packet(&[]), None);
+    }
+
+    // ── DiscoveredWorker::total_vram ─────────────────────────────
+
+    fn make_worker(gpus: Vec<GpuInfo>) -> DiscoveredWorker {
+        DiscoveredWorker {
+            name: "test".into(),
+            host: "127.0.0.1:10128".into(),
+            port: 10128,
+            gpus,
+            backend: "test".into(),
+            hostname: "test-host".into(),
+            os: "linux".into(),
+        }
+    }
+
+    #[test]
+    fn test_total_vram_single_gpu() {
+        let w = make_worker(vec![GpuInfo {
+            name: "NVIDIA RTX 3080".into(),
+            vram_bytes: 16 * 1024 * 1024 * 1024,
+            tflops: 30.0,
+        }]);
+        assert_eq!(w.total_vram(), 16 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_total_vram_multi_gpu() {
+        let w = make_worker(vec![
+            GpuInfo { name: "TITAN X".into(), vram_bytes: 12 * 1024 * 1024 * 1024, tflops: 10.0 },
+            GpuInfo { name: "TITAN X".into(), vram_bytes: 12 * 1024 * 1024 * 1024, tflops: 10.0 },
+        ]);
+        assert_eq!(w.total_vram(), 24 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_total_vram_empty() {
+        let w = make_worker(vec![]);
+        assert_eq!(w.total_vram(), 0);
+    }
+
+    // ── max_layers_for_size ──────────────────────────────────────
+
+    #[test]
+    fn test_max_layers_zero_layer_size() {
+        let w = make_worker(vec![GpuInfo {
+            name: "NVIDIA RTX 3080".into(),
+            vram_bytes: 16 * 1024 * 1024 * 1024,
+            tflops: 30.0,
+        }]);
+        assert_eq!(w.max_layers_for_size(0), usize::MAX);
+    }
+
+    #[test]
+    fn test_max_layers_no_gpus() {
+        let w = make_worker(vec![]);
+        assert_eq!(w.max_layers_for_size(100_000_000), usize::MAX);
+    }
+
+    #[test]
+    fn test_max_layers_dedicated_gpu() {
+        // 12 GB VRAM, 768 MiB reserve (max of 5%=614 MiB and 768 MiB)
+        let vram = 12u64 * 1024 * 1024 * 1024;
+        let w = make_worker(vec![GpuInfo {
+            name: "NVIDIA TITAN X".into(),
+            vram_bytes: vram,
+            tflops: 10.0,
+        }]);
+        let layer_size = 500u64 * 1024 * 1024; // 500 MiB per layer
+        let reserve = 768u64 * 1024 * 1024;
+        let usable = vram - reserve;
+        let expected = (usable / layer_size) as usize;
+        assert_eq!(w.max_layers_for_size(layer_size), expected);
+    }
+
+    #[test]
+    fn test_max_layers_large_dedicated_gpu() {
+        // 24 GB VRAM — 5% = 1.2 GiB > 768 MiB, so 5% used
+        let vram = 24u64 * 1024 * 1024 * 1024;
+        let w = make_worker(vec![GpuInfo {
+            name: "NVIDIA RTX 4090".into(),
+            vram_bytes: vram,
+            tflops: 80.0,
+        }]);
+        let layer_size = 1u64 * 1024 * 1024 * 1024; // 1 GiB per layer
+        let pct_reserve = (vram as f64 * 0.05) as u64;
+        let usable = vram - pct_reserve;
+        let expected = (usable / layer_size) as usize;
+        assert_eq!(w.max_layers_for_size(layer_size), expected);
+    }
+
+    #[test]
+    fn test_max_layers_apple_unified() {
+        // 36 GB unified — 28% = 10.08 GiB > 6 GiB min, so 28% used
+        let vram = 36u64 * 1024 * 1024 * 1024;
+        let w = make_worker(vec![GpuInfo {
+            name: "Apple M3 Pro".into(),
+            vram_bytes: vram,
+            tflops: 14.0,
+        }]);
+        let layer_size = 1u64 * 1024 * 1024 * 1024;
+        let pct_reserve = (vram as f64 * 0.28) as u64;
+        let usable = vram - pct_reserve;
+        let expected = (usable / layer_size) as usize;
+        assert_eq!(w.max_layers_for_size(layer_size), expected);
+    }
+
+    #[test]
+    fn test_max_layers_apple_small_memory() {
+        // 8 GB unified — 28% = 2.24 GiB < 6 GiB min, so 6 GiB used
+        let vram = 8u64 * 1024 * 1024 * 1024;
+        let w = make_worker(vec![GpuInfo {
+            name: "Apple M1".into(),
+            vram_bytes: vram,
+            tflops: 3.0,
+        }]);
+        let layer_size = 500u64 * 1024 * 1024;
+        let min_reserve = 6u64 * 1024 * 1024 * 1024;
+        let usable = vram - min_reserve;
+        let expected = (usable / layer_size) as usize;
+        assert_eq!(w.max_layers_for_size(layer_size), expected);
+    }
+
+    #[test]
+    fn test_max_layers_cpu() {
+        // CPU device: 20% reserve
+        let vram = 16u64 * 1024 * 1024 * 1024;
+        let w = make_worker(vec![GpuInfo {
+            name: "CPU (aarch64)".into(),
+            vram_bytes: vram,
+            tflops: 2.0,
+        }]);
+        let layer_size = 500u64 * 1024 * 1024;
+        let reserve = (vram as f64 * 0.20) as u64;
+        let usable = vram - reserve;
+        let expected = (usable / layer_size) as usize;
+        assert_eq!(w.max_layers_for_size(layer_size), expected);
+    }
+
+    #[test]
+    fn test_max_layers_multi_gpu_sums() {
+        // Two 12 GB GPUs — each contributes independently
+        let vram = 12u64 * 1024 * 1024 * 1024;
+        let w = make_worker(vec![
+            GpuInfo { name: "NVIDIA TITAN X".into(), vram_bytes: vram, tflops: 10.0 },
+            GpuInfo { name: "NVIDIA TITAN X".into(), vram_bytes: vram, tflops: 10.0 },
+        ]);
+        let layer_size = 500u64 * 1024 * 1024;
+        let reserve = 768u64 * 1024 * 1024;
+        let usable_per = vram - reserve;
+        let expected = 2 * (usable_per / layer_size) as usize;
+        assert_eq!(w.max_layers_for_size(layer_size), expected);
+    }
+
+    // ── total_tflops ─────────────────────────────────────────────
+
+    #[test]
+    fn test_total_tflops_reported() {
+        let w = make_worker(vec![
+            GpuInfo { name: "RTX 3080".into(), vram_bytes: 16 * 1024 * 1024 * 1024, tflops: 30.0 },
+        ]);
+        assert!((w.total_tflops() - 30.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_total_tflops_fallback_nvidia() {
+        let w = make_worker(vec![GpuInfo {
+            name: "NVIDIA GeForce RTX 3080".into(),
+            vram_bytes: 16 * 1024 * 1024 * 1024,
+            tflops: 0.0, // old binary, no tflops reported
+        }]);
+        // Fallback: vram_gb * 3.0 = 16 * 3 = 48
+        assert!((w.total_tflops() - 48.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_total_tflops_fallback_apple() {
+        let w = make_worker(vec![GpuInfo {
+            name: "Apple M3 Pro".into(),
+            vram_bytes: 36 * 1024 * 1024 * 1024,
+            tflops: 0.0,
+        }]);
+        // Fallback: vram_gb * 0.4 = 36 * 0.4 = 14.4
+        assert!((w.total_tflops() - 14.4).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_total_tflops_fallback_cpu() {
+        let w = make_worker(vec![GpuInfo {
+            name: "unknown device".into(),
+            vram_bytes: 32 * 1024 * 1024 * 1024,
+            tflops: 0.0,
+        }]);
+        // Fallback: 2.0 flat for unknown
+        assert!((w.total_tflops() - 2.0).abs() < 0.01);
+    }
+
+    // ── encode_packet / decode_packet: additional edge cases ────
+
+    #[test]
+    fn test_packet_roundtrip_empty_payload() {
+        // Empty payload: MAGIC + 0 bytes of payload = 4 bytes total
+        // decode requires len > 4, so empty payload should return None
+        let pkt = encode_packet(&[]);
+        assert_eq!(pkt.len(), 4);
+        assert_eq!(decode_packet(&pkt), None, "exactly 4 bytes (magic only, no payload) should return None");
+    }
+
+    #[test]
+    fn test_packet_roundtrip_single_byte_payload() {
+        let pkt = encode_packet(&[0x42]);
+        assert_eq!(pkt.len(), 5);
+        let decoded = decode_packet(&pkt);
+        assert_eq!(decoded, Some(&[0x42][..]));
+    }
+
+    #[test]
+    fn test_packet_roundtrip_binary_payload() {
+        let payload: Vec<u8> = (0..=255).collect();
+        let pkt = encode_packet(&payload);
+        assert_eq!(pkt.len(), 4 + 256);
+        let decoded = decode_packet(&pkt).unwrap();
+        assert_eq!(decoded, payload.as_slice());
+    }
+
+    #[test]
+    fn test_decode_packet_partial_magic() {
+        // Only first 3 bytes of magic
+        assert_eq!(decode_packet(b"CAK"), None);
+        assert_eq!(decode_packet(b"CA"), None);
+        assert_eq!(decode_packet(b"C"), None);
+    }
+
+    #[test]
+    fn test_encode_packet_preserves_magic() {
+        let pkt = encode_packet(b"test");
+        assert_eq!(&pkt[..4], b"CAKE");
+        assert_eq!(&pkt[4..], b"test");
+    }
+
+    #[test]
+    fn test_decode_packet_case_sensitive_magic() {
+        // "cake" (lowercase) should not match "CAKE"
+        let mut pkt = vec![b'c', b'a', b'k', b'e', 0x01];
+        assert_eq!(decode_packet(&pkt), None);
+        // Fix the magic
+        pkt[..4].copy_from_slice(b"CAKE");
+        assert!(decode_packet(&pkt).is_some());
+    }
+
+    // ── JSON roundtrip for discovery structs ────────────────────
+
+    #[test]
+    fn test_discovery_query_json_roundtrip() {
+        let query = DiscoveryQuery {
+            cluster_hash: "abcd1234".into(),
+        };
+        let json = serde_json::to_vec(&query).unwrap();
+        let decoded: DiscoveryQuery = serde_json::from_slice(&json).unwrap();
+        assert_eq!(decoded.cluster_hash, "abcd1234");
+    }
+
+    #[test]
+    fn test_discovery_response_json_roundtrip() {
+        let resp = DiscoveryResponse {
+            cluster_hash: "9f86d081".into(),
+            worker_name: "worker-1".into(),
+            port: 10128,
+            gpus: vec![GpuInfo {
+                name: "NVIDIA RTX 3080".into(),
+                vram_bytes: 16 * 1024 * 1024 * 1024,
+                tflops: 30.0,
+            }],
+            backend: "CUDA 12.4".into(),
+            hostname: "blade".into(),
+            os: "linux".into(),
+        };
+        let json = serde_json::to_vec(&resp).unwrap();
+        let decoded: DiscoveryResponse = serde_json::from_slice(&json).unwrap();
+        assert_eq!(decoded.cluster_hash, "9f86d081");
+        assert_eq!(decoded.worker_name, "worker-1");
+        assert_eq!(decoded.port, 10128);
+        assert_eq!(decoded.gpus.len(), 1);
+        assert_eq!(decoded.gpus[0].name, "NVIDIA RTX 3080");
+        assert_eq!(decoded.gpus[0].vram_bytes, 16 * 1024 * 1024 * 1024);
+        assert!((decoded.gpus[0].tflops - 30.0).abs() < 0.01);
+        assert_eq!(decoded.backend, "CUDA 12.4");
+        assert_eq!(decoded.hostname, "blade");
+        assert_eq!(decoded.os, "linux");
+    }
+
+    #[test]
+    fn test_discovery_response_defaults_for_old_fields() {
+        // Simulate response from an old binary that doesn't send backend/hostname/os
+        let json = r#"{
+            "cluster_hash": "abcd1234",
+            "worker_name": "old-worker",
+            "port": 10128,
+            "gpus": []
+        }"#;
+        let resp: DiscoveryResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.backend, "");
+        assert_eq!(resp.hostname, "");
+        assert_eq!(resp.os, "");
+    }
+
+    #[test]
+    fn test_discovery_response_multi_gpu() {
+        let resp = DiscoveryResponse {
+            cluster_hash: "hash".into(),
+            worker_name: "multi-gpu".into(),
+            port: 10128,
+            gpus: vec![
+                GpuInfo { name: "TITAN X".into(), vram_bytes: 12 * 1024 * 1024 * 1024, tflops: 10.0 },
+                GpuInfo { name: "TITAN X".into(), vram_bytes: 12 * 1024 * 1024 * 1024, tflops: 10.0 },
+            ],
+            backend: "CUDA 12.4".into(),
+            hostname: "bahamut".into(),
+            os: "linux".into(),
+        };
+        let json = serde_json::to_vec(&resp).unwrap();
+        let decoded: DiscoveryResponse = serde_json::from_slice(&json).unwrap();
+        assert_eq!(decoded.gpus.len(), 2);
+    }
+
+    // ── Full packet encode/decode with JSON payload ─────────────
+
+    #[test]
+    fn test_full_query_packet_roundtrip() {
+        let query = DiscoveryQuery {
+            cluster_hash: cluster_hash("my-key"),
+        };
+        let json = serde_json::to_vec(&query).unwrap();
+        let pkt = encode_packet(&json);
+
+        let payload = decode_packet(&pkt).unwrap();
+        let decoded: DiscoveryQuery = serde_json::from_slice(payload).unwrap();
+        assert_eq!(decoded.cluster_hash, cluster_hash("my-key"));
+    }
+
+    #[test]
+    fn test_full_response_packet_roundtrip() {
+        let resp = DiscoveryResponse {
+            cluster_hash: cluster_hash("secret"),
+            worker_name: "w1".into(),
+            port: 9999,
+            gpus: vec![GpuInfo { name: "CPU (x86_64)".into(), vram_bytes: 8_000_000_000, tflops: 2.0 }],
+            backend: "CPU".into(),
+            hostname: "test-host".into(),
+            os: "linux".into(),
+        };
+        let json = serde_json::to_vec(&resp).unwrap();
+        let pkt = encode_packet(&json);
+
+        let payload = decode_packet(&pkt).unwrap();
+        let decoded: DiscoveryResponse = serde_json::from_slice(payload).unwrap();
+        assert_eq!(decoded.worker_name, "w1");
+        assert_eq!(decoded.port, 9999);
+    }
+
+    // ── detect_gpus (CPU fallback path) ─────────────────────────
+
+    #[test]
+    fn test_detect_gpus_returns_nonempty() {
+        // Without cuda/metal features in test builds, should fall back to CPU
+        let gpus = detect_gpus();
+        assert!(!gpus.is_empty(), "detect_gpus should always return at least one device");
+    }
+
+    #[test]
+    fn test_detect_gpus_cpu_fallback_has_positive_vram() {
+        let gpus = detect_gpus();
+        for gpu in &gpus {
+            assert!(gpu.vram_bytes > 0, "detected GPU should report positive VRAM: {}", gpu.name);
+        }
+    }
+
+    #[test]
+    fn test_detect_gpus_cpu_fallback_has_name() {
+        let gpus = detect_gpus();
+        for gpu in &gpus {
+            assert!(!gpu.name.is_empty(), "GPU name should not be empty");
+        }
+    }
+
+    // ── detect_hostname ─────────────────────────────────────────
+
+    #[test]
+    fn test_detect_hostname_nonempty() {
+        let hostname = detect_hostname();
+        assert!(!hostname.is_empty());
+        assert_ne!(hostname, "unknown", "should detect a real hostname in test environment");
+    }
+
+    // ── detect_backend ──────────────────────────────────────────
+
+    #[test]
+    fn test_detect_backend_nonempty() {
+        let backend = detect_backend();
+        assert!(!backend.is_empty());
+    }
+
+    // ── GpuInfo serialization ───────────────────────────────────
+
+    #[test]
+    fn test_gpu_info_json_roundtrip() {
+        let gpu = GpuInfo {
+            name: "Test GPU".into(),
+            vram_bytes: 1024 * 1024 * 1024,
+            tflops: 15.5,
+        };
+        let json = serde_json::to_string(&gpu).unwrap();
+        let decoded: GpuInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.name, "Test GPU");
+        assert_eq!(decoded.vram_bytes, 1024 * 1024 * 1024);
+        assert!((decoded.tflops - 15.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_gpu_info_tflops_default() {
+        // Old JSON without tflops field should default to 0.0
+        let json = r#"{"name": "Old GPU", "vram_bytes": 1000000}"#;
+        let gpu: GpuInfo = serde_json::from_str(json).unwrap();
+        assert!((gpu.tflops - 0.0).abs() < 0.01);
+    }
+
+    // ── total_tflops: multi-GPU and edge cases ──────────────────
+
+    #[test]
+    fn test_total_tflops_multi_gpu_reported() {
+        let w = make_worker(vec![
+            GpuInfo { name: "GPU A".into(), vram_bytes: 12 * 1024 * 1024 * 1024, tflops: 10.0 },
+            GpuInfo { name: "GPU B".into(), vram_bytes: 12 * 1024 * 1024 * 1024, tflops: 15.0 },
+        ]);
+        assert!((w.total_tflops() - 25.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_total_tflops_empty_gpus() {
+        let w = make_worker(vec![]);
+        assert!((w.total_tflops() - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_total_tflops_mixed_reported_and_zero() {
+        // If any GPU reports non-zero tflops, the sum of reported values is used
+        let w = make_worker(vec![
+            GpuInfo { name: "RTX 3080".into(), vram_bytes: 16 * 1024 * 1024 * 1024, tflops: 30.0 },
+            GpuInfo { name: "CPU".into(), vram_bytes: 8 * 1024 * 1024 * 1024, tflops: 0.0 },
+        ]);
+        // total reported = 30.0 > 0 => returns 30.0 (not fallback)
+        assert!((w.total_tflops() - 30.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_total_tflops_fallback_geforce() {
+        let w = make_worker(vec![GpuInfo {
+            name: "GeForce RTX 2080".into(),
+            vram_bytes: 8 * 1024 * 1024 * 1024,
+            tflops: 0.0,
+        }]);
+        // Fallback: 8 * 3.0 = 24
+        assert!((w.total_tflops() - 24.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_total_tflops_fallback_tesla() {
+        let w = make_worker(vec![GpuInfo {
+            name: "Tesla V100".into(),
+            vram_bytes: 16 * 1024 * 1024 * 1024,
+            tflops: 0.0,
+        }]);
+        // Fallback: 16 * 3.0 = 48
+        assert!((w.total_tflops() - 48.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_total_tflops_fallback_silicon() {
+        let w = make_worker(vec![GpuInfo {
+            name: "Apple Silicon M2".into(),
+            vram_bytes: 24 * 1024 * 1024 * 1024,
+            tflops: 0.0,
+        }]);
+        // Fallback: 24 * 0.4 = 9.6
+        assert!((w.total_tflops() - 9.6).abs() < 0.01);
+    }
+
+    // ── max_layers_for_size: additional edge cases ──────────────
+
+    #[test]
+    fn test_max_layers_layer_larger_than_vram() {
+        // Layer bigger than usable VRAM: should return 0
+        let vram = 1u64 * 1024 * 1024 * 1024; // 1 GiB
+        let w = make_worker(vec![GpuInfo {
+            name: "NVIDIA Small GPU".into(),
+            vram_bytes: vram,
+            tflops: 5.0,
+        }]);
+        // After 768 MiB reserve, only ~256 MiB usable, but layer is 2 GiB
+        let layer_size = 2u64 * 1024 * 1024 * 1024;
+        assert_eq!(w.max_layers_for_size(layer_size), 0);
+    }
+
+    #[test]
+    fn test_max_layers_apple_tiny_vram_below_min_reserve() {
+        // Apple device with less VRAM than the 6 GiB minimum reserve
+        let vram = 4u64 * 1024 * 1024 * 1024; // 4 GiB
+        let w = make_worker(vec![GpuInfo {
+            name: "Apple M1 (4GB)".into(),
+            vram_bytes: vram,
+            tflops: 1.0,
+        }]);
+        let layer_size = 100u64 * 1024 * 1024;
+        // min_reserve = 6 GiB > vram, so usable = saturating_sub = 0
+        assert_eq!(w.max_layers_for_size(layer_size), 0);
+    }
+
+    #[test]
+    fn test_max_layers_cpu_small_memory() {
+        // CPU with 2 GiB (mobile-like)
+        let vram = 2u64 * 1024 * 1024 * 1024;
+        let w = make_worker(vec![GpuInfo {
+            name: "CPU (aarch64)".into(),
+            vram_bytes: vram,
+            tflops: 1.0,
+        }]);
+        let layer_size = 100u64 * 1024 * 1024;
+        // 20% reserve = 409 MiB, usable = ~1638 MiB
+        let reserve = (vram as f64 * 0.20) as u64;
+        let usable = vram - reserve;
+        let expected = (usable / layer_size) as usize;
+        assert_eq!(w.max_layers_for_size(layer_size), expected);
+    }
+
+    // ── DiscoveredWorker construction ───────────────────────────
+
+    #[test]
+    fn test_discovered_worker_total_vram_consistency() {
+        let w = make_worker(vec![
+            GpuInfo { name: "A".into(), vram_bytes: 100, tflops: 1.0 },
+            GpuInfo { name: "B".into(), vram_bytes: 200, tflops: 2.0 },
+            GpuInfo { name: "C".into(), vram_bytes: 300, tflops: 3.0 },
+        ]);
+        assert_eq!(w.total_vram(), 600);
+    }
+
+    // ── cluster_hash: unicode and special characters ────────────
+
+    #[test]
+    fn test_cluster_hash_unicode_key() {
+        let h = cluster_hash("schluessel-\u{00FC}ber-alles");
+        assert_eq!(h.len(), 8);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_cluster_hash_long_key() {
+        let long_key = "a".repeat(10000);
+        let h = cluster_hash(&long_key);
+        assert_eq!(h.len(), 8);
+    }
+
+    #[test]
+    fn test_cluster_hash_whitespace_matters() {
+        let h1 = cluster_hash("key");
+        let h2 = cluster_hash("key ");
+        assert_ne!(h1, h2);
+    }
+}

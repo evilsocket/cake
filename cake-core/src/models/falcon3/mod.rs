@@ -1,5 +1,5 @@
 //! Falcon3 model implementation (FalconForCausalLM).
-mod config;
+pub mod config;
 mod model;
 
 pub use config::*;

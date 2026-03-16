@@ -214,6 +214,75 @@ impl SimpleBackend for GptqBackend {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dequantize_gptq_4bit_shape() {
+        // 2 packed_rows × 4 out_features, group_size=8 → 1 group
+        // in_features = 2*8 = 16, out_features = 4
+        let qweight = Tensor::zeros((2, 4), DType::I64, &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::I64)
+            .unwrap();
+        // Actually qweight is i32
+        let qweight = Tensor::from_vec(vec![0i32; 8], (2, 4), &Device::Cpu).unwrap();
+        let scales = Tensor::from_vec(vec![1.0f32; 4], (1, 4), &Device::Cpu).unwrap();
+        let qzeros = Tensor::from_vec(vec![0i32; 1], (1, 1), &Device::Cpu).unwrap();
+        // group_size=16, 1 group, packed_rows=2, out=4
+
+        let result = dequantize_gptq_4bit(&qweight, &scales, &qzeros, 16).unwrap();
+        assert_eq!(result.dims(), &[4, 16]); // (out_features, in_features)
+    }
+
+    #[test]
+    fn test_dequantize_gptq_4bit_known_values() {
+        // 1 packed_row × 1 out_feature, group_size=8
+        // qweight[0,0] = 0x21 → bits: [1, 2, 0, 0, 0, 0, 0, 0] (4-bit nibbles)
+        // scale = 2.0, qzeros = 0 → zero = (0 & 0xF) + 1 = 1
+        // w[bit] = (nibble - 1) * 2.0
+        let qweight = Tensor::from_vec(vec![0x21i32], (1, 1), &Device::Cpu).unwrap();
+        let scales = Tensor::from_vec(vec![2.0f32], (1, 1), &Device::Cpu).unwrap();
+        let qzeros = Tensor::from_vec(vec![0i32], (1, 1), &Device::Cpu).unwrap();
+
+        let result = dequantize_gptq_4bit(&qweight, &scales, &qzeros, 8).unwrap();
+        let vals: Vec<f32> = result.flatten_all().unwrap().to_vec1().unwrap();
+        // bit0: nibble=(0x21>>0)&0xF = 1, w=(1-1)*2.0 = 0.0
+        // bit1: nibble=(0x21>>4)&0xF = 2, w=(2-1)*2.0 = 2.0
+        assert!((vals[0] - 0.0).abs() < 1e-6, "bit0: got {}", vals[0]);
+        assert!((vals[1] - 2.0).abs() < 1e-6, "bit1: got {}", vals[1]);
+    }
+
+    #[test]
+    fn test_is_gptq_quantized() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            r#"{"quantization_config": {"quant_method": "gptq", "bits": 4, "group_size": 128}}"#,
+        )
+        .unwrap();
+        assert!(is_gptq_quantized(&config_path));
+
+        let config_path2 = dir.path().join("config2.json");
+        std::fs::write(&config_path2, r#"{"hidden_size": 4096}"#).unwrap();
+        assert!(!is_gptq_quantized(&config_path2));
+    }
+
+    #[test]
+    fn test_gptq_group_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        std::fs::write(
+            &config_path,
+            r#"{"quantization_config": {"quant_method": "gptq", "group_size": 64}}"#,
+        )
+        .unwrap();
+        assert_eq!(gptq_group_size(&config_path), 64);
+    }
+}
+
 /// Create a VarBuilder that transparently dequantizes GPTQ 4-bit weights.
 ///
 /// # Safety

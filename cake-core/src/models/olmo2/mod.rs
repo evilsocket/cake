@@ -1,6 +1,6 @@
 //! OLMo 2 model implementation (OLMo2ForCausalLM).
 mod block;
-mod config;
+pub mod config;
 mod model;
 
 pub use block::*;

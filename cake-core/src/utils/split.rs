@@ -232,3 +232,139 @@ pub fn split_model(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn make_node(layers: Vec<&str>) -> Node {
+        Node {
+            host: "test:10128".to_string(),
+            description: None,
+            layers: layers.into_iter().map(|s| s.to_string()).collect(),
+            vram_bytes: 0,
+            tflops: 0.0,
+            backend: String::new(),
+            hostname: String::new(),
+            os: String::new(),
+        }
+    }
+
+    #[test]
+    fn load_index_from_json_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_json = serde_json::json!({
+            "weight_map": {
+                "model.layers.0.self_attn.q_proj.weight": "shard-00001.safetensors",
+                "model.layers.0.self_attn.k_proj.weight": "shard-00001.safetensors",
+                "model.layers.1.self_attn.q_proj.weight": "shard-00002.safetensors"
+            }
+        });
+        fs::write(
+            tmp.path().join("model.safetensors.index.json"),
+            serde_json::to_string(&index_json).unwrap(),
+        )
+        .unwrap();
+
+        let index = load_index(tmp.path()).unwrap();
+        assert_eq!(index.weight_map.len(), 3);
+        assert_eq!(
+            index.weight_map["model.layers.0.self_attn.q_proj.weight"],
+            "shard-00001.safetensors"
+        );
+    }
+
+    #[test]
+    fn load_index_missing_both_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = load_index(tmp.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reduce_for_worker_filters_correctly() {
+        let mut weight_map = HashMap::new();
+        weight_map.insert(
+            "model.layers.0.attn.weight".to_string(),
+            "shard-00001.safetensors".to_string(),
+        );
+        weight_map.insert(
+            "model.layers.0.mlp.weight".to_string(),
+            "shard-00001.safetensors".to_string(),
+        );
+        weight_map.insert(
+            "model.layers.1.attn.weight".to_string(),
+            "shard-00002.safetensors".to_string(),
+        );
+        weight_map.insert(
+            "model.layers.2.attn.weight".to_string(),
+            "shard-00002.safetensors".to_string(),
+        );
+        weight_map.insert(
+            "model.embed_tokens.weight".to_string(),
+            "shard-00001.safetensors".to_string(),
+        );
+        let index = Index { weight_map };
+
+        // Worker owns layers 0 and 1
+        let worker = make_node(vec!["model.layers.0", "model.layers.1"]);
+        let (new_index, reduced) = reduce_for_worker(&index, &worker).unwrap();
+
+        // Should have 3 tensors (layer 0 attn, layer 0 mlp, layer 1 attn)
+        assert_eq!(new_index.weight_map.len(), 3);
+        assert!(new_index
+            .weight_map
+            .contains_key("model.layers.0.attn.weight"));
+        assert!(new_index
+            .weight_map
+            .contains_key("model.layers.0.mlp.weight"));
+        assert!(new_index
+            .weight_map
+            .contains_key("model.layers.1.attn.weight"));
+        // Should NOT contain layer 2 or embed_tokens
+        assert!(!new_index
+            .weight_map
+            .contains_key("model.layers.2.attn.weight"));
+        assert!(!new_index
+            .weight_map
+            .contains_key("model.embed_tokens.weight"));
+
+        // All entries in new_index should point to "reduced.safetensors"
+        for val in new_index.weight_map.values() {
+            assert_eq!(val, "reduced.safetensors");
+        }
+
+        // reduced map should have source shard filenames as keys
+        assert!(reduced.contains_key("shard-00001.safetensors"));
+        assert!(reduced.contains_key("shard-00002.safetensors"));
+    }
+
+    #[test]
+    fn reduce_for_worker_no_matching_layers() {
+        let mut weight_map = HashMap::new();
+        weight_map.insert(
+            "model.layers.5.attn.weight".to_string(),
+            "shard.safetensors".to_string(),
+        );
+        let index = Index { weight_map };
+
+        let worker = make_node(vec!["model.layers.0"]);
+        let (new_index, reduced) = reduce_for_worker(&index, &worker).unwrap();
+        assert!(new_index.weight_map.is_empty());
+        assert!(reduced.is_empty());
+    }
+
+    #[test]
+    fn index_serialization_roundtrip() {
+        let mut index = Index::new();
+        index.weight_map.insert(
+            "tensor.weight".to_string(),
+            "file.safetensors".to_string(),
+        );
+        let json = serde_json::to_string(&index).unwrap();
+        let deserialized: Index = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.weight_map.len(), 1);
+        assert_eq!(deserialized.weight_map["tensor.weight"], "file.safetensors");
+    }
+}

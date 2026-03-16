@@ -32,3 +32,52 @@ impl Phi4History {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_phi4_single_user() {
+        let mut h = Phi4History::new();
+        h.push(Message::user("Hello".into()));
+
+        let prompt = h.encode_dialog_to_prompt();
+        assert_eq!(prompt, "<|user|>\nHello<|end|>\n<|assistant|>\n");
+    }
+
+    #[test]
+    fn test_phi4_system_user() {
+        let mut h = Phi4History::new();
+        h.push(Message::system("You are helpful.".into()));
+        h.push(Message::user("Hi".into()));
+
+        let prompt = h.encode_dialog_to_prompt();
+        assert!(prompt.starts_with("<|system|>\nYou are helpful.<|end|>\n"));
+        assert!(prompt.contains("<|user|>\nHi<|end|>\n"));
+        assert!(prompt.ends_with("<|assistant|>\n"));
+    }
+
+    #[test]
+    fn test_phi4_multi_turn() {
+        let mut h = Phi4History::new();
+        h.push(Message::user("Hello".into()));
+        h.push(Message::assistant("Hi there!".into()));
+        h.push(Message::user("Bye".into()));
+
+        let prompt = h.encode_dialog_to_prompt();
+        assert!(prompt.contains("<|assistant|>\nHi there!<|end|>\n"));
+        assert!(prompt.contains("<|user|>\nBye<|end|>\n"));
+        assert!(prompt.ends_with("<|assistant|>\n"));
+    }
+
+    #[test]
+    fn test_phi4_clear() {
+        let mut h = Phi4History::new();
+        h.push(Message::user("test".into()));
+        h.clear();
+        let prompt = h.encode_dialog_to_prompt();
+        // Empty history still primes assistant
+        assert_eq!(prompt, "<|assistant|>\n");
+    }
+}
