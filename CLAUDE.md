@@ -100,3 +100,66 @@ ssh stevie.local "cd ~/Lab/cake && ./target/release/cake worker --model Qwen/Qwe
 # Run master (blade, local)
 ./target/release/cake master --model Qwen/Qwen3.5-0.8B --topology topology-0.8B.yml --prompt "Explain quantum computing in simple terms"
 ```
+
+## Testing
+
+### Unit Tests (474 tests, 62% line coverage, <3s)
+
+All tests run offline — no model downloads, no GPU, no network servers required.
+
+```bash
+# Run all tests
+cargo test -p cake-core
+
+# Run only inline library tests (fastest, ~0.02s)
+cargo test -p cake-core --lib
+
+# Run external unit tests (attention, blocks, MoE, topology, client/worker mock)
+cargo test -p cake-core --test unit
+
+# Run protocol tests
+cargo test -p cake-core --test protocol
+
+# Measure coverage (requires cargo-llvm-cov)
+cargo llvm-cov --test unit --test protocol --lib -p cake-core --summary-only
+```
+
+Test helpers are in `cake-core/tests/unit_tests/helpers.rs` — reuse `test_config()`, `make_tensor()`,
+`make_vb_attention()`, `make_vb_mlp()`, `make_vb_transformer_block()`, `make_cache()` for any new tests.
+
+For model block tests, use the `make_context()` + `Forwarder::load()` pattern in `test_blocks.rs`.
+
+### Benchmarks (divan)
+
+```bash
+# Run all benchmarks
+cargo bench -p cake-core
+
+# Run specific benchmark group
+cargo bench -p cake-core -- attention
+cargo bench -p cake-core -- protocol
+cargo bench -p cake-core -- moe
+
+# Quick smoke test (1 sample per benchmark)
+DIVAN_SAMPLE_COUNT=1 cargo bench -p cake-core
+```
+
+Benchmarks use divan and are in `cake-core/benches/`. They share helpers with unit tests
+and run on CPU with small dimensions (hidden=64) for fast iteration. ~55 benchmarks covering:
+attention, MLP, GatedDeltaNet, MoE, full blocks, cache, serialization, protocol, auth,
+discovery, topology, quantization, and SD utilities.
+
+### Rules
+
+1. **Any change to existing code MUST pass all tests.** Run `cargo test -p cake-core` before committing. No exceptions.
+2. **Any change to existing code MUST NOT create a performance regression.** Run `cargo bench -p cake-core` before and after, compare results. If a benchmark regresses, fix the regression or justify it.
+3. **New models require full test and benchmark coverage:**
+   - Config parsing test (inline `#[cfg(test)]` in `config.rs` — deserialize sample JSON, verify `into_config()`)
+   - Block forward test (in `tests/unit_tests/test_blocks.rs` — load via VarBuilder, assert output shape for prefill and generation)
+   - Block forward benchmark (in `benches/bench_blocks.rs` — `args = [1, 8, 64]` for seq_len)
+   - If the model introduces new attention/MLP/MoE variants, add dedicated tests and benchmarks for those components
+   - Chat history encoder test if a new history format is added
+4. **New components (protocol messages, discovery features, utilities) require:**
+   - Unit tests covering all code paths (happy path + error cases)
+   - Benchmarks for any function on a hot path or that processes data proportional to model/tensor size
+5. **Clippy must pass:** `cargo clippy --all-targets -- -D warnings` with zero warnings.

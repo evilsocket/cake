@@ -74,3 +74,8 @@ exaone4 = []
 
 [dev-dependencies]
 tempfile = "3"
+divan = "0.1"
+
+[[bench]]
+name = "benchmarks"
+harness = false
