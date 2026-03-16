@@ -168,6 +168,94 @@ RMS_NORM_GATED_OP(__half, rms_norm_gated_f16)
 RMS_NORM_GATED_OP(__nv_bfloat16, rms_norm_gated_bf16)
 #endif
 
+// ─── add_rms_norm: rms_norm(a + b, weight, eps) with residual output ──
+// Fuses 2 kernels (add + rms_norm) into 1.
+// Used in transformer blocks: residual add followed by layer norm.
+// Output is [a+b, rms_norm(a+b)] concatenated on last dim (2 * n_cols).
+// Caller splits with narrow (zero-cost view).
+// a, b: (n_rows, n_cols), weight: (n_cols,)
+#define ADD_RMS_NORM_OP(TYPENAME, FN_NAME) \
+extern "C" __global__ void FN_NAME( \
+    const TYPENAME *a, \
+    const TYPENAME *b, \
+    const TYPENAME *weight, \
+    TYPENAME *out, \
+    const int n_cols, \
+    const int block_size, \
+    const float eps \
+) { \
+    const int row = blockIdx.x; \
+    const int out_stride = n_cols * 2; \
+    const int in_off = row * n_cols; \
+    const int res_off = row * out_stride; \
+    const int norm_off = res_off + n_cols; \
+    /* Compute sum and sum of squares in one pass */ \
+    float sum2 = 0.0f; \
+    for (int col = threadIdx.x; col < n_cols; col += block_size) { \
+        float av = static_cast<float>(a[in_off + col]); \
+        float bv = static_cast<float>(b[in_off + col]); \
+        float s = av + bv; \
+        out[res_off + col] = static_cast<TYPENAME>(s); \
+        sum2 += s * s; \
+    } \
+    /* Warp reduction */ \
+    for (int mask = 16; mask > 0; mask >>= 1) { \
+        sum2 += __shfl_xor_sync(0xffffffff, sum2, mask); \
+    } \
+    /* Block reduction via shared memory */ \
+    __shared__ float shared[32]; \
+    int warp_id = threadIdx.x / 32; \
+    int lane_id = threadIdx.x % 32; \
+    if (lane_id == 0) shared[warp_id] = sum2; \
+    __syncthreads(); \
+    sum2 = (threadIdx.x < (block_size + 31) / 32) ? shared[lane_id] : 0.0f; \
+    for (int mask = 16; mask > 0; mask >>= 1) { \
+        sum2 += __shfl_xor_sync(0xffffffff, sum2, mask); \
+    } \
+    float inv_rms = rsqrtf(sum2 / (float)n_cols + eps); \
+    /* Write normed output */ \
+    for (int col = threadIdx.x; col < n_cols; col += block_size) { \
+        float s = static_cast<float>(out[res_off + col]); \
+        float wv = static_cast<float>(weight[col]); \
+        out[norm_off + col] = static_cast<TYPENAME>(s * inv_rms * wv); \
+    } \
+}
+
+ADD_RMS_NORM_OP(float, add_rms_norm_f32)
+ADD_RMS_NORM_OP(double, add_rms_norm_f64)
+#if __CUDA_ARCH__ >= 530
+ADD_RMS_NORM_OP(__half, add_rms_norm_f16)
+#endif
+#if __CUDA_ARCH__ >= 800
+ADD_RMS_NORM_OP(__nv_bfloat16, add_rms_norm_bf16)
+#endif
+
+// ─── add3: out = a + b + c ───────────────────────────────────────────
+// Fuses 2 kernels (add + add) into 1.
+// Used in transformer blocks: residual + attn_out + mlp_out.
+#define ADD3_OP(TYPENAME, FN_NAME) \
+extern "C" __global__ void FN_NAME( \
+    const size_t numel, \
+    const TYPENAME *a, \
+    const TYPENAME *b, \
+    const TYPENAME *c, \
+    TYPENAME *out \
+) { \
+    for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; \
+         i < numel; i += blockDim.x * gridDim.x) { \
+        out[i] = a[i] + b[i] + c[i]; \
+    } \
+}
+
+ADD3_OP(float, add3_f32)
+ADD3_OP(double, add3_f64)
+#if __CUDA_ARCH__ >= 530
+ADD3_OP(__half, add3_f16)
+#endif
+#if __CUDA_ARCH__ >= 800
+ADD3_OP(__nv_bfloat16, add3_bf16)
+#endif
+
 // ─── exp_mul: out = x * exp(y) ──────────────────────────────────────
 // Fuses 2 kernels (exp + broadcast_mul) into 1.
 // Used in GatedDeltaNet recurrent decay: state = state * exp(gate).

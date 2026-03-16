@@ -436,6 +436,391 @@ pub fn rms_norm_gated(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) -> Resu
     x.apply_op3_no_bwd(z, weight, &RmsNormGated { eps })
 }
 
+// ─── add_rms_norm: rms_norm(a + b, weight, eps) with residual ────────
+
+struct AddRmsNorm {
+    eps: f32,
+    n_cols: usize,
+}
+
+impl candle_core::CustomOp3 for AddRmsNorm {
+    fn name(&self) -> &'static str {
+        "add_rms_norm"
+    }
+
+    fn cpu_fwd(
+        &self,
+        s_a: &CpuStorage,
+        l_a: &Layout,
+        s_b: &CpuStorage,
+        l_b: &Layout,
+        s_w: &CpuStorage,
+        l_w: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        use rayon::prelude::*;
+
+        #[allow(clippy::too_many_arguments)]
+        fn inner<
+            T: candle_core::WithDType
+                + num_traits::Float
+                + num_traits::AsPrimitive<f32>
+                + num_traits::FromPrimitive,
+        >(
+            a: &[T],
+            l_a: &Layout,
+            b: &[T],
+            l_b: &Layout,
+            w: &[T],
+            l_w: &Layout,
+            eps: f32,
+            n_cols: usize,
+        ) -> Result<(CpuStorage, Shape)> {
+            let a = match l_a.contiguous_offsets() {
+                Some((o1, o2)) => &a[o1..o2],
+                None => candle_core::bail!("add_rms_norm: a must be contiguous"),
+            };
+            let b = match l_b.contiguous_offsets() {
+                Some((o1, o2)) => &b[o1..o2],
+                None => candle_core::bail!("add_rms_norm: b must be contiguous"),
+            };
+            let w = match l_w.contiguous_offsets() {
+                Some((o1, o2)) => &w[o1..o2],
+                None => candle_core::bail!("add_rms_norm: weight must be contiguous"),
+            };
+            let dims = l_a.shape().dims();
+            let el = l_a.shape().elem_count();
+            let n_rows = el / n_cols;
+            // Output: [sum, normed] concatenated on last dim
+            let out_cols = n_cols * 2;
+            let mut dst = vec![T::zero(); n_rows * out_cols];
+
+            dst.par_chunks_mut(out_cols)
+                .enumerate()
+                .for_each(|(row, dst_row)| {
+                    let a_row = &a[row * n_cols..(row + 1) * n_cols];
+                    let b_row = &b[row * n_cols..(row + 1) * n_cols];
+                    // Compute sum and sum of squares
+                    let mut sum2: f32 = 0.0;
+                    for i in 0..n_cols {
+                        let s: f32 = a_row[i].as_() + b_row[i].as_();
+                        dst_row[i] = T::from_f32(s).unwrap_or_else(T::nan);
+                        sum2 += s * s;
+                    }
+                    let inv_rms = 1.0 / (sum2 / n_cols as f32 + eps).sqrt();
+                    for i in 0..n_cols {
+                        let s: f32 = dst_row[i].as_();
+                        let wv: f32 = w[i].as_();
+                        dst_row[n_cols + i] =
+                            T::from_f32(s * inv_rms * wv).unwrap_or_else(T::nan);
+                    }
+                });
+
+            let mut out_dims = dims.to_vec();
+            *out_dims.last_mut().unwrap() = out_cols;
+            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
+            Ok((storage, Shape::from_dims(&out_dims)))
+        }
+
+        use CpuStorage as C;
+        match (s_a, s_b, s_w) {
+            (C::BF16(a), C::BF16(b), C::BF16(w)) => {
+                inner(a, l_a, b, l_b, w, l_w, self.eps, self.n_cols)
+            }
+            (C::F16(a), C::F16(b), C::F16(w)) => {
+                inner(a, l_a, b, l_b, w, l_w, self.eps, self.n_cols)
+            }
+            (C::F32(a), C::F32(b), C::F32(w)) => {
+                inner(a, l_a, b, l_b, w, l_w, self.eps, self.n_cols)
+            }
+            (C::F64(a), C::F64(b), C::F64(w)) => {
+                inner(a, l_a, b, l_b, w, l_w, self.eps, self.n_cols)
+            }
+            _ => candle_core::bail!("add_rms_norm: unsupported dtype {:?}", s_a.dtype()),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        s_a: &candle_core::CudaStorage,
+        l_a: &Layout,
+        s_b: &candle_core::CudaStorage,
+        l_b: &Layout,
+        s_w: &candle_core::CudaStorage,
+        l_w: &Layout,
+    ) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{
+            CudaSlice, DeviceRepr, LaunchConfig, PushKernelArg,
+        };
+        use candle_core::cuda_backend::{kernel_name, WrapErr};
+        use candle_core::{CudaDevice, CudaStorage, WithDType};
+
+        let n_cols = self.n_cols;
+        let eps = self.eps;
+        let el = l_a.shape().elem_count();
+        let n_rows = el / n_cols;
+        let out_cols = n_cols * 2;
+
+        #[allow(clippy::too_many_arguments)]
+        fn launch<T: DeviceRepr + WithDType>(
+            a: &CudaSlice<T>,
+            l_a: &Layout,
+            b: &CudaSlice<T>,
+            l_b: &Layout,
+            w: &CudaSlice<T>,
+            l_w: &Layout,
+            dev: &CudaDevice,
+            n_cols: usize,
+            n_rows: usize,
+            eps: f32,
+        ) -> Result<CudaSlice<T>> {
+            let a = match l_a.contiguous_offsets() {
+                Some((o1, o2)) => a.slice(o1..o2),
+                None => candle_core::bail!("add_rms_norm: a must be contiguous"),
+            };
+            let b = match l_b.contiguous_offsets() {
+                Some((o1, o2)) => b.slice(o1..o2),
+                None => candle_core::bail!("add_rms_norm: b must be contiguous"),
+            };
+            let w = match l_w.contiguous_offsets() {
+                Some((o1, o2)) => w.slice(o1..o2),
+                None => candle_core::bail!("add_rms_norm: weight must be contiguous"),
+            };
+            let block_size: u32 = if n_cols < 1024 { 32 } else { 1024 };
+            let cfg = LaunchConfig {
+                grid_dim: (n_rows as u32, 1, 1),
+                block_dim: (block_size, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let func = dev.get_or_load_custom_func(
+                &kernel_name::<T>("add_rms_norm"),
+                "cake_fused_ops",
+                FUSED_OPS_PTX,
+            )?;
+            let out_el = n_rows * n_cols * 2;
+            let out = unsafe { dev.alloc::<T>(out_el)? };
+            let mut builder = func.builder();
+            builder.arg(&a);
+            builder.arg(&b);
+            builder.arg(&w);
+            builder.arg(&out);
+            candle_core::builder_arg!(builder, n_cols as i32, block_size as i32, eps);
+            unsafe { builder.launch(cfg) }.w()?;
+            Ok(out)
+        }
+
+        use candle_core::backend::BackendStorage;
+        use candle_core::cuda_backend::CudaStorageSlice as SS;
+        let dev = s_a.device();
+
+        let slice = match (&s_a.slice, &s_b.slice, &s_w.slice) {
+            (SS::BF16(a), SS::BF16(b), SS::BF16(w)) => {
+                SS::BF16(launch(a, l_a, b, l_b, w, l_w, dev, n_cols, n_rows, eps)?)
+            }
+            (SS::F16(a), SS::F16(b), SS::F16(w)) => {
+                SS::F16(launch(a, l_a, b, l_b, w, l_w, dev, n_cols, n_rows, eps)?)
+            }
+            (SS::F32(a), SS::F32(b), SS::F32(w)) => {
+                SS::F32(launch(a, l_a, b, l_b, w, l_w, dev, n_cols, n_rows, eps)?)
+            }
+            (SS::F64(a), SS::F64(b), SS::F64(w)) => {
+                SS::F64(launch(a, l_a, b, l_b, w, l_w, dev, n_cols, n_rows, eps)?)
+            }
+            _ => candle_core::bail!("add_rms_norm: unsupported dtype"),
+        };
+
+        let mut out_dims = l_a.shape().dims().to_vec();
+        *out_dims.last_mut().unwrap() = out_cols;
+
+        Ok((
+            CudaStorage {
+                slice,
+                device: dev.clone(),
+            },
+            Shape::from_dims(&out_dims),
+        ))
+    }
+}
+
+/// Fused residual add + RmsNorm — replaces 2 kernel launches with 1.
+/// Returns (residual_sum, rms_normed) as contiguous tensors.
+/// `a` and `b` are added, then the sum is RMS-normalized with `weight` and `eps`.
+pub fn add_rms_norm(
+    a: &Tensor,
+    b: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+) -> Result<(Tensor, Tensor)> {
+    let n_cols = *a.dims().last().unwrap();
+    let combined = a.apply_op3_no_bwd(b, weight, &AddRmsNorm { eps, n_cols })?;
+    let residual = combined.narrow(candle_core::D::Minus1, 0, n_cols)?.contiguous()?;
+    let normed = combined.narrow(candle_core::D::Minus1, n_cols, n_cols)?.contiguous()?;
+    Ok((residual, normed))
+}
+
+/// Fused residual add + RmsNorm — returns ONLY the normed result.
+/// Use when caller will reconstruct residual via add3 at the end of the block.
+pub fn add_rms_norm_normed(
+    a: &Tensor,
+    b: &Tensor,
+    weight: &Tensor,
+    eps: f32,
+) -> Result<Tensor> {
+    // Fuse add+norm into 1 kernel, return only the normed half
+    let n_cols = *a.dims().last().unwrap();
+    let combined = a.apply_op3_no_bwd(b, weight, &AddRmsNorm { eps, n_cols })?;
+    combined.narrow(candle_core::D::Minus1, n_cols, n_cols)?.contiguous()
+}
+
+// ─── add3: a + b + c ────────────────────────────────────────────────
+
+struct Add3;
+
+impl candle_core::CustomOp3 for Add3 {
+    fn name(&self) -> &'static str {
+        "add3"
+    }
+
+    fn cpu_fwd(
+        &self,
+        s_a: &CpuStorage,
+        l_a: &Layout,
+        s_b: &CpuStorage,
+        l_b: &Layout,
+        s_c: &CpuStorage,
+        l_c: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        fn inner<T: candle_core::WithDType + num_traits::Float>(
+            a: &[T],
+            l_a: &Layout,
+            b: &[T],
+            l_b: &Layout,
+            c: &[T],
+            l_c: &Layout,
+        ) -> Result<(CpuStorage, Shape)> {
+            let a = match l_a.contiguous_offsets() {
+                Some((o1, o2)) => &a[o1..o2],
+                None => candle_core::bail!("add3: a must be contiguous"),
+            };
+            let b = match l_b.contiguous_offsets() {
+                Some((o1, o2)) => &b[o1..o2],
+                None => candle_core::bail!("add3: b must be contiguous"),
+            };
+            let c = match l_c.contiguous_offsets() {
+                Some((o1, o2)) => &c[o1..o2],
+                None => candle_core::bail!("add3: c must be contiguous"),
+            };
+            let dst: Vec<T> = a
+                .iter()
+                .zip(b)
+                .zip(c)
+                .map(|((&av, &bv), &cv)| av + bv + cv)
+                .collect();
+            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
+            Ok((storage, l_a.shape().clone()))
+        }
+
+        use CpuStorage as C;
+        match (s_a, s_b, s_c) {
+            (C::BF16(a), C::BF16(b), C::BF16(c)) => inner(a, l_a, b, l_b, c, l_c),
+            (C::F16(a), C::F16(b), C::F16(c)) => inner(a, l_a, b, l_b, c, l_c),
+            (C::F32(a), C::F32(b), C::F32(c)) => inner(a, l_a, b, l_b, c, l_c),
+            (C::F64(a), C::F64(b), C::F64(c)) => inner(a, l_a, b, l_b, c, l_c),
+            _ => candle_core::bail!("add3: unsupported dtype {:?}", s_a.dtype()),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        s_a: &candle_core::CudaStorage,
+        l_a: &Layout,
+        s_b: &candle_core::CudaStorage,
+        l_b: &Layout,
+        s_c: &candle_core::CudaStorage,
+        l_c: &Layout,
+    ) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{
+            CudaSlice, DeviceRepr, LaunchConfig, PushKernelArg,
+        };
+        use candle_core::cuda_backend::{kernel_name, WrapErr};
+        use candle_core::{CudaDevice, CudaStorage, WithDType};
+
+        #[allow(clippy::too_many_arguments)]
+        fn launch<T: DeviceRepr + WithDType>(
+            a: &CudaSlice<T>,
+            l_a: &Layout,
+            b: &CudaSlice<T>,
+            l_b: &Layout,
+            c: &CudaSlice<T>,
+            l_c: &Layout,
+            dev: &CudaDevice,
+        ) -> Result<CudaSlice<T>> {
+            let a = match l_a.contiguous_offsets() {
+                Some((o1, o2)) => a.slice(o1..o2),
+                None => candle_core::bail!("add3: a must be contiguous"),
+            };
+            let b = match l_b.contiguous_offsets() {
+                Some((o1, o2)) => b.slice(o1..o2),
+                None => candle_core::bail!("add3: b must be contiguous"),
+            };
+            let c = match l_c.contiguous_offsets() {
+                Some((o1, o2)) => c.slice(o1..o2),
+                None => candle_core::bail!("add3: c must be contiguous"),
+            };
+            let el = l_a.shape().elem_count();
+            let cfg = LaunchConfig::for_num_elems(el as u32);
+            let func = dev.get_or_load_custom_func(
+                &kernel_name::<T>("add3"),
+                "cake_fused_ops",
+                FUSED_OPS_PTX,
+            )?;
+            let out = unsafe { dev.alloc::<T>(el)? };
+            let mut builder = func.builder();
+            builder.arg(&el);
+            builder.arg(&a);
+            builder.arg(&b);
+            builder.arg(&c);
+            builder.arg(&out);
+            unsafe { builder.launch(cfg) }.w()?;
+            Ok(out)
+        }
+
+        use candle_core::backend::BackendStorage;
+        use candle_core::cuda_backend::CudaStorageSlice as SS;
+        let dev = s_a.device();
+
+        let slice = match (&s_a.slice, &s_b.slice, &s_c.slice) {
+            (SS::BF16(a), SS::BF16(b), SS::BF16(c)) => {
+                SS::BF16(launch(a, l_a, b, l_b, c, l_c, dev)?)
+            }
+            (SS::F16(a), SS::F16(b), SS::F16(c)) => {
+                SS::F16(launch(a, l_a, b, l_b, c, l_c, dev)?)
+            }
+            (SS::F32(a), SS::F32(b), SS::F32(c)) => {
+                SS::F32(launch(a, l_a, b, l_b, c, l_c, dev)?)
+            }
+            (SS::F64(a), SS::F64(b), SS::F64(c)) => {
+                SS::F64(launch(a, l_a, b, l_b, c, l_c, dev)?)
+            }
+            _ => candle_core::bail!("add3: unsupported dtype"),
+        };
+
+        Ok((
+            CudaStorage {
+                slice,
+                device: dev.clone(),
+            },
+            l_a.shape().clone(),
+        ))
+    }
+}
+
+/// Fused a + b + c — replaces 2 kernel launches (add + add) with 1.
+pub fn add3(a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
+    a.apply_op3_no_bwd(b, c, &Add3)
+}
+
 // ─── exp_mul: x * exp(y) ────────────────────────────────────────────
 
 struct ExpMul;
@@ -1176,6 +1561,73 @@ mod tests {
             approx_eq(&gpu_result, &cpu_result, 1e-5),
             "CUDA vs CPU silu_mul mismatch on 1024 elements"
         );
+    }
+
+    // ── add_rms_norm tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_add_rms_norm_correctness() {
+        let a = Tensor::new(&[[1.0f32, 2.0, 3.0, 4.0]], &Device::Cpu).unwrap();
+        let b = Tensor::new(&[[0.5f32, -1.0, 0.5, -1.0]], &Device::Cpu).unwrap();
+        let weight = Tensor::new(&[1.0f32, 1.0, 1.0, 1.0], &Device::Cpu).unwrap();
+        let eps = 1e-6f32;
+
+        let (residual, normed) = add_rms_norm(&a, &b, &weight, eps).unwrap();
+
+        // Check residual = a + b
+        let expected_sum: Vec<f32> = (&a + &b).unwrap().flatten_all().unwrap().to_vec1().unwrap();
+        let actual_sum: Vec<f32> = residual.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(
+            approx_eq(&actual_sum, &expected_sum, 1e-5),
+            "residual mismatch: got={actual_sum:?} expected={expected_sum:?}"
+        );
+
+        // Check normed = rms_norm(a + b, weight, eps)
+        let sum_tensor = (&a + &b).unwrap();
+        let expected_norm: Vec<f32> = candle_nn::ops::rms_norm(&sum_tensor, &weight, eps)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        let actual_norm: Vec<f32> = normed.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(
+            approx_eq(&actual_norm, &expected_norm, 1e-5),
+            "normed mismatch: got={actual_norm:?} expected={expected_norm:?}"
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_add_rms_norm_cuda() {
+        let dev = match cuda_device() {
+            Some(d) => d,
+            None => return,
+        };
+        let a = Tensor::new(&[[1.0f32, 2.0, 3.0, 4.0], [0.5, -1.0, 0.5, -1.0]], &dev).unwrap();
+        let b = Tensor::new(&[[0.1f32, 0.2, 0.3, 0.4], [-0.5, 1.0, -0.5, 1.0]], &dev).unwrap();
+        let weight = Tensor::new(&[1.0f32, 0.5, 2.0, 1.5], &dev).unwrap();
+        let eps = 1e-6f32;
+
+        let (residual, normed) = add_rms_norm(&a, &b, &weight, eps).unwrap();
+        let res_vals: Vec<f32> = residual.flatten_all().unwrap().to_vec1().unwrap();
+        let norm_vals: Vec<f32> = normed.flatten_all().unwrap().to_vec1().unwrap();
+
+        // CPU reference
+        let a_cpu = a.to_device(&Device::Cpu).unwrap();
+        let b_cpu = b.to_device(&Device::Cpu).unwrap();
+        let w_cpu = weight.to_device(&Device::Cpu).unwrap();
+        let sum_cpu = (&a_cpu + &b_cpu).unwrap();
+        let expected_sum: Vec<f32> = sum_cpu.flatten_all().unwrap().to_vec1().unwrap();
+        let expected_norm: Vec<f32> = candle_nn::ops::rms_norm(&sum_cpu, &w_cpu, eps)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+
+        assert!(approx_eq(&res_vals, &expected_sum, 1e-5), "CUDA residual mismatch");
+        assert!(approx_eq(&norm_vals, &expected_norm, 1e-4), "CUDA normed mismatch");
     }
 
     // ── depthwise_conv1d_silu tests ────────────────────────────────
