@@ -87,8 +87,8 @@ async fn main() -> Result<()> {
                 println!("  cake download <org/model-name>");
             } else {
                 println!(
-                    "{:<50} {:<15} {:<15} {}",
-                    "MODEL", "STATUS", "SIZE", "SOURCE"
+                    "{:<50} {:<15} {:<15} SOURCE",
+                    "MODEL", "STATUS", "SIZE"
                 );
                 println!("{}", "-".repeat(95));
                 for m in &models {

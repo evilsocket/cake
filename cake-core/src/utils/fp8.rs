@@ -44,8 +44,8 @@ fn dequantize_fp8_blockwise(weight: &Tensor, scale_inv: &Tensor) -> candle_core:
     let (m, n) = weight.dims2()?;
     let bm = FP8_BLOCK_SIZE;
     let bn = FP8_BLOCK_SIZE;
-    let blocks_m = (m + bm - 1) / bm;
-    let blocks_n = (n + bn - 1) / bn;
+    let blocks_m = m.div_ceil(bm);
+    let blocks_n = n.div_ceil(bn);
 
     // Cast FP8 → F32 on CPU (candle supports this on CPU)
     let weight_f32 = weight.to_dtype(DType::F32)?;
@@ -130,6 +130,32 @@ impl Fp8Backend {
     }
 }
 
+/// Create a VarBuilder that transparently dequantizes FP8 weights.
+///
+/// # Safety
+///
+/// Inherits the mmap safety requirements from `MmapedSafetensors`.
+pub unsafe fn load_fp8_var_builder<'a>(
+    filenames: &[std::path::PathBuf],
+    dtype: DType,
+    device: &Device,
+) -> anyhow::Result<VarBuilder<'a>> {
+    let inner = MmapedSafetensors::multi(filenames)?;
+
+    let fp8_count = inner
+        .tensors()
+        .iter()
+        .filter(|(_, v)| v.dtype() == safetensors::tensor::Dtype::F8_E4M3)
+        .count();
+    log::info!(
+        "FP8 model detected: {} tensors will be dequantized at load time",
+        fp8_count
+    );
+
+    let backend: Box<dyn SimpleBackend> = Box::new(Fp8Backend { inner });
+    Ok(VarBuilder::from_backend(backend, dtype, device.clone()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,30 +206,4 @@ mod tests {
         std::fs::write(&config_path2, r#"{"hidden_size": 4096}"#).unwrap();
         assert!(!is_fp8_quantized(&config_path2));
     }
-}
-
-/// Create a VarBuilder that transparently dequantizes FP8 weights.
-///
-/// # Safety
-///
-/// Inherits the mmap safety requirements from `MmapedSafetensors`.
-pub unsafe fn load_fp8_var_builder<'a>(
-    filenames: &[std::path::PathBuf],
-    dtype: DType,
-    device: &Device,
-) -> anyhow::Result<VarBuilder<'a>> {
-    let inner = MmapedSafetensors::multi(filenames)?;
-
-    let fp8_count = inner
-        .tensors()
-        .iter()
-        .filter(|(_, v)| v.dtype() == safetensors::tensor::Dtype::F8_E4M3)
-        .count();
-    log::info!(
-        "FP8 model detected: {} tensors will be dequantized at load time",
-        fp8_count
-    );
-
-    let backend: Box<dyn SimpleBackend> = Box::new(Fp8Backend { inner });
-    Ok(VarBuilder::from_backend(backend, dtype, device.clone()))
 }

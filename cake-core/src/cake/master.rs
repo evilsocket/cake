@@ -65,12 +65,10 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
                 let mut step_num = 0;
 
                 self.generate_image(self.ctx.args.sd_img_gen_args.clone(), move |images| {
-                    let mut batched_num = 0;
-                    for image in images {
+                    for (batched_num, image) in images.into_iter().enumerate() {
                         image
                             .save(format!("images/image_{}_{}.png", batched_num, step_num))
                             .expect("Error saving image to disk");
-                        batched_num += 1;
                     }
                     step_num += 1;
                 })

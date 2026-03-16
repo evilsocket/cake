@@ -9,6 +9,12 @@ pub struct ChatMLHistory(Vec<Message>);
 // <|im_start|>user
 // Hello<|im_end|>
 // <|im_start|>assistant
+impl Default for ChatMLHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ChatMLHistory {
     fn encode_message(message: &Message) -> String {
         format!(

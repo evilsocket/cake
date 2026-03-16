@@ -1,5 +1,4 @@
 use candle_core::{DType, Device, Tensor};
-use cake_core::models::common::{Cache, Config};
 
 use super::helpers::*;
 
@@ -63,12 +62,12 @@ fn test_mask_causal_upper_triangular() {
     let mask = mask.to_dtype(DType::F32).unwrap();
     let vals: Vec<Vec<f32>> = mask.to_vec2().unwrap();
     // Upper triangular (future) should be non-zero (masked), diagonal+lower should be 0
-    for i in 0..4 {
-        for j in 0..4 {
+    for (i, row) in vals.iter().enumerate().take(4) {
+        for (j, &val) in row.iter().enumerate().take(4) {
             if j > i {
-                assert!(vals[i][j] != 0.0, "pos ({i},{j}) should be masked (non-zero)");
+                assert!(val != 0.0, "pos ({i},{j}) should be masked (non-zero)");
             } else {
-                assert_eq!(vals[i][j], 0.0, "pos ({i},{j}) should be unmasked (0)");
+                assert_eq!(val, 0.0, "pos ({i},{j}) should be unmasked (0)");
             }
         }
     }
@@ -109,7 +108,7 @@ fn test_kv_cache_windowed() {
     let v1 = Tensor::zeros((1, num_kv_heads, 6, head_dim), DType::F32, &Device::Cpu).unwrap();
     let (k_out1, _) = cache.process_kv_windowed(0, k1, v1, window).unwrap();
     // First call stores all, windowing applies on subsequent calls
-    let initial_len = k_out1.dim(2).unwrap();
+    let _initial_len = k_out1.dim(2).unwrap();
 
     // Second call: 1 more token, window should truncate
     let k2 = Tensor::zeros((1, num_kv_heads, 1, head_dim), DType::F32, &Device::Cpu).unwrap();

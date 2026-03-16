@@ -156,7 +156,7 @@ impl<G: Generator + 'static> Worker<G> {
             let mut gpu_devices: Vec<Device> = Vec::new();
             let mut gpu_var_builders: Vec<candle_nn::VarBuilder<'static>> = Vec::new();
 
-            for ordinal in 0..num_gpus {
+            for (ordinal, _group) in gpu_layer_groups.iter().enumerate().take(num_gpus) {
                 let dev = Device::new_cuda(ordinal)?;
 
                 #[cfg(feature = "cuda")]
@@ -190,6 +190,7 @@ impl<G: Generator + 'static> Worker<G> {
                 thread_ctx.var_builder = Some(vb);
 
                 handles.push(std::thread::spawn(
+                    #[allow(clippy::type_complexity)]
                     move || -> Result<Vec<(String, Device, Box<G::Shardable>)>> {
                         #[cfg(feature = "cuda")]
                         if let Device::Cuda(ref cuda_dev) = dev {

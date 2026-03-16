@@ -2,12 +2,12 @@
 //!
 //! Models quantized with AutoGPTQ store linear-layer weights as three tensors
 //! per weight matrix:
-//!   - `*.qweight` — int32, shape (in_features // 8, out_features): 8 × 4-bit values
-//!                   packed into each int32 along the input dimension.
+//!   - `*.qweight` — int32, shape (in_features // 8, out_features): 8 x 4-bit values
+//!     packed into each int32 along the input dimension.
 //!   - `*.scales`  — f16,  shape (groups, out_features): one scale per output neuron
-//!                   per group (group_size = in_features / groups).
-//!   - `*.qzeros`  — int32, shape (groups, out_features // 8): 8 × 4-bit zero points
-//!                   packed into each int32 along the output dimension.
+//!     per group (group_size = in_features / groups).
+//!   - `*.qzeros`  — int32, shape (groups, out_features // 8): 8 x 4-bit zero points
+//!     packed into each int32 along the output dimension.
 //!
 //! This module provides a custom VarBuilder backend (`GptqBackend`) that
 //! intercepts loads of `*.weight` tensors and transparently dequantizes them
@@ -214,6 +214,34 @@ impl SimpleBackend for GptqBackend {
     }
 }
 
+/// Create a VarBuilder that transparently dequantizes GPTQ 4-bit weights.
+///
+/// # Safety
+///
+/// Inherits the mmap safety requirements from `MmapedSafetensors`.
+pub unsafe fn load_gptq_var_builder<'a>(
+    filenames: &[std::path::PathBuf],
+    dtype: DType,
+    device: &Device,
+    group_size: usize,
+) -> anyhow::Result<VarBuilder<'a>> {
+    let inner = MmapedSafetensors::multi(filenames)?;
+
+    let qweight_count = inner
+        .tensors()
+        .iter()
+        .filter(|(name, _)| name.ends_with(".qweight"))
+        .count();
+    log::info!(
+        "GPTQ model detected: {} weight matrices will be dequantized at load time (group_size={})",
+        qweight_count,
+        group_size,
+    );
+
+    let backend: Box<dyn SimpleBackend> = Box::new(GptqBackend { inner, group_size });
+    Ok(VarBuilder::from_backend(backend, dtype, device.clone()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,7 +250,7 @@ mod tests {
     fn test_dequantize_gptq_4bit_shape() {
         // 2 packed_rows × 4 out_features, group_size=8 → 1 group
         // in_features = 2*8 = 16, out_features = 4
-        let qweight = Tensor::zeros((2, 4), DType::I64, &Device::Cpu)
+        let _qweight_unused = Tensor::zeros((2, 4), DType::I64, &Device::Cpu)
             .unwrap()
             .to_dtype(DType::I64)
             .unwrap();
@@ -281,32 +309,4 @@ mod tests {
         .unwrap();
         assert_eq!(gptq_group_size(&config_path), 64);
     }
-}
-
-/// Create a VarBuilder that transparently dequantizes GPTQ 4-bit weights.
-///
-/// # Safety
-///
-/// Inherits the mmap safety requirements from `MmapedSafetensors`.
-pub unsafe fn load_gptq_var_builder<'a>(
-    filenames: &[std::path::PathBuf],
-    dtype: DType,
-    device: &Device,
-    group_size: usize,
-) -> anyhow::Result<VarBuilder<'a>> {
-    let inner = MmapedSafetensors::multi(filenames)?;
-
-    let qweight_count = inner
-        .tensors()
-        .iter()
-        .filter(|(name, _)| name.ends_with(".qweight"))
-        .count();
-    log::info!(
-        "GPTQ model detected: {} weight matrices will be dequantized at load time (group_size={})",
-        qweight_count,
-        group_size,
-    );
-
-    let backend: Box<dyn SimpleBackend> = Box::new(GptqBackend { inner, group_size });
-    Ok(VarBuilder::from_backend(backend, dtype, device.clone()))
 }

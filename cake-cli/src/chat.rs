@@ -541,6 +541,7 @@ fn build_cluster_lines(topo: &TopologyResponse, width: usize) -> Vec<Line<'stati
     lines
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_node(
     lines: &mut Vec<Line<'static>>,
     name: &str,

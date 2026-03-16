@@ -46,8 +46,8 @@ impl CausalSelfAttention {
         cache: &super::Cache,
     ) -> Result<Tensor> {
         let (_batch_size, _, seq_len, _hidden_size) = x.dims4()?;
-        let cos = cache.cosine(index_pos, seq_len, &x.device())?;
-        let sin = cache.sine(index_pos, seq_len, &x.device())?;
+        let cos = cache.cosine(index_pos, seq_len, x.device())?;
+        let sin = cache.sine(index_pos, seq_len, x.device())?;
         if self.rotary_dim == self.head_dim {
             candle_nn::rotary_emb::rope(x, &cos, &sin)
         } else {
@@ -268,7 +268,7 @@ impl CausalSelfAttention {
                 // Causal mask — for sliding window the kv cache is already trimmed,
                 // so we only need to mask within the query's own positions.
                 let mask = cache
-                    .mask(seq_len, &q.device())
+                    .mask(seq_len, q.device())
                     .map_err(|e| anyhow!("cache.mask({seq_len}) -> {e}"))?;
 
                 // If kv_seq_len > seq_len (prefill into existing cache), extend mask

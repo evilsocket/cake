@@ -27,14 +27,8 @@ use super::topology::{Node, Topology};
 fn layer_prefix_for_config(config_json: &serde_json::Value) -> String {
     if let Some(archs) = config_json.get("architectures").and_then(|v| v.as_array()) {
         for arch in archs {
-            if let Some(s) = arch.as_str() {
-                match s {
-                    "Qwen3_5ForConditionalGeneration" => {
-                        return "model.language_model.layers".to_string();
-                    }
-                    // All other supported architectures use "model.layers"
-                    _ => {}
-                }
+            if let Some("Qwen3_5ForConditionalGeneration") = arch.as_str() {
+                return "model.language_model.layers".to_string();
             }
         }
     }
@@ -1390,7 +1384,7 @@ mod tests {
 
         let total_worker_layers: usize = result.iter().map(|(_, l)| l.len()).sum();
         // Workers get ~19 layers (rounding), master gets ~5
-        assert!(total_worker_layers >= 18 && total_worker_layers <= 20,
+        assert!((18..=20).contains(&total_worker_layers),
             "expected ~19 total worker layers, got {}", total_worker_layers);
 
         // w1 (30 TFLOPS) should get more than w2 (10 TFLOPS)
@@ -1752,7 +1746,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("model.safetensors");
         // Write only 4 bytes (not enough for the 8-byte header length)
-        fs::write(&path, &[0u8; 4]).unwrap();
+        fs::write(&path, [0u8; 4]).unwrap();
         let result = read_safetensors_tensor_sizes(&path);
         assert!(result.is_none());
     }
@@ -2255,7 +2249,7 @@ mod tests {
         // 30 TFLOPS worker vs 10 TFLOPS master => worker gets 30/40*24 = 18
         // But per-GPU VRAM caps: each GPU 10GB * 0.95 / 1GB = 9 layers per GPU
         // max_layers_for_size sums across GPUs = 18, so no cap needed
-        assert!(layers.len() > 0);
+        assert!(!layers.is_empty());
     }
 
     #[test]

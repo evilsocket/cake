@@ -104,9 +104,7 @@ impl GatedDeltaNet {
         let total_out = conv_dim + num_heads + num_heads + value_dim;
         let dt_bias_vec = dt_bias.to_dtype(DType::F32)?.to_vec1::<f32>()?;
         let mut bias_data = vec![0.0f32; total_out];
-        for i in 0..num_heads {
-            bias_data[conv_dim + i] = dt_bias_vec[i];
-        }
+        bias_data[conv_dim..(num_heads + conv_dim)].copy_from_slice(&dt_bias_vec[..num_heads]);
         let dev_for_bias = fused_w.device().clone();
         let fused_bias = Tensor::from_slice(&bias_data, total_out, &dev_for_bias)?
             .to_dtype(fused_w.dtype())?;

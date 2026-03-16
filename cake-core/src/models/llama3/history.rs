@@ -3,6 +3,12 @@ use crate::models::chat::Message;
 /// Chat history.
 pub struct History(Vec<Message>);
 
+impl Default for History {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // Adapted from https://github.com/meta-llama/llama3/blob/main/llama/tokenizer.py#L202
 impl History {
     fn encode_header(message: &Message) -> String {

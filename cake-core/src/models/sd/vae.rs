@@ -10,6 +10,7 @@ use log::{debug, info};
 use std::fmt::{Debug, Display, Formatter};
 
 #[derive(Debug)]
+#[allow(clippy::upper_case_acronyms)]
 pub struct VAE {
     vae_model: AutoEncoderKL,
 }
@@ -117,6 +118,7 @@ impl VAE {
     }
 
     /// The constant layer name for this component.
+    #[cfg(test)]
     pub const LAYER_NAME: &'static str = "vae";
 
     pub async fn decode(

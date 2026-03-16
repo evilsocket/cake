@@ -24,25 +24,15 @@ impl Forwarder for SDShardable {
     where
         Self: Sized,
     {
-        let model: Box<dyn Forwarder>;
-
-        match name.as_str() {
-            "vae" => {
-                model = VAE::load(name.clone(), ctx)?;
-            }
-            "clip" => {
-                model = Clip::load(name.clone(), ctx)?;
-            }
-            "clip2" => {
-                model = Clip::load(name.clone(), ctx)?;
-            }
-            "unet" => {
-                model = UNet::load(name.clone(), ctx)?;
-            }
+        let model: Box<dyn Forwarder> = match name.as_str() {
+            "vae" => VAE::load(name.clone(), ctx)?,
+            "clip" => Clip::load(name.clone(), ctx)?,
+            "clip2" => Clip::load(name.clone(), ctx)?,
+            "unet" => UNet::load(name.clone(), ctx)?,
             _ => {
                 anyhow::bail!("Model name not recognized");
             }
-        }
+        };
 
         Ok(Box::new(Self {
             forwarder: model,
@@ -92,11 +82,11 @@ impl Forwarder for SDShardable {
     }
 }
 
-/// The set of recognised SD component names that `SDShardable::load` dispatches on.
-pub(crate) const KNOWN_LAYER_NAMES: &[&str] = &["vae", "clip", "clip2", "unet"];
+#[cfg(test)]
+const KNOWN_LAYER_NAMES: &[&str] = &["vae", "clip", "clip2", "unet"];
 
-/// Returns true if the given name is a valid SD shardable component.
-pub(crate) fn is_valid_sd_layer_name(name: &str) -> bool {
+#[cfg(test)]
+fn is_valid_sd_layer_name(name: &str) -> bool {
     KNOWN_LAYER_NAMES.contains(&name)
 }
 

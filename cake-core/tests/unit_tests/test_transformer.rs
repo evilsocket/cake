@@ -8,8 +8,6 @@ use super::helpers::*;
 #[test]
 fn test_transformer_components_compose() {
     use cake_core::models::common::{CausalSelfAttention, MLP};
-    use candle_core::Tensor;
-
     let cfg = test_config();
     let vb = make_vb_transformer_block(&cfg);
 

@@ -476,6 +476,8 @@ async fn run_direct_worker(name: &str, model: &str, address: &str) -> String {
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
+/// # Safety
+/// `name`, `model`, and `cluster_key` must be valid, non-null, NUL-terminated C strings.
 #[no_mangle]
 pub unsafe extern "C" fn cake_start_worker(
     name: *const c_char,
@@ -499,12 +501,16 @@ pub extern "C" fn cake_get_worker_status() -> *mut c_char {
     CString::new(get_worker_status()).unwrap_or_default().into_raw()
 }
 
+/// # Safety
+/// `path` must be a valid, non-null, NUL-terminated C string.
 #[no_mangle]
 pub unsafe extern "C" fn cake_set_cache_dir(path: *const c_char) {
     let path = CStr::from_ptr(path).to_string_lossy().into_owned();
     set_cache_dir(path);
 }
 
+/// # Safety
+/// `s` must be either null or a pointer previously returned by `cake_start_worker` / `cake_get_worker_status`.
 #[no_mangle]
 pub unsafe extern "C" fn cake_free_string(s: *mut c_char) {
     if !s.is_null() {

@@ -79,6 +79,7 @@ impl Forwarder for UNet {
 }
 
 impl UNet {
+    #[allow(clippy::too_many_arguments)]
     pub fn load_model(
         name: Option<String>,
         use_flash_attn: bool,

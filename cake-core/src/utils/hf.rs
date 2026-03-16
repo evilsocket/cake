@@ -73,7 +73,7 @@ fn find_cached_model(repo_id: &str) -> Option<PathBuf> {
                 .ok()
                 .and_then(|m| m.modified().ok())
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            if best.as_ref().map_or(true, |(_, t)| mtime > *t) {
+            if best.as_ref().is_none_or(|(_, t)| mtime > *t) {
                 best = Some((snap_path, mtime));
             }
         }

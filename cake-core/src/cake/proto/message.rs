@@ -285,7 +285,7 @@ mod tests {
         let raw = RawTensor::from_tensor(&original);
         assert_eq!(raw.dtype, dtype_to_u8(DType::F16));
         assert_eq!(raw.shape, vec![1, 128]);
-        assert_eq!(raw.data.len(), 1 * 128 * 2);
+        assert_eq!(raw.data.len(), 128 * 2);
 
         let recovered = raw.to_tensor(&Device::Cpu).unwrap();
         assert_eq!(recovered.dtype(), DType::F16);

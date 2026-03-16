@@ -90,6 +90,7 @@ impl Forwarder for Clip {
 }
 
 impl Clip {
+    #[allow(clippy::too_many_arguments)]
     pub fn load_model(
         model_file: ModelFile,
         name: Option<String>,

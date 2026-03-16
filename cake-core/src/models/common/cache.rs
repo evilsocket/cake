@@ -49,8 +49,7 @@ impl Cache {
         if let Some(ref rope_scaling) = config.rope_scaling {
             let is_llama3 = rope_scaling
                 .rope_type
-                .as_deref()
-                .map_or(false, |t| t == "llama3");
+                .as_deref() == Some("llama3");
 
             if is_llama3 && rope_scaling.original_max_position_embeddings > 0 {
                 let factor = rope_scaling.factor;

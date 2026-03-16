@@ -903,7 +903,7 @@ mod tests {
             vram_bytes: vram,
             tflops: 80.0,
         }]);
-        let layer_size = 1u64 * 1024 * 1024 * 1024; // 1 GiB per layer
+        let layer_size = 1024u64 * 1024 * 1024; // 1 GiB per layer
         let pct_reserve = (vram as f64 * 0.05) as u64;
         let usable = vram - pct_reserve;
         let expected = (usable / layer_size) as usize;
@@ -919,7 +919,7 @@ mod tests {
             vram_bytes: vram,
             tflops: 14.0,
         }]);
-        let layer_size = 1u64 * 1024 * 1024 * 1024;
+        let layer_size = 1024u64 * 1024 * 1024;
         let pct_reserve = (vram as f64 * 0.28) as u64;
         let usable = vram - pct_reserve;
         let expected = (usable / layer_size) as usize;
@@ -1311,7 +1311,7 @@ mod tests {
     #[test]
     fn test_max_layers_layer_larger_than_vram() {
         // Layer bigger than usable VRAM: should return 0
-        let vram = 1u64 * 1024 * 1024 * 1024; // 1 GiB
+        let vram = 1024u64 * 1024 * 1024; // 1 GiB
         let w = make_worker(vec![GpuInfo {
             name: "NVIDIA Small GPU".into(),
             vram_bytes: vram,

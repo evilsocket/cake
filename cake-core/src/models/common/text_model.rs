@@ -191,20 +191,20 @@ impl TextModelBase {
             (0..config.num_hidden_layers).map(|_| None).collect();
 
         // Pass 1: load local layers
-        for i in 0..config.num_hidden_layers {
+        for (i, block) in blocks.iter_mut().enumerate().take(config.num_hidden_layers) {
             let block_layer_name = format!("{prefix}.layers.{i}");
             if ctx.topology.get_node_for_layer(&block_layer_name).is_none() {
                 log::info!("loading {} ...", &block_layer_name);
-                blocks[i] = Some(B::load(block_layer_name, ctx)?);
+                *block = Some(B::load(block_layer_name, ctx)?);
             }
         }
 
         // Pass 2: connect to remote layers
-        for i in 0..config.num_hidden_layers {
+        for (i, block) in blocks.iter_mut().enumerate().take(config.num_hidden_layers) {
             let block_layer_name = format!("{prefix}.layers.{i}");
             if let Some((_node_name, node)) = ctx.topology.get_node_for_layer(&block_layer_name) {
                 log::info!("connecting {} to {} ...", &block_layer_name, &node.host);
-                blocks[i] = Some(Box::new(
+                *block = Some(Box::new(
                     crate::cake::Client::new(
                         ctx.device.clone(),
                         &node.host,
@@ -449,7 +449,7 @@ impl TextModelBase {
         let is_end_of_stream = self
             .eos_token_id
             .as_ref()
-            .map_or(false, |eos| eos.is_eos(next_token));
+            .is_some_and(|eos| eos.is_eos(next_token));
 
         let decode_start = std::time::Instant::now();
         let text = match self.tokenizer.decode(&[next_token], false) {
@@ -675,11 +675,13 @@ mod tests {
         use std::path::PathBuf;
         use std::sync::{Arc, Mutex};
 
-        let mut args = Args::default();
-        args.temperature = temperature;
-        args.top_k = top_k;
-        args.top_p = top_p;
-        args.seed = seed;
+        let args = Args {
+            temperature,
+            top_k,
+            top_p,
+            seed,
+            ..Args::default()
+        };
 
         Context {
             args,

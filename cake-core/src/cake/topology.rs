@@ -52,6 +52,12 @@ impl Node {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Topology(HashMap<String, Node>);
 
+impl Default for Topology {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Topology {
     /// Create a new empty topology.
     pub fn new() -> Self {

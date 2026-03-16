@@ -85,7 +85,7 @@ impl Gemma3Config {
         } else {
             // Pattern: every `sliding_window_pattern`-th layer (0-indexed) is global.
             // E.g. pattern=6 → layer 5, 11, 17, ... are global.
-            (layer_idx + 1) % self.sliding_window_pattern == 0
+            (layer_idx + 1).is_multiple_of(self.sliding_window_pattern)
         }
     }
 

@@ -20,7 +20,7 @@ fn default_sliding_window() -> usize {
 ///
 /// EXAONE 4.0 uses a 3:1 local/global hybrid pattern:
 /// - 3 local layers (sliding window + RoPE) then 1 global layer (full context, **no RoPE**)
-/// The global attention layers skip positional embeddings entirely.
+///   The global attention layers skip positional embeddings entirely.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct EXAONE4Config {
     pub hidden_size: usize,
@@ -67,7 +67,7 @@ impl EXAONE4Config {
     /// Default: every 4th layer (0-indexed: 3, 7, 11, ...) is global.
     pub fn is_global_layer(&self, layer_idx: usize) -> bool {
         let period = self.global_layer_period.unwrap_or(4);
-        (layer_idx + 1) % period == 0
+        (layer_idx + 1).is_multiple_of(period)
     }
 
     pub fn into_config(self) -> Config {
