@@ -91,3 +91,38 @@ impl Forwarder for SDShardable {
         &self.layer_name
     }
 }
+
+/// The set of recognised SD component names that `SDShardable::load` dispatches on.
+pub(crate) const KNOWN_LAYER_NAMES: &[&str] = &["vae", "clip", "clip2", "unet"];
+
+/// Returns true if the given name is a valid SD shardable component.
+pub(crate) fn is_valid_sd_layer_name(name: &str) -> bool {
+    KNOWN_LAYER_NAMES.contains(&name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_layer_names() {
+        assert!(is_valid_sd_layer_name("vae"));
+        assert!(is_valid_sd_layer_name("clip"));
+        assert!(is_valid_sd_layer_name("clip2"));
+        assert!(is_valid_sd_layer_name("unet"));
+    }
+
+    #[test]
+    fn invalid_layer_names() {
+        assert!(!is_valid_sd_layer_name("tokenizer"));
+        assert!(!is_valid_sd_layer_name("tokenizer_2"));
+        assert!(!is_valid_sd_layer_name(""));
+        assert!(!is_valid_sd_layer_name("VAE"));
+        assert!(!is_valid_sd_layer_name("unknown"));
+    }
+
+    #[test]
+    fn known_layer_names_count() {
+        assert_eq!(KNOWN_LAYER_NAMES.len(), 4);
+    }
+}

@@ -116,6 +116,9 @@ impl VAE {
         forwarder.forward_mut(&combined_tensor, 0, 0, ctx).await
     }
 
+    /// The constant layer name for this component.
+    pub const LAYER_NAME: &'static str = "vae";
+
     pub async fn decode(
         forwarder: &mut Box<dyn Forwarder>,
         latents: Tensor,

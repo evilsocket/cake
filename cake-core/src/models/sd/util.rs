@@ -167,6 +167,12 @@ mod tests {
     }
 
     #[test]
+    fn test_get_device_cpu_flag_returns_cpu() {
+        let dev = get_device(true).unwrap();
+        assert!(matches!(dev, Device::Cpu));
+    }
+
+    #[test]
     fn test_pack_unpack_f16_cast_to_f32() {
         // pack_tensors casts to F32 internally, so F16 input data is preserved
         // only approximately (within F16 precision)

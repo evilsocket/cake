@@ -18,6 +18,17 @@ use tokio::{
 /// Determines how often worker statistics are calculated and printed.
 const NUM_OPS_TO_STATS: usize = 5;
 
+/// Return a human-readable device type string for a candle Device.
+pub(crate) fn device_type_str(device: &Device) -> &'static str {
+    if device.is_cuda() {
+        "cuda"
+    } else if device.is_metal() {
+        "metal"
+    } else {
+        "cpu"
+    }
+}
+
 /// A single worker state.
 #[derive(Clone)]
 struct WorkerContext<F> {
@@ -37,13 +48,7 @@ impl<F: Forwarder> WorkerContext<F> {
             version: env!("CARGO_PKG_VERSION").to_string(),
             os: std::env::consts::OS.to_string(),
             arch: std::env::consts::ARCH.to_string(),
-            device: if self.device.is_cuda() {
-                "cuda".to_string()
-            } else if self.device.is_metal() {
-                "metal".to_string()
-            } else {
-                "cpu".to_string()
-            },
+            device: device_type_str(&self.device).to_string(),
             device_idx: self.device_idx,
             latency,
             dtype: format!("{:?}", self.dtype),
@@ -587,5 +592,44 @@ impl<G: Generator + 'static> Worker<G> {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- device_type_str ---
+
+    #[test]
+    fn device_type_str_cpu() {
+        assert_eq!(device_type_str(&Device::Cpu), "cpu");
+    }
+
+    // CUDA/Metal variants can only be tested when those features are enabled and
+    // hardware is available. The CPU path exercises the fallback branch.
+
+    #[test]
+    fn device_type_str_is_one_of_known() {
+        let result = device_type_str(&Device::Cpu);
+        assert!(["cpu", "cuda", "metal"].contains(&result));
+    }
+
+    // --- detect_cuda_device_count (CPU-only fallback) ---
+
+    // When built without the `cuda` feature, detect_cuda_device_count returns 0.
+    // When built with `cuda` but no GPU present, it also returns 0.
+    // We can't assert an exact count, but we can verify it doesn't panic.
+    #[test]
+    fn detect_cuda_device_count_does_not_panic() {
+        // We need a concrete Generator type. Use SD since it's always available.
+        use crate::models::sd::SD;
+        let count = <crate::cake::Worker<SD>>::detect_cuda_device_count();
+        // Without cuda feature, this is always 0.
+        #[cfg(not(feature = "cuda"))]
+        assert_eq!(count, 0);
+        // With cuda feature, it's >= 0 (might be 0 if no GPU).
+        #[cfg(feature = "cuda")]
+        let _ = count;
     }
 }

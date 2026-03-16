@@ -16,3 +16,5 @@ mod test_config_parsing;
 mod test_moe;
 #[path = "unit_tests/test_blocks.rs"]
 mod test_blocks;
+#[path = "unit_tests/test_client_worker.rs"]
+mod test_client_worker;

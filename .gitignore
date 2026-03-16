@@ -80,3 +80,7 @@ opencode.json
 split-output/
 topology.yml
 *.safetensors
+
+cake-mobile-app/.gradle/
+cake-mobile-app/build/
+cake-mobile-app/kls_database.db

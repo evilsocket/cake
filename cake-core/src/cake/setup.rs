@@ -1315,4 +1315,180 @@ mod tests {
         let layers = vec!["model.layers.0".to_string()];
         assert!(!has_valid_model_cache(tmp.path(), &layers));
     }
+
+    // ── compute_layer_assignments tests ──────────────────────────
+
+    use super::compute_layer_assignments;
+    use crate::cake::discovery::{DiscoveredWorker, GpuInfo};
+
+    fn make_worker(name: &str, tflops: f32, vram_gb: f64) -> DiscoveredWorker {
+        DiscoveredWorker {
+            name: name.to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 10128,
+            gpus: vec![GpuInfo {
+                name: "NVIDIA RTX Test".to_string(),
+                vram_bytes: (vram_gb * 1024.0 * 1024.0 * 1024.0) as u64,
+                tflops,
+            }],
+            backend: "cuda".to_string(),
+            hostname: name.to_string(),
+            os: "linux".to_string(),
+        }
+    }
+
+    #[test]
+    fn compute_assignments_empty_workers() {
+        let result = compute_layer_assignments(&[], 24, 10.0, 100_000_000, usize::MAX, "model.layers");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn compute_assignments_zero_num_layers() {
+        let workers = vec![make_worker("w1", 20.0, 12.0)];
+        let result = compute_layer_assignments(&workers, 0, 10.0, 100_000_000, usize::MAX, "model.layers");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn compute_assignments_single_worker_equal_tflops() {
+        // Worker 10 TFLOPS, master 10 TFLOPS => 50/50 split of 24 layers
+        let workers = vec![make_worker("w1", 10.0, 24.0)];
+        let result = compute_layer_assignments(
+            &workers,
+            24,
+            10.0,
+            100_000_000, // 100 MB per layer, 24 GB VRAM = plenty
+            usize::MAX,
+            "model.layers",
+        );
+        assert_eq!(result.len(), 1);
+        let (idx, ref layers) = result[0];
+        assert_eq!(idx, 0);
+        // 10/(10+10) * 24 = 12 layers
+        assert_eq!(layers.len(), 12);
+    }
+
+    #[test]
+    fn compute_assignments_two_workers_proportional() {
+        // w1: 30 TFLOPS, w2: 10 TFLOPS, master: 10 TFLOPS
+        // total = 50 TFLOPS, workers get (40/50)*24 = 19.2 => 19 layers
+        // w1 gets 30/40 * 19 ~= 14, w2 gets remainder
+        let workers = vec![
+            make_worker("w1", 30.0, 24.0),
+            make_worker("w2", 10.0, 24.0),
+        ];
+        let result = compute_layer_assignments(
+            &workers,
+            24,
+            10.0,
+            100_000_000,
+            usize::MAX,
+            "model.layers",
+        );
+        assert_eq!(result.len(), 2);
+
+        let total_worker_layers: usize = result.iter().map(|(_, l)| l.len()).sum();
+        // Workers get ~19 layers (rounding), master gets ~5
+        assert!(total_worker_layers >= 18 && total_worker_layers <= 20,
+            "expected ~19 total worker layers, got {}", total_worker_layers);
+
+        // w1 (30 TFLOPS) should get more than w2 (10 TFLOPS)
+        let w1_layers = result.iter().find(|(i, _)| *i == 0).map(|(_, l)| l.len()).unwrap_or(0);
+        let w2_layers = result.iter().find(|(i, _)| *i == 1).map(|(_, l)| l.len()).unwrap_or(0);
+        assert!(w1_layers > w2_layers,
+            "w1 ({} layers) should have more than w2 ({} layers)", w1_layers, w2_layers);
+    }
+
+    #[test]
+    fn compute_assignments_vram_cap() {
+        // Worker has only 1 GB VRAM, layer is 500 MB => can fit ~1 layer
+        // (after 5% reserve on dedicated GPU: usable = 0.95 GB => 1 layer)
+        let workers = vec![make_worker("small", 100.0, 1.0)];
+        let result = compute_layer_assignments(
+            &workers,
+            24,
+            1.0,         // master very weak
+            500_000_000, // 500 MB per layer
+            usize::MAX,
+            "model.layers",
+        );
+        assert_eq!(result.len(), 1);
+        let (_, ref layers) = result[0];
+        // Even though TFLOPS says it should get ~24 layers, VRAM caps it
+        assert!(layers.len() <= 2,
+            "expected VRAM-capped to <=2 layers, got {}", layers.len());
+    }
+
+    #[test]
+    fn compute_assignments_master_overflow_redistributed() {
+        // 24 layers, master can hold only 4, master has 10 TFLOPS,
+        // worker has 10 TFLOPS => worker initially gets 12, master gets 12.
+        // Master overflow: 12 - 4 = 8 deficit, redistributed to worker.
+        let workers = vec![make_worker("w1", 10.0, 24.0)];
+        let result = compute_layer_assignments(
+            &workers,
+            24,
+            10.0,
+            100_000_000,
+            4, // master_max_layers
+            "model.layers",
+        );
+        assert_eq!(result.len(), 1);
+        let (_, ref layers) = result[0];
+        // Worker should get 12 + 8 = 20 layers (master keeps 4)
+        assert_eq!(layers.len(), 20,
+            "expected worker to get 20 layers after redistribution, got {}", layers.len());
+    }
+
+    #[test]
+    fn compute_assignments_layer_name_format() {
+        let workers = vec![make_worker("w1", 10.0, 24.0)];
+        let result = compute_layer_assignments(
+            &workers,
+            10,
+            10.0,
+            100_000_000,
+            usize::MAX,
+            "model.language_model.layers",
+        );
+        assert!(!result.is_empty());
+        let (_, ref layers) = result[0];
+        for layer in layers {
+            assert!(layer.starts_with("model.language_model.layers."),
+                "layer name '{}' should start with 'model.language_model.layers.'", layer);
+            // Verify the suffix is a valid number
+            let suffix = layer.strip_prefix("model.language_model.layers.").unwrap();
+            suffix.parse::<usize>().expect("layer suffix should be a number");
+        }
+    }
+
+    #[test]
+    fn compute_assignments_zero_tflops_fallback() {
+        // When all TFLOPS are zero (total_tflops <= 0.0), layers split evenly:
+        // half to workers, half to master. This requires empty gpus list since
+        // total_tflops() has a VRAM-based fallback for non-empty gpu lists.
+        let w = DiscoveredWorker {
+            name: "w1".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 10128,
+            gpus: vec![], // empty gpus => total_tflops() = 0.0
+            backend: "cpu".to_string(),
+            hostname: "w1".to_string(),
+            os: "linux".to_string(),
+        };
+        let workers = vec![w];
+        let result = compute_layer_assignments(
+            &workers,
+            24,
+            0.0, // master also zero
+            0,   // no layer size constraint
+            usize::MAX,
+            "model.layers",
+        );
+        assert_eq!(result.len(), 1);
+        let (_, ref layers) = result[0];
+        // Half of 24 = 12 to worker
+        assert_eq!(layers.len(), 12);
+    }
 }

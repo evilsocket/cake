@@ -387,24 +387,10 @@ impl ImageGenerator for SD {
             None
         };
 
-        let guidance_scale = match guidance_scale {
-            Some(guidance_scale) => guidance_scale,
-            None => &match sd_version {
-                StableDiffusionVersion::V1_5
-                | StableDiffusionVersion::V2_1
-                | StableDiffusionVersion::Xl => 7.5,
-                StableDiffusionVersion::Turbo => 0.,
-            },
-        };
-        let n_steps = match n_steps {
-            Some(n_steps) => n_steps,
-            None => &match sd_version {
-                StableDiffusionVersion::V1_5
-                | StableDiffusionVersion::V2_1
-                | StableDiffusionVersion::Xl => 30,
-                StableDiffusionVersion::Turbo => 1,
-            },
-        };
+        let default_gs = default_guidance_scale(sd_version);
+        let guidance_scale = guidance_scale.as_ref().unwrap_or(&default_gs);
+        let default_ns = default_n_steps(sd_version);
+        let n_steps = n_steps.as_ref().unwrap_or(&default_ns);
 
         if let Some(seed) = image_seed {
             self.context.device.set_seed(*seed)?;
@@ -445,12 +431,7 @@ impl ImageGenerator for SD {
             0
         };
 
-        let vae_scale = match sd_version {
-            StableDiffusionVersion::V1_5
-            | StableDiffusionVersion::V2_1
-            | StableDiffusionVersion::Xl => 0.18215,
-            StableDiffusionVersion::Turbo => 0.13025,
-        };
+        let vae_scale = vae_scale_factor(sd_version);
 
         let mut safe_scheduler = SafeScheduler {
             scheduler: self.sd_config.build_scheduler(*n_steps)?,
@@ -685,6 +666,36 @@ impl SD {
     }
 }
 
+/// Return the default guidance scale for a given SD version.
+pub(crate) fn default_guidance_scale(version: StableDiffusionVersion) -> f64 {
+    match version {
+        StableDiffusionVersion::V1_5
+        | StableDiffusionVersion::V2_1
+        | StableDiffusionVersion::Xl => 7.5,
+        StableDiffusionVersion::Turbo => 0.,
+    }
+}
+
+/// Return the default number of sampling steps for a given SD version.
+pub(crate) fn default_n_steps(version: StableDiffusionVersion) -> usize {
+    match version {
+        StableDiffusionVersion::V1_5
+        | StableDiffusionVersion::V2_1
+        | StableDiffusionVersion::Xl => 30,
+        StableDiffusionVersion::Turbo => 1,
+    }
+}
+
+/// Return the VAE scaling factor for a given SD version.
+pub(crate) fn vae_scale_factor(version: StableDiffusionVersion) -> f64 {
+    match version {
+        StableDiffusionVersion::V1_5
+        | StableDiffusionVersion::V2_1
+        | StableDiffusionVersion::Xl => 0.18215,
+        StableDiffusionVersion::Turbo => 0.13025,
+    }
+}
+
 fn image_preprocess<T: AsRef<std::path::Path>>(path: T) -> Result<Tensor> {
     let img = image::ImageReader::open(path)?.decode()?;
     let (height, width) = (img.height() as usize, img.width() as usize);
@@ -703,4 +714,160 @@ fn image_preprocess<T: AsRef<std::path::Path>>(path: T) -> Result<Tensor> {
         .affine(2. / 255., -1.)?
         .unsqueeze(0)?;
     Ok(img)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- ModelFile::name() ---
+
+    #[test]
+    fn model_file_name_tokenizer() {
+        assert_eq!(ModelFile::Tokenizer.name(), "tokenizer");
+    }
+
+    #[test]
+    fn model_file_name_tokenizer2() {
+        assert_eq!(ModelFile::Tokenizer2.name(), "tokenizer_2");
+    }
+
+    #[test]
+    fn model_file_name_clip() {
+        assert_eq!(ModelFile::Clip.name(), "clip");
+    }
+
+    #[test]
+    fn model_file_name_clip2() {
+        assert_eq!(ModelFile::Clip2.name(), "clip2");
+    }
+
+    #[test]
+    fn model_file_name_unet() {
+        assert_eq!(ModelFile::Unet.name(), "unet");
+    }
+
+    #[test]
+    fn model_file_name_vae() {
+        assert_eq!(ModelFile::Vae.name(), "vae");
+    }
+
+    // --- ModelFile::get() with explicit filename ---
+
+    #[test]
+    fn model_file_get_explicit_path_returns_pathbuf() {
+        let path = "/tmp/my_model.safetensors".to_string();
+        let result = ModelFile::Clip
+            .get(
+                Some(path.clone()),
+                StableDiffusionVersion::V1_5,
+                false,
+                "/unused".to_string(),
+            )
+            .unwrap();
+        assert_eq!(result, std::path::PathBuf::from(&path));
+    }
+
+    #[test]
+    fn model_file_get_explicit_path_ignores_version_and_f16() {
+        let path = "/tmp/custom.bin".to_string();
+        // Same path regardless of version/f16 flag
+        for version in [
+            StableDiffusionVersion::V1_5,
+            StableDiffusionVersion::Xl,
+            StableDiffusionVersion::Turbo,
+        ] {
+            for use_f16 in [true, false] {
+                let result = ModelFile::Unet
+                    .get(Some(path.clone()), version, use_f16, "/x".to_string())
+                    .unwrap();
+                assert_eq!(result, std::path::PathBuf::from(&path));
+            }
+        }
+    }
+
+    // --- default_guidance_scale ---
+
+    #[test]
+    fn default_guidance_v15() {
+        assert!((default_guidance_scale(StableDiffusionVersion::V1_5) - 7.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn default_guidance_v21() {
+        assert!((default_guidance_scale(StableDiffusionVersion::V2_1) - 7.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn default_guidance_xl() {
+        assert!((default_guidance_scale(StableDiffusionVersion::Xl) - 7.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn default_guidance_turbo() {
+        assert!((default_guidance_scale(StableDiffusionVersion::Turbo) - 0.0).abs() < f64::EPSILON);
+    }
+
+    // --- default_n_steps ---
+
+    #[test]
+    fn default_steps_v15() {
+        assert_eq!(default_n_steps(StableDiffusionVersion::V1_5), 30);
+    }
+
+    #[test]
+    fn default_steps_turbo() {
+        assert_eq!(default_n_steps(StableDiffusionVersion::Turbo), 1);
+    }
+
+    // --- vae_scale_factor ---
+
+    #[test]
+    fn vae_scale_standard() {
+        assert!((vae_scale_factor(StableDiffusionVersion::V1_5) - 0.18215).abs() < 1e-6);
+        assert!((vae_scale_factor(StableDiffusionVersion::V2_1) - 0.18215).abs() < 1e-6);
+        assert!((vae_scale_factor(StableDiffusionVersion::Xl) - 0.18215).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vae_scale_turbo() {
+        assert!((vae_scale_factor(StableDiffusionVersion::Turbo) - 0.13025).abs() < 1e-6);
+    }
+
+    // --- StableDiffusionVersion helpers ---
+
+    #[test]
+    fn sd_version_repos() {
+        assert_eq!(StableDiffusionVersion::V1_5.repo(), "runwayml/stable-diffusion-v1-5");
+        assert_eq!(StableDiffusionVersion::V2_1.repo(), "stabilityai/stable-diffusion-2-1");
+        assert_eq!(
+            StableDiffusionVersion::Xl.repo(),
+            "stabilityai/stable-diffusion-xl-base-1.0"
+        );
+        assert_eq!(StableDiffusionVersion::Turbo.repo(), "stabilityai/sdxl-turbo");
+    }
+
+    #[test]
+    fn sd_version_unet_files() {
+        assert!(StableDiffusionVersion::V1_5.unet_file(true).contains("fp16"));
+        assert!(!StableDiffusionVersion::V1_5.unet_file(false).contains("fp16"));
+    }
+
+    #[test]
+    fn sd_version_clip_files() {
+        assert!(StableDiffusionVersion::Xl.clip_file(true).contains("fp16"));
+        assert!(!StableDiffusionVersion::Xl.clip_file(false).contains("fp16"));
+    }
+
+    #[test]
+    fn sd_version_vae_files() {
+        assert!(StableDiffusionVersion::V2_1.vae_file(true).contains("fp16"));
+        assert!(!StableDiffusionVersion::V2_1.vae_file(false).contains("fp16"));
+    }
+
+    #[test]
+    fn sd_version_clip2_files() {
+        assert!(StableDiffusionVersion::Turbo.clip2_file(true).contains("fp16"));
+        assert!(!StableDiffusionVersion::Turbo.clip2_file(false).contains("fp16"));
+    }
 }

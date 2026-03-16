@@ -62,16 +62,53 @@ pub struct Context {
     pub listener_override: Arc<Mutex<Option<TcpListener>>>,
 }
 
+/// Parse a dtype string ("f16", "bf16", "f32") into a candle DType.
+/// Returns F16 when the input is `None`.
+pub(crate) fn parse_dtype_str(s: Option<&str>) -> Result<DType> {
+    match s {
+        Some("f16") => Ok(DType::F16),
+        Some("bf16") => Ok(DType::BF16),
+        Some("f32") => Ok(DType::F32),
+        Some(other) => bail!("unsupported dtype {other}"),
+        None => Ok(DType::F16),
+    }
+}
+
+/// Map a config.json `architectures` string to our `TextModelArch` enum.
+/// Feature-gated variants are only matched when the corresponding feature is enabled;
+/// unrecognised strings fall back to `Llama`.
+pub(crate) fn arch_str_to_text_model_arch(arch: &str) -> TextModelArch {
+    match arch {
+        #[cfg(feature = "qwen2")]
+        "Qwen2ForCausalLM" => TextModelArch::Qwen2,
+        #[cfg(feature = "qwen3_5")]
+        "Qwen3_5ForConditionalGeneration" => TextModelArch::Qwen3_5,
+        #[cfg(feature = "qwen3")]
+        "Qwen3ForCausalLM" => TextModelArch::Qwen3,
+        #[cfg(feature = "qwen3_moe")]
+        "Qwen3MoeForCausalLM" => TextModelArch::Qwen3Moe,
+        #[cfg(feature = "qwen3_5_moe")]
+        "Qwen3_5MoeForConditionalGeneration" => TextModelArch::Qwen3_5Moe,
+        #[cfg(feature = "phi4")]
+        "Phi3ForCausalLM" | "Phi4ForCausalLM" => TextModelArch::Phi4,
+        #[cfg(feature = "mistral")]
+        "MistralForCausalLM" => TextModelArch::Mistral,
+        #[cfg(feature = "gemma3")]
+        "Gemma3ForCausalLM" => TextModelArch::Gemma3,
+        #[cfg(feature = "falcon3")]
+        "FalconForCausalLM" => TextModelArch::Falcon3,
+        #[cfg(feature = "olmo2")]
+        "OLMo2ForCausalLM" | "Olmo2ForCausalLM" => TextModelArch::OLMo2,
+        #[cfg(feature = "exaone4")]
+        "ExaoneForCausalLM" => TextModelArch::EXAONE4,
+        _ => TextModelArch::Llama,
+    }
+}
+
 impl Context {
     /// Create the context from the parsed command line arguments.
     pub fn from_args(mut args: Args) -> Result<Self> {
-        let dtype: DType = match args.dtype.as_deref() {
-            Some("f16") => DType::F16,
-            Some("bf16") => DType::BF16,
-            Some("f32") => DType::F32,
-            Some(dtype) => bail!("unsupported dtype {dtype}"),
-            None => DType::F16,
-        };
+        let dtype = parse_dtype_str(args.dtype.as_deref())?;
 
         let device = utils::get_inference_device(args.cpu, args.device)
             .map_err(|e| anyhow!("can't attach to device: {:?}", e))?;
@@ -125,31 +162,7 @@ impl Context {
             // Auto-detect architecture if needed
             if text_model_arch == TextModelArch::Auto {
                 let arch_str = detect_text_model_arch(&config_filename).unwrap_or_default();
-                text_model_arch = match arch_str.as_str() {
-                    #[cfg(feature = "qwen2")]
-                    "Qwen2ForCausalLM" => TextModelArch::Qwen2,
-                    #[cfg(feature = "qwen3_5")]
-                    "Qwen3_5ForConditionalGeneration" => TextModelArch::Qwen3_5,
-                    #[cfg(feature = "qwen3")]
-                    "Qwen3ForCausalLM" => TextModelArch::Qwen3,
-                    #[cfg(feature = "qwen3_moe")]
-                    "Qwen3MoeForCausalLM" => TextModelArch::Qwen3Moe,
-                    #[cfg(feature = "qwen3_5_moe")]
-                    "Qwen3_5MoeForConditionalGeneration" => TextModelArch::Qwen3_5Moe,
-                    #[cfg(feature = "phi4")]
-                    "Phi3ForCausalLM" | "Phi4ForCausalLM" => TextModelArch::Phi4,
-                    #[cfg(feature = "mistral")]
-                    "MistralForCausalLM" => TextModelArch::Mistral,
-                    #[cfg(feature = "gemma3")]
-                    "Gemma3ForCausalLM" => TextModelArch::Gemma3,
-                    #[cfg(feature = "falcon3")]
-                    "FalconForCausalLM" => TextModelArch::Falcon3,
-                    #[cfg(feature = "olmo2")]
-                    "OLMo2ForCausalLM" | "Olmo2ForCausalLM" => TextModelArch::OLMo2,
-                    #[cfg(feature = "exaone4")]
-                    "ExaoneForCausalLM" => TextModelArch::EXAONE4,
-                    _ => TextModelArch::Llama,
-                };
+                text_model_arch = arch_str_to_text_model_arch(&arch_str);
             }
 
             log::info!("text model architecture: {:?}", text_model_arch);
@@ -334,5 +347,121 @@ pub trait Forwarder: Debug + Send + Sync + Display {
     /// Return the unique identity or local.
     fn ident(&self) -> &str {
         "local"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::DType;
+
+    // --- parse_dtype_str ---
+
+    #[test]
+    fn parse_dtype_f16() {
+        assert_eq!(parse_dtype_str(Some("f16")).unwrap(), DType::F16);
+    }
+
+    #[test]
+    fn parse_dtype_bf16() {
+        assert_eq!(parse_dtype_str(Some("bf16")).unwrap(), DType::BF16);
+    }
+
+    #[test]
+    fn parse_dtype_f32() {
+        assert_eq!(parse_dtype_str(Some("f32")).unwrap(), DType::F32);
+    }
+
+    #[test]
+    fn parse_dtype_none_defaults_to_f16() {
+        assert_eq!(parse_dtype_str(None).unwrap(), DType::F16);
+    }
+
+    #[test]
+    fn parse_dtype_invalid_returns_err() {
+        assert!(parse_dtype_str(Some("int8")).is_err());
+        assert!(parse_dtype_str(Some("")).is_err());
+    }
+
+    // --- arch_str_to_text_model_arch ---
+
+    #[test]
+    fn arch_str_unknown_falls_back_to_llama() {
+        assert_eq!(arch_str_to_text_model_arch("UnknownArchXYZ"), TextModelArch::Llama);
+        assert_eq!(arch_str_to_text_model_arch(""), TextModelArch::Llama);
+    }
+
+    #[test]
+    #[cfg(feature = "qwen2")]
+    fn arch_str_qwen2() {
+        assert_eq!(arch_str_to_text_model_arch("Qwen2ForCausalLM"), TextModelArch::Qwen2);
+    }
+
+    #[test]
+    #[cfg(feature = "qwen3_5")]
+    fn arch_str_qwen3_5() {
+        assert_eq!(
+            arch_str_to_text_model_arch("Qwen3_5ForConditionalGeneration"),
+            TextModelArch::Qwen3_5
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "qwen3")]
+    fn arch_str_qwen3() {
+        assert_eq!(arch_str_to_text_model_arch("Qwen3ForCausalLM"), TextModelArch::Qwen3);
+    }
+
+    #[test]
+    #[cfg(feature = "qwen3_moe")]
+    fn arch_str_qwen3_moe() {
+        assert_eq!(arch_str_to_text_model_arch("Qwen3MoeForCausalLM"), TextModelArch::Qwen3Moe);
+    }
+
+    #[test]
+    #[cfg(feature = "qwen3_5_moe")]
+    fn arch_str_qwen3_5_moe() {
+        assert_eq!(
+            arch_str_to_text_model_arch("Qwen3_5MoeForConditionalGeneration"),
+            TextModelArch::Qwen3_5Moe
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "phi4")]
+    fn arch_str_phi3_and_phi4() {
+        assert_eq!(arch_str_to_text_model_arch("Phi3ForCausalLM"), TextModelArch::Phi4);
+        assert_eq!(arch_str_to_text_model_arch("Phi4ForCausalLM"), TextModelArch::Phi4);
+    }
+
+    #[test]
+    #[cfg(feature = "mistral")]
+    fn arch_str_mistral() {
+        assert_eq!(arch_str_to_text_model_arch("MistralForCausalLM"), TextModelArch::Mistral);
+    }
+
+    #[test]
+    #[cfg(feature = "gemma3")]
+    fn arch_str_gemma3() {
+        assert_eq!(arch_str_to_text_model_arch("Gemma3ForCausalLM"), TextModelArch::Gemma3);
+    }
+
+    #[test]
+    #[cfg(feature = "falcon3")]
+    fn arch_str_falcon3() {
+        assert_eq!(arch_str_to_text_model_arch("FalconForCausalLM"), TextModelArch::Falcon3);
+    }
+
+    #[test]
+    #[cfg(feature = "olmo2")]
+    fn arch_str_olmo2_both_spellings() {
+        assert_eq!(arch_str_to_text_model_arch("OLMo2ForCausalLM"), TextModelArch::OLMo2);
+        assert_eq!(arch_str_to_text_model_arch("Olmo2ForCausalLM"), TextModelArch::OLMo2);
+    }
+
+    #[test]
+    #[cfg(feature = "exaone4")]
+    fn arch_str_exaone4() {
+        assert_eq!(arch_str_to_text_model_arch("ExaoneForCausalLM"), TextModelArch::EXAONE4);
     }
 }
