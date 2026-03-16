@@ -167,3 +167,56 @@ RMS_NORM_GATED_OP(__half, rms_norm_gated_f16)
 #if __CUDA_ARCH__ >= 800
 RMS_NORM_GATED_OP(__nv_bfloat16, rms_norm_gated_bf16)
 #endif
+
+// ─── exp_mul: out = x * exp(y) ──────────────────────────────────────
+// Fuses 2 kernels (exp + broadcast_mul) into 1.
+// Used in GatedDeltaNet recurrent decay: state = state * exp(gate).
+// y is broadcast to match x (e.g. y has fewer dims).
+#define EXP_MUL_OP(TYPENAME, FN_NAME) \
+extern "C" __global__ void FN_NAME( \
+    const size_t numel, \
+    const TYPENAME *x, \
+    const TYPENAME *y, \
+    TYPENAME *out \
+) { \
+    for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; \
+         i < numel; i += blockDim.x * gridDim.x) { \
+        out[i] = x[i] * expg(y[i]); \
+    } \
+}
+
+EXP_MUL_OP(float, exp_mul_f32)
+EXP_MUL_OP(double, exp_mul_f64)
+#if __CUDA_ARCH__ >= 530
+EXP_MUL_OP(__half, exp_mul_f16)
+#endif
+#if __CUDA_ARCH__ >= 800
+EXP_MUL_OP(__nv_bfloat16, exp_mul_bf16)
+#endif
+
+// ─── sub_mul: out = (a - b) * c ─────────────────────────────────────
+// Fuses 2 kernels (sub + broadcast_mul) into 1.
+// Used in GatedDeltaNet delta rule: delta = beta * (v - retrieved).
+// c is broadcast to match a,b (e.g. c has fewer dims).
+#define SUB_MUL_OP(TYPENAME, FN_NAME) \
+extern "C" __global__ void FN_NAME( \
+    const size_t numel, \
+    const TYPENAME *a, \
+    const TYPENAME *b, \
+    const TYPENAME *c, \
+    TYPENAME *out \
+) { \
+    for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; \
+         i < numel; i += blockDim.x * gridDim.x) { \
+        out[i] = (a[i] - b[i]) * c[i]; \
+    } \
+}
+
+SUB_MUL_OP(float, sub_mul_f32)
+SUB_MUL_OP(double, sub_mul_f64)
+#if __CUDA_ARCH__ >= 530
+SUB_MUL_OP(__half, sub_mul_f16)
+#endif
+#if __CUDA_ARCH__ >= 800
+SUB_MUL_OP(__nv_bfloat16, sub_mul_bf16)
+#endif

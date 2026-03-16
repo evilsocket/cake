@@ -175,8 +175,9 @@ impl Cache {
         if self.use_kv_cache {
             if let Some((cache_k, cache_v)) = &self.kvs[block_idx] {
                 // tensor shape is (batch, num_heads, seq_len, head_dim)
-                k = Tensor::cat(&[cache_k, &k], 2)?.contiguous()?;
-                v = Tensor::cat(&[cache_v, &v], 2)?.contiguous()?;
+                // cat() already returns a contiguous tensor — no need for .contiguous()
+                k = Tensor::cat(&[cache_k, &k], 2)?;
+                v = Tensor::cat(&[cache_v, &v], 2)?;
 
                 let k_seq_len = k.dims()[2];
                 if k_seq_len > limit {

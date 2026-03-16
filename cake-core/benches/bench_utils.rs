@@ -125,3 +125,35 @@ fn unfused_rms_norm_gated_gpu(bencher: divan::Bencher, size: usize) {
         (normed * gate).unwrap()
     });
 }
+
+// ── exp_mul / sub_mul GPU benchmarks ─────────────────────────────────
+
+#[divan::bench(args = [1024, 4096])]
+fn fused_exp_mul_gpu(bencher: divan::Bencher, size: usize) {
+    let x = make_gpu_tensor(&[1, 1, size], 300);
+    let y = make_gpu_tensor(&[1, 1, size], 301);
+    bencher.bench_local(|| cake_core::utils::fused_ops::exp_mul(&x, &y).unwrap());
+}
+
+#[divan::bench(args = [1024, 4096])]
+fn unfused_exp_mul_gpu(bencher: divan::Bencher, size: usize) {
+    let x = make_gpu_tensor(&[1, 1, size], 310);
+    let y = make_gpu_tensor(&[1, 1, size], 311);
+    bencher.bench_local(|| (&x * y.exp().unwrap()).unwrap());
+}
+
+#[divan::bench(args = [1024, 4096])]
+fn fused_sub_mul_gpu(bencher: divan::Bencher, size: usize) {
+    let a = make_gpu_tensor(&[1, 1, size], 320);
+    let b = make_gpu_tensor(&[1, 1, size], 321);
+    let c = make_gpu_tensor(&[1, 1, size], 322);
+    bencher.bench_local(|| cake_core::utils::fused_ops::sub_mul(&a, &b, &c).unwrap());
+}
+
+#[divan::bench(args = [1024, 4096])]
+fn unfused_sub_mul_gpu(bencher: divan::Bencher, size: usize) {
+    let a = make_gpu_tensor(&[1, 1, size], 330);
+    let b = make_gpu_tensor(&[1, 1, size], 331);
+    let c = make_gpu_tensor(&[1, 1, size], 332);
+    bencher.bench_local(|| ((&a - &b).unwrap() * &c).unwrap());
+}
