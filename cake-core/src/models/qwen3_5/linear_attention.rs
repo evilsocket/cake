@@ -172,14 +172,17 @@ impl GatedDeltaNet {
         // Build full window: cat(state, new_input) -> (batch, channels, kernel_size)
         let full_window = Tensor::cat(&[conv_state, &x_t], 2)?;
 
-        // Depthwise conv: for each channel, dot product of window with kernel
+        // Fused depthwise conv + silu: 1 kernel instead of 3 (broadcast_mul + sum + silu)
         // conv1d_weight: (channels, kernel_size)
         // full_window: (batch, channels, kernel_size)
-        // Result: sum along kernel dimension -> (batch, channels)
-        let y = full_window.broadcast_mul(&self.conv1d_weight.unsqueeze(0)?)?.sum(D::Minus1)?;
-
-        // SiLU activation, reshape to (batch, 1, channels)
-        let y = candle_nn::ops::silu(&y)?.unsqueeze(1)?;
+        // Result: (batch, channels) -> unsqueeze to (batch, 1, channels)
+        let y = crate::utils::fused_ops::depthwise_conv1d_silu(
+            &full_window.contiguous()?,
+            &self.conv1d_weight,
+            self.conv_kernel_size,
+            self.conv_dim,
+        )?
+        .unsqueeze(1)?;
 
         // New state: last (kernel_size-1) elements of full_window
         let new_state = full_window.narrow(2, 1, self.conv_kernel_size - 1)?;

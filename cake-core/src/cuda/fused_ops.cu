@@ -212,6 +212,46 @@ extern "C" __global__ void FN_NAME( \
     } \
 }
 
+// ─── depthwise_conv1d_silu: dot(window, weight) per channel + silu ──
+// Fuses 3 kernels (broadcast_mul + sum + silu) into 1.
+// Used in GatedDeltaNet causal conv1d step.
+// window: (batch, channels, kernel_size), weight: (channels, kernel_size)
+// out: (batch, channels)
+#define CONV1D_SILU_OP(TYPENAME, FN_NAME) \
+extern "C" __global__ void FN_NAME( \
+    const size_t numel, \
+    const TYPENAME *window, \
+    const TYPENAME *weight, \
+    TYPENAME *out, \
+    const int kernel_size, \
+    const int channels \
+) { \
+    for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; \
+         i < numel; i += blockDim.x * gridDim.x) { \
+        int chan = i % channels; \
+        int batch_idx = i / channels; \
+        float acc = 0.0f; \
+        int w_off = batch_idx * channels * kernel_size + chan * kernel_size; \
+        int wt_off = chan * kernel_size; \
+        for (int k = 0; k < kernel_size; k++) { \
+            acc += static_cast<float>(window[w_off + k]) \
+                 * static_cast<float>(weight[wt_off + k]); \
+        } \
+        /* silu(acc) = acc * sigmoid(acc) */ \
+        float sig = 1.0f / (1.0f + expf(-acc)); \
+        out[i] = static_cast<TYPENAME>(acc * sig); \
+    } \
+}
+
+CONV1D_SILU_OP(float, depthwise_conv1d_silu_f32)
+CONV1D_SILU_OP(double, depthwise_conv1d_silu_f64)
+#if __CUDA_ARCH__ >= 530
+CONV1D_SILU_OP(__half, depthwise_conv1d_silu_f16)
+#endif
+#if __CUDA_ARCH__ >= 800
+CONV1D_SILU_OP(__nv_bfloat16, depthwise_conv1d_silu_bf16)
+#endif
+
 SUB_MUL_OP(float, sub_mul_f32)
 SUB_MUL_OP(double, sub_mul_f64)
 #if __CUDA_ARCH__ >= 530

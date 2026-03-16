@@ -698,6 +698,169 @@ pub fn sub_mul(a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
     a.apply_op3_no_bwd(b, c, &SubMul)
 }
 
+// ─── depthwise_conv1d_silu: dot(window, weight) per channel + silu ──
+
+struct DepthwiseConv1dSilu {
+    kernel_size: usize,
+    channels: usize,
+}
+
+impl candle_core::CustomOp2 for DepthwiseConv1dSilu {
+    fn name(&self) -> &'static str {
+        "depthwise_conv1d_silu"
+    }
+
+    fn cpu_fwd(
+        &self,
+        s_w: &CpuStorage,
+        l_w: &Layout,
+        s_wt: &CpuStorage,
+        l_wt: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        fn inner<T: candle_core::WithDType + num_traits::Float>(
+            window: &[T],
+            l_w: &Layout,
+            weight: &[T],
+            l_wt: &Layout,
+            kernel_size: usize,
+            channels: usize,
+        ) -> Result<(CpuStorage, Shape)> {
+            let window = match l_w.contiguous_offsets() {
+                Some((o1, o2)) => &window[o1..o2],
+                None => candle_core::bail!("conv1d_silu: window must be contiguous"),
+            };
+            let weight = match l_wt.contiguous_offsets() {
+                Some((o1, o2)) => &weight[o1..o2],
+                None => candle_core::bail!("conv1d_silu: weight must be contiguous"),
+            };
+            let dims = l_w.shape().dims();
+            let batch = dims[0];
+            let numel = batch * channels;
+            let mut dst = vec![T::zero(); numel];
+            for b in 0..batch {
+                for c in 0..channels {
+                    let mut acc = T::zero();
+                    let w_off = b * channels * kernel_size + c * kernel_size;
+                    let wt_off = c * kernel_size;
+                    for k in 0..kernel_size {
+                        acc += window[w_off + k] * weight[wt_off + k];
+                    }
+                    // silu(acc) = acc * sigmoid(acc)
+                    let sig = T::one() / (T::one() + (-acc).exp());
+                    dst[b * channels + c] = acc * sig;
+                }
+            }
+            let out_shape = Shape::from_dims(&[batch, channels]);
+            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
+            Ok((storage, out_shape))
+        }
+
+        use CpuStorage as C;
+        match (s_w, s_wt) {
+            (C::BF16(w), C::BF16(wt)) => inner(w, l_w, wt, l_wt, self.kernel_size, self.channels),
+            (C::F16(w), C::F16(wt)) => inner(w, l_w, wt, l_wt, self.kernel_size, self.channels),
+            (C::F32(w), C::F32(wt)) => inner(w, l_w, wt, l_wt, self.kernel_size, self.channels),
+            (C::F64(w), C::F64(wt)) => inner(w, l_w, wt, l_wt, self.kernel_size, self.channels),
+            _ => candle_core::bail!("conv1d_silu: unsupported dtype {:?}", s_w.dtype()),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        s_w: &candle_core::CudaStorage,
+        l_w: &Layout,
+        s_wt: &candle_core::CudaStorage,
+        l_wt: &Layout,
+    ) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{
+            CudaSlice, DeviceRepr, LaunchConfig, PushKernelArg,
+        };
+        use candle_core::cuda_backend::{kernel_name, Map2, WrapErr};
+        use candle_core::{CudaDevice, WithDType};
+
+        let kernel_size = self.kernel_size;
+        let channels = self.channels;
+        let batch = l_w.shape().dims()[0];
+
+        struct S {
+            kernel_size: i32,
+            channels: i32,
+            numel: usize,
+        }
+        impl Map2 for S {
+            fn f<T: DeviceRepr + WithDType>(
+                &self,
+                window: &CudaSlice<T>,
+                l_w: &Layout,
+                weight: &CudaSlice<T>,
+                l_wt: &Layout,
+                dev: &CudaDevice,
+            ) -> Result<CudaSlice<T>> {
+                let window = match l_w.contiguous_offsets() {
+                    Some((o1, o2)) => window.slice(o1..o2),
+                    None => candle_core::bail!("conv1d_silu: window must be contiguous"),
+                };
+                let weight = match l_wt.contiguous_offsets() {
+                    Some((o1, o2)) => weight.slice(o1..o2),
+                    None => candle_core::bail!("conv1d_silu: weight must be contiguous"),
+                };
+                let cfg = LaunchConfig::for_num_elems(self.numel as u32);
+                let func = dev.get_or_load_custom_func(
+                    &kernel_name::<T>("depthwise_conv1d_silu"),
+                    "cake_fused_ops",
+                    FUSED_OPS_PTX,
+                )?;
+                let out = unsafe { dev.alloc::<T>(self.numel)? };
+                let mut builder = func.builder();
+                builder.arg(&self.numel);
+                builder.arg(&window);
+                builder.arg(&weight);
+                builder.arg(&out);
+                candle_core::builder_arg!(builder, self.kernel_size, self.channels);
+                unsafe { builder.launch(cfg) }.w()?;
+                Ok(out)
+            }
+        }
+
+        use candle_core::backend::BackendStorage;
+        let dev = s_w.device();
+        let numel = batch * channels;
+        let slice = S {
+            kernel_size: kernel_size as i32,
+            channels: channels as i32,
+            numel,
+        }
+        .map(&s_w.slice, l_w, &s_wt.slice, l_wt, dev)?;
+        let out_shape = Shape::from_dims(&[batch, channels]);
+        Ok((
+            candle_core::CudaStorage {
+                slice,
+                device: dev.clone(),
+            },
+            out_shape,
+        ))
+    }
+}
+
+/// Fused depthwise conv1d + silu — replaces 3 kernel launches with 1.
+/// window: (batch, channels, kernel_size), weight: (channels, kernel_size)
+/// Returns: (batch, channels)
+pub fn depthwise_conv1d_silu(
+    window: &Tensor,
+    weight: &Tensor,
+    kernel_size: usize,
+    channels: usize,
+) -> Result<Tensor> {
+    window.apply_op2_no_bwd(
+        weight,
+        &DepthwiseConv1dSilu {
+            kernel_size,
+            channels,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1012,6 +1175,86 @@ mod tests {
         assert!(
             approx_eq(&gpu_result, &cpu_result, 1e-5),
             "CUDA vs CPU silu_mul mismatch on 1024 elements"
+        );
+    }
+
+    // ── depthwise_conv1d_silu tests ────────────────────────────────
+
+    #[test]
+    fn test_depthwise_conv1d_silu_correctness() {
+        // batch=1, channels=4, kernel_size=3
+        let window = Tensor::new(
+            &[[[0.1f32, 0.2, 0.3], [0.4, 0.5, 0.6], [-0.1, 0.0, 0.1], [1.0, -1.0, 0.5]]],
+            &Device::Cpu,
+        )
+        .unwrap();
+        let weight = Tensor::new(
+            &[[1.0f32, 0.5, 0.25], [0.1, 0.2, 0.3], [1.0, 1.0, 1.0], [0.0, 0.0, 1.0]],
+            &Device::Cpu,
+        )
+        .unwrap();
+
+        let fused = depthwise_conv1d_silu(&window, &weight, 3, 4).unwrap();
+        assert_eq!(fused.dims(), &[1, 4]);
+
+        // Reference: broadcast_mul + sum + silu
+        let ref_y = window
+            .broadcast_mul(&weight.unsqueeze(0).unwrap())
+            .unwrap()
+            .sum(candle_core::D::Minus1)
+            .unwrap();
+        let ref_y: Vec<f32> = candle_nn::ops::silu(&ref_y)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        let fused_vals: Vec<f32> = fused.flatten_all().unwrap().to_vec1().unwrap();
+
+        assert!(
+            approx_eq(&fused_vals, &ref_y, 1e-5),
+            "conv1d_silu mismatch: fused={fused_vals:?} ref={ref_y:?}"
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_depthwise_conv1d_silu_cuda() {
+        let dev = match cuda_device() {
+            Some(d) => d,
+            None => return,
+        };
+        let window = Tensor::new(
+            &[[[0.1f32, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8], [-0.1, 0.0, 0.1, 0.2]]],
+            &dev,
+        )
+        .unwrap();
+        let weight = Tensor::new(
+            &[[1.0f32, 0.5, 0.25, 0.1], [0.1, 0.2, 0.3, 0.4], [1.0, 1.0, 1.0, 1.0]],
+            &dev,
+        )
+        .unwrap();
+
+        let fused_vals: Vec<f32> = depthwise_conv1d_silu(&window, &weight, 4, 3)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+
+        // CPU reference
+        let window_cpu = window.to_device(&Device::Cpu).unwrap();
+        let weight_cpu = weight.to_device(&Device::Cpu).unwrap();
+        let ref_vals: Vec<f32> = depthwise_conv1d_silu(&window_cpu, &weight_cpu, 4, 3)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+
+        assert!(
+            approx_eq(&fused_vals, &ref_vals, 1e-5),
+            "CUDA conv1d_silu mismatch: fused={fused_vals:?} ref={ref_vals:?}"
         );
     }
 
