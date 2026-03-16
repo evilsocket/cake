@@ -147,7 +147,14 @@ impl Qwen3_5MoeSparseMlp {
             .map_err(|e| anyhow!("router topk narrow: {e}"))?; // (n_tok, k)
 
         let top_k_w = router_probs
-            .gather(&top_k_idx, D::Minus1)
+            .contiguous()
+            .map_err(|e| anyhow!("router probs contiguous: {e}"))?
+            .gather(
+                &top_k_idx
+                    .contiguous()
+                    .map_err(|e| anyhow!("router idx contiguous: {e}"))?,
+                D::Minus1,
+            )
             .map_err(|e| anyhow!("router gather: {e}"))?;
 
         // Renormalise
@@ -246,5 +253,125 @@ impl Qwen3_5MoeSparseMlp {
         output
             .reshape((b, s, h))
             .map_err(|e| anyhow!("output reshape: {e}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::Device;
+    use std::collections::HashMap;
+
+    fn make_tensor(shape: &[usize], seed: u64) -> Tensor {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        let numel: usize = shape.iter().product();
+        let mut rng = StdRng::seed_from_u64(seed);
+        let data: Vec<f32> = (0..numel).map(|_| rng.gen_range(-0.1..0.1)).collect();
+        Tensor::from_vec(data, shape, &Device::Cpu).unwrap()
+    }
+
+    fn test_config() -> Config {
+        Config {
+            hidden_size: 64,
+            intermediate_size: 128,
+            vocab_size: 256,
+            num_hidden_layers: 4,
+            num_attention_heads: 4,
+            num_key_value_heads: 2,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10000.0,
+            bos_token_id: None,
+            eos_token_id: None,
+            rope_scaling: None,
+            tie_word_embeddings: false,
+            max_seq_len: 64,
+            use_qkv_bias: false,
+            model_prefix: "model".into(),
+            head_dim: None,
+            partial_rotary_factor: 1.0,
+            linear_attn: None,
+            residual_rms_norm: false,
+            use_qk_norm: false,
+            pre_reshape_qk_norm: false,
+            sliding_window: None,
+            fused_qkv_proj: false,
+            fused_gate_up_proj: false,
+            global_layers: vec![],
+            use_gelu_mlp: false,
+            embed_scale: None,
+            moe_intermediate_size: Some(32),
+            num_experts: 4,
+            num_experts_per_tok: 2,
+            norm_topk_prob: true,
+            shared_expert_intermediate_size: Some(48),
+            attn_output_gate: false,
+        }
+    }
+
+    fn make_vb() -> VarBuilder<'static> {
+        let cfg = test_config();
+        let h = cfg.hidden_size;
+        let i = cfg.moe_intermediate_size.unwrap();
+        let si = cfg.shared_expert_intermediate_size.unwrap();
+        let n = cfg.num_experts;
+
+        let mut map: HashMap<String, Tensor> = HashMap::new();
+        map.insert("gate.weight".into(), make_tensor(&[n, h], 40));
+        for j in 0..n {
+            map.insert(format!("experts.{j}.gate_proj.weight"), make_tensor(&[i, h], 41 + j as u64 * 3));
+            map.insert(format!("experts.{j}.up_proj.weight"), make_tensor(&[i, h], 42 + j as u64 * 3));
+            map.insert(format!("experts.{j}.down_proj.weight"), make_tensor(&[h, i], 43 + j as u64 * 3));
+        }
+        map.insert("shared_expert.gate_proj.weight".into(), make_tensor(&[si, h], 60));
+        map.insert("shared_expert.up_proj.weight".into(), make_tensor(&[si, h], 61));
+        map.insert("shared_expert.down_proj.weight".into(), make_tensor(&[h, si], 62));
+        map.insert("shared_expert_gate.weight".into(), make_tensor(&[1, h], 63));
+
+        VarBuilder::from_tensors(map, DType::F32, &Device::Cpu)
+    }
+
+    #[test]
+    fn test_forward_shape() {
+        let cfg = test_config();
+        let vb = make_vb();
+        let moe = Qwen3_5MoeSparseMlp::load(vb, &cfg).unwrap();
+        let x = make_tensor(&[1, 4, 64], 80);
+        let y = moe.forward(&x).unwrap();
+        assert_eq!(y.dims(), &[1, 4, 64]);
+    }
+
+    #[test]
+    fn test_forward_single_token() {
+        let cfg = test_config();
+        let vb = make_vb();
+        let moe = Qwen3_5MoeSparseMlp::load(vb, &cfg).unwrap();
+        let x = make_tensor(&[1, 1, 64], 81);
+        let y = moe.forward(&x).unwrap();
+        assert_eq!(y.dims(), &[1, 1, 64]);
+    }
+
+    #[test]
+    fn test_forward_nonzero() {
+        let cfg = test_config();
+        let vb = make_vb();
+        let moe = Qwen3_5MoeSparseMlp::load(vb, &cfg).unwrap();
+        let x = make_tensor(&[1, 4, 64], 82);
+        let y = moe.forward(&x).unwrap();
+        let vals: Vec<f32> = y.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(vals.iter().any(|v| v.abs() > 1e-10), "output should not be all zeros");
+    }
+
+    #[test]
+    fn test_deterministic() {
+        let cfg = test_config();
+        let vb1 = make_vb();
+        let vb2 = make_vb();
+        let moe1 = Qwen3_5MoeSparseMlp::load(vb1, &cfg).unwrap();
+        let moe2 = Qwen3_5MoeSparseMlp::load(vb2, &cfg).unwrap();
+        let x = make_tensor(&[1, 4, 64], 83);
+        let y1: Vec<f32> = moe1.forward(&x).unwrap().flatten_all().unwrap().to_vec1().unwrap();
+        let y2: Vec<f32> = moe2.forward(&x).unwrap().flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(y1, y2);
     }
 }

@@ -102,7 +102,9 @@ impl SparseMoeMlp {
 
         // Gather routing weights for selected experts.
         let top_k_w = router_probs
-            .gather(&top_k_idx, D::Minus1)
+            .contiguous()
+            .map_err(|e| anyhow!("moe probs contiguous -> {e}"))?
+            .gather(&top_k_idx.contiguous().map_err(|e| anyhow!("moe idx contiguous -> {e}"))?, D::Minus1)
             .map_err(|e| anyhow!("moe gather weights -> {e}"))?; // (n_tok, k)
 
         // Renormalise so the k selected weights sum to 1.
