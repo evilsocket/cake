@@ -26,6 +26,8 @@ pub enum ImageModelArch {
     SD,
     /// FLUX.2-klein (flow-matching transformer)
     Flux,
+    /// FLUX.1-dev FP8 (12B flow-matching transformer)
+    Flux1,
 }
 
 /// Supported text model architectures.
@@ -172,8 +174,8 @@ pub struct FluxArgs {
     #[arg(long = "flux-width", default_value_t = 1024, id = "flux_width")]
     pub width: usize,
 
-    /// Number of denoising steps (4 for distilled FLUX.2-klein).
-    #[arg(long = "flux-steps", default_value_t = 4, id = "flux_steps")]
+    /// Number of denoising steps (20 for FLUX.1-dev, 4 for distilled FLUX.2-klein).
+    #[arg(long = "flux-steps", default_value_t = 20, id = "flux_steps")]
     pub num_steps: usize,
 
     /// Guidance scale for classifier-free guidance.

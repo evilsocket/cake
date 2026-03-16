@@ -52,8 +52,31 @@ for f in moe_wmma.cu moe_wmma_gguf.cu; do
     fi
 done
 
-# 4. Clean stale build artifacts so cargo picks up the changes
+# 4. Fix F8E4M3 CUDA kernel naming mismatch in candle-core.
+#    candle-core builds kernel name as "cast_f8e4m3_*" but the CUDA kernels
+#    are named "cast_f8_e4m3_*" (with underscore). This breaks F8→BF16 on GPU.
+CC_DIR=""
+for d in "$HOME"/.cargo/registry/src/*/candle-core-*; do
+    if [ -d "$d/src/cuda_backend" ]; then
+        CC_DIR="$d"
+    fi
+done
+
+if [ -n "$CC_DIR" ]; then
+    CUDA_MOD="$CC_DIR/src/cuda_backend/mod.rs"
+    if grep -q 'let kernel_name = format!("cast_{}_{}", self.dtype().as_str(), dtype.as_str());' "$CUDA_MOD" 2>/dev/null; then
+        sed -i 's|let kernel_name = format!("cast_{}_{}", self.dtype().as_str(), dtype.as_str());|// Fix F8E4M3 kernel naming: as_str() returns "f8e4m3" but CUDA kernels use "f8_e4m3"\n        let src_str = if self.dtype() == DType::F8E4M3 { "f8_e4m3" } else { self.dtype().as_str() };\n        let dst_str = if dtype == DType::F8E4M3 { "f8_e4m3" } else { dtype.as_str() };\n        let kernel_name = format!("cast_{}_{}", src_str, dst_str);|' "$CUDA_MOD"
+        echo "  patched candle-core F8E4M3 kernel naming in $CC_DIR"
+    else
+        echo "  candle-core F8E4M3 patch: already applied or pattern not found"
+    fi
+else
+    echo "  warning: candle-core not found in cargo registry, skipping F8 patch"
+fi
+
+# 5. Clean stale build artifacts so cargo picks up the changes
 rm -rf "$REPO_DIR/target/release/build/candle-kernels-"* 2>/dev/null || true
+rm -rf "$REPO_DIR/target/release/build/candle-core-"* 2>/dev/null || true
 echo "  cleaned build cache"
 
 echo "done. you can now build with: cargo build --release --features cuda"

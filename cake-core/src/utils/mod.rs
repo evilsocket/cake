@@ -6,6 +6,7 @@ pub mod flash_attn;
 pub mod gptq;
 pub mod hf;
 pub mod models;
+pub mod native_dtype_backend;
 pub mod split;
 
 use std::path::{Path, PathBuf};

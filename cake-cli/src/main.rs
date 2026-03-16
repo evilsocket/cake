@@ -314,6 +314,13 @@ async fn run_master_image(ctx: Context) -> Result<()> {
                 .run()
                 .await
         }
+        #[cfg(feature = "flux")]
+        ImageModelArch::Flux1 => {
+            Master::<cake_core::models::llama3::LLama, cake_core::models::flux::Flux1Gen>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
         #[allow(unreachable_patterns)]
         _ => anyhow::bail!(
             "no image model feature enabled for architecture {:?}",
@@ -430,6 +437,13 @@ async fn run_worker(ctx: &mut Context) -> Result<()> {
             #[cfg(feature = "flux")]
             ImageModelArch::Flux => {
                 Worker::<cake_core::models::flux::FluxGen>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(feature = "flux")]
+            ImageModelArch::Flux1 => {
+                Worker::<cake_core::models::flux::Flux1Gen>::new(ctx)
                     .await?
                     .run()
                     .await

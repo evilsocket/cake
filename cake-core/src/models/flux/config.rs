@@ -119,3 +119,53 @@ pub fn flux2_klein_vae_config() -> candle_transformers::models::flux::autoencode
         shift_factor: 0.1159,
     }
 }
+
+// ── FLUX.1-dev configuration ────────────────────────────────────────────────────
+
+/// FLUX.1-dev model component file resolution.
+///
+/// Uses a single bundled checkpoint from Comfy-Org/flux1-dev (17.2GB)
+/// that contains transformer + CLIP-L + T5-XXL + VAE.
+/// Tokenizers are downloaded separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flux1ModelFile {
+    /// Bundled checkpoint: transformer + CLIP + T5 + VAE
+    Checkpoint,
+    /// CLIP tokenizer from openai/clip-vit-large-patch14
+    ClipTokenizer,
+    /// T5 tokenizer from google/t5-v1_1-xxl
+    T5Tokenizer,
+}
+
+impl Flux1ModelFile {
+    fn repo_and_file(&self) -> (&'static str, &'static str) {
+        match self {
+            Self::Checkpoint => ("Comfy-Org/flux1-dev", "flux1-dev-fp8.safetensors"),
+            Self::ClipTokenizer => ("openai/clip-vit-large-patch14", "tokenizer.json"),
+            Self::T5Tokenizer => ("google/t5-v1_1-xxl", "spiece.model"),
+        }
+    }
+
+    /// Download and return the file path.
+    pub fn get(&self, cache_dir: &str) -> Result<PathBuf> {
+        let (repo_id, filename) = self.repo_and_file();
+        let mut cache_path = PathBuf::from(cache_dir);
+        cache_path.push("hub");
+        let cache = Cache::new(cache_path);
+        let api = ApiBuilder::from_cache(cache).build()?;
+        let repo = api.model(repo_id.to_string());
+        log::info!("downloading {}/{} ...", repo_id, filename);
+        let path = repo
+            .get(filename)
+            .map_err(|e| anyhow::anyhow!("failed to download {}/{}: {}", repo_id, filename, e))?;
+        Ok(path)
+    }
+}
+
+/// Tensor name prefixes in the bundled Comfy-Org checkpoint.
+pub mod flux1_prefixes {
+    pub const TRANSFORMER: &str = "model.diffusion_model";
+    pub const CLIP: &str = "text_encoders.clip_l.transformer";
+    pub const T5: &str = "text_encoders.t5xxl.transformer";
+    pub const VAE: &str = "vae";
+}
