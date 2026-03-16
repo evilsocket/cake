@@ -35,3 +35,28 @@ fn tensor_cat(bencher: divan::Bencher, size: usize) {
     let b = super::bench_helpers::make_tensor(&[1, size], 141);
     bencher.bench_local(|| Tensor::cat(&[&a, &b], 1).unwrap());
 }
+
+// ── Fused ops benchmarks ─────────────────────────────────────────────
+
+#[divan::bench(args = [256, 1024, 4096])]
+fn fused_silu_mul(bencher: divan::Bencher, size: usize) {
+    let gate = super::bench_helpers::make_tensor(&[1, 1, size], 150);
+    let up = super::bench_helpers::make_tensor(&[1, 1, size], 151);
+    bencher.bench_local(|| cake_core::utils::fused_ops::silu_mul(&gate, &up).unwrap());
+}
+
+#[divan::bench(args = [256, 1024, 4096])]
+fn fused_stable_softplus(bencher: divan::Bencher, size: usize) {
+    let x = super::bench_helpers::make_tensor(&[1, 1, size], 160);
+    bencher.bench_local(|| cake_core::utils::fused_ops::stable_softplus(&x).unwrap());
+}
+
+#[divan::bench(args = [256, 1024, 4096])]
+fn fused_rms_norm_gated(bencher: divan::Bencher, size: usize) {
+    let x = super::bench_helpers::make_tensor(&[1, 1, size], 170);
+    let z = super::bench_helpers::make_tensor(&[1, 1, size], 171);
+    let weight = Tensor::ones(size, DType::F32, &Device::Cpu).unwrap();
+    bencher.bench_local(|| {
+        cake_core::utils::fused_ops::rms_norm_gated(&x, &z, &weight, 1e-6).unwrap()
+    });
+}
