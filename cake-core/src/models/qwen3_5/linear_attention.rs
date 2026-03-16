@@ -264,23 +264,17 @@ impl GatedDeltaNet {
         beta: &Tensor, // (batch, num_heads) — F32
         state: &Tensor, // (batch, num_heads, key_head_dim, value_head_dim) — F32
     ) -> Result<(Tensor, Tensor)> {
-        // 1. Decay state: S = S * exp(g)   [fused: 1 kernel instead of 2]
-        let decay = g.unsqueeze(D::Minus1)?.unsqueeze(D::Minus1)?
-            .broadcast_as(state.shape())?.contiguous()?;
-        let state = crate::utils::fused_ops::exp_mul(&state.contiguous()?, &decay)?;
+        // 1. Decay state: S = S * exp(g)
+        let decay = g.unsqueeze(D::Minus1)?.unsqueeze(D::Minus1)?.exp()?;
+        let state = state.broadcast_mul(&decay)?;
 
         // 2. Retrieve: retrieved = S^T @ k  (batched matrix-vector)
         let k_4d = k.unsqueeze(D::Minus1)?;
         let retrieved = state.transpose(2, 3)?.matmul(&k_4d)?.squeeze(D::Minus1)?;
 
-        // 3. Delta rule: delta = (v - retrieved) * beta   [fused: 1 kernel instead of 2]
-        let beta_3d = beta.unsqueeze(D::Minus1)?
-            .broadcast_as(v.shape())?.contiguous()?;
-        let delta = crate::utils::fused_ops::sub_mul(
-            &v.contiguous()?,
-            &retrieved.contiguous()?,
-            &beta_3d,
-        )?;
+        // 3. Delta rule: delta = beta * (v - retrieved)
+        let beta_3d = beta.unsqueeze(D::Minus1)?;
+        let delta = (v - &retrieved)?.broadcast_mul(&beta_3d)?;
 
         // 4. Update state: S = S + k @ delta^T  (rank-1 outer product)
         let update = k_4d.matmul(&delta.unsqueeze(2)?)?;
