@@ -791,4 +791,132 @@ mod tests {
 
         assert_ne!(tokens1, tokens2, "different seeds should produce different sequences");
     }
+
+    // ── create_logits_processor: high temperature spreads distribution ──
+
+    #[test]
+    fn test_create_logits_processor_high_temperature_spreads() {
+        // With very high temperature, even small logit differences should produce varied tokens.
+        // Use top_k to force TopK sampling (not GumbelSoftmax) for predictability.
+        let logits = f32_tensor(&[10.0, 9.5, 9.0, 8.5, 8.0]);
+        let ctx = make_test_context(100.0, Some(5), None, 42);
+        let mut lp = create_logits_processor(&ctx);
+        let tokens: Vec<u32> = (0..50).map(|_| lp.sample(&logits).unwrap()).collect();
+        let unique: std::collections::HashSet<u32> = tokens.into_iter().collect();
+        // High temperature should cause at least 3 distinct tokens to be sampled
+        assert!(unique.len() >= 3, "high temp should produce variety, got {:?}", unique);
+    }
+
+    #[test]
+    fn test_create_logits_processor_low_temperature_concentrates() {
+        // Low (but positive) temperature should heavily favor the top logit.
+        let logits = f32_tensor(&[10.0, 5.0, 0.0, -5.0, -10.0]);
+        let ctx = make_test_context(0.01, Some(5), None, 42);
+        let mut lp = create_logits_processor(&ctx);
+        let tokens: Vec<u32> = (0..20).map(|_| lp.sample(&logits).unwrap()).collect();
+        // With temp=0.01, nearly all tokens should be index 0 (logit 10.0)
+        let count_zero = tokens.iter().filter(|&&t| t == 0).count();
+        assert!(count_zero >= 18, "low temp should concentrate on max logit, got {} out of 20", count_zero);
+    }
+
+    // ── apply_repeat_penalty_gpu: high penalty ──
+
+    #[test]
+    fn test_repeat_penalty_very_high_penalty() {
+        // Very high penalty should crush positive logits near zero
+        let logits = f32_tensor(&[100.0, -0.5]);
+        let context = vec![0u32, 1];
+        let result = apply_repeat_penalty_gpu(&logits, 100.0, &context).unwrap();
+        let vals: Vec<f32> = result.to_vec1().unwrap();
+        assert!((vals[0] - 1.0).abs() < 1e-4, "100/100=1, got {}", vals[0]);
+        assert!((vals[1] - (-50.0)).abs() < 1e-4, "-0.5*100=-50, got {}", vals[1]);
+    }
+
+    // ── apply_repeat_penalty_gpu: partial context ──
+
+    #[test]
+    fn test_repeat_penalty_partial_overlap() {
+        // Only some positions are penalized; others should be untouched.
+        let logits = f32_tensor(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        let context = vec![1u32, 3]; // only indices 1 and 3
+        let result = apply_repeat_penalty_gpu(&logits, 2.0, &context).unwrap();
+        let vals: Vec<f32> = result.to_vec1().unwrap();
+        assert!((vals[0] - 1.0).abs() < 1e-6, "unchanged");
+        assert!((vals[1] - 1.0).abs() < 1e-6, "2/2=1, got {}", vals[1]);
+        assert!((vals[2] - 3.0).abs() < 1e-6, "unchanged");
+        assert!((vals[3] - 2.0).abs() < 1e-6, "4/2=2, got {}", vals[3]);
+        assert!((vals[4] - 5.0).abs() < 1e-6, "unchanged");
+    }
+
+    // ── create_logits_processor: argmax is deterministic across calls ──
+
+    #[test]
+    fn test_argmax_is_fully_deterministic() {
+        let logits = f32_tensor(&[3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0]);
+        let ctx = make_test_context(0.0, None, None, 0);
+        let mut lp = create_logits_processor(&ctx);
+        for _ in 0..10 {
+            let token = lp.sample(&logits).unwrap();
+            assert_eq!(token, 5, "argmax should always pick index 5 (value 9.0)");
+        }
+    }
+
+    // ── create_logits_processor: top_p with extreme values ──
+
+    #[test]
+    fn test_top_p_very_small_picks_max() {
+        // top_p near 0 should only allow the single highest-probability token
+        let logits = f32_tensor(&[0.0, 0.0, 1000.0, 0.0, 0.0]);
+        let ctx = make_test_context(0.5, None, Some(0.01), 42);
+        let mut lp = create_logits_processor(&ctx);
+        let token = lp.sample(&logits).unwrap();
+        assert_eq!(token, 2, "tiny top_p should pick the dominant logit");
+    }
+
+    // ── create_logits_processor: single-element vocab ──
+
+    #[test]
+    fn test_logits_processor_single_token_vocab() {
+        // A vocab of size 1 should always return token 0
+        let logits = f32_tensor(&[42.0]);
+        let ctx = make_test_context(1.0, Some(1), None, 42);
+        let mut lp = create_logits_processor(&ctx);
+        let token = lp.sample(&logits).unwrap();
+        assert_eq!(token, 0);
+    }
+
+    // ── create_logits_processor: two-element vocab argmax ──
+
+    #[test]
+    fn test_logits_processor_two_tokens_argmax() {
+        let logits = f32_tensor(&[0.1, 99.9]);
+        let ctx = make_test_context(0.0, None, None, 0);
+        let mut lp = create_logits_processor(&ctx);
+        assert_eq!(lp.sample(&logits).unwrap(), 1);
+    }
+
+    // ── repeat penalty with index at boundary ──
+
+    #[test]
+    fn test_repeat_penalty_last_index() {
+        // Penalize only the last index of the logits vector
+        let logits = f32_tensor(&[1.0, 2.0, 3.0, 8.0]);
+        let context = vec![3u32];
+        let result = apply_repeat_penalty_gpu(&logits, 4.0, &context).unwrap();
+        let vals: Vec<f32> = result.to_vec1().unwrap();
+        assert!((vals[0] - 1.0).abs() < 1e-6);
+        assert!((vals[1] - 2.0).abs() < 1e-6);
+        assert!((vals[2] - 3.0).abs() < 1e-6);
+        assert!((vals[3] - 2.0).abs() < 1e-6, "8/4=2, got {}", vals[3]);
+    }
+
+    // ── repeat penalty preserves tensor shape ──
+
+    #[test]
+    fn test_repeat_penalty_preserves_shape() {
+        let logits = f32_tensor(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+        let context = vec![0u32, 2, 4];
+        let result = apply_repeat_penalty_gpu(&logits, 2.0, &context).unwrap();
+        assert_eq!(result.shape().dims(), logits.shape().dims());
+    }
 }

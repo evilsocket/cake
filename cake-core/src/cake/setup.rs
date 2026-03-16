@@ -1491,4 +1491,829 @@ mod tests {
         // Half of 24 = 12 to worker
         assert_eq!(layers.len(), 12);
     }
+
+    // ── Additional layer_prefix_for_config tests ──────────────────────
+
+    #[test]
+    fn layer_prefix_for_config_multiple_architectures_qwen3_5_first() {
+        let config = serde_json::json!({
+            "architectures": ["Qwen3_5ForConditionalGeneration", "LlamaForCausalLM"]
+        });
+        assert_eq!(
+            layer_prefix_for_config(&config),
+            "model.language_model.layers"
+        );
+    }
+
+    #[test]
+    fn layer_prefix_for_config_multiple_architectures_qwen3_5_second() {
+        let config = serde_json::json!({
+            "architectures": ["LlamaForCausalLM", "Qwen3_5ForConditionalGeneration"]
+        });
+        // Iterates through all archs, finds Qwen3_5 on second pass
+        assert_eq!(
+            layer_prefix_for_config(&config),
+            "model.language_model.layers"
+        );
+    }
+
+    #[test]
+    fn layer_prefix_for_config_non_string_in_array() {
+        // Architectures array with non-string element
+        let config = serde_json::json!({
+            "architectures": [42, "LlamaForCausalLM"]
+        });
+        assert_eq!(layer_prefix_for_config(&config), "model.layers");
+    }
+
+    #[test]
+    fn layer_prefix_for_config_architectures_not_array() {
+        let config = serde_json::json!({
+            "architectures": "LlamaForCausalLM"
+        });
+        // Not an array, falls through to default
+        assert_eq!(layer_prefix_for_config(&config), "model.layers");
+    }
+
+    #[test]
+    fn layer_prefix_for_config_null_value() {
+        let config = serde_json::json!(null);
+        assert_eq!(layer_prefix_for_config(&config), "model.layers");
+    }
+
+    #[test]
+    fn layer_prefix_for_config_all_supported_archs_use_model_layers() {
+        // Verify all other supported architectures use "model.layers"
+        for arch in &[
+            "Qwen2ForCausalLM",
+            "Qwen3ForCausalLM",
+            "Phi3ForCausalLM",
+            "Phi4ForCausalLM",
+            "MistralForCausalLM",
+            "Gemma3ForCausalLM",
+            "FalconForCausalLM",
+            "Olmo2ForCausalLM",
+            "ExaoneForCausalLM",
+            "Qwen3MoeForCausalLM",
+        ] {
+            let config = serde_json::json!({ "architectures": [arch] });
+            assert_eq!(
+                layer_prefix_for_config(&config),
+                "model.layers",
+                "arch {} should use model.layers",
+                arch
+            );
+        }
+    }
+
+    // ── Additional has_valid_model_cache tests ────────────────────────
+
+    #[test]
+    fn has_valid_model_cache_empty_layers_with_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        // Empty layers list — no layers to validate, but no safetensors either
+        let layers: Vec<String> = vec![];
+        // With no safetensors files, falls through to index check which also fails
+        assert!(!has_valid_model_cache(tmp.path(), &layers));
+    }
+
+    #[test]
+    fn has_valid_model_cache_single_safetensors_empty_layers() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        fs::write(tmp.path().join("model.safetensors"), "data").unwrap();
+        // Empty layers list with single safetensors => true (file exists)
+        let layers: Vec<String> = vec![];
+        assert!(has_valid_model_cache(tmp.path(), &layers));
+    }
+
+    #[test]
+    fn has_valid_model_cache_sharded_empty_layers() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        let index = serde_json::json!({
+            "weight_map": {
+                "model.layers.0.attn.weight": "shard-00001.safetensors"
+            }
+        });
+        fs::write(
+            tmp.path().join("model.safetensors.index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+        fs::write(tmp.path().join("shard-00001.safetensors"), "data").unwrap();
+        // Empty layers => all layers validated (vacuously true)
+        let layers: Vec<String> = vec![];
+        assert!(has_valid_model_cache(tmp.path(), &layers));
+    }
+
+    #[test]
+    fn has_valid_model_cache_sharded_malformed_index_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        fs::write(
+            tmp.path().join("model.safetensors.index.json"),
+            "not valid json",
+        )
+        .unwrap();
+        let layers = vec!["model.layers.0".to_string()];
+        assert!(!has_valid_model_cache(tmp.path(), &layers));
+    }
+
+    #[test]
+    fn has_valid_model_cache_sharded_index_missing_weight_map() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        let index = serde_json::json!({ "metadata": {} });
+        fs::write(
+            tmp.path().join("model.safetensors.index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+        let layers = vec!["model.layers.0".to_string()];
+        assert!(!has_valid_model_cache(tmp.path(), &layers));
+    }
+
+    #[test]
+    fn has_valid_model_cache_sharded_multiple_tensors_per_layer() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        let index = serde_json::json!({
+            "weight_map": {
+                "model.layers.0.attn.q_proj.weight": "shard-00001.safetensors",
+                "model.layers.0.attn.k_proj.weight": "shard-00001.safetensors",
+                "model.layers.0.attn.v_proj.weight": "shard-00001.safetensors",
+                "model.layers.0.mlp.gate_proj.weight": "shard-00002.safetensors",
+                "model.layers.0.mlp.up_proj.weight": "shard-00002.safetensors"
+            }
+        });
+        fs::write(
+            tmp.path().join("model.safetensors.index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+        // Only one shard file exists
+        fs::write(tmp.path().join("shard-00001.safetensors"), "data").unwrap();
+        // Missing shard-00002 — but layer 0 has tensors in shard-00001 which exists
+        // The function checks that at least one tensor exists with its shard present
+        let layers = vec!["model.layers.0".to_string()];
+        assert!(has_valid_model_cache(tmp.path(), &layers));
+    }
+
+    #[test]
+    fn has_valid_model_cache_sharded_layer_prefix_disambiguation() {
+        // Ensure "model.layers.1" doesn't match "model.layers.10"
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        let index = serde_json::json!({
+            "weight_map": {
+                "model.layers.10.attn.weight": "shard-00001.safetensors"
+            }
+        });
+        fs::write(
+            tmp.path().join("model.safetensors.index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+        fs::write(tmp.path().join("shard-00001.safetensors"), "data").unwrap();
+        // Request layer 1 — should NOT match layer 10
+        let layers = vec!["model.layers.1".to_string()];
+        assert!(!has_valid_model_cache(tmp.path(), &layers));
+    }
+
+    // ── read_safetensors_tensor_sizes tests ───────────────────────────
+
+    /// Build a minimal safetensors file with the given header JSON.
+    fn write_fake_safetensors(path: &Path, header: &serde_json::Value) {
+        use std::io::Write;
+        let header_bytes = serde_json::to_vec(header).unwrap();
+        let header_len = header_bytes.len() as u64;
+        let mut f = std::fs::File::create(path).unwrap();
+        f.write_all(&header_len.to_le_bytes()).unwrap();
+        f.write_all(&header_bytes).unwrap();
+        // Write some dummy tensor data (doesn't matter for header parsing)
+        f.write_all(&vec![0u8; 1024]).unwrap();
+    }
+
+    #[test]
+    fn read_safetensors_tensor_sizes_basic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.safetensors");
+        let header = serde_json::json!({
+            "model.layers.0.attn.weight": {
+                "dtype": "F16",
+                "shape": [1024, 1024],
+                "data_offsets": [0, 2097152]
+            },
+            "model.layers.0.mlp.weight": {
+                "dtype": "F16",
+                "shape": [4096, 1024],
+                "data_offsets": [2097152, 10485760]
+            }
+        });
+        write_fake_safetensors(&path, &header);
+        let result = read_safetensors_tensor_sizes(&path).unwrap();
+        assert_eq!(result.len(), 2);
+        let sizes: std::collections::HashMap<String, u64> = result.into_iter().collect();
+        assert_eq!(sizes["model.layers.0.attn.weight"], 2097152);
+        assert_eq!(sizes["model.layers.0.mlp.weight"], 10485760 - 2097152);
+    }
+
+    #[test]
+    fn read_safetensors_tensor_sizes_skips_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.safetensors");
+        let header = serde_json::json!({
+            "__metadata__": {
+                "format": "pt"
+            },
+            "weight": {
+                "dtype": "F16",
+                "shape": [10],
+                "data_offsets": [0, 20]
+            }
+        });
+        write_fake_safetensors(&path, &header);
+        let result = read_safetensors_tensor_sizes(&path).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "weight");
+        assert_eq!(result[0].1, 20);
+    }
+
+    #[test]
+    fn read_safetensors_tensor_sizes_nonexistent_file() {
+        let result = read_safetensors_tensor_sizes(Path::new("/nonexistent/file.safetensors"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_safetensors_tensor_sizes_truncated_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.safetensors");
+        // Write only 4 bytes (not enough for the 8-byte header length)
+        fs::write(&path, &[0u8; 4]).unwrap();
+        let result = read_safetensors_tensor_sizes(&path);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_safetensors_tensor_sizes_header_too_large() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.safetensors");
+        // Claim a header larger than 10 MB
+        let huge_len: u64 = 20 * 1024 * 1024;
+        let mut f = std::fs::File::create(&path).unwrap();
+        use std::io::Write;
+        f.write_all(&huge_len.to_le_bytes()).unwrap();
+        f.write_all(&[0u8; 64]).unwrap(); // not enough data
+        drop(f);
+        let result = read_safetensors_tensor_sizes(&path);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_safetensors_tensor_sizes_invalid_json_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.safetensors");
+        let garbage = b"this is not json!!!!";
+        let header_len = garbage.len() as u64;
+        let mut f = std::fs::File::create(&path).unwrap();
+        use std::io::Write;
+        f.write_all(&header_len.to_le_bytes()).unwrap();
+        f.write_all(garbage).unwrap();
+        drop(f);
+        let result = read_safetensors_tensor_sizes(&path);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_safetensors_tensor_sizes_missing_data_offsets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.safetensors");
+        let header = serde_json::json!({
+            "weight": {
+                "dtype": "F16",
+                "shape": [10]
+                // no data_offsets
+            }
+        });
+        write_fake_safetensors(&path, &header);
+        let result = read_safetensors_tensor_sizes(&path).unwrap();
+        // Tensor without data_offsets is skipped
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn read_safetensors_tensor_sizes_empty_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.safetensors");
+        let header = serde_json::json!({});
+        write_fake_safetensors(&path, &header);
+        let result = read_safetensors_tensor_sizes(&path).unwrap();
+        assert_eq!(result.len(), 0);
+    }
+
+    // ── estimate_layer_size tests ─────────────────────────────────────
+
+    #[test]
+    fn estimate_layer_size_zero_layers() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(estimate_layer_size(tmp.path(), 0, "model.layers"), 0);
+    }
+
+    #[test]
+    fn estimate_layer_size_no_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No safetensors files at all
+        assert_eq!(estimate_layer_size(tmp.path(), 24, "model.layers"), 0);
+    }
+
+    #[test]
+    fn estimate_layer_size_single_safetensors_with_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.safetensors");
+        // 2 layers, each with 2 tensors of 1000 bytes
+        let header = serde_json::json!({
+            "__metadata__": { "format": "pt" },
+            "model.layers.0.attn.weight": {
+                "dtype": "F16", "shape": [100, 10], "data_offsets": [0, 1000]
+            },
+            "model.layers.0.mlp.weight": {
+                "dtype": "F16", "shape": [100, 10], "data_offsets": [1000, 2000]
+            },
+            "model.layers.1.attn.weight": {
+                "dtype": "F16", "shape": [100, 10], "data_offsets": [2000, 3000]
+            },
+            "model.layers.1.mlp.weight": {
+                "dtype": "F16", "shape": [100, 10], "data_offsets": [3000, 4000]
+            },
+            "model.embed_tokens.weight": {
+                "dtype": "F16", "shape": [32000, 100], "data_offsets": [4000, 6404000]
+            }
+        });
+        write_fake_safetensors(&path, &header);
+        let result = estimate_layer_size(tmp.path(), 2, "model.layers");
+        // Total layer bytes = 4 * 1000 = 4000, divided by 2 layers = 2000
+        assert_eq!(result, 2000);
+    }
+
+    #[test]
+    fn estimate_layer_size_single_safetensors_no_matching_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.safetensors");
+        // Tensors use a different prefix
+        let header = serde_json::json!({
+            "encoder.layers.0.weight": {
+                "dtype": "F16", "shape": [10], "data_offsets": [0, 20]
+            }
+        });
+        write_fake_safetensors(&path, &header);
+        // layer_bytes=0, falls through to file-size fallback
+        let result = estimate_layer_size(tmp.path(), 1, "model.layers");
+        // Fallback: total file size / num_layers
+        assert!(result > 0);
+    }
+
+    #[test]
+    fn estimate_layer_size_sharded_with_headers() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Create index file
+        let index = serde_json::json!({
+            "weight_map": {
+                "model.layers.0.attn.weight": "shard-00001.safetensors",
+                "model.layers.0.mlp.weight": "shard-00001.safetensors",
+                "model.layers.1.attn.weight": "shard-00002.safetensors",
+                "model.layers.1.mlp.weight": "shard-00002.safetensors",
+                "model.embed_tokens.weight": "shard-00001.safetensors"
+            }
+        });
+        fs::write(
+            tmp.path().join("model.safetensors.index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+
+        // Create shard files with proper safetensors headers
+        let shard1_header = serde_json::json!({
+            "model.layers.0.attn.weight": {
+                "dtype": "F16", "shape": [100], "data_offsets": [0, 500]
+            },
+            "model.layers.0.mlp.weight": {
+                "dtype": "F16", "shape": [100], "data_offsets": [500, 1000]
+            },
+            "model.embed_tokens.weight": {
+                "dtype": "F16", "shape": [32000], "data_offsets": [1000, 65000]
+            }
+        });
+        write_fake_safetensors(&tmp.path().join("shard-00001.safetensors"), &shard1_header);
+
+        let shard2_header = serde_json::json!({
+            "model.layers.1.attn.weight": {
+                "dtype": "F16", "shape": [100], "data_offsets": [0, 500]
+            },
+            "model.layers.1.mlp.weight": {
+                "dtype": "F16", "shape": [100], "data_offsets": [500, 1000]
+            }
+        });
+        write_fake_safetensors(&tmp.path().join("shard-00002.safetensors"), &shard2_header);
+
+        let result = estimate_layer_size(tmp.path(), 2, "model.layers");
+        // layer bytes = 500+500+500+500 = 2000, /2 = 1000
+        assert_eq!(result, 1000);
+    }
+
+    #[test]
+    fn estimate_layer_size_sharded_missing_shard_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index = serde_json::json!({
+            "weight_map": {
+                "model.layers.0.weight": "shard-00001.safetensors",
+                "model.layers.1.weight": "shard-00002.safetensors"
+            }
+        });
+        fs::write(
+            tmp.path().join("model.safetensors.index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+
+        // Create shard-00001 but NOT shard-00002 (header read will fail)
+        let shard1_header = serde_json::json!({
+            "model.layers.0.weight": {
+                "dtype": "F16", "shape": [100], "data_offsets": [0, 200]
+            }
+        });
+        write_fake_safetensors(&tmp.path().join("shard-00001.safetensors"), &shard1_header);
+
+        // Should fall through to raw file size fallback
+        let result = estimate_layer_size(tmp.path(), 2, "model.layers");
+        // Only shard-00001 exists; fallback sums existing files / num_layers
+        // shard-00001 size / 2
+        assert!(result > 0);
+    }
+
+    #[test]
+    fn estimate_layer_size_with_language_model_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("model.safetensors");
+        let header = serde_json::json!({
+            "model.language_model.layers.0.attn.weight": {
+                "dtype": "F16", "shape": [100], "data_offsets": [0, 800]
+            },
+            "model.language_model.layers.1.attn.weight": {
+                "dtype": "F16", "shape": [100], "data_offsets": [800, 1600]
+            },
+            "model.visual.layers.0.weight": {
+                "dtype": "F16", "shape": [100], "data_offsets": [1600, 10000]
+            }
+        });
+        write_fake_safetensors(&path, &header);
+        let result = estimate_layer_size(tmp.path(), 2, "model.language_model.layers");
+        // Only language_model tensors: 800 + 800 = 1600, /2 = 800
+        assert_eq!(result, 800);
+    }
+
+    // ── Additional compute_layer_assignments tests ────────────────────
+
+    #[test]
+    fn compute_assignments_single_layer_model() {
+        let workers = vec![make_worker("w1", 10.0, 24.0)];
+        let result = compute_layer_assignments(
+            &workers,
+            1,
+            10.0,
+            100_000_000,
+            usize::MAX,
+            "model.layers",
+        );
+        // With equal TFLOPS, worker gets round(0.5*1) = 1 or 0 layers
+        let total: usize = result.iter().map(|(_, l)| l.len()).sum();
+        assert!(total <= 1);
+    }
+
+    #[test]
+    fn compute_assignments_worker_zero_vram_with_tflops() {
+        // Worker with TFLOPS but zero VRAM — no GPUs, so max_layers_for_size = MAX
+        let w = DiscoveredWorker {
+            name: "cpu_worker".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 10128,
+            gpus: vec![], // no GPUs
+            backend: "cpu".to_string(),
+            hostname: "cpu_worker".to_string(),
+            os: "linux".to_string(),
+        };
+        let result = compute_layer_assignments(
+            &[w],
+            24,
+            10.0,
+            500_000_000,
+            usize::MAX,
+            "model.layers",
+        );
+        // total_tflops = 0 (no gpus) + 10 master = 10
+        // worker tflops = 0 => worker_layers = round(0/10 * 24) = 0
+        // But zero TFLOPS fallback: workers get half
+        // Actually master_tflops=10 > 0, so total_tflops=10 > 0, no fallback
+        // worker gets 0 layers proportionally
+        let total: usize = result.iter().map(|(_, l)| l.len()).sum();
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn compute_assignments_very_high_tflops_low_vram() {
+        // Worker with extremely high TFLOPS but tiny VRAM (100 MB)
+        let workers = vec![make_worker("fast_small", 1000.0, 0.1)];
+        let result = compute_layer_assignments(
+            &workers,
+            24,
+            1.0,
+            200_000_000, // 200 MB per layer
+            usize::MAX,
+            "model.layers",
+        );
+        assert_eq!(result.len(), 1);
+        let (_, ref layers) = result[0];
+        // TFLOPS says it should get nearly all layers, but VRAM caps it severely
+        // 0.1 GB = ~107 MB usable (after 5% reserve), can't fit any 200 MB layers
+        assert!(
+            layers.is_empty(),
+            "expected 0 layers due to VRAM cap, got {}",
+            layers.len()
+        );
+    }
+
+    #[test]
+    fn compute_assignments_contiguous_layer_ranges() {
+        // Verify layers are assigned as contiguous ranges starting from 0
+        let workers = vec![
+            make_worker("w1", 20.0, 24.0),
+            make_worker("w2", 20.0, 24.0),
+        ];
+        let result = compute_layer_assignments(
+            &workers,
+            24,
+            10.0,
+            100_000_000,
+            usize::MAX,
+            "model.layers",
+        );
+
+        // Collect all assigned layer numbers
+        let mut all_layers: Vec<usize> = Vec::new();
+        for (_, layers) in &result {
+            for layer in layers {
+                let num: usize = layer.strip_prefix("model.layers.").unwrap().parse().unwrap();
+                all_layers.push(num);
+            }
+        }
+        all_layers.sort();
+
+        // Verify contiguous from 0
+        if !all_layers.is_empty() {
+            assert_eq!(all_layers[0], 0, "layers should start at 0");
+            for i in 1..all_layers.len() {
+                assert_eq!(
+                    all_layers[i],
+                    all_layers[i - 1] + 1,
+                    "layers should be contiguous"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compute_assignments_master_overflow_partial_redistribution() {
+        // Master can only hold 2 layers, workers can't absorb all excess
+        // w1: 1 GB VRAM, 500 MB per layer => ~1 layer max (after reserve)
+        let workers = vec![make_worker("w1", 5.0, 1.0)];
+        let result = compute_layer_assignments(
+            &workers,
+            10,
+            5.0,
+            500_000_000, // 500 MB per layer
+            2,           // master can only hold 2
+            "model.layers",
+        );
+        // Worker is VRAM-capped to ~1 layer, master wants only 2
+        // deficit = (10 - initial_worker_layers) - 2; worker can't take more than ~1 total
+        let total: usize = result.iter().map(|(_, l)| l.len()).sum();
+        // The total assigned should respect VRAM caps even with redistribution
+        assert!(total <= 10);
+    }
+
+    #[test]
+    fn compute_assignments_no_layer_size_constraint() {
+        // layer_size_bytes = 0 means no VRAM capping
+        let workers = vec![make_worker("w1", 20.0, 0.001)]; // tiny VRAM
+        let result = compute_layer_assignments(
+            &workers,
+            24,
+            10.0,
+            0, // no layer size constraint
+            usize::MAX,
+            "model.layers",
+        );
+        assert_eq!(result.len(), 1);
+        let (_, ref layers) = result[0];
+        // Without VRAM cap, worker gets proportional share: 20/30 * 24 = 16
+        assert_eq!(layers.len(), 16);
+    }
+
+    #[test]
+    fn compute_assignments_three_workers_sorted_by_tflops() {
+        let workers = vec![
+            make_worker("slow", 5.0, 24.0),
+            make_worker("fast", 30.0, 24.0),
+            make_worker("medium", 15.0, 24.0),
+        ];
+        let result = compute_layer_assignments(
+            &workers,
+            48,
+            10.0,
+            100_000_000,
+            usize::MAX,
+            "model.layers",
+        );
+        // Fast worker (idx=1) should get the most layers
+        let fast_layers = result
+            .iter()
+            .find(|(i, _)| *i == 1)
+            .map(|(_, l)| l.len())
+            .unwrap_or(0);
+        let medium_layers = result
+            .iter()
+            .find(|(i, _)| *i == 2)
+            .map(|(_, l)| l.len())
+            .unwrap_or(0);
+        let slow_layers = result
+            .iter()
+            .find(|(i, _)| *i == 0)
+            .map(|(_, l)| l.len())
+            .unwrap_or(0);
+        assert!(
+            fast_layers >= medium_layers,
+            "fast ({}) >= medium ({})",
+            fast_layers,
+            medium_layers
+        );
+        assert!(
+            medium_layers >= slow_layers,
+            "medium ({}) >= slow ({})",
+            medium_layers,
+            slow_layers
+        );
+    }
+
+    #[test]
+    fn compute_assignments_zero_tflops_multiple_workers() {
+        // Multiple workers with zero TFLOPS, layers split evenly among them
+        let make_zero = |name: &str| DiscoveredWorker {
+            name: name.to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 10128,
+            gpus: vec![],
+            backend: "cpu".to_string(),
+            hostname: name.to_string(),
+            os: "linux".to_string(),
+        };
+        let workers = vec![make_zero("w1"), make_zero("w2"), make_zero("w3")];
+        let result = compute_layer_assignments(
+            &workers,
+            24,
+            0.0,
+            0,
+            usize::MAX,
+            "model.layers",
+        );
+        // Workers get half of 24 = 12 layers, split among 3 = 4 each
+        let total: usize = result.iter().map(|(_, l)| l.len()).sum();
+        assert_eq!(total, 12);
+        // Each worker gets 4 layers
+        for (_, layers) in &result {
+            assert_eq!(layers.len(), 4);
+        }
+    }
+
+    #[test]
+    fn compute_assignments_all_layers_accounted_for() {
+        // Verify total assigned + master remainder = num_layers
+        let workers = vec![
+            make_worker("w1", 15.0, 24.0),
+            make_worker("w2", 25.0, 24.0),
+        ];
+        let num_layers = 32;
+        let result = compute_layer_assignments(
+            &workers,
+            num_layers,
+            10.0,
+            100_000_000,
+            usize::MAX,
+            "model.layers",
+        );
+        let total_assigned: usize = result.iter().map(|(_, l)| l.len()).sum();
+        let master_remainder = num_layers - total_assigned;
+        assert_eq!(total_assigned + master_remainder, num_layers);
+        // Master should keep some layers
+        assert!(master_remainder > 0, "master should keep some layers");
+    }
+
+    #[test]
+    fn compute_assignments_multi_gpu_worker() {
+        // Worker with 2 GPUs
+        let w = DiscoveredWorker {
+            name: "dual_gpu".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 10128,
+            gpus: vec![
+                GpuInfo {
+                    name: "NVIDIA RTX 3080".to_string(),
+                    vram_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
+                    tflops: 15.0,
+                },
+                GpuInfo {
+                    name: "NVIDIA RTX 3080".to_string(),
+                    vram_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
+                    tflops: 15.0,
+                },
+            ],
+            backend: "cuda".to_string(),
+            hostname: "dual_gpu".to_string(),
+            os: "linux".to_string(),
+        };
+        let result = compute_layer_assignments(
+            &[w],
+            24,
+            10.0,
+            1_000_000_000, // 1 GB per layer
+            usize::MAX,
+            "model.layers",
+        );
+        assert_eq!(result.len(), 1);
+        let (_, ref layers) = result[0];
+        // 30 TFLOPS worker vs 10 TFLOPS master => worker gets 30/40*24 = 18
+        // But per-GPU VRAM caps: each GPU 10GB * 0.95 / 1GB = 9 layers per GPU
+        // max_layers_for_size sums across GPUs = 18, so no cap needed
+        assert!(layers.len() > 0);
+    }
+
+    #[test]
+    fn compute_assignments_master_max_layers_zero() {
+        // Master can hold 0 layers — all must go to workers
+        let workers = vec![make_worker("w1", 10.0, 24.0)];
+        let result = compute_layer_assignments(
+            &workers,
+            10,
+            10.0,
+            100_000_000,
+            0, // master can hold 0 layers
+            "model.layers",
+        );
+        let total: usize = result.iter().map(|(_, l)| l.len()).sum();
+        // Worker initially gets 5 (50%), master has 5 but can only hold 0
+        // deficit=5, worker has plenty of VRAM, absorbs all 5
+        assert_eq!(total, 10, "all layers should be assigned to workers");
+    }
+
+    #[test]
+    fn compute_assignments_odd_layer_count() {
+        // Odd number of layers shouldn't cause issues
+        let workers = vec![make_worker("w1", 10.0, 24.0)];
+        let result = compute_layer_assignments(
+            &workers,
+            7,
+            10.0,
+            100_000_000,
+            usize::MAX,
+            "model.layers",
+        );
+        let total: usize = result.iter().map(|(_, l)| l.len()).sum();
+        assert!(total <= 7);
+        // Verify all layer names are valid
+        for (_, layers) in &result {
+            for layer in layers {
+                let num: usize = layer.strip_prefix("model.layers.").unwrap().parse().unwrap();
+                assert!(num < 7, "layer index {} should be < 7", num);
+            }
+        }
+    }
+
+    #[test]
+    fn compute_assignments_dominant_master() {
+        // Master has vastly more TFLOPS than worker
+        let workers = vec![make_worker("w1", 1.0, 24.0)];
+        let result = compute_layer_assignments(
+            &workers,
+            24,
+            100.0, // master 100x stronger
+            100_000_000,
+            usize::MAX,
+            "model.layers",
+        );
+        let total: usize = result.iter().map(|(_, l)| l.len()).sum();
+        // Worker gets round(1/101 * 24) = 0 layers
+        // But proportional code does .max(1) => at least 1 layer
+        assert!(total <= 2, "weak worker should get very few layers, got {}", total);
+    }
 }

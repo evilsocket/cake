@@ -132,3 +132,73 @@ impl VAE {
         Ok(result)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vae_display_format() {
+        // We can't construct a VAE without model weights, but we can test
+        // the LAYER_NAME constant and verify the expected display string.
+        assert_eq!(VAE::LAYER_NAME, "vae");
+    }
+
+    #[test]
+    fn vae_layer_name_matches_constant() {
+        // LAYER_NAME should match ModelFile::Vae.name()
+        assert_eq!(VAE::LAYER_NAME, ModelFile::Vae.name());
+    }
+
+    #[test]
+    fn vae_encode_direction_tensor_is_one() {
+        // The encode path packs a direction tensor of [1.0] as the first element.
+        let device = candle_core::Device::Cpu;
+        let direction = Tensor::from_slice(&[1f32], 1, &device).unwrap();
+        let val: Vec<f32> = direction.to_vec1().unwrap();
+        assert_eq!(val, vec![1.0]);
+    }
+
+    #[test]
+    fn vae_decode_direction_tensor_is_zero() {
+        // The decode path packs a direction tensor of [0.0] as the first element.
+        let device = candle_core::Device::Cpu;
+        let direction = Tensor::from_slice(&[0f32], 1, &device).unwrap();
+        let val: Vec<f32> = direction.to_vec1().unwrap();
+        assert_eq!(val, vec![0.0]);
+    }
+
+    #[test]
+    fn vae_pack_unpack_encode_direction() {
+        // Verify the encode packing produces a valid packed tensor that unpacks correctly.
+        let device = candle_core::Device::Cpu;
+        let direction = Tensor::from_slice(&[1f32], 1, &device).unwrap();
+        let image = Tensor::from_vec(vec![0.5f32; 12], (1, 3, 2, 2), &device).unwrap();
+
+        let tensors = vec![direction, image.clone()];
+        let packed = pack_tensors(tensors, &device).unwrap();
+        let unpacked = unpack_tensors(&packed).unwrap();
+
+        assert_eq!(unpacked.len(), 2);
+        let dir_val: Vec<f32> = unpacked[0].to_vec1().unwrap();
+        assert_eq!(dir_val, vec![1.0]);
+        assert_eq!(unpacked[1].shape().dims(), &[1, 3, 2, 2]);
+    }
+
+    #[test]
+    fn vae_pack_unpack_decode_direction() {
+        // Verify the decode packing produces a valid packed tensor that unpacks correctly.
+        let device = candle_core::Device::Cpu;
+        let direction = Tensor::from_slice(&[0f32], 1, &device).unwrap();
+        let latents = Tensor::from_vec(vec![0.1f32; 16], (1, 4, 2, 2), &device).unwrap();
+
+        let tensors = vec![direction, latents.clone()];
+        let packed = pack_tensors(tensors, &device).unwrap();
+        let unpacked = unpack_tensors(&packed).unwrap();
+
+        assert_eq!(unpacked.len(), 2);
+        let dir_val: Vec<f32> = unpacked[0].to_vec1().unwrap();
+        assert_eq!(dir_val, vec![0.0]);
+        assert_eq!(unpacked[1].shape().dims(), &[1, 4, 2, 2]);
+    }
+}

@@ -191,4 +191,170 @@ mod tests {
         let recv: Vec<f32> = unpacked[0].to_vec1().unwrap();
         assert_eq!(recv, vec![1.0, 2.0, 3.0]);
     }
+
+    // --- pack/unpack: scalar-like 1-element tensor ---
+
+    #[test]
+    fn test_pack_unpack_scalar_tensor() {
+        let device = Device::Cpu;
+        let t = Tensor::from_slice(&[42.0f32], 1, &device).unwrap();
+        let packed = pack_tensors(vec![t.clone()], &device).unwrap();
+        let unpacked = unpack_tensors(&packed).unwrap();
+
+        assert_eq!(unpacked.len(), 1);
+        assert_eq!(unpacked[0].shape().dims(), &[1]);
+        let val: Vec<f32> = unpacked[0].to_vec1().unwrap();
+        assert_eq!(val, vec![42.0]);
+    }
+
+    // --- pack/unpack: 4D tensor ---
+
+    #[test]
+    fn test_pack_unpack_4d_tensor() {
+        let device = Device::Cpu;
+        let data: Vec<f32> = (0..120).map(|i| i as f32).collect();
+        let t = Tensor::from_vec(data, (2, 3, 4, 5), &device).unwrap();
+
+        let packed = pack_tensors(vec![t.clone()], &device).unwrap();
+        let unpacked = unpack_tensors(&packed).unwrap();
+
+        assert_eq!(unpacked.len(), 1);
+        assert_eq!(unpacked[0].shape().dims(), &[2, 3, 4, 5]);
+        let orig: Vec<f32> = t.flatten_all().unwrap().to_vec1().unwrap();
+        let recv: Vec<f32> = unpacked[0].flatten_all().unwrap().to_vec1().unwrap();
+        assert_eq!(orig, recv);
+    }
+
+    // --- pack/unpack: many small tensors ---
+
+    #[test]
+    fn test_pack_unpack_many_tensors() {
+        let device = Device::Cpu;
+        let tensors: Vec<Tensor> = (0..10)
+            .map(|i| Tensor::from_slice(&[i as f32], 1, &device).unwrap())
+            .collect();
+
+        let packed = pack_tensors(tensors.clone(), &device).unwrap();
+        let unpacked = unpack_tensors(&packed).unwrap();
+
+        assert_eq!(unpacked.len(), 10);
+        for (i, t) in unpacked.iter().enumerate() {
+            let val: Vec<f32> = t.to_vec1().unwrap();
+            assert_eq!(val, vec![i as f32]);
+        }
+    }
+
+    // --- pack/unpack: mixed shapes ---
+
+    #[test]
+    fn test_pack_unpack_mixed_shapes() {
+        let device = Device::Cpu;
+        let t1 = Tensor::from_slice(&[1.0f32], 1, &device).unwrap(); // 1D scalar
+        let t2 = Tensor::from_vec(vec![2.0f32, 3.0, 4.0, 5.0, 6.0, 7.0], (2, 3), &device).unwrap(); // 2D
+        let t3 = Tensor::from_vec(vec![8.0f32; 24], (2, 3, 4), &device).unwrap(); // 3D
+
+        let packed = pack_tensors(vec![t1, t2, t3], &device).unwrap();
+        let unpacked = unpack_tensors(&packed).unwrap();
+
+        assert_eq!(unpacked.len(), 3);
+        assert_eq!(unpacked[0].shape().dims(), &[1]);
+        assert_eq!(unpacked[1].shape().dims(), &[2, 3]);
+        assert_eq!(unpacked[2].shape().dims(), &[2, 3, 4]);
+    }
+
+    // --- pack/unpack: values are preserved exactly for f32 ---
+
+    #[test]
+    fn test_pack_unpack_preserves_values_exactly() {
+        let device = Device::Cpu;
+        let special_values = vec![0.0f32, -0.0, 1.0, -1.0, f32::MAX, f32::MIN, 1e-38, -1e-38];
+        let t = Tensor::from_vec(special_values.clone(), (8,), &device).unwrap();
+
+        let packed = pack_tensors(vec![t], &device).unwrap();
+        let unpacked = unpack_tensors(&packed).unwrap();
+
+        let recv: Vec<f32> = unpacked[0].to_vec1().unwrap();
+        for (i, (orig, got)) in special_values.iter().zip(recv.iter()).enumerate() {
+            assert!(
+                orig.to_bits() == got.to_bits() || (orig.is_nan() && got.is_nan()),
+                "index {}: expected {} (bits {:032b}), got {} (bits {:032b})",
+                i,
+                orig,
+                orig.to_bits(),
+                got,
+                got.to_bits()
+            );
+        }
+    }
+
+    // --- get_sd_config: all versions via context ---
+
+    fn make_test_sd_context(version: StableDiffusionVersion) -> crate::cake::Context {
+        use crate::cake::{Context, Topology};
+        use crate::Args;
+        use std::path::PathBuf;
+        use std::sync::{Arc, Mutex};
+
+        let mut args = Args::default();
+        args.sd_args.sd_version = version;
+        args.sd_args.height = Some(512);
+        args.sd_args.width = Some(512);
+        args.sd_args.sliced_attention_size = None;
+
+        Context {
+            args,
+            dtype: DType::F32,
+            topology: Topology::new(),
+            data_path: PathBuf::from("/tmp"),
+            device: Device::Cpu,
+            config: None,
+            cache: None,
+            var_builder: None,
+            text_model_arch: crate::TextModelArch::Llama,
+            fp8: false,
+            listener_override: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn test_get_sd_config_v15() {
+        let ctx = make_test_sd_context(StableDiffusionVersion::V1_5);
+        let config = get_sd_config(&ctx).unwrap();
+        assert_eq!(config.height, 512);
+        assert_eq!(config.width, 512);
+    }
+
+    #[test]
+    fn test_get_sd_config_v21() {
+        let ctx = make_test_sd_context(StableDiffusionVersion::V2_1);
+        let config = get_sd_config(&ctx).unwrap();
+        assert_eq!(config.height, 512);
+        assert_eq!(config.width, 512);
+    }
+
+    #[test]
+    fn test_get_sd_config_xl() {
+        let ctx = make_test_sd_context(StableDiffusionVersion::Xl);
+        let config = get_sd_config(&ctx).unwrap();
+        assert_eq!(config.height, 512);
+        assert_eq!(config.width, 512);
+        assert!(config.clip2.is_some(), "SDXL should have clip2 config");
+    }
+
+    #[test]
+    fn test_get_sd_config_turbo() {
+        let ctx = make_test_sd_context(StableDiffusionVersion::Turbo);
+        let config = get_sd_config(&ctx).unwrap();
+        assert_eq!(config.height, 512);
+        assert_eq!(config.width, 512);
+        assert!(config.clip2.is_some(), "Turbo (SDXL variant) should have clip2 config");
+    }
+
+    // --- get_device with cpu=true always returns Cpu ---
+
+    #[test]
+    fn test_get_device_cpu_always_cpu() {
+        let dev = get_device(true).unwrap();
+        assert!(matches!(dev, Device::Cpu));
+    }
 }

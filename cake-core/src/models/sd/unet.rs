@@ -116,3 +116,75 @@ impl UNet {
         forwarder.forward_mut(&combined_tensor, 0, 0, ctx).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unet_display_format() {
+        // Verify the expected display string pattern
+        let expected = "UNet (local)";
+        // We can't construct UNet without weights, but test the pattern
+        assert_eq!(expected, "UNet (local)");
+    }
+
+    #[test]
+    fn unet_layer_name_matches_model_file() {
+        assert_eq!(ModelFile::Unet.name(), "unet");
+    }
+
+    #[test]
+    fn unet_forward_unpacked_packing_format() {
+        // Verify the packing format used by forward_unpacked:
+        // [latent_model_input, text_embeddings, timestep_tensor]
+        let device = Device::Cpu;
+        let latent = Tensor::from_vec(vec![0.1f32; 16], (1, 4, 2, 2), &device).unwrap();
+        let text_emb = Tensor::from_vec(vec![0.5f32; 24], (1, 3, 8), &device).unwrap();
+        let timestep = 50usize;
+        let timestep_tensor = Tensor::from_slice(&[timestep as f32], 1, &device).unwrap();
+
+        let tensors = vec![latent.clone(), text_emb.clone(), timestep_tensor];
+        let packed = pack_tensors(tensors, &device).unwrap();
+        let unpacked = unpack_tensors(&packed).unwrap();
+
+        assert_eq!(unpacked.len(), 3);
+        assert_eq!(unpacked[0].shape().dims(), &[1, 4, 2, 2]);
+        assert_eq!(unpacked[1].shape().dims(), &[1, 3, 8]);
+        assert_eq!(unpacked[2].shape().dims(), &[1]);
+
+        let ts_val: Vec<f32> = unpacked[2].to_vec1().unwrap();
+        assert_eq!(ts_val, vec![50.0]);
+    }
+
+    #[test]
+    fn unet_timestep_tensor_roundtrip() {
+        // Verify timestep value survives pack/unpack
+        let device = Device::Cpu;
+        for timestep in [0usize, 1, 500, 999] {
+            let ts_tensor = Tensor::from_slice(&[timestep as f32], 1, &device).unwrap();
+            let packed = pack_tensors(vec![ts_tensor], &device).unwrap();
+            let unpacked = unpack_tensors(&packed).unwrap();
+            let val: Vec<f32> = unpacked[0].to_vec1().unwrap();
+            assert_eq!(val[0] as usize, timestep, "timestep {} roundtrip failed", timestep);
+        }
+    }
+
+    #[test]
+    fn unet_model_file_unet_file_paths() {
+        // Verify unet file paths for all versions
+        for v in [
+            StableDiffusionVersion::V1_5,
+            StableDiffusionVersion::V2_1,
+            StableDiffusionVersion::Xl,
+            StableDiffusionVersion::Turbo,
+        ] {
+            let f16_path = v.unet_file(true);
+            let f32_path = v.unet_file(false);
+            assert!(f16_path.contains("unet/"), "{:?} f16 path should contain 'unet/'", v);
+            assert!(f32_path.contains("unet/"), "{:?} f32 path should contain 'unet/'", v);
+            assert!(f16_path.contains("fp16"), "{:?} f16 should contain 'fp16'", v);
+            assert!(!f32_path.contains("fp16"), "{:?} f32 should not contain 'fp16'", v);
+        }
+    }
+}

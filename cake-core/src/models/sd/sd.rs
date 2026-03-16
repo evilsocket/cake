@@ -870,4 +870,300 @@ mod tests {
         assert!(StableDiffusionVersion::Turbo.clip2_file(true).contains("fp16"));
         assert!(!StableDiffusionVersion::Turbo.clip2_file(false).contains("fp16"));
     }
+
+    // --- ModelFile Debug derive ---
+
+    #[test]
+    fn model_file_debug_format() {
+        // Ensure Debug derive works and produces expected output
+        assert_eq!(format!("{:?}", ModelFile::Tokenizer), "Tokenizer");
+        assert_eq!(format!("{:?}", ModelFile::Tokenizer2), "Tokenizer2");
+        assert_eq!(format!("{:?}", ModelFile::Clip), "Clip");
+        assert_eq!(format!("{:?}", ModelFile::Clip2), "Clip2");
+        assert_eq!(format!("{:?}", ModelFile::Unet), "Unet");
+        assert_eq!(format!("{:?}", ModelFile::Vae), "Vae");
+    }
+
+    // --- ModelFile equality ---
+
+    #[test]
+    fn model_file_equality() {
+        assert_eq!(ModelFile::Clip, ModelFile::Clip);
+        assert_ne!(ModelFile::Clip, ModelFile::Clip2);
+        assert_ne!(ModelFile::Unet, ModelFile::Vae);
+        assert_ne!(ModelFile::Tokenizer, ModelFile::Tokenizer2);
+    }
+
+    // --- ModelFile::name() returns static strings ---
+
+    #[test]
+    fn model_file_name_all_variants_non_empty() {
+        let all = [
+            ModelFile::Tokenizer,
+            ModelFile::Tokenizer2,
+            ModelFile::Clip,
+            ModelFile::Clip2,
+            ModelFile::Unet,
+            ModelFile::Vae,
+        ];
+        for mf in &all {
+            assert!(!mf.name().is_empty(), "{:?} name should not be empty", mf);
+        }
+    }
+
+    #[test]
+    fn model_file_names_are_unique() {
+        let all = [
+            ModelFile::Tokenizer,
+            ModelFile::Tokenizer2,
+            ModelFile::Clip,
+            ModelFile::Clip2,
+            ModelFile::Unet,
+            ModelFile::Vae,
+        ];
+        let names: Vec<&str> = all.iter().map(|mf| mf.name()).collect();
+        let unique: std::collections::HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(names.len(), unique.len(), "all ModelFile names should be unique");
+    }
+
+    // --- ModelFile::get with explicit paths for all variants ---
+
+    #[test]
+    fn model_file_get_explicit_path_all_variants() {
+        let all = [
+            ModelFile::Tokenizer,
+            ModelFile::Tokenizer2,
+            ModelFile::Clip,
+            ModelFile::Clip2,
+            ModelFile::Unet,
+            ModelFile::Vae,
+        ];
+        for mf in &all {
+            let path = format!("/tmp/{}.bin", mf.name());
+            let result = mf.get(
+                Some(path.clone()),
+                StableDiffusionVersion::V1_5,
+                false,
+                "/unused".to_string(),
+            ).unwrap();
+            assert_eq!(result, std::path::PathBuf::from(&path));
+        }
+    }
+
+    // --- default_guidance_scale: all versions ---
+
+    #[test]
+    fn default_guidance_scale_all_versions() {
+        let versions = [
+            (StableDiffusionVersion::V1_5, 7.5),
+            (StableDiffusionVersion::V2_1, 7.5),
+            (StableDiffusionVersion::Xl, 7.5),
+            (StableDiffusionVersion::Turbo, 0.0),
+        ];
+        for (v, expected) in versions {
+            let gs = default_guidance_scale(v);
+            assert!(
+                (gs - expected).abs() < f64::EPSILON,
+                "{:?}: expected {}, got {}",
+                v,
+                expected,
+                gs
+            );
+        }
+    }
+
+    // --- default_n_steps: all versions ---
+
+    #[test]
+    fn default_n_steps_all_versions() {
+        let versions = [
+            (StableDiffusionVersion::V1_5, 30),
+            (StableDiffusionVersion::V2_1, 30),
+            (StableDiffusionVersion::Xl, 30),
+            (StableDiffusionVersion::Turbo, 1),
+        ];
+        for (v, expected) in versions {
+            assert_eq!(
+                default_n_steps(v),
+                expected,
+                "{:?}: expected {}, got {}",
+                v,
+                expected,
+                default_n_steps(v)
+            );
+        }
+    }
+
+    // --- vae_scale_factor: all versions ---
+
+    #[test]
+    fn vae_scale_factor_all_versions() {
+        let versions = [
+            (StableDiffusionVersion::V1_5, 0.18215),
+            (StableDiffusionVersion::V2_1, 0.18215),
+            (StableDiffusionVersion::Xl, 0.18215),
+            (StableDiffusionVersion::Turbo, 0.13025),
+        ];
+        for (v, expected) in versions {
+            let sf = vae_scale_factor(v);
+            assert!(
+                (sf - expected).abs() < 1e-6,
+                "{:?}: expected {}, got {}",
+                v,
+                expected,
+                sf
+            );
+        }
+    }
+
+    // --- vae_scale_factor: non-zero and positive ---
+
+    #[test]
+    fn vae_scale_factor_positive() {
+        for v in [
+            StableDiffusionVersion::V1_5,
+            StableDiffusionVersion::V2_1,
+            StableDiffusionVersion::Xl,
+            StableDiffusionVersion::Turbo,
+        ] {
+            assert!(vae_scale_factor(v) > 0.0, "{:?} should have positive scale", v);
+        }
+    }
+
+    // --- default_n_steps: turbo is always less than others ---
+
+    #[test]
+    fn turbo_fewer_steps_than_others() {
+        let turbo_steps = default_n_steps(StableDiffusionVersion::Turbo);
+        for v in [
+            StableDiffusionVersion::V1_5,
+            StableDiffusionVersion::V2_1,
+            StableDiffusionVersion::Xl,
+        ] {
+            assert!(
+                turbo_steps < default_n_steps(v),
+                "Turbo should have fewer steps than {:?}",
+                v
+            );
+        }
+    }
+
+    // --- default_guidance_scale: turbo has no guidance ---
+
+    #[test]
+    fn turbo_zero_guidance() {
+        assert_eq!(default_guidance_scale(StableDiffusionVersion::Turbo), 0.0);
+    }
+
+    // --- SD version repo strings are valid URLs ---
+
+    #[test]
+    fn sd_version_repos_contain_slash() {
+        for v in [
+            StableDiffusionVersion::V1_5,
+            StableDiffusionVersion::V2_1,
+            StableDiffusionVersion::Xl,
+            StableDiffusionVersion::Turbo,
+        ] {
+            assert!(v.repo().contains('/'), "{:?} repo should contain '/'", v);
+        }
+    }
+
+    // --- SD version file paths end with .safetensors ---
+
+    #[test]
+    fn sd_version_files_end_with_safetensors() {
+        for v in [
+            StableDiffusionVersion::V1_5,
+            StableDiffusionVersion::V2_1,
+            StableDiffusionVersion::Xl,
+            StableDiffusionVersion::Turbo,
+        ] {
+            for use_f16 in [true, false] {
+                assert!(v.unet_file(use_f16).ends_with(".safetensors"), "{:?} unet_file", v);
+                assert!(v.vae_file(use_f16).ends_with(".safetensors"), "{:?} vae_file", v);
+                assert!(v.clip_file(use_f16).ends_with(".safetensors"), "{:?} clip_file", v);
+                assert!(v.clip2_file(use_f16).ends_with(".safetensors"), "{:?} clip2_file", v);
+            }
+        }
+    }
+
+    // --- image_preprocess with nonexistent file returns error ---
+
+    #[test]
+    fn image_preprocess_nonexistent_file_errors() {
+        let result = image_preprocess("/tmp/nonexistent_cake_test_image_12345.png");
+        assert!(result.is_err());
+    }
+
+    // --- StableDiffusionConfig construction for all versions ---
+
+    #[test]
+    fn sd_config_v15_builds() {
+        let _config = StableDiffusionConfig::v1_5(None, None, None);
+    }
+
+    #[test]
+    fn sd_config_v21_builds() {
+        let _config = StableDiffusionConfig::v2_1(None, None, None);
+    }
+
+    #[test]
+    fn sd_config_xl_builds() {
+        let _config = StableDiffusionConfig::sdxl(None, None, None);
+    }
+
+    #[test]
+    fn sd_config_turbo_builds() {
+        let _config = StableDiffusionConfig::sdxl_turbo(None, None, None);
+    }
+
+    // --- StableDiffusionConfig with custom dimensions ---
+
+    #[test]
+    fn sd_config_v15_custom_dims() {
+        let config = StableDiffusionConfig::v1_5(None, Some(256), Some(256));
+        assert_eq!(config.height, 256);
+        assert_eq!(config.width, 256);
+    }
+
+    #[test]
+    fn sd_config_xl_custom_dims() {
+        let config = StableDiffusionConfig::sdxl(None, Some(1024), Some(1024));
+        assert_eq!(config.height, 1024);
+        assert_eq!(config.width, 1024);
+    }
+
+    #[test]
+    fn sd_config_v15_has_clip() {
+        let config = StableDiffusionConfig::v1_5(None, None, None);
+        // V1.5 should not have clip2
+        assert!(config.clip2.is_none());
+    }
+
+    #[test]
+    fn sd_config_xl_has_clip2() {
+        let config = StableDiffusionConfig::sdxl(None, None, None);
+        // SDXL should have clip2
+        assert!(config.clip2.is_some());
+    }
+
+    #[test]
+    fn sd_config_turbo_has_clip2() {
+        let config = StableDiffusionConfig::sdxl_turbo(None, None, None);
+        assert!(config.clip2.is_some());
+    }
+
+    // --- StableDiffusionConfig with sliced attention ---
+
+    #[test]
+    fn sd_config_v15_sliced_attention() {
+        let _config = StableDiffusionConfig::v1_5(Some(4), None, None);
+        // Just verifying it doesn't panic
+    }
+
+    #[test]
+    fn sd_config_xl_sliced_attention() {
+        let _config = StableDiffusionConfig::sdxl(Some(8), None, None);
+    }
 }

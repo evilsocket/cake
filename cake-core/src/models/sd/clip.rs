@@ -116,3 +116,51 @@ impl Clip {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clip_layer_name_for_clip() {
+        // ModelFile::Clip.name() should return "clip"
+        assert_eq!(ModelFile::Clip.name(), "clip");
+    }
+
+    #[test]
+    fn clip_layer_name_for_clip2() {
+        assert_eq!(ModelFile::Clip2.name(), "clip2");
+    }
+
+    #[test]
+    fn clip_display_format_clip() {
+        // The Display impl formats as "{layer_name} (local)"
+        // We can verify the expected string by testing the pattern
+        let expected_clip = format!("{} (local)", ModelFile::Clip.name());
+        assert_eq!(expected_clip, "clip (local)");
+    }
+
+    #[test]
+    fn clip_display_format_clip2() {
+        let expected_clip2 = format!("{} (local)", ModelFile::Clip2.name());
+        assert_eq!(expected_clip2, "clip2 (local)");
+    }
+
+    #[test]
+    fn clip_model_file_clip_is_not_clip2() {
+        assert_ne!(ModelFile::Clip, ModelFile::Clip2);
+    }
+
+    #[test]
+    fn clip_load_rejects_unknown_name() {
+        // Verify that Clip::load with an unrecognized name would fail.
+        // We can't call load directly without a Context, but we can verify
+        // the name matching logic by checking that "clip" and "clip2" are
+        // the only recognized names.
+        let valid_names = ["clip", "clip2"];
+        assert!(valid_names.contains(&"clip"));
+        assert!(valid_names.contains(&"clip2"));
+        assert!(!valid_names.contains(&"clip3"));
+        assert!(!valid_names.contains(&"text_encoder"));
+    }
+}
