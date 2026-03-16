@@ -349,6 +349,7 @@ impl candle_core::CustomOp3 for RmsNormGated {
         use candle_core::cuda_backend::{kernel_name, WrapErr};
         use candle_core::{CudaDevice, CudaStorage, WithDType};
 
+        #[allow(clippy::too_many_arguments)]
         fn launch<T: DeviceRepr + WithDType>(
             x: &CudaSlice<T>,
             l_x: &Layout,
@@ -575,5 +576,180 @@ mod tests {
         let result = silu_mul(&gate, &up).unwrap();
         assert_eq!(result.dtype(), DType::F16);
         assert_eq!(result.dims(), &[3]);
+    }
+
+    // ── CUDA tests ───────────────────────────────────────────────────
+
+    #[cfg(feature = "cuda")]
+    fn cuda_device() -> Option<Device> {
+        Device::new_cuda(0).ok()
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_silu_mul_cuda() {
+        let dev = match cuda_device() {
+            Some(d) => d,
+            None => return, // skip if no GPU
+        };
+        let gate = Tensor::new(&[0.0f32, 1.0, -1.0, 2.0, -2.0], &dev).unwrap();
+        let up = Tensor::new(&[1.0f32, 2.0, 3.0, 0.5, -1.0], &dev).unwrap();
+
+        let fused: Vec<f32> = silu_mul(&gate, &up).unwrap().to_vec1().unwrap();
+
+        // Reference on CPU
+        let gate_cpu = gate.to_device(&Device::Cpu).unwrap();
+        let up_cpu = up.to_device(&Device::Cpu).unwrap();
+        let reference: Vec<f32> = (candle_nn::ops::silu(&gate_cpu).unwrap() * &up_cpu)
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+
+        assert!(
+            approx_eq(&fused, &reference, 1e-5),
+            "CUDA silu_mul mismatch: fused={fused:?} ref={reference:?}"
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_silu_mul_cuda_f16() {
+        let dev = match cuda_device() {
+            Some(d) => d,
+            None => return,
+        };
+        let gate = Tensor::new(&[1.0f32, -1.0, 2.0, -0.5], &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap()
+            .to_device(&dev)
+            .unwrap();
+        let up = Tensor::new(&[2.0f32, 3.0, 0.5, -1.0], &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap()
+            .to_device(&dev)
+            .unwrap();
+
+        let result = silu_mul(&gate, &up).unwrap();
+        assert_eq!(result.dtype(), DType::F16);
+
+        let fused: Vec<f32> = result
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+
+        // Reference
+        let gate_cpu = gate.to_device(&Device::Cpu).unwrap().to_dtype(DType::F32).unwrap();
+        let up_cpu = up.to_device(&Device::Cpu).unwrap().to_dtype(DType::F32).unwrap();
+        let reference: Vec<f32> = (candle_nn::ops::silu(&gate_cpu).unwrap() * &up_cpu)
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+
+        assert!(
+            approx_eq(&fused, &reference, 1e-2), // F16 has less precision
+            "CUDA F16 silu_mul mismatch: fused={fused:?} ref={reference:?}"
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_stable_softplus_cuda() {
+        let dev = match cuda_device() {
+            Some(d) => d,
+            None => return,
+        };
+        let x = Tensor::new(&[-10.0f32, -1.0, 0.0, 1.0, 10.0, 100.0], &dev).unwrap();
+        let result: Vec<f32> = stable_softplus(&x).unwrap().to_vec1().unwrap();
+
+        let expected: Vec<f32> = vec![
+            ((-10.0f32).exp() + 1.0).ln(),
+            ((-1.0f32).exp() + 1.0).ln(),
+            (0.0f32.exp() + 1.0).ln(),
+            (1.0f32.exp() + 1.0).ln(),
+            (10.0f32.exp() + 1.0).ln(),
+            100.0,
+        ];
+        assert!(
+            approx_eq(&result, &expected, 1e-4),
+            "CUDA softplus mismatch: result={result:?} expected={expected:?}"
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_rms_norm_gated_cuda() {
+        let dev = match cuda_device() {
+            Some(d) => d,
+            None => return,
+        };
+        let x = Tensor::new(&[[1.0f32, 2.0, 3.0, 4.0], [0.5, -1.0, 0.5, -1.0]], &dev).unwrap();
+        let z = Tensor::new(
+            &[[0.1f32, 0.2, 0.3, 0.4], [-0.5, 1.0, -0.5, 1.0]],
+            &dev,
+        )
+        .unwrap();
+        let weight = Tensor::new(&[1.0f32, 1.0, 1.0, 1.0], &dev).unwrap();
+        let eps = 1e-6f32;
+
+        let fused: Vec<f32> = rms_norm_gated(&x, &z, &weight, eps)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+
+        // Reference on CPU
+        let x_cpu = x.to_device(&Device::Cpu).unwrap();
+        let z_cpu = z.to_device(&Device::Cpu).unwrap();
+        let w_cpu = weight.to_device(&Device::Cpu).unwrap();
+        let x_normed: Vec<f32> = candle_nn::ops::rms_norm(&x_cpu, &w_cpu, eps)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        let silu_z: Vec<f32> = candle_nn::ops::silu(&z_cpu)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        let reference: Vec<f32> = x_normed.iter().zip(&silu_z).map(|(a, b)| a * b).collect();
+
+        assert!(
+            approx_eq(&fused, &reference, 1e-5),
+            "CUDA rms_norm_gated mismatch:\nfused={fused:?}\nref  ={reference:?}"
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_silu_mul_cuda_large() {
+        let dev = match cuda_device() {
+            Some(d) => d,
+            None => return,
+        };
+        // Test with realistic hidden size
+        use rand::{Rng, SeedableRng};
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let n = 1024;
+        let gate_data: Vec<f32> = (0..n).map(|_| rng.gen_range(-2.0..2.0)).collect();
+        let up_data: Vec<f32> = (0..n).map(|_| rng.gen_range(-2.0..2.0)).collect();
+
+        let gate_cpu = Tensor::new(gate_data.as_slice(), &Device::Cpu).unwrap();
+        let up_cpu = Tensor::new(up_data.as_slice(), &Device::Cpu).unwrap();
+        let gate_gpu = gate_cpu.to_device(&dev).unwrap();
+        let up_gpu = up_cpu.to_device(&dev).unwrap();
+
+        let gpu_result: Vec<f32> = silu_mul(&gate_gpu, &up_gpu).unwrap().to_vec1().unwrap();
+        let cpu_result: Vec<f32> = silu_mul(&gate_cpu, &up_cpu).unwrap().to_vec1().unwrap();
+
+        assert!(
+            approx_eq(&gpu_result, &cpu_result, 1e-5),
+            "CUDA vs CPU silu_mul mismatch on 1024 elements"
+        );
     }
 }
