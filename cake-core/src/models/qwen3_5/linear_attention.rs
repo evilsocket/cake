@@ -28,22 +28,22 @@ impl RmsNormGated {
     }
 
     /// Apply gated RMS normalization: weight * rms_norm(x) * silu(z).
-    /// Uses fused rms_norm (1 kernel) + silu + mul = 4 kernels instead of 10.
+    /// Uses fused kernel (1 launch) instead of rms_norm + silu + mul (3 launches).
     fn forward(&self, x: &Tensor, z: &Tensor) -> Result<Tensor> {
-        // Fused RMS norm on F32 input (x is F32 from recurrent step)
-        let x_normed = candle_nn::ops::rms_norm(&x.contiguous()?, &self.weight, self.eps)?;
-        // Gate: silu(z) in F32, then multiply
-        let gate = candle_nn::ops::silu(&z.to_dtype(x.dtype())?)?;
-        x_normed * gate
+        let z = z.to_dtype(x.dtype())?;
+        crate::utils::fused_ops::rms_norm_gated(
+            &x.contiguous()?,
+            &z.contiguous()?,
+            &self.weight,
+            self.eps,
+        )
     }
 }
 
 /// Numerically stable softplus: ln(1 + exp(x)).
-/// Clamps input to avoid exp overflow, then uses max(x, result) for large x
-/// where softplus(x) ≈ x. 5 kernels instead of 7.
+/// Uses fused CUDA kernel when available (1 kernel instead of 5).
 fn stable_softplus(x: &Tensor) -> Result<Tensor> {
-    let sp = (x.minimum(88f64)?.exp()? + 1.0)?.log()?;
-    x.maximum(&sp)
+    crate::utils::fused_ops::stable_softplus(&x.contiguous()?)
 }
 
 /// Gated DeltaNet linear attention block with fused input projections.

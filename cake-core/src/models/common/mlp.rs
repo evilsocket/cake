@@ -17,7 +17,11 @@ impl MLP {
         let fused = self.gate_up_proj.forward(x)?;
         let gate = fused.narrow(D::Minus1, 0, self.intermediate_size)?;
         let up = fused.narrow(D::Minus1, self.intermediate_size, self.intermediate_size)?;
-        let x = (if self.use_gelu { gate.gelu()? } else { candle_nn::ops::silu(&gate)? } * up)?;
+        let x = if self.use_gelu {
+            (gate.gelu()? * up)?
+        } else {
+            crate::utils::fused_ops::silu_mul(&gate.contiguous()?, &up.contiguous()?)?
+        };
         self.down_proj.forward(&x)
     }
 

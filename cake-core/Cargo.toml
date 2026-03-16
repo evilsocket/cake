@@ -45,6 +45,7 @@ hf-hub = "0.5"
 libc = "0.2"
 sha2 = "0.10"
 hmac = "0.12"
+num-traits = "0.2"
 rand = "0.8"
 dirs = "5"
 hex = "0.4"
@@ -56,7 +57,7 @@ base64 = "0.22.1"
 default = ["master", "llama", "qwen2", "qwen3_5", "qwen3", "qwen3_moe", "qwen3_5_moe", "phi4", "mistral", "gemma3", "falcon3", "olmo2", "exaone4"]
 
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:candle-flash-attn"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:candle-flash-attn", "dep:bindgen_cuda"]
 
 master = ["dep:actix-web", "dep:async-stream", "dep:uuid"]
 
@@ -72,6 +73,9 @@ gemma3 = []
 falcon3 = []
 olmo2 = []
 exaone4 = []
+
+[build-dependencies]
+bindgen_cuda = { version = "0.1.6", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

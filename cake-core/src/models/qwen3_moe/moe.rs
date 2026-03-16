@@ -156,10 +156,11 @@ impl SparseMoeMlp {
                 .matmul(&sel_up.t().map_err(|e| anyhow!("moe sel up.t -> {e}"))?)
                 .map_err(|e| anyhow!("moe batched up matmul -> {e}"))?;
 
-            let hidden = (candle_nn::ops::silu(&gate_out)
-                .map_err(|e| anyhow!("moe silu -> {e}"))?
-                * up_out)
-                .map_err(|e| anyhow!("moe gate*up -> {e}"))?;
+            let hidden = crate::utils::fused_ops::silu_mul(
+                &gate_out.contiguous().map_err(|e| anyhow!("moe gate contig -> {e}"))?,
+                &up_out.contiguous().map_err(|e| anyhow!("moe up contig -> {e}"))?,
+            )
+            .map_err(|e| anyhow!("moe silu_mul -> {e}"))?;
 
             // Down proj: (k, 1, i) @ (k, i, h) = (k, 1, h)
             let expert_outs = hidden
@@ -256,10 +257,11 @@ impl SparseMoeMlp {
                 .matmul(&up.t().map_err(|e| anyhow!("moe up.t -> {e}"))?)
                 .map_err(|e| anyhow!("moe up matmul -> {e}"))?;
 
-            let hidden = (candle_nn::ops::silu(&gate_out)
-                .map_err(|e| anyhow!("moe silu -> {e}"))?
-                * up_out)
-                .map_err(|e| anyhow!("moe gate*up -> {e}"))?;
+            let hidden = crate::utils::fused_ops::silu_mul(
+                &gate_out.contiguous().map_err(|e| anyhow!("moe gate contig -> {e}"))?,
+                &up_out.contiguous().map_err(|e| anyhow!("moe up contig -> {e}"))?,
+            )
+            .map_err(|e| anyhow!("moe silu_mul -> {e}"))?;
 
             // (n_sel, i) @ (i, h) = (n_sel, h)
             let expert_out = hidden

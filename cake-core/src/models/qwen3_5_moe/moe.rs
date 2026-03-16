@@ -111,10 +111,11 @@ impl Qwen3_5MoeSparseMlp {
                 .shared_up_proj
                 .forward(&x_flat)
                 .map_err(|e| anyhow!("shared up_proj: {e}"))?;
-            let hidden = (candle_nn::ops::silu(&gate)
-                .map_err(|e| anyhow!("shared silu: {e}"))?
-                * up)
-                .map_err(|e| anyhow!("shared gate*up: {e}"))?;
+            let hidden = crate::utils::fused_ops::silu_mul(
+                &gate.contiguous().map_err(|e| anyhow!("shared gate contig: {e}"))?,
+                &up.contiguous().map_err(|e| anyhow!("shared up contig: {e}"))?,
+            )
+            .map_err(|e| anyhow!("shared silu_mul: {e}"))?;
             self.shared_down_proj
                 .forward(&hidden)
                 .map_err(|e| anyhow!("shared down_proj: {e}"))?
@@ -202,10 +203,11 @@ impl Qwen3_5MoeSparseMlp {
                 let up_out = self.experts_up[exp]
                     .forward(&x_flat)
                     .map_err(|e| anyhow!("expert up: {e}"))?;
-                let hidden = (candle_nn::ops::silu(&gate_out)
-                    .map_err(|e| anyhow!("silu: {e}"))?
-                    * up_out)
-                    .map_err(|e| anyhow!("gate*up: {e}"))?;
+                let hidden = crate::utils::fused_ops::silu_mul(
+                    &gate_out.contiguous().map_err(|e| anyhow!("gate contig: {e}"))?,
+                    &up_out.contiguous().map_err(|e| anyhow!("up contig: {e}"))?,
+                )
+                .map_err(|e| anyhow!("silu_mul: {e}"))?;
                 let expert_out = self.experts_down[exp]
                     .forward(&hidden)
                     .map_err(|e| anyhow!("expert down: {e}"))?;
@@ -275,10 +277,11 @@ impl Qwen3_5MoeSparseMlp {
                 .forward(&selected)
                 .map_err(|e| anyhow!("expert up: {e}"))?; // (n_sel, i)
 
-            let hidden = (candle_nn::ops::silu(&gate_out)
-                .map_err(|e| anyhow!("silu: {e}"))?
-                * up_out)
-                .map_err(|e| anyhow!("gate*up: {e}"))?;
+            let hidden = crate::utils::fused_ops::silu_mul(
+                &gate_out.contiguous().map_err(|e| anyhow!("gate contig: {e}"))?,
+                &up_out.contiguous().map_err(|e| anyhow!("up contig: {e}"))?,
+            )
+            .map_err(|e| anyhow!("silu_mul: {e}"))?;
 
             let expert_out = self.experts_down[exp_idx]
                 .forward(&hidden)
