@@ -215,6 +215,104 @@ fn test3_transformer_internals() -> Result<()> {
     Ok(())
 }
 
+fn test4_block0_detail() -> Result<()> {
+    println!("=== Test 4: Block 0 Detailed Intermediates ===\n");
+
+    if !Path::new(&format!("{TEST_DIR}/test4_norm_img.bin")).exists() {
+        anyhow::bail!("Run Python test4 first");
+    }
+
+    let device = Device::cuda_if_available(0)?;
+
+    // Load inputs
+    let img_data = load_f32(&format!("{TEST_DIR}/test2_img.bin"))?;
+    let txt_data = load_f32(&format!("{TEST_DIR}/test2_txt.bin"))?;
+    let img = Tensor::from_vec(img_data, (1, 256, 128), &device)?;
+    let txt = Tensor::from_vec(txt_data, (1, 512, 7680), &device)?;
+
+    // Load transformer
+    println!("Loading transformer...");
+    let transformer = cake_core::models::flux::transformer::FluxTransformerForwarder::load_model(
+        &device, DType::BF16, MODEL_REPO
+    )?;
+    let model = &transformer.model;
+    let w = model.x_embedder.weight().dtype();
+
+    // Embeddings
+    let img_cast = img.to_dtype(w)?;
+    let txt_cast = txt.to_dtype(w)?;
+    let img_emb = candle_core::Module::forward(&model.x_embedder, &img_cast)?;
+    let txt_emb = candle_core::Module::forward(&model.context_embedder, &txt_cast)?;
+
+    // Timestep + modulation
+    let t_val = Tensor::new(&[1.0f32], &device)?;
+    let t_emb = cake_core::models::flux::flux2_model::timestep_embedding(
+        &t_val, 256, DType::F32
+    )?.to_dtype(w)?;
+    let vec = model.time_embedder.forward(&t_emb)?;
+    let vec_silu = vec.silu()?;
+    let mod_img = candle_nn::Module::forward(&model.double_mod_img, &vec_silu)?;
+    let mod_txt = candle_nn::Module::forward(&model.double_mod_txt, &vec_silu)?;
+    let img_mods = mod_img.chunk(6, candle_core::D::Minus1)?;
+    let txt_mods = mod_txt.chunk(6, candle_core::D::Minus1)?;
+
+    // PE
+    let h_half = 16usize; let w_half = 16usize;
+    let mut img_id_data = Vec::new();
+    for h in 0..h_half { for ww in 0..w_half {
+        img_id_data.extend_from_slice(&[0.0f32, h as f32, ww as f32, 0.0]);
+    }}
+    let img_ids_2d = Tensor::from_vec(img_id_data, (h_half * w_half, 4), &device)?;
+    let mut txt_id_data = vec![0.0f32; 512 * 4];
+    for i in 0..512 { txt_id_data[i * 4 + 3] = i as f32; }
+    let txt_ids_2d = Tensor::from_vec(txt_id_data, (512, 4), &device)?;
+    let (img_cos, img_sin) = model.pe_embedder.forward(&img_ids_2d)?;
+    let (txt_cos, txt_sin) = model.pe_embedder.forward(&txt_ids_2d)?;
+    let pe_cos = Tensor::cat(&[&txt_cos, &img_cos], 0)?.to_dtype(w)?;
+    let pe_sin = Tensor::cat(&[&txt_sin, &img_sin], 0)?.to_dtype(w)?;
+
+    // Now manually step through block 0 to compare intermediates
+    println!("Running block 0 step by step...\n");
+
+    // 1. Modulate (norm + scale + shift)
+    // Our modulate: layer_norm(x) in F32, cast to BF16, then (1+scale)*norm + shift in BF16
+    use cake_core::models::flux::flux2_model::modulate;
+    let norm_img = modulate(&img_emb, &img_mods[0], &img_mods[1])?;
+    let r: Vec<f32> = norm_img.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+    let p = load_f32(&format!("{TEST_DIR}/test4_norm_img.bin"))?;
+    compare("norm_img (after modulate)", &r, &p);
+
+    // 2. Attention output
+    // Run full block to get the attention output
+    let (b0_img, b0_txt) = model.double_blocks[0].forward(
+        &img_emb, &txt_emb, &img_mods, &txt_mods, &pe_cos, &pe_sin
+    )?;
+
+    // Compare img_after_attn (which includes gated residual but NOT MLP)
+    // Unfortunately our block does everything at once. Let's compare the final output instead.
+    let p_img = load_f32(&format!("{TEST_DIR}/test3_block0_img.bin"))?;
+    let r_img: Vec<f32> = b0_img.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+    compare("block0_img (full output)", &r_img, &p_img);
+
+    let p_txt = load_f32(&format!("{TEST_DIR}/test3_block0_txt.bin"))?;
+    let r_txt: Vec<f32> = b0_txt.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+    compare("block0_txt (full output)", &r_txt, &p_txt);
+
+    // Also compare the intermediate: img_after_attn (before MLP)
+    let p_aft = load_f32(&format!("{TEST_DIR}/test4_img_after_attn.bin"))?;
+    // We don't have this from Rust since block does it internally.
+    // But we can compare attn output
+    let p_attn = load_f32(&format!("{TEST_DIR}/test4_attn_out_img.bin"))?;
+    println!("\n  Python attn_out_img: norm={:.4}, first3={:?}",
+        p_attn.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt(),
+        &p_attn[..3]);
+    println!("  Python img_after_attn: norm={:.4}, first3={:?}",
+        p_aft.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt(),
+        &p_aft[..3]);
+
+    Ok(())
+}
+
 fn test2_transformer() -> Result<()> {
     println!("=== Test 2: Transformer (single forward) ===\n");
 
@@ -301,7 +399,8 @@ async fn main() -> Result<()> {
         1 => test1_text_encoder()?,
         2 => test2_transformer()?,
         3 => test3_transformer_internals()?,
-        _ => println!("Unknown test: {test_num}. Available: 1, 2, 3"),
+        4 => test4_block0_detail()?,
+        _ => println!("Unknown test: {test_num}. Available: 1, 2, 3, 4"),
     }
 
     Ok(())

@@ -105,6 +105,14 @@ fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
     out.to_dtype(dtype)
 }
 
+/// Linear projection that ensures inputs match weight dtype.
+/// This is needed because modulate() returns in the input dtype which might be F32
+/// from layer_norm, but the weight is BF16.
+fn linear_matched(linear: &Linear, x: &Tensor) -> Result<Tensor> {
+    let w_dtype = linear.weight().dtype();
+    Module::forward(linear, &x.to_dtype(w_dtype)?)
+}
+
 fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe_cos: &Tensor, pe_sin: &Tensor) -> Result<Tensor> {
     let w_dtype = q.dtype();
     let q = apply_rope(q, pe_cos, pe_sin)?.contiguous()?;
@@ -168,12 +176,12 @@ impl GatedMLP {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let fused = self.linear_in.forward(x)?;
+        let fused = linear_matched(&self.linear_in, x)?;
 
         let gate = fused.narrow(D::Minus1, 0, self.mlp_hidden)?;
         let up = fused.narrow(D::Minus1, self.mlp_hidden, self.mlp_hidden)?;
         let x = (gate.silu()? * up)?;
-        self.linear_out.forward(&x)
+        linear_matched(&self.linear_out, &x)
     }
 }
 
@@ -237,22 +245,19 @@ impl DoubleStreamBlock {
     ) -> Result<(Tensor, Tensor)> {
         let head_dim = img.dim(D::Minus1)? / self.num_heads;
 
-        // Modulate + norm (adaptive LayerNorm)
+        // Modulate + norm (computes in F32 internally, returns in input dtype)
         let img_norm = modulate(img, &img_mod[0], &img_mod[1])?;
         let txt_norm = modulate(txt, &txt_mod[0], &txt_mod[1])?;
 
-        // Image Q/K/V
-        let img_q = self.to_q.forward(&img_norm)?;
-        let img_k = self.to_k.forward(&img_norm)?;
-        let img_v = self.to_v.forward(&img_norm)?;
+        // Q/K/V projections (linear_matched ensures dtype compatibility)
+        let img_q = linear_matched(&self.to_q, &img_norm)?;
+        let img_k = linear_matched(&self.to_k, &img_norm)?;
+        let img_v = linear_matched(&self.to_v, &img_norm)?;
+        let txt_q = linear_matched(&self.add_q_proj, &txt_norm)?;
+        let txt_k = linear_matched(&self.add_k_proj, &txt_norm)?;
+        let txt_v = linear_matched(&self.add_v_proj, &txt_norm)?;
 
-        // Text Q/K/V
-        let txt_q = self.add_q_proj.forward(&txt_norm)?;
-        let txt_k = self.add_k_proj.forward(&txt_norm)?;
-        let txt_v = self.add_v_proj.forward(&txt_norm)?;
-
-
-        // Reshape to (b, heads, seq, head_dim) and apply QK-norm
+        // Reshape + QK-norm
         let (b, img_seq, _) = img_q.dims3()?;
         let (_, txt_seq, _) = txt_q.dims3()?;
 
@@ -264,31 +269,26 @@ impl DoubleStreamBlock {
         let img_q = reshape_norm(img_q, &self.norm_q, img_seq)?;
         let img_k = reshape_norm(img_k, &self.norm_k, img_seq)?;
         let img_v = img_v.reshape((b, img_seq, self.num_heads, head_dim))?.transpose(1, 2)?;
-
         let txt_q = reshape_norm(txt_q, &self.norm_added_q, txt_seq)?;
         let txt_k = reshape_norm(txt_k, &self.norm_added_k, txt_seq)?;
         let txt_v = txt_v.reshape((b, txt_seq, self.num_heads, head_dim))?.transpose(1, 2)?;
 
-        // Joint attention: concat text + image
-        let q = Tensor::cat(&[&txt_q, &img_q], 2)?; // (b, heads, txt+img, head_dim)
+        // Joint attention
+        let q = Tensor::cat(&[&txt_q, &img_q], 2)?;
         let k = Tensor::cat(&[&txt_k, &img_k], 2)?;
         let v = Tensor::cat(&[&txt_v, &img_v], 2)?;
+        let attn_out = attention(&q, &k, &v, pe_cos, pe_sin)?;
 
-        let attn_out = attention(&q, &k, &v, pe_cos, pe_sin)?; // (b, txt+img, hidden)
-
-        // Split attention output
+        // Split + output projections + gated residual
         let txt_attn = attn_out.narrow(1, 0, txt_seq)?;
         let img_attn = attn_out.narrow(1, txt_seq, img_seq)?;
 
-        // Apply output projections + gated residual
-        let img = (img + img_mod[2].unsqueeze(1)?.broadcast_mul(&self.to_out.forward(&img_attn)?)?)?;
-        let txt = (txt + txt_mod[2].unsqueeze(1)?.broadcast_mul(&self.to_add_out.forward(&txt_attn)?)?)?;
+        let img = (img + img_mod[2].unsqueeze(1)?.broadcast_mul(&linear_matched(&self.to_out, &img_attn)?)?)?;
+        let txt = (txt + txt_mod[2].unsqueeze(1)?.broadcast_mul(&linear_matched(&self.to_add_out, &txt_attn)?)?)?;
 
         // MLP with modulation
-        let img_mod_mlp = modulate(&img, &img_mod[3], &img_mod[4])?;
-        let img_ff = self.ff.forward(&img_mod_mlp)?;
-        let txt_mod_mlp = modulate(&txt, &txt_mod[3], &txt_mod[4])?;
-        let txt_ff = self.ff_context.forward(&txt_mod_mlp)?;
+        let img_ff = self.ff.forward(&modulate(&img, &img_mod[3], &img_mod[4])?)?;
+        let txt_ff = self.ff_context.forward(&modulate(&txt, &txt_mod[3], &txt_mod[4])?)?;
 
         let img = (img + img_mod[5].unsqueeze(1)?.broadcast_mul(&img_ff)?)?;
         let txt = (txt + txt_mod[5].unsqueeze(1)?.broadcast_mul(&txt_ff)?)?;
@@ -341,35 +341,29 @@ impl SingleStreamBlock {
         let head_dim = self.hidden_size / self.num_heads;
 
         let x_norm = modulate(x, &mod_tensors[0], &mod_tensors[1])?;
-        let fused = self.to_qkv_mlp_proj.forward(&x_norm)?;
+        let fused = linear_matched(&self.to_qkv_mlp_proj, &x_norm)?;
 
-        // Split: Q, K, V (each hidden_size), then MLP gate+up (2*mlp_hidden)
         let h = self.hidden_size;
         let q = fused.narrow(D::Minus1, 0, h)?;
         let k = fused.narrow(D::Minus1, h, h)?;
         let v = fused.narrow(D::Minus1, 2 * h, h)?;
         let mlp_fused = fused.narrow(D::Minus1, 3 * h, 2 * self.mlp_hidden)?;
 
-        // QK-norm + reshape
         let q = q.reshape((b, seq, self.num_heads, head_dim))?;
         let q = self.norm_q.forward(&q)?.transpose(1, 2)?;
         let k = k.reshape((b, seq, self.num_heads, head_dim))?;
         let k = self.norm_k.forward(&k)?.transpose(1, 2)?;
         let v = v.reshape((b, seq, self.num_heads, head_dim))?.transpose(1, 2)?;
 
-        // Attention
-        let attn_out = attention(&q, &k, &v, pe_cos, pe_sin)?; // (b, seq, hidden)
+        let attn_out = attention(&q, &k, &v, pe_cos, pe_sin)?;
 
-        // MLP: gated SiLU
         let gate = mlp_fused.narrow(D::Minus1, 0, self.mlp_hidden)?;
         let up = mlp_fused.narrow(D::Minus1, self.mlp_hidden, self.mlp_hidden)?;
         let mlp_out = (gate.silu()? * up)?;
 
-        // Concat attention + MLP, project out
         let combined = Tensor::cat(&[&attn_out, &mlp_out], D::Minus1)?;
-        let out = self.to_out.forward(&combined)?;
+        let out = linear_matched(&self.to_out, &combined)?;
 
-        // Gated residual
         Ok((x + mod_tensors[2].unsqueeze(1)?.broadcast_mul(&out)?)?)
     }
 }
@@ -377,9 +371,9 @@ impl SingleStreamBlock {
 // ── Modulation helper ──────────────────────────────────────────────────────────
 
 /// Adaptive LayerNorm: norm(x) * (1 + scale) + shift
-fn modulate(x: &Tensor, shift: &Tensor, scale: &Tensor) -> Result<Tensor> {
+/// LayerNorm computes in F32, then casts back. Scale/shift arithmetic in input dtype (BF16).
+pub fn modulate(x: &Tensor, shift: &Tensor, scale: &Tensor) -> Result<Tensor> {
     let dtype = x.dtype();
-    // Compute norm in F32, then scale/shift in input dtype
     let x_norm = layer_norm_forward(x)?.to_dtype(dtype)?;
     let scale = scale.unsqueeze(1)?;
     let shift = shift.unsqueeze(1)?;
@@ -532,9 +526,9 @@ impl Flux2Transformer {
         let img = img.to_dtype(w_dtype)?;
         let txt = txt.to_dtype(w_dtype)?;
 
-        // Embed inputs
-        let mut img = self.x_embedder.forward(&img)?;
-        let mut txt = self.context_embedder.forward(&txt)?;
+        // Embed inputs (F32 for precision)
+        let mut img = linear_matched(&self.x_embedder, &img)?;
+        let mut txt = linear_matched(&self.context_embedder, &txt)?;
 
         // Timestep conditioning (compute in F32, cast back)
         let vec = timestep_embedding(&timesteps.to_dtype(DType::F32)?, 256, DType::F32)?
@@ -549,11 +543,11 @@ impl Flux2Transformer {
         let pe_cos = Tensor::cat(&[&txt_cos, &img_cos], 0)?.to_dtype(w_dtype)?;
         let pe_sin = Tensor::cat(&[&txt_sin, &img_sin], 0)?.to_dtype(w_dtype)?;
 
-        // Compute shared modulations
+        // Compute shared modulations (F32 for precision)
         let vec_silu = vec.silu()?;
-        let img_mod_all = Module::forward(&self.double_mod_img, &vec_silu)?;
-        let txt_mod_all = Module::forward(&self.double_mod_txt, &vec_silu)?;
-        let single_mod_all = Module::forward(&self.single_mod, &vec_silu)?;
+        let img_mod_all = linear_matched(&self.double_mod_img, &vec_silu)?;
+        let txt_mod_all = linear_matched(&self.double_mod_txt, &vec_silu)?;
+        let single_mod_all = linear_matched(&self.single_mod, &vec_silu)?;
 
         // Split modulations into chunks
         let img_mods = img_mod_all.chunk(6, D::Minus1)?;
@@ -577,10 +571,10 @@ impl Flux2Transformer {
         // Extract image portion
         let img = merged.narrow(1, txt_seq, merged.dim(1)? - txt_seq)?;
 
-        // Final layer: adaptive norm + projection
-        let final_mod = Module::forward(&self.norm_out, &vec.silu()?)?;
+        // Final layer: adaptive norm + projection (F32 for precision)
+        let final_mod = linear_matched(&self.norm_out, &vec.silu()?)?;
         let final_chunks = final_mod.chunk(2, D::Minus1)?;
         let img = modulate(&img, &final_chunks[0], &final_chunks[1])?;
-        self.proj_out.forward(&img)
+        linear_matched(&self.proj_out, &img)
     }
 }
