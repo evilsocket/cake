@@ -15,3 +15,4 @@ pub mod prediction_head;
 pub mod acoustic_connector;
 pub mod eos_classifier;
 pub mod ddpm;
+pub mod vae_decoder;
