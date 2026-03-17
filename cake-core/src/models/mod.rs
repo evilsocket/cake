@@ -36,6 +36,8 @@ pub mod qwen3_5_moe;
 #[cfg(feature = "flux")]
 pub mod flux;
 pub mod sd;
+#[cfg(feature = "vibevoice")]
+pub mod vibevoice;
 
 /// A token.
 pub struct Token {
