@@ -206,11 +206,11 @@ impl ImageGenerator for Flux1Gen {
 
         // Generate noise latents
         let noise = sampling::get_noise(1, self.height, self.width, &dev)?;
-        let noise = noise.to_dtype(DType::BF16)?;
+        let noise = noise.to_dtype(DType::F32)?;
 
         // Build state (packs noise into patches, creates position IDs)
-        let t5_embed = t5_embed.to_dtype(DType::BF16)?;
-        let clip_embed = clip_embed.to_dtype(DType::BF16)?;
+        let t5_embed = t5_embed.to_dtype(DType::F32)?;
+        let clip_embed = clip_embed.to_dtype(DType::F32)?;
         let state = sampling::State::new(&t5_embed, &clip_embed, &noise)?;
 
         // Move all state tensors to GPU
@@ -250,7 +250,7 @@ impl ImageGenerator for Flux1Gen {
         let vb = unsafe {
             crate::utils::native_dtype_backend::load_native_dtype_var_builder(
                 &[self.checkpoint_path.clone()],
-                DType::BF16,
+                DType::F32,
                 &dev,
             )?
         };
@@ -265,7 +265,7 @@ impl ImageGenerator for Flux1Gen {
         info!("Starting denoising ({num_steps} steps, guidance={guidance_scale})...");
         let b_sz = img.dim(0)?;
         let guidance_tensor = Tensor::full(guidance_scale as f32, b_sz, &dev)?
-            .to_dtype(DType::BF16)?;
+            .to_dtype(DType::F32)?;
 
         let mut img = img;
         for window in schedule.windows(2) {
@@ -274,7 +274,7 @@ impl ImageGenerator for Flux1Gen {
                 _ => continue,
             };
             let t_vec = Tensor::full(*t_curr as f32, b_sz, &dev)?
-                .to_dtype(DType::BF16)?;
+                .to_dtype(DType::F32)?;
             let pred = transformer.forward(
                 &img,
                 &img_ids,
@@ -315,7 +315,7 @@ impl ImageGenerator for Flux1Gen {
         let vb_vae = unsafe {
             candle_nn::VarBuilder::from_mmaped_safetensors(
                 &[self.checkpoint_path.clone()],
-                DType::BF16,
+                DType::F32,
                 &dev,
             )?
         };
