@@ -53,15 +53,14 @@ impl candle_core::CustomOp1 for F8E4M3ToF16 {
     }
 
     fn cpu_fwd(&self, s: &CpuStorage, l: &Layout) -> Result<(CpuStorage, Shape)> {
-        // CPU: decode to f32 then cast to f16
-        let (storage, shape) = F8E4M3ToF32.cpu_fwd(s, l)?;
-        // Re-wrap as F32, then convert — but we need the raw f32 data
-        let f32_tensor = Tensor::from_storage(candle_core::Storage::Cpu(storage), shape.clone());
-        let f16_tensor = f32_tensor.to_dtype(candle_core::DType::F16)?;
-        let (storage, _) = f16_tensor.storage_and_layout();
-        match &*storage {
-            candle_core::Storage::Cpu(s) => Ok((s.clone(), shape)),
-            _ => candle_core::bail!("expected CPU storage"),
+        // CPU: decode F8 bytes to f32, then quantize to f16
+        let (f32_storage, shape) = F8E4M3ToF32.cpu_fwd(s, l)?;
+        match f32_storage {
+            CpuStorage::F32(data) => {
+                let f16_data: Vec<half::f16> = data.iter().map(|&v| half::f16::from_f32(v)).collect();
+                Ok((CpuStorage::F16(f16_data), shape))
+            }
+            _ => candle_core::bail!("expected F32 from F8E4M3ToF32"),
         }
     }
 
