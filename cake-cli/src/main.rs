@@ -349,11 +349,10 @@ async fn run_master_audio(ctx: Context) -> Result<()> {
         let voice_path = ctx.args.voice_prompt.as_ref()
             .ok_or_else(|| anyhow::anyhow!("--voice-prompt required for TTS (path to .safetensors voice preset)"))?;
         println!("[VibeVoice] Loading voice prompt: {}", voice_path);
-        let dtype = ctx.dtype;
-        let voice_prompt = vibevoice::VoicePrompt::load(
+        // Load voice prompt in same dtype as model (F32 for numerical stability)
+        let voice_prompt = vibevoice::VoicePrompt::load_f32(
             std::path::Path::new(voice_path),
             &ctx.device,
-            dtype,
         )?;
 
         let mut model = model;

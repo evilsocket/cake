@@ -67,7 +67,9 @@ impl VibeVoiceTTS {
         let common_cfg = config.into_config();
 
         info!("Loading VibeVoice-Realtime-0.5B...");
-        let dtype = if matches!(device, Device::Cuda(_)) { DType::F16 } else { DType::F32 };
+        // Use BF16 on CUDA for flash attention compatibility + good precision
+        // (better than F16 which caused pos_cond std mismatch)
+        let dtype = if matches!(device, Device::Cuda(_)) { DType::BF16 } else { DType::F32 };
 
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[weights_path.to_path_buf()], dtype, device)?
@@ -264,23 +266,25 @@ impl VibeVoiceTTS {
             audio_latents.push(((&latent / &scale)? - &bias)?);
 
             // Check EOS
-            if self.eos_classifier.should_stop(&pos_cond, 0.5)? {
+            if self.eos_classifier.should_stop(&pos_cond, 0.99)? {
                 info!("  EOS at frame {}", audio_latents.len());
                 break;
             }
 
-            // Feed back through positive TTS LM
+            // Feed acoustic latent back through both TTS LMs for next frame condition
             let acoustic_embed = self.connector.forward(&latent)?;
-            let speech_input = (acoustic_embed.unsqueeze(1)? + speech_type.unsqueeze(0)?.broadcast_as((1, 1, hidden_size))?)?;
+            let speech_embed = (acoustic_embed.unsqueeze(1)?
+                + speech_type.unsqueeze(0)?.broadcast_as((1, 1, hidden_size))?)?;
+
+            // Positive TTS LM feedback
             pos_last = Self::forward_layers(
-                &self.tts_layers, Some(&self.tts_norm), &speech_input, pos_tts_pos, &mut pos_tts_cache,
+                &self.tts_layers, Some(&self.tts_norm), &speech_embed, pos_tts_pos, &mut pos_tts_cache,
             )?;
             pos_tts_pos += 1;
 
-            // Feed back through negative TTS LM (same latent, different cache)
-            let neg_speech_input = (acoustic_embed.unsqueeze(1)? + speech_type.unsqueeze(0)?.broadcast_as((1, 1, hidden_size))?)?;
+            // Negative TTS LM feedback
             let neg_out = Self::forward_layers(
-                &self.tts_layers, Some(&self.tts_norm), &neg_speech_input, neg_tts_pos, &mut neg_tts_cache,
+                &self.tts_layers, Some(&self.tts_norm), &speech_embed, neg_tts_pos, &mut neg_tts_cache,
             )?;
             neg_cond = neg_out.narrow(1, neg_out.dim(1)? - 1, 1)?.squeeze(1)?;
             neg_tts_pos += 1;
