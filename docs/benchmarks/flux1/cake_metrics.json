@@ -1,0 +1,14 @@
+{
+  "total_time_s": 90.0,
+  "t5_encode_s": 28.0,
+  "transformer_load_s": 9.0,
+  "denoising_time_s": 66.0,
+  "per_step_s": 3.3,
+  "vae_decode_s": 4.0,
+  "steps": 20,
+  "height": 768,
+  "width": 1024,
+  "guidance": 3.5,
+  "peak_vram_mb": 13317,
+  "note": "FP8 weights, BF16 outer compute (eliminates F32 round-trips)"
+}

@@ -1,0 +1,9 @@
+{
+  "total_time_s": 8.88,
+  "audio_duration_s": 15.6,
+  "speech_frames": 325,
+  "per_frame_ms": 27.3,
+  "diffusion_steps": 10,
+  "cfg_scale": 1.3,
+  "peak_vram_mb": 5978
+}

@@ -1,0 +1,10 @@
+{
+  "total_time_s": 12.7,
+  "audio_duration_s": 13.9,
+  "speech_frames": 104,
+  "per_frame_ms": 34,
+  "diffusion_steps": 10,
+  "cfg_scale": 1.3,
+  "peak_vram_mb": 6565,
+  "note": "Optimized: manual depthwise conv (broadcast_mul+sum), flash attention BF16"
+}

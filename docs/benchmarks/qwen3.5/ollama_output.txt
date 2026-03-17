@@ -1,0 +1,13 @@
+
+**General Relativity explained in simple terms**
+
+General relativity describes gravity as a consequence of how space and time interact with matter. It says that **mass and energy warp the fabric of spacetime**, causing objects to follow curved paths rather than following straight lines.
+
+Here is the breakdown:
+
+1.  **Gravity is Curvature:** Instead of gravity being just an attractive pull, Einstein proposes that massive objects distort the "fabric" of the universe (spacetime).
+2.  **Path of Least Resistance:** Objects fall not because they are pulled to a center, but because they follow the straightest possible route through this warped space, which causes them to naturally curve toward other mass.
+3.  **Gravity Is Everywhere:** Just as gravity is strongest near large bodies and weaker far away, gravitational effects exist everywhere in the universe, including within planets and stars.
+
+The theory explains that time slows down for objects in stronger gravitational fields. It also predicts how black holes and light travel around massive objects, such as how the solar system orbits the sun due to the warping of space caused by the sun's mass.
+

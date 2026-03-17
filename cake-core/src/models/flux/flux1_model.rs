@@ -299,7 +299,8 @@ fn fp8_linear_b(_in_d: usize, _out_d: usize, bias: bool, vb: VarBuilder) -> Resu
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 fn layer_norm(dim: usize, vb: VarBuilder) -> Result<LayerNorm> {
-    let ws = Tensor::ones(dim, DType::F32, vb.device())?;
+    // Use BF16 weights to match the compute dtype and avoid F32 casts
+    let ws = Tensor::ones(dim, DType::BF16, vb.device())?;
     Ok(LayerNorm::new_no_bias(ws, 1e-6))
 }
 
@@ -454,10 +455,9 @@ pub struct QkNorm {
 
 impl QkNorm {
     fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
-        // Norm weights must be in BF16 (not F8) for RmsNorm computation
-        let query_norm = vb.get(dim, "query_norm.scale")?.to_dtype(DType::F32)?;
+        let query_norm = vb.get(dim, "query_norm.scale")?.to_dtype(DType::BF16)?;
         let query_norm = RmsNorm::new(query_norm, 1e-6);
-        let key_norm = vb.get(dim, "key_norm.scale")?.to_dtype(DType::F32)?;
+        let key_norm = vb.get(dim, "key_norm.scale")?.to_dtype(DType::BF16)?;
         let key_norm = RmsNorm::new(key_norm, 1e-6);
         Ok(Self {
             query_norm,
@@ -476,7 +476,9 @@ struct ModulationOut {
 
 impl ModulationOut {
     fn scale_shift(&self, xs: &Tensor) -> Result<Tensor> {
-        xs.broadcast_mul(&(&self.scale + 1.)?)?
+        // Use ones_like to avoid F32 scalar promotion when scale is BF16
+        let one = Tensor::ones_like(&self.scale)?;
+        xs.broadcast_mul(&(&self.scale + one)?)?
             .broadcast_add(&self.shift)
     }
 
@@ -780,7 +782,7 @@ impl LastLayer {
         let (shift, scale) = (&chunks[0], &chunks[1]);
         let xs = xs
             .apply(&self.norm_final)?
-            .broadcast_mul(&(scale.unsqueeze(1)? + 1.0)?)?
+            .broadcast_mul(&(scale.unsqueeze(1)? + Tensor::ones_like(scale)?.unsqueeze(1)?)?)?
             .broadcast_add(&shift.unsqueeze(1)?)?;
         self.linear.forward(&xs)
     }

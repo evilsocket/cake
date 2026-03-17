@@ -268,23 +268,25 @@ impl ImageGenerator for Flux1Gen {
         // ── 6. Denoise ─────────────────────────────────────────────────────
         info!("Starting denoising ({num_steps} steps, guidance={guidance_scale})...");
         let b_sz = img.dim(0)?;
-        let guidance_tensor = Tensor::full(guidance_scale as f32, b_sz, &dev)?;
 
-        // Keep state in F32 for numerical stability (F16 causes NaN in modulation ops).
-        // Fp8Linear internally casts to F16 for fast matmul, then outputs F16 which gets
-        // cast back to F32 by downstream ops — so we still benefit from F16 TFLOPS.
-        let img_ids = img_ids.to_dtype(DType::F32)?;
-        let txt = txt.to_dtype(DType::F32)?;
-        let txt_ids = txt_ids.to_dtype(DType::F32)?;
-        let vec = vec.to_dtype(DType::F32)?;
+        // Use BF16 for denoising state — same exponent range as F32 (no NaN risk),
+        // eliminates hundreds of F32↔F16 casts per step in Fp8Linear.
+        let compute_dtype = DType::BF16;
+        let guidance_tensor = Tensor::full(guidance_scale as f32, b_sz, &dev)?
+            .to_dtype(compute_dtype)?;
+        let img_ids = img_ids.to_dtype(compute_dtype)?;
+        let txt = txt.to_dtype(compute_dtype)?;
+        let txt_ids = txt_ids.to_dtype(compute_dtype)?;
+        let vec = vec.to_dtype(compute_dtype)?;
 
-        let mut img = img.to_dtype(DType::F32)?;
+        let mut img = img.to_dtype(compute_dtype)?;
         for window in schedule.windows(2) {
             let (t_curr, t_prev) = match window {
                 [a, b] => (a, b),
                 _ => continue,
             };
-            let t_vec = Tensor::full(*t_curr as f32, b_sz, &dev)?;
+            let t_vec = Tensor::full(*t_curr as f32, b_sz, &dev)?
+                .to_dtype(compute_dtype)?;
             let pred = transformer.forward(
                 &img,
                 &img_ids,
@@ -294,7 +296,8 @@ impl ImageGenerator for Flux1Gen {
                 &vec,
                 Some(&guidance_tensor),
             )?;
-            img = (img + pred * (t_prev - t_curr))?;
+            let dt = Tensor::full((t_prev - t_curr) as f32, b_sz, &dev)?.to_dtype(compute_dtype)?;
+            img = (img + pred.broadcast_mul(&dt)?)?;
             info!("  step: t={t_curr:.3}→{t_prev:.3}");
         }
 

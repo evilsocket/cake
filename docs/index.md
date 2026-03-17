@@ -13,3 +13,4 @@ Built on [Candle](https://github.com/huggingface/candle) with support for CUDA, 
 - [Image Generation](image_generation.md) — FLUX and Stable Diffusion image synthesis
 - [Voice Generation](voice_generation.md) — VibeVoice TTS with voice cloning
 - [Docker](docker.md) — Container builds for Linux/NVIDIA
+- [Benchmarks](benchmarks/README.md) — Performance comparison vs reference implementations

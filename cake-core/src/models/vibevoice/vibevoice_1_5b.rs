@@ -346,6 +346,10 @@ impl VibeVoice1_5B {
         let mut audio_chunks: Vec<Tensor> = Vec::new();
         let mut last_hidden = hidden.narrow(1, hidden.dim(1)? - 1, 1)?;
 
+        // Pre-compute scaling factors once (avoid per-frame dtype conversion)
+        let scale = self.speech_scaling_factor.to_dtype(self.dtype)?;
+        let bias = self.speech_bias_factor.to_dtype(self.dtype)?;
+
         // Valid token IDs for generation (constrained logits)
         let valid_tokens = [SPEECH_START_ID, SPEECH_END_ID, SPEECH_DIFFUSION_ID, EOS_ID];
 
@@ -416,8 +420,6 @@ impl VibeVoice1_5B {
 
                 // Decode to audio
                 let t0 = std::time::Instant::now();
-                let scale = self.speech_scaling_factor.to_dtype(self.dtype)?;
-                let bias = self.speech_bias_factor.to_dtype(self.dtype)?;
                 let scaled_latent = latent.broadcast_div(&scale)?.broadcast_sub(&bias)?;
 
                 let audio_chunk = self

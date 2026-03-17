@@ -1,0 +1,18 @@
+<think>
+
+</think>
+
+**General Relativity** is the theory of Einstein that describes how gravity works. It explains that **mass and energy curve spacetime**, and everything else—like planets orbiting stars or light bending around us—is just following those curves.
+
+Here is a simple breakdown:
+
+### 1. The Big Idea: Spacetime
+Before Einstein, people thought space and time were separate, like two different rooms in a house. But Einstein realized they are actually one continuous fabric called **spacetime**. Imagine you are walking on a trampoline made of stretched rubber. If you drop a bowling ball (representing mass), it creates a dip in the surface.
+
+*   **Mass/Energy** acts as the "weight" that pulls things down into this curve.
+*   **Light** follows the curvature of spacetime, which is why light bends when it passes near massive objects.
+
+### 2. Gravity as Curvature
+In everyday life, gravity feels like an invisible force pulling things together. In General Relativity, gravity isn't really a force; it's just the result of space being curved by matter and energy.
+
+*   Imagine two planets orbiting each other. The planet closer to the sun has more mass, so

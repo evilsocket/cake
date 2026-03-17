@@ -1,0 +1,9 @@
+{
+  "total_time_s": 14.42,
+  "load_time_s": 2.15,
+  "prompt_eval_tokens": 24,
+  "prompt_eval_rate_tok_s": 1170.36,
+  "eval_tokens": 1686,
+  "eval_rate_tok_s": 183.55,
+  "peak_vram_mb": 2248
+}

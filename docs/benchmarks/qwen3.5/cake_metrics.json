@@ -1,0 +1,8 @@
+{
+  "total_time_s": 3.76,
+  "load_time_s": 1.8,
+  "eval_tokens": 256,
+  "eval_rate_tok_s": 128.23,
+  "peak_vram_mb": 1906,
+  "peak_ram_mb": 2200
+}
