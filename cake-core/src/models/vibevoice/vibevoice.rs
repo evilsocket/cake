@@ -58,10 +58,12 @@ pub struct VibeVoiceTTS {
 
 impl VibeVoiceTTS {
     /// Load the full VibeVoice model from a safetensors file.
+    /// `diffusion_steps` overrides the config's ddpm_num_inference_steps (default 10 for speed).
     pub fn load(
         config_path: &std::path::Path,
         weights_path: &std::path::Path,
         device: &Device,
+        diffusion_steps: Option<usize>,
     ) -> Result<Self> {
         let config = VibeVoiceConfig::from_path(config_path)?;
         let common_cfg = config.into_config();
@@ -146,10 +148,13 @@ impl VibeVoiceTTS {
         let speech_scaling_factor = vb.pp("model").get((), "speech_scaling_factor")?;
         let speech_bias_factor = vb.pp("model").get((), "speech_bias_factor")?;
 
-        // DDPM scheduler
+        // DDPM scheduler (default from config, override with parameter)
+        let inference_steps = diffusion_steps
+            .unwrap_or(config.diffusion_head_config.ddpm_num_inference_steps);
+        info!("  DDPM: {} inference steps", inference_steps);
         let scheduler = DdpmScheduler::new_cosine(
             config.diffusion_head_config.ddpm_num_steps,
-            config.diffusion_head_config.ddpm_num_inference_steps,
+            inference_steps,
         );
 
         // RoPE + KV cache for autoregressive generation

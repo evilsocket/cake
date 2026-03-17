@@ -172,6 +172,10 @@ pub struct Args {
     /// Maximum speech frames to generate (each frame ≈ 133ms at 7.5 Hz).
     #[arg(long, default_value_t = 150)]
     pub max_audio_frames: usize,
+
+    /// Number of DDPM diffusion steps per speech frame (lower = faster, less quality).
+    #[arg(long, default_value_t = 10)]
+    pub tts_diffusion_steps: usize,
 }
 
 #[derive(Clone, clap::Args, Default, Debug)]

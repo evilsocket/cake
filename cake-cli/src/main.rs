@@ -318,6 +318,7 @@ async fn run_master_audio(ctx: Context) -> Result<()> {
             &config_path,
             &weights_path,
             &ctx.device,
+            Some(ctx.args.tts_diffusion_steps),
         )?;
 
         let prompt = &ctx.args.prompt;
