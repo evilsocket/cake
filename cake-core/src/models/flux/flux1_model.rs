@@ -115,8 +115,10 @@ impl Fp8Linear {
     }
 
     /// Pre-dequantize F8→F16 and cache. Call once before inference loop.
-    pub fn warmup(&self) -> Result<()> {
+    pub fn warmup(&mut self) -> Result<()> {
         let _ = self.get_weight()?;
+        // Drop the F8 weight to reclaim VRAM (we keep only the F16 cache)
+        self.f8_weight = None;
         Ok(())
     }
 
@@ -305,6 +307,28 @@ fn layer_norm(dim: usize, vb: VarBuilder) -> Result<LayerNorm> {
 fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
     let dim = q.dim(D::Minus1)?;
     let scale_factor = 1.0 / (dim as f64).sqrt();
+
+    // Use Flash Attention on CUDA — O(n) memory instead of O(n²)
+    #[cfg(feature = "cuda")]
+    if matches!(q.device(), candle_core::Device::Cuda(_)) {
+        let mut batch_dims = q.dims().to_vec();
+        batch_dims.pop();
+        batch_dims.pop();
+        let q = q.flatten_to(batch_dims.len() - 1)?;
+        let k = k.flatten_to(batch_dims.len() - 1)?;
+        let v = v.flatten_to(batch_dims.len() - 1)?;
+        // flash_attn expects (batch, seq, heads, head_dim)
+        let q = q.transpose(1, 2)?.contiguous()?;
+        let k = k.transpose(1, 2)?.contiguous()?;
+        let v = v.transpose(1, 2)?.contiguous()?;
+        let attn = candle_flash_attn::flash_attn(&q, &k, &v, scale_factor as f32, false)?;
+        let attn = attn.transpose(1, 2)?;
+        batch_dims.push(attn.dim(D::Minus2)?);
+        batch_dims.push(attn.dim(D::Minus1)?);
+        return attn.reshape(batch_dims);
+    }
+
+    // CPU/Metal fallback: manual SDPA
     let mut batch_dims = q.dims().to_vec();
     batch_dims.pop();
     batch_dims.pop();

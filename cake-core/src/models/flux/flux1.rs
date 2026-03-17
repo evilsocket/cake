@@ -187,13 +187,13 @@ impl ImageGenerator for Flux1Gen {
             clip_embed.dtype()
         );
 
-        // ── 3. T5 encode on CPU ────────────────────────────────────────────
-        info!("Running T5-XXL text encoder (CPU)...");
+        // ── 3. T5 encode (GPU when available, CPU fallback) ─────────────────
+        info!("Running T5-XXL text encoder...");
         let t5_embed = t5_encoder::encode_t5(
             &self.checkpoint_path,
             flux1_prefixes::T5,
             &t5_id_tensor,
-            &Device::Cpu,
+            &dev,
         )?;
         info!(
             "T5 embedding: {:?}, dtype={:?}",
@@ -260,6 +260,10 @@ impl ImageGenerator for Flux1Gen {
             "Transformer loaded ({} double + {} single blocks)",
             cfg.depth, cfg.depth_single_blocks
         );
+
+        // First forward call triggers F8→F16 dequant and caching for all Fp8Linear layers.
+        // After this, F8 weights can be garbage-collected (only F16 cache is kept).
+        // The F8 originals will be dropped when Fp8Linear's RwLock cache is populated.
 
         // ── 6. Denoise ─────────────────────────────────────────────────────
         info!("Starting denoising ({num_steps} steps, guidance={guidance_scale})...");
