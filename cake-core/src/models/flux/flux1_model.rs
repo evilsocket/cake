@@ -85,6 +85,67 @@ impl Fp8Linear {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fp8_linear_f32_roundtrip() {
+        let w = Tensor::new(&[[1.0f32, 2.0], [3.0, 4.0], [5.0, 6.0]], &candle_core::Device::Cpu)
+            .unwrap();
+        let linear = Fp8Linear::new(w, None);
+        let x = Tensor::new(&[[0.5f32, 1.0]], &candle_core::Device::Cpu).unwrap();
+        let y = linear.forward(&x).unwrap();
+        assert_eq!(y.dims(), &[1, 3]);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_f8_to_f32_cast_on_cuda() {
+        let dev = match candle_core::Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        // Create F32 tensor, cast to F8E4M3, move to GPU, cast back to F32
+        let original = Tensor::new(&[0.5f32, 1.0, -0.5, 2.0], &candle_core::Device::Cpu).unwrap();
+        let f8 = original.to_dtype(DType::F8E4M3).unwrap();
+        let f8_gpu = f8.to_device(&dev).unwrap();
+        assert_eq!(f8_gpu.dtype(), DType::F8E4M3);
+
+        // This is the critical operation — F8→F32 on CUDA
+        let f32_gpu = f8_gpu.to_dtype(DType::F32).unwrap();
+        assert_eq!(f32_gpu.dtype(), DType::F32);
+
+        let vals: Vec<f32> = f32_gpu.to_vec1().unwrap();
+        assert_eq!(vals.len(), 4);
+        // F8E4M3 has limited precision, check roughly
+        assert!((vals[0] - 0.5).abs() < 0.1, "val[0]={}", vals[0]);
+        assert!((vals[1] - 1.0).abs() < 0.1, "val[1]={}", vals[1]);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_fp8_linear_cuda_forward() {
+        let dev = match candle_core::Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        // Create F8 weight on GPU
+        let w_f32 = Tensor::new(
+            &[[1.0f32, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
+            &candle_core::Device::Cpu,
+        )
+        .unwrap();
+        let w_f8 = w_f32.to_dtype(DType::F8E4M3).unwrap().to_device(&dev).unwrap();
+        let linear = Fp8Linear::new(w_f8, None);
+
+        let x = Tensor::new(&[[0.5f32, 1.0, 0.5, 1.0]], &dev).unwrap();
+        let y = linear.forward(&x).unwrap();
+        assert_eq!(y.dims(), &[1, 2]);
+        assert_eq!(y.dtype(), DType::F32);
+    }
+}
+
 /// Load an Fp8Linear from VarBuilder (weights stay in native dtype).
 fn fp8_linear(_in_d: usize, _out_d: usize, vb: VarBuilder) -> Result<Fp8Linear> {
     let weight = vb.get_unchecked("weight")?;
