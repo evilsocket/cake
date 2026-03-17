@@ -397,19 +397,25 @@ impl VibeVoice1_5B {
             let mut next_embed;
 
             if next_token == SPEECH_DIFFUSION_ID {
+                let frame_start = std::time::Instant::now();
+
                 // Forward negative model to get neg condition
                 let diff_id = Tensor::new(&[SPEECH_DIFFUSION_ID], &dev)?.unsqueeze(0)?;
                 let diff_embed = self.embed_tokens.forward(&diff_id)?;
                 let neg_hidden = self.forward_lm(&diff_embed, neg_pos, &mut neg_cache)?;
                 neg_pos += 1;
+                let t_neg_lm = frame_start.elapsed();
 
                 let pos_cond = last_hidden.squeeze(1)?; // (1, hidden)
                 let neg_cond = neg_hidden.squeeze(1)?; // (1, hidden)
 
                 // Diffusion sampling
+                let t0 = std::time::Instant::now();
                 let latent = self.sample_speech_latent(&pos_cond, &neg_cond, cfg_scale)?;
+                let t_diffusion = t0.elapsed();
 
                 // Decode to audio
+                let t0 = std::time::Instant::now();
                 let scale = self.speech_scaling_factor.to_dtype(self.dtype)?;
                 let bias = self.speech_bias_factor.to_dtype(self.dtype)?;
                 let scaled_latent = latent.broadcast_div(&scale)?.broadcast_sub(&bias)?;
@@ -417,22 +423,34 @@ impl VibeVoice1_5B {
                 let audio_chunk = self
                     .acoustic_decoder
                     .decode(&scaled_latent.unsqueeze(0)?.transpose(1, 2)?)?;
+                let t_vae_decode = t0.elapsed();
                 audio_chunks.push(audio_chunk.clone());
 
                 // Encode feedback through semantic encoder
+                let t0 = std::time::Instant::now();
                 let semantic_features = self.semantic_encoder.encode(&audio_chunk)?;
+                let t_sem_encode = t0.elapsed();
 
                 // Combine acoustic + semantic for next input
                 let acoustic_embed = self.acoustic_connector.forward(&latent)?; // (1, hidden)
                 let semantic_embed = self.semantic_connector.forward(&semantic_features)?; // (1, frames, hidden)
-                // Use mean of semantic frames
                 let semantic_mean = semantic_embed.mean(1)?; // (1, hidden)
                 next_embed = (acoustic_embed + semantic_mean)?; // (1, hidden)
                 next_embed = next_embed.unsqueeze(1)?; // (1, 1, hidden)
 
+                let t_total = frame_start.elapsed();
+
                 #[allow(clippy::manual_is_multiple_of)]
-                if audio_chunks.len() % 10 == 0 {
-                    info!("  {} speech frames...", audio_chunks.len());
+                if audio_chunks.len() % 10 == 0 || audio_chunks.len() <= 3 {
+                    info!(
+                        "  frame {} ({:.0}ms): neg_lm={:.0}ms diffusion={:.0}ms vae_dec={:.0}ms sem_enc={:.0}ms",
+                        audio_chunks.len(),
+                        t_total.as_secs_f64() * 1000.0,
+                        t_neg_lm.as_secs_f64() * 1000.0,
+                        t_diffusion.as_secs_f64() * 1000.0,
+                        t_vae_decode.as_secs_f64() * 1000.0,
+                        t_sem_encode.as_secs_f64() * 1000.0,
+                    );
                 }
             } else {
                 // Non-diffusion token: embed normally

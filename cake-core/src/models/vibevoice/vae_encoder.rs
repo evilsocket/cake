@@ -16,7 +16,9 @@ use candle_nn::{Conv1d, Conv1dConfig, RmsNorm, VarBuilder};
 struct EncoderBlock {
     norm: RmsNorm,
     gamma: Tensor,
-    mixer_conv: Conv1d,
+    /// Depthwise conv weight: (channels, 7) for manual broadcast_mul implementation
+    mixer_weight: Tensor,
+    mixer_bias: Tensor,
     ffn_norm: RmsNorm,
     ffn_gamma: Tensor,
     ffn_linear1: candle_nn::Linear,
@@ -28,17 +30,10 @@ impl EncoderBlock {
         let norm = candle_nn::rms_norm(channels, eps, vb.pp("norm"))?;
         let gamma = vb.get(channels, "gamma")?;
 
-        // Depthwise conv: groups=channels, kernel=7, NO padding (causal)
-        let mixer_conv = candle_nn::conv1d(
-            channels,
-            channels,
-            7,
-            Conv1dConfig {
-                groups: channels,
-                ..Default::default()
-            },
-            vb.pp("mixer").pp("conv").pp("conv").pp("conv"),
-        )?;
+        // Load depthwise conv weights manually: (channels, 1, 7) → (channels, 7)
+        let conv_vb = vb.pp("mixer").pp("conv").pp("conv").pp("conv");
+        let mixer_weight = conv_vb.get((channels, 1, 7), "weight")?.squeeze(1)?;
+        let mixer_bias = conv_vb.get(channels, "bias")?;
 
         let ffn_norm = candle_nn::rms_norm(channels, eps, vb.pp("ffn_norm"))?;
         let ffn_gamma = vb.get(channels, "ffn_gamma")?;
@@ -48,7 +43,8 @@ impl EncoderBlock {
         Ok(Self {
             norm,
             gamma,
-            mixer_conv,
+            mixer_weight,
+            mixer_bias,
             ffn_norm,
             ffn_gamma,
             ffn_linear1,
@@ -68,7 +64,8 @@ impl EncoderBlock {
             ],
             2,
         )?;
-        let h = self.mixer_conv.forward(&h)?;
+        // Manual depthwise conv (avoids candle's slow grouped Conv1d)
+        let h = super::vae_decoder::depthwise_conv1d_manual(&h, &self.mixer_weight, &self.mixer_bias, 7)?;
         let gamma = self.gamma.unsqueeze(0)?.unsqueeze(2)?;
         let x = (residual + h.broadcast_mul(&gamma)?)?;
 
@@ -307,5 +304,90 @@ impl TokenizerEncoder {
 
         // Return as (batch, frames, vae_dim)
         h.transpose(1, 2)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::{DType, Device, IndexOp};
+
+    fn mt(shape: &[usize], seed: u64) -> Tensor {
+        use rand::{Rng, SeedableRng};
+        let n: usize = shape.iter().product();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+        let d: Vec<f32> = (0..n).map(|_| rng.gen_range(-0.01..0.01)).collect();
+        Tensor::from_vec(d, shape, &Device::Cpu).unwrap()
+    }
+
+    #[test]
+    fn test_encoder_block_forward() {
+        let ch = 32;
+        let mut map = std::collections::HashMap::new();
+        let dev = Device::Cpu;
+
+        map.insert("norm.weight".into(), Tensor::ones(ch, DType::F32, &dev).unwrap());
+        map.insert("gamma".into(), Tensor::ones(ch, DType::F32, &dev).unwrap());
+        map.insert("mixer.conv.conv.conv.weight".into(), mt(&[ch, 1, 7], 1));
+        map.insert("mixer.conv.conv.conv.bias".into(), mt(&[ch], 2));
+        map.insert("ffn_norm.weight".into(), Tensor::ones(ch, DType::F32, &dev).unwrap());
+        map.insert("ffn_gamma".into(), Tensor::ones(ch, DType::F32, &dev).unwrap());
+        map.insert("ffn.linear1.weight".into(), mt(&[ch * 4, ch], 3));
+        map.insert("ffn.linear1.bias".into(), mt(&[ch * 4], 4));
+        map.insert("ffn.linear2.weight".into(), mt(&[ch, ch * 4], 5));
+        map.insert("ffn.linear2.bias".into(), mt(&[ch], 6));
+
+        let vb = candle_nn::VarBuilder::from_tensors(map, DType::F32, &dev);
+        let block = EncoderBlock::load(vb, ch, 1e-5).unwrap();
+
+        // Input: (batch=1, channels=32, seq=16)
+        let x = mt(&[1, ch, 16], 10);
+        let y = block.forward(&x).unwrap();
+        assert_eq!(y.dims(), &[1, ch, 16]);
+    }
+
+    #[test]
+    fn test_encoder_block_residual() {
+        let ch = 16;
+        let mut map = std::collections::HashMap::new();
+        let dev = Device::Cpu;
+
+        // Zero weights → output should equal input (residual connection)
+        map.insert("norm.weight".into(), Tensor::ones(ch, DType::F32, &dev).unwrap());
+        map.insert("gamma".into(), Tensor::zeros(ch, DType::F32, &dev).unwrap());
+        map.insert("mixer.conv.conv.conv.weight".into(), Tensor::zeros(&[ch, 1, 7], DType::F32, &dev).unwrap());
+        map.insert("mixer.conv.conv.conv.bias".into(), Tensor::zeros(ch, DType::F32, &dev).unwrap());
+        map.insert("ffn_norm.weight".into(), Tensor::ones(ch, DType::F32, &dev).unwrap());
+        map.insert("ffn_gamma".into(), Tensor::zeros(ch, DType::F32, &dev).unwrap());
+        map.insert("ffn.linear1.weight".into(), Tensor::zeros(&[ch * 4, ch], DType::F32, &dev).unwrap());
+        map.insert("ffn.linear1.bias".into(), Tensor::zeros(ch * 4, DType::F32, &dev).unwrap());
+        map.insert("ffn.linear2.weight".into(), Tensor::zeros(&[ch, ch * 4], DType::F32, &dev).unwrap());
+        map.insert("ffn.linear2.bias".into(), Tensor::zeros(ch, DType::F32, &dev).unwrap());
+
+        let vb = candle_nn::VarBuilder::from_tensors(map, DType::F32, &dev);
+        let block = EncoderBlock::load(vb, ch, 1e-5).unwrap();
+
+        let x = mt(&[1, ch, 8], 42);
+        let y = block.forward(&x).unwrap();
+        // With zero gamma, both mixer and FFN contribute nothing → y ≈ x
+        let diff: f32 = (y - x).unwrap().abs().unwrap().sum_all().unwrap().to_scalar().unwrap();
+        assert!(diff < 1e-5, "residual should be identity with zero gamma, got diff={diff}");
+    }
+
+    #[test]
+    fn test_causal_pad() {
+        let x = Tensor::ones(&[1, 4, 10], DType::F32, &Device::Cpu).unwrap();
+        let padded = TokenizerEncoder::causal_pad(&x, 3).unwrap();
+        assert_eq!(padded.dims(), &[1, 4, 13]);
+        // First 3 samples should be zeros
+        let first: Vec<f32> = padded.i((0, 0, ..3)).unwrap().to_vec1().unwrap();
+        assert!(first.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn test_causal_pad_zero() {
+        let x = Tensor::ones(&[1, 4, 10], DType::F32, &Device::Cpu).unwrap();
+        let padded = TokenizerEncoder::causal_pad(&x, 0).unwrap();
+        assert_eq!(padded.dims(), &[1, 4, 10]);
     }
 }

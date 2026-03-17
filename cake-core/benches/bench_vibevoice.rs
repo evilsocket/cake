@@ -91,3 +91,50 @@ fn acoustic_connector_forward(bencher: divan::Bencher) {
     let x = make_tensor(&[1, vae_dim], 10);
     bencher.bench_local(|| conn.forward(&x).unwrap());
 }
+
+// ── Acoustic Connector 1.5B (larger hidden) ─────────────────────────
+
+#[divan::bench]
+fn acoustic_connector_1_5b_forward(bencher: divan::Bencher) {
+    let vae_dim = 64;
+    let hidden = 1536; // 1.5B model hidden size
+    let mut map: HashMap<String, Tensor> = HashMap::new();
+    map.insert("fc1.weight".into(), make_tensor(&[hidden, vae_dim], 1));
+    map.insert("fc1.bias".into(), make_tensor(&[hidden], 2));
+    map.insert("norm.weight".into(), Tensor::ones(hidden, DType::F32, &Device::Cpu).unwrap());
+    map.insert("fc2.weight".into(), make_tensor(&[hidden, hidden], 3));
+    map.insert("fc2.bias".into(), make_tensor(&[hidden], 4));
+    let vb = VarBuilder::from_tensors(map, DType::F32, &Device::Cpu);
+    let conn = cake_core::models::vibevoice::acoustic_connector::AcousticConnector::load(vb, vae_dim, hidden, 1e-6).unwrap();
+    let x = make_tensor(&[1, vae_dim], 10);
+    bencher.bench_local(|| conn.forward(&x).unwrap());
+}
+
+// ── Semantic Connector 1.5B ─────────────────────────────────────────
+
+#[divan::bench]
+fn semantic_connector_1_5b_forward(bencher: divan::Bencher) {
+    let vae_dim = 128; // semantic tokenizer dim
+    let hidden = 1536;
+    let mut map: HashMap<String, Tensor> = HashMap::new();
+    map.insert("fc1.weight".into(), make_tensor(&[hidden, vae_dim], 1));
+    map.insert("fc1.bias".into(), make_tensor(&[hidden], 2));
+    map.insert("norm.weight".into(), Tensor::ones(hidden, DType::F32, &Device::Cpu).unwrap());
+    map.insert("fc2.weight".into(), make_tensor(&[hidden, hidden], 3));
+    map.insert("fc2.bias".into(), make_tensor(&[hidden], 4));
+    let vb = VarBuilder::from_tensors(map, DType::F32, &Device::Cpu);
+    let conn = cake_core::models::vibevoice::acoustic_connector::AcousticConnector::load(vb, vae_dim, hidden, 1e-6).unwrap();
+    let x = make_tensor(&[1, 1, vae_dim], 10); // (batch, 1 frame, 128)
+    bencher.bench_local(|| conn.forward(&x).unwrap());
+}
+
+// ── Prediction Head 1.5B (1536 hidden) ──────────────────────────────
+
+#[divan::bench(args = [1, 4])]
+fn prediction_head_1_5b_forward(bencher: divan::Bencher, batch: usize) {
+    let head = make_prediction_head(128, 64, 4); // Scaled down for CPU bench
+    let x = make_tensor(&[batch, 64], 100);
+    let t = Tensor::from_vec(vec![0.5f32; batch], batch, &Device::Cpu).unwrap();
+    let cond = make_tensor(&[batch, 128], 101);
+    bencher.bench_local(|| head.forward(&x, &t, &cond).unwrap());
+}

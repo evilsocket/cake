@@ -12,11 +12,38 @@ use candle_nn::{Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, Rm
 struct DecoderBlock {
     norm: RmsNorm,
     gamma: Tensor,
-    mixer_conv: Conv1d,
+    /// Depthwise conv weight: (channels, 1, 7) — stored as (channels, 7) for manual impl
+    mixer_weight: Tensor,
+    mixer_bias: Tensor,
     ffn_norm: RmsNorm,
     ffn_gamma: Tensor,
     ffn_linear1: candle_nn::Linear,
     ffn_linear2: candle_nn::Linear,
+}
+
+/// Manual depthwise conv1d using broadcast_mul + sum.
+/// This avoids candle's pathologically slow grouped Conv1d CUDA kernel.
+/// Input: (batch, channels, time+pad), weight: (channels, kernel), bias: (channels,)
+/// Output: (batch, channels, time)
+pub fn depthwise_conv1d_manual(x: &Tensor, weight: &Tensor, bias: &Tensor, kernel_size: usize) -> Result<Tensor> {
+    let (_b, _c, t_padded) = x.dims3()?;
+    let out_len = t_padded - kernel_size + 1;
+    // Collect windowed slices and sum with weights
+    let mut acc: Option<Tensor> = None;
+    for k in 0..kernel_size {
+        let slice = x.narrow(2, k, out_len)?; // (b, c, out_len)
+        let w_k = weight.narrow(1, k, 1)?; // (c, 1)
+        let w_k = w_k.unsqueeze(0)?; // (1, c, 1)
+        let term = slice.broadcast_mul(&w_k)?;
+        acc = Some(match acc {
+            None => term,
+            Some(a) => (a + term)?,
+        });
+    }
+    let out = acc.unwrap();
+    // Add bias: (channels,) → (1, channels, 1)
+    let bias = bias.unsqueeze(0)?.unsqueeze(2)?;
+    out.broadcast_add(&bias)
 }
 
 impl DecoderBlock {
@@ -24,17 +51,10 @@ impl DecoderBlock {
         let norm = candle_nn::rms_norm(channels, eps, vb.pp("norm"))?;
         let gamma = vb.get(channels, "gamma")?;
 
-        // Depthwise conv: groups=channels, kernel=7, NO padding (causal model)
-        let mixer_conv = candle_nn::conv1d(
-            channels,
-            channels,
-            7,
-            Conv1dConfig {
-                groups: channels,
-                ..Default::default() // padding=0
-            },
-            vb.pp("mixer").pp("conv").pp("conv").pp("conv"),
-        )?;
+        // Load depthwise conv weights manually: (channels, 1, 7) → squeeze to (channels, 7)
+        let conv_vb = vb.pp("mixer").pp("conv").pp("conv").pp("conv");
+        let mixer_weight = conv_vb.get((channels, 1, 7), "weight")?.squeeze(1)?; // (channels, 7)
+        let mixer_bias = conv_vb.get(channels, "bias")?;
 
         let ffn_norm = candle_nn::rms_norm(channels, eps, vb.pp("ffn_norm"))?;
         let ffn_gamma = vb.get(channels, "ffn_gamma")?;
@@ -44,7 +64,8 @@ impl DecoderBlock {
         Ok(Self {
             norm,
             gamma,
-            mixer_conv,
+            mixer_weight,
+            mixer_bias,
             ffn_norm,
             ffn_gamma,
             ffn_linear1,
@@ -61,7 +82,7 @@ impl DecoderBlock {
             &Tensor::zeros((h.dim(0)?, h.dim(1)?, 6), h.dtype(), h.device())?,
             &h,
         ], 2)?;
-        let h = self.mixer_conv.forward(&h)?;
+        let h = depthwise_conv1d_manual(&h, &self.mixer_weight, &self.mixer_bias, 7)?;
         let gamma = self.gamma.unsqueeze(0)?.unsqueeze(2)?;
         let x = (residual + h.broadcast_mul(&gamma)?)?;
 
