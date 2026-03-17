@@ -87,6 +87,7 @@ impl candle_core::CustomOp1 for F8E4M3ToF16 {
         let cfg = LaunchConfig::for_num_elems(el as u32);
         let func =
             dev.get_or_load_custom_func("f8e4m3_to_f16", "cake_fused_ops", FUSED_OPS_PTX)?;
+        // half::f16 is used by CudaStorageSlice::F16
         let out = unsafe { dev.alloc::<half::f16>(el)? };
         let mut builder = func.builder();
         builder.arg(&el);

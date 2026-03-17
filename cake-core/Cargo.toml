@@ -40,6 +40,7 @@ candle-core = { version = "0.9" }
 candle-nn = { version = "0.9" }
 candle-transformers = { version = "0.9" }
 candle-flash-attn = { version = "0.9", optional = true }
+half = "2"
 image = "0.25.2"
 hf-hub = "0.5"
 libc = "0.2"
