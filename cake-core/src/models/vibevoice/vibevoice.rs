@@ -11,7 +11,7 @@ use log::info;
 
 use super::acoustic_connector::AcousticConnector;
 use super::config::VibeVoiceConfig;
-use super::ddpm::DdpmScheduler;
+use super::ddpm::DpmSolverPP;
 use super::eos_classifier::EosClassifier;
 use super::prediction_head::PredictionHead;
 use super::vae_decoder::AcousticVaeDecoder;
@@ -42,7 +42,7 @@ pub struct VibeVoiceTTS {
 
     // Diffusion + decoding
     prediction_head: PredictionHead,
-    scheduler: DdpmScheduler,
+    scheduler: DpmSolverPP,
     vae_decoder: AcousticVaeDecoder,
     connector: AcousticConnector,
     eos_classifier: EosClassifier,
@@ -110,8 +110,8 @@ impl VibeVoiceTTS {
         let speech_bias_factor = vb.pp("model").get((), "speech_bias_factor")?;
 
         let steps = diffusion_steps.unwrap_or(config.diffusion_head_config.ddpm_num_inference_steps);
-        info!("  DDPM: {steps} steps");
-        let scheduler = DdpmScheduler::new_cosine(config.diffusion_head_config.ddpm_num_steps, steps);
+        info!("  DPM-Solver++: {steps} steps");
+        let scheduler = DpmSolverPP::new_cosine(config.diffusion_head_config.ddpm_num_steps, steps);
 
         info!("VibeVoice loaded!");
 
@@ -143,18 +143,21 @@ impl VibeVoiceTTS {
         Ok(h)
     }
 
-    /// Sample speech latent with CFG.
+    /// Sample speech latent with CFG using DPM-Solver++.
     fn sample_speech_latent(&self, pos_cond: &Tensor, neg_cond: &Tensor, cfg_scale: f32) -> Result<Tensor> {
         let vae_dim = self.config.acoustic_vae_dim;
-        let timesteps = self.scheduler.timesteps().to_vec();
+        let num_steps = self.scheduler.timesteps().len();
 
         // Stack positive+negative for batched prediction
         let condition = Tensor::cat(&[pos_cond, neg_cond], 0)?; // (2, hidden)
 
         let mut sample = Tensor::randn(0f32, 1., (1, vae_dim), &self.device)?.to_dtype(self.dtype)?;
+        let mut x0_buffer: Vec<Tensor> = Vec::new();
+        let mut ts_buffer: Vec<usize> = Vec::new();
 
-        for t in &timesteps {
-            let t_tensor = Tensor::new(&[*t as f32], &self.device)?.to_dtype(self.dtype)?;
+        for step_idx in 0..num_steps {
+            let t = self.scheduler.timesteps()[step_idx];
+            let t_tensor = Tensor::new(&[t as f32], &self.device)?.to_dtype(self.dtype)?;
 
             // Duplicate sample for both conditions
             let doubled = Tensor::cat(&[&sample, &sample], 0)?; // (2, vae_dim)
@@ -167,7 +170,7 @@ impl VibeVoiceTTS {
             let uncond_pred = v_pred.narrow(0, 1, 1)?;
             let guided = (&uncond_pred + (&cond_pred - &uncond_pred)? * cfg_scale as f64)?;
 
-            sample = self.scheduler.step(&guided, *t, &sample)?;
+            sample = self.scheduler.step(&guided, step_idx, &sample, &mut x0_buffer, &mut ts_buffer)?;
         }
         Ok(sample)
     }

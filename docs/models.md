@@ -5,12 +5,12 @@
 | Model | HuggingFace ID (example) | Feature Flag | Notes |
 |-------|--------------------------|-------------|-------|
 | LLaMA 3.x | `meta-llama/Llama-3.2-1B-Instruct` | `llama` (default) | Also covers SmolLM2 and DeepSeek-R1 distilled variants |
-| SmolLM2 | `HuggingFaceTB/SmolLM2-1.7B-Instruct` | `llama` (default) | LLaMA architecture, 135M–1.7B |
+| SmolLM2 | `HuggingFaceTB/SmolLM2-1.7B-Instruct` | `llama` (default) | LLaMA architecture, 135M-1.7B |
 | Qwen2 / Qwen2.5 | `Qwen/Qwen2.5-Coder-1.5B-Instruct` | `qwen2` (default) | |
 | Qwen3 (dense) | `Qwen/Qwen3-0.6B` | `qwen3` (default) | GQA + QK-norm, thinking mode via `/think` |
 | Qwen3 MoE | `Qwen/Qwen3-30B-A3B` | `qwen3_moe` (default) | Sparse MoE FFN, 128 experts / top-8 per token |
 | Qwen3.5 | `Qwen/Qwen3.5-0.8B` | `qwen3_5` (default) | Hybrid GDN linear + full attention |
-| Qwen3.5 MoE | `Qwen/Qwen3.5-35B-A3B-GPTQ-Int4` | `qwen3_5_moe` (default) | Hybrid GDN+full-attn + sparse MoE FFN, 256 experts / top-8 per token; GPTQ-Int4 dequantized at load time |
+| Qwen3.5 MoE | `Qwen/Qwen3.5-35B-A3B-GPTQ-Int4` | `qwen3_5_moe` (default) | Hybrid GDN+full-attn + sparse MoE FFN, 256 experts / top-8; GPTQ-Int4 |
 | Phi-4-mini | `microsoft/Phi-4-mini-instruct` | `phi4` (default) | 3.8B, partial RoPE, 200K vocab |
 | Phi-4 | `microsoft/phi-4` | `phi4` (default) | 14B, same family as Phi-4-mini |
 | Mistral | `mistralai/Mistral-7B-Instruct-v0.3` | `mistral` (default) | Standard GQA, optional sliding window |
@@ -18,18 +18,29 @@
 | Falcon3 | `tiiuae/Falcon3-1B-Instruct` | `falcon3` (default) | Standard GQA, Apache 2.0 |
 | OLMo 2 | `allenai/OLMo-2-1124-7B` | `olmo2` (default) | Post-norm, QK-norm, fully open weights+data |
 | EXAONE 4.0 | `LGAI-EXAONE/EXAONE-4.0-1.2B-Instruct` | `exaone4` (default) | 3:1 local/global hybrid, QK-norm |
-| DeepSeek-R1 (distilled) | `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` | `llama` (default) | LLaMA or Qwen2.5 base — no new code needed |
+| DeepSeek-R1 (distilled) | `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` | `llama` (default) | LLaMA or Qwen2.5 base |
 
 ## Image Models
 
-| Model | Status |
-|-------|--------|
-| Stable Diffusion 1.5 | Supported |
-| Stable Diffusion 2.1 | Supported |
-| Stable Diffusion XL | Supported |
-| Stable Diffusion XL Turbo | Supported |
+| Model | HuggingFace ID | Architecture | VRAM | Feature Flag |
+|-------|---------------|-------------|------|-------------|
+| Stable Diffusion 1.5 | (HF cache) | SD | ~4 GB | - |
+| Stable Diffusion 2.1 | (HF cache) | SD | ~5 GB | - |
+| Stable Diffusion XL | (HF cache) | SD | ~7 GB | - |
+| SDXL Turbo | (HF cache) | SD | ~7 GB | - |
+| FLUX.2-klein-4B | `black-forest-labs/FLUX.2-klein-4B` | FLUX | ~8 GB | `flux` (default) |
+| FLUX.1-dev (FP8) | `Comfy-Org/flux1-dev` | FLUX | ~12 GB | `flux` (default) |
 
-See [Stable Diffusion](stable_diffusion.md) for image generation usage.
+See [Image Generation](image_generation.md) for usage.
+
+## Voice Models (TTS)
+
+| Model | HuggingFace ID | VRAM | Max Duration | Feature Flag |
+|-------|---------------|------|-------------|-------------|
+| VibeVoice-1.5B | `microsoft/VibeVoice-1.5B` | ~7 GB | ~90 min | `vibevoice` (default) |
+| VibeVoice-Realtime-0.5B | `microsoft/VibeVoice-Realtime-0.5B` | ~3 GB | ~10 min | `vibevoice` (default) |
+
+See [Voice Generation](voice_generation.md) for usage.
 
 ## Architecture Detection
 
@@ -37,6 +48,13 @@ Text model architecture is auto-detected from `config.json` in the model directo
 
 ```sh
 cake master --model /path/to/model --text-model-arch auto|llama|qwen2|qwen3|qwen3-moe|qwen3-5|qwen3-5moe|phi4|mistral|gemma3|falcon3|ol-mo2|exaone4
+```
+
+Image and voice model types are selected with `--model-type`:
+
+```sh
+cake master --model-type image-model --image-model-arch sd|flux|flux1
+cake master --model-type audio-model  # auto-detects 1.5B vs 0.5B from config
 ```
 
 ## Model Notes
@@ -47,7 +65,7 @@ SmolLM2 uses the LLaMA architecture (`model_type: "llama"` in config.json) and l
 
 ### Qwen3 (dense)
 
-Qwen3 dense models (0.6B–32B) extend the Qwen2.5 design with QK-norm on query and key projections. They support a dual-mode thinking toggle: prefix your prompt with `/think` or `/no_think` to enable or disable the reasoning chain.
+Qwen3 dense models (0.6B-32B) extend the Qwen2.5 design with QK-norm on query and key projections. They support a dual-mode thinking toggle: prefix your prompt with `/think` or `/no_think` to enable or disable the reasoning chain.
 
 ### Qwen3.5
 
@@ -83,6 +101,4 @@ EXAONE 4.0 uses a 3:1 local/global hybrid attention pattern where global layers 
 
 ### Qwen3 MoE
 
-Qwen3 MoE (30B-A3B and 235B-A22B) uses the same attention block as dense Qwen3 (GQA + QK-norm) but replaces the dense FFN with a Sparse Mixture-of-Experts layer. Each layer has 128 experts; the router selects the top-8 per token using softmax → top-K → renormalize. This makes these models ideal cluster targets: the 30B model activates only 3B parameters per token, while the 235B model activates 22B — both require multiple nodes to hold all expert weights.
-
-The router matches HuggingFace `Qwen3MoeTopKRouter` exactly: softmax over all experts first, then top-K, then renormalize the selected weights to sum to 1.
+Qwen3 MoE (30B-A3B and 235B-A22B) uses the same attention block as dense Qwen3 (GQA + QK-norm) but replaces the dense FFN with a Sparse Mixture-of-Experts layer. Each layer has 128 experts; the router selects the top-8 per token using softmax -> top-K -> renormalize. These models are ideal cluster targets: the 30B model activates only 3B parameters per token, while the 235B model activates 22B — both require multiple nodes to hold all expert weights.

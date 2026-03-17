@@ -93,7 +93,7 @@ Cake exposes an OpenAI-compatible REST API when running with `--api`:
 | `/api/v1/chat/completions` | POST | Same as above (alternative path) |
 | `/v1/models` | GET | List available models |
 | `/api/v1/topology` | GET | Cluster topology as JSON |
-| `/api/v1/image` | POST | Image generation (see [Stable Diffusion](stable_diffusion.md)) |
+| `/api/v1/image` | POST | Image generation (see [Image Generation](image_generation.md)) |
 
 ### Chat Completion
 

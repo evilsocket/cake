@@ -65,8 +65,10 @@ fn ddpm_full_loop(bencher: divan::Bencher, steps: usize) {
     let noise = Tensor::randn(0f32, 1., (1, 64), &Device::Cpu).unwrap();
     bencher.bench_local(|| {
         let mut sample = noise.clone();
-        for &t in sched.timesteps() {
-            sample = sched.step(&zero, t, &sample).unwrap();
+        let mut x0_buf: Vec<Tensor> = Vec::new();
+        let mut ts_buf: Vec<usize> = Vec::new();
+        for step_idx in 0..sched.timesteps().len() {
+            sample = sched.step(&zero, step_idx, &sample, &mut x0_buf, &mut ts_buf).unwrap();
         }
         sample
     });

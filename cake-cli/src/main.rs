@@ -304,71 +304,322 @@ async fn run_master(ctx: Context) -> Result<()> {
 async fn run_master_audio(ctx: Context) -> Result<()> {
     #[cfg(feature = "vibevoice")]
     {
-        use cake_core::models::vibevoice;
-        use std::path::Path;
-
-        // Resolve model path via HuggingFace cache
         let model_path = utils::hf::ensure_model_downloaded(&ctx.args.model)?;
         let config_path = model_path.join("config.json");
-        let weights_path = model_path.join("model.safetensors");
 
-        println!("[VibeVoice] Loading model from {}", model_path.display());
+        // Detect model variant from config.json model_type
+        let config_str = std::fs::read_to_string(&config_path)?;
+        let model_type: String = serde_json::from_str::<serde_json::Value>(&config_str)?
+            .get("model_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("vibevoice_streaming")
+            .to_string();
 
-        let model = vibevoice::VibeVoiceTTS::load(
-            &config_path,
-            &weights_path,
-            &ctx.device,
-            Some(ctx.args.tts_diffusion_steps),
-        )?;
+        println!("[VibeVoice] Model type: {model_type}");
 
-        let prompt = &ctx.args.prompt;
-        println!("[VibeVoice] Generating speech for: \"{}\"", prompt);
-
-        // Tokenize — VibeVoice uses Qwen2.5 tokenizer
-        let tokenizer = {
-            let local = model_path.join("tokenizer.json");
-            if local.exists() {
-                tokenizers::Tokenizer::from_file(&local)
-                    .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?
-            } else {
-                // VibeVoice doesn't ship a tokenizer — use Qwen2.5's
-                println!("[VibeVoice] Downloading Qwen2.5 tokenizer...");
-                let qwen_path = utils::hf::ensure_model_downloaded("Qwen/Qwen2.5-0.5B")?;
-                tokenizers::Tokenizer::from_file(qwen_path.join("tokenizer.json"))
-                    .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?
+        match model_type.as_str() {
+            "vibevoice" => {
+                // VibeVoice-1.5B (non-streaming)
+                run_vibevoice_1_5b(ctx, &model_path, &config_path).await
             }
-        };
-
-        let encoding = tokenizer.encode(prompt.as_str(), true)
-            .map_err(|e| anyhow::anyhow!("tokenize: {e}"))?;
-        let token_ids = encoding.get_ids();
-        println!("[VibeVoice] Tokenized: {} tokens", token_ids.len());
-
-        let max_frames = ctx.args.max_audio_frames;
-        // Load voice prompt
-        let voice_path = ctx.args.voice_prompt.as_ref()
-            .ok_or_else(|| anyhow::anyhow!("--voice-prompt required for TTS (path to .safetensors voice preset)"))?;
-        println!("[VibeVoice] Loading voice prompt: {}", voice_path);
-        // Load voice prompt in same dtype as model (F32 for numerical stability)
-        let voice_prompt = vibevoice::VoicePrompt::load_f32(
-            std::path::Path::new(voice_path),
-            &ctx.device,
-        )?;
-
-        let mut model = model;
-        let samples = model.generate(token_ids, &voice_prompt, max_frames, 3.0)?;
-
-        let output_path = Path::new(&ctx.args.audio_output);
-        vibevoice::save_wav(&samples, output_path, 24000)?;
-        println!(
-            "[VibeVoice] Audio saved to {} ({:.1}s, {} samples)",
-            output_path.display(),
-            samples.len() as f64 / 24000.0,
-            samples.len()
-        );
-
-        Ok(())
+            _ => {
+                // VibeVoice-Realtime-0.5B (streaming)
+                run_vibevoice_0_5b(ctx, &model_path, &config_path).await
+            }
+        }
     }
+}
+
+#[cfg(feature = "master")]
+#[cfg(feature = "vibevoice")]
+async fn run_vibevoice_0_5b(
+    ctx: Context,
+    model_path: &std::path::Path,
+    config_path: &std::path::Path,
+) -> Result<()> {
+    use cake_core::models::vibevoice;
+
+    let weights_path = model_path.join("model.safetensors");
+    println!("[VibeVoice-0.5B] Loading from {}", model_path.display());
+
+    let model = vibevoice::VibeVoiceTTS::load(
+        config_path,
+        &weights_path,
+        &ctx.device,
+        Some(ctx.args.tts_diffusion_steps),
+    )?;
+
+    let prompt = &ctx.args.prompt;
+    println!("[VibeVoice-0.5B] Generating speech for: \"{}\"", prompt);
+
+    let tokenizer = {
+        let local = model_path.join("tokenizer.json");
+        if local.exists() {
+            tokenizers::Tokenizer::from_file(&local)
+                .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?
+        } else {
+            println!("[VibeVoice-0.5B] Downloading Qwen2.5 tokenizer...");
+            let qwen_path = utils::hf::ensure_model_downloaded("Qwen/Qwen2.5-0.5B")?;
+            tokenizers::Tokenizer::from_file(qwen_path.join("tokenizer.json"))
+                .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?
+        }
+    };
+
+    let text_with_newline = format!("{}\n", prompt.trim());
+    let encoding = tokenizer
+        .encode(text_with_newline.as_str(), false)
+        .map_err(|e| anyhow::anyhow!("tokenize: {e}"))?;
+    let token_ids = encoding.get_ids();
+    println!("[VibeVoice-0.5B] Tokenized: {} tokens", token_ids.len());
+
+    let voice_path = ctx
+        .args
+        .voice_prompt
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("--voice-prompt required for TTS"))?;
+    let voice_prompt = vibevoice::VoicePrompt::load_f32(
+        std::path::Path::new(voice_path),
+        &ctx.device,
+    )?;
+
+    let mut model = model;
+    let samples = model.generate(
+        token_ids,
+        &voice_prompt,
+        ctx.args.max_audio_frames,
+        ctx.args.tts_cfg_scale,
+    )?;
+
+    let output_path = std::path::Path::new(&ctx.args.audio_output);
+    vibevoice::save_wav(&samples, output_path, 24000)?;
+    println!(
+        "[VibeVoice-0.5B] Audio saved to {} ({:.1}s, {} samples)",
+        output_path.display(),
+        samples.len() as f64 / 24000.0,
+        samples.len()
+    );
+    Ok(())
+}
+
+#[cfg(feature = "master")]
+#[cfg(feature = "vibevoice")]
+async fn run_vibevoice_1_5b(
+    ctx: Context,
+    model_path: &std::path::Path,
+    config_path: &std::path::Path,
+) -> Result<()> {
+    use cake_core::models::vibevoice;
+    use cake_core::models::vibevoice::config_1_5b::*;
+
+    println!("[VibeVoice-1.5B] Loading from {}", model_path.display());
+
+    // Collect weight shard paths
+    let mut weight_paths: Vec<std::path::PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(model_path)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.ends_with(".safetensors") && name.starts_with("model") {
+            weight_paths.push(entry.path());
+        }
+    }
+    weight_paths.sort();
+    println!(
+        "[VibeVoice-1.5B] Found {} weight shards",
+        weight_paths.len()
+    );
+
+    let mut model = vibevoice::VibeVoice1_5B::load(
+        config_path,
+        &weight_paths,
+        &ctx.device,
+        Some(ctx.args.tts_diffusion_steps),
+    )?;
+
+    let prompt = &ctx.args.prompt;
+    println!("[VibeVoice-1.5B] Generating speech for: \"{}\"", prompt);
+
+    // Load tokenizer (Qwen2.5-1.5B)
+    let tokenizer = {
+        let local = model_path.join("tokenizer.json");
+        if local.exists() {
+            tokenizers::Tokenizer::from_file(&local)
+                .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?
+        } else {
+            println!("[VibeVoice-1.5B] Downloading Qwen2.5-1.5B tokenizer...");
+            let qwen_path = utils::hf::ensure_model_downloaded("Qwen/Qwen2.5-1.5B")?;
+            tokenizers::Tokenizer::from_file(qwen_path.join("tokenizer.json"))
+                .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?
+        }
+    };
+
+    // Load voice reference audio
+    let voice_path = ctx
+        .args
+        .voice_prompt
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("--voice-prompt required (path to .wav voice reference)"))?;
+    println!("[VibeVoice-1.5B] Loading voice: {}", voice_path);
+
+    // Read WAV file and encode voice reference
+    let voice_audio = load_wav_mono_24k(std::path::Path::new(voice_path))?;
+    let (_acoustic_features, voice_embeds) = model.encode_voice_from_samples(&voice_audio)?;
+    let num_speech_frames = voice_embeds.dim(1)?;
+    println!(
+        "[VibeVoice-1.5B] Voice reference: {} frames",
+        num_speech_frames
+    );
+
+    // Build input token sequence matching VibeVoiceProcessor
+    let system_prompt = " Transform the text provided by various speakers into speech output, utilizing the distinct voice of each respective speaker.\n";
+    let voice_section = format!(
+        " Voice input:\n Speaker 0:{start}{diffusion}{end}\n",
+        start = "<|vision_start|>",
+        diffusion = "<|vision_pad|>".repeat(num_speech_frames),
+        end = "<|vision_end|>"
+    );
+    let text_section = format!(
+        " Text input:\n Speaker 0: {text}\n Speech output:\n{start}",
+        text = prompt.trim(),
+        start = "<|vision_start|>"
+    );
+
+    let full_input = format!("{}{}{}", system_prompt, voice_section, text_section);
+    let encoding = tokenizer
+        .encode(full_input.as_str(), false)
+        .map_err(|e| anyhow::anyhow!("tokenize: {e}"))?;
+    let token_ids: Vec<u32> = encoding.get_ids().to_vec();
+    println!("[VibeVoice-1.5B] Input: {} tokens", token_ids.len());
+
+    // Build speech_input_mask (positions where speech_diffusion_id should be replaced)
+    let speech_input_mask: Vec<bool> = token_ids
+        .iter()
+        .map(|&t| t == SPEECH_DIFFUSION_ID)
+        .collect();
+    let speech_count: usize = speech_input_mask.iter().filter(|&&m| m).count();
+    println!(
+        "[VibeVoice-1.5B] Speech positions: {} (voice frames: {})",
+        speech_count, num_speech_frames
+    );
+
+    // Generate
+    let max_tokens = ctx.args.max_audio_frames * 3; // ~3 tokens per speech frame
+    let samples = model.generate(
+        &token_ids,
+        &speech_input_mask,
+        &voice_embeds,
+        max_tokens,
+        ctx.args.tts_cfg_scale,
+    )?;
+
+    let output_path = std::path::Path::new(&ctx.args.audio_output);
+    vibevoice::save_wav(&samples, output_path, 24000)?;
+    println!(
+        "[VibeVoice-1.5B] Audio saved to {} ({:.1}s, {} samples)",
+        output_path.display(),
+        samples.len() as f64 / 24000.0,
+        samples.len()
+    );
+    Ok(())
+}
+
+/// Load a WAV file as mono 24kHz f32 samples.
+#[cfg(feature = "master")]
+#[cfg(feature = "vibevoice")]
+fn load_wav_mono_24k(path: &std::path::Path) -> Result<Vec<f32>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path)?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+
+    // Parse WAV header
+    if buf.len() < 44 || &buf[0..4] != b"RIFF" || &buf[8..12] != b"WAVE" {
+        anyhow::bail!("Not a valid WAV file");
+    }
+
+    // Find data chunk
+    let mut pos = 12;
+    let mut data_start = 0;
+    let mut data_size = 0u32;
+    let mut channels = 1u16;
+    let mut sample_rate = 24000u32;
+    let mut bits_per_sample = 16u16;
+
+    while pos + 8 <= buf.len() {
+        let chunk_id = &buf[pos..pos + 4];
+        let chunk_size = u32::from_le_bytes([buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7]]);
+        if chunk_id == b"fmt " {
+            channels = u16::from_le_bytes([buf[pos + 10], buf[pos + 11]]);
+            sample_rate = u32::from_le_bytes([buf[pos + 12], buf[pos + 13], buf[pos + 14], buf[pos + 15]]);
+            bits_per_sample = u16::from_le_bytes([buf[pos + 22], buf[pos + 23]]);
+        } else if chunk_id == b"data" {
+            data_start = pos + 8;
+            data_size = chunk_size;
+            break;
+        }
+        pos += 8 + chunk_size as usize;
+        if pos % 2 != 0 {
+            pos += 1; // WAV chunks are word-aligned
+        }
+    }
+
+    if data_start == 0 {
+        anyhow::bail!("No data chunk in WAV file");
+    }
+
+    // Convert to f32 samples
+    let mut samples = Vec::new();
+    let data = &buf[data_start..data_start + data_size as usize];
+    match bits_per_sample {
+        16 => {
+            for chunk in data.chunks(2) {
+                if chunk.len() == 2 {
+                    let s = i16::from_le_bytes([chunk[0], chunk[1]]);
+                    samples.push(s as f32 / 32768.0);
+                }
+            }
+        }
+        32 => {
+            for chunk in data.chunks(4) {
+                if chunk.len() == 4 {
+                    let s = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    samples.push(s);
+                }
+            }
+        }
+        _ => anyhow::bail!("Unsupported bits_per_sample: {}", bits_per_sample),
+    }
+
+    // Mix to mono if stereo
+    if channels == 2 {
+        let mono: Vec<f32> = samples.chunks(2).map(|c| (c[0] + c.get(1).copied().unwrap_or(0.0)) / 2.0).collect();
+        samples = mono;
+    }
+
+    // Resample to 24kHz if needed (simple linear interpolation)
+    if sample_rate != 24000 {
+        let ratio = 24000.0 / sample_rate as f64;
+        let new_len = (samples.len() as f64 * ratio) as usize;
+        let mut resampled = Vec::with_capacity(new_len);
+        for i in 0..new_len {
+            let src_pos = i as f64 / ratio;
+            let idx = src_pos as usize;
+            let frac = (src_pos - idx as f64) as f32;
+            let s0 = samples.get(idx).copied().unwrap_or(0.0);
+            let s1 = samples.get(idx + 1).copied().unwrap_or(s0);
+            resampled.push(s0 + frac * (s1 - s0));
+        }
+        samples = resampled;
+    }
+
+    println!(
+        "[WAV] Loaded {:.1}s audio ({} samples, {}ch, {}Hz, {}bit)",
+        samples.len() as f64 / 24000.0,
+        samples.len(),
+        channels,
+        sample_rate,
+        bits_per_sample
+    );
+    Ok(samples)
 }
 
 #[cfg(feature = "master")]

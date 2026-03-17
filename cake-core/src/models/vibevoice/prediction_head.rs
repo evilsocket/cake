@@ -94,20 +94,20 @@ impl DiffusionBlock {
     }
 }
 
-/// Final output layer with LayerNorm + AdaLN + linear projection.
+/// Final output layer with RMSNorm (no affine) + AdaLN + linear projection.
 #[derive(Debug, Clone)]
 struct FinalLayer {
-    norm: candle_nn::LayerNorm,
+    norm: candle_nn::RmsNorm,
     ada_ln: Linear,
     linear: Linear,
 }
 
 impl FinalLayer {
-    fn load(vb: VarBuilder, hidden: usize, latent: usize) -> Result<Self> {
-        // norm_final uses ones (no learned weight in checkpoint)
+    fn load(vb: VarBuilder, hidden: usize, latent: usize, eps: f64) -> Result<Self> {
+        // norm_final is RMSNorm with elementwise_affine=False — use weight=ones
         let norm_w = Tensor::ones(hidden, candle_core::DType::F32, vb.device())?
             .to_dtype(vb.dtype())?;
-        let norm = candle_nn::LayerNorm::new_no_bias(norm_w, 1e-6);
+        let norm = candle_nn::RmsNorm::new(norm_w, eps);
         let ada_ln = linear(hidden, 2 * hidden, vb.pp("adaLN_modulation").pp("1"))?;
         let linear_proj = linear(hidden, latent, vb.pp("linear"))?;
         Ok(Self { norm, ada_ln, linear: linear_proj })
@@ -155,7 +155,7 @@ impl PredictionHead {
             )?);
         }
 
-        let final_layer = FinalLayer::load(vb.pp("final_layer"), h, latent)?;
+        let final_layer = FinalLayer::load(vb.pp("final_layer"), h, latent, cfg.rms_norm_eps)?;
 
         Ok(Self {
             t_embedder,

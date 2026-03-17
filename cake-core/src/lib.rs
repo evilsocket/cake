@@ -173,9 +173,13 @@ pub struct Args {
     #[arg(long, default_value_t = 150)]
     pub max_audio_frames: usize,
 
-    /// Number of DDPM diffusion steps per speech frame (lower = faster, less quality).
+    /// Number of diffusion steps per speech frame (lower = faster, less quality).
     #[arg(long, default_value_t = 10)]
     pub tts_diffusion_steps: usize,
+
+    /// Classifier-free guidance scale for TTS (reference default: 1.5).
+    #[arg(long, default_value_t = 1.5)]
+    pub tts_cfg_scale: f32,
 
     /// Path to voice prompt (.safetensors) for TTS voice cloning.
     #[arg(long)]

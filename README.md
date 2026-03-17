@@ -13,7 +13,7 @@
 
 </div>
 
-Cake is a Rust framework for distributed inference of large language models and image generation models based on [Candle](https://github.com/huggingface/candle). The goal is to run big (70B+) models by repurposing consumer hardware into a heterogeneous cluster of iOS, Android, macOS, Linux and Windows devices, effectively leveraging [planned obsolescence](https://en.wikipedia.org/wiki/Planned_obsolescence) as a tool to make AI more accessible and democratic.
+Cake is a Rust framework for **multimodal distributed inference** based on [Candle](https://github.com/huggingface/candle). It shards models across a heterogeneous cluster of consumer devices — iOS, Android, macOS, Linux, Windows — to run workloads that wouldn't fit on a single GPU, effectively leveraging [planned obsolescence](https://en.wikipedia.org/wiki/Planned_obsolescence) to make AI more accessible and democratic.
 
 <p align="center">
   <strong>
@@ -23,81 +23,34 @@ Cake is a Rust framework for distributed inference of large language models and 
 
 ## Key Features
 
-- **Distributed Inference** — Shard transformer blocks across multiple devices to run models that don't fit on a single GPU. [Learn more](https://github.com/evilsocket/cake/blob/main/docs/clustering.md).
-- **Multi Model** — Support for [LLaMA 3.x, SmolLM2, Qwen2/2.5/3/3.5, Phi-4, Mistral, Gemma 3, Falcon3, OLMo 2, EXAONE 4.0](https://github.com/evilsocket/cake/blob/main/docs/models.md), [Stable Diffusion](https://github.com/evilsocket/cake/blob/main/docs/stable_diffusion.md), and **FLUX** (FLUX.2-klein-4B, FLUX.1-dev FP8).
-- **Multi Platform** — CUDA, Metal, and CPU backends across [Linux, macOS, Windows, iOS, and Android](https://github.com/evilsocket/cake/blob/main/docs/install.md).
-- **Zero-Config Clustering** — mDNS discovery, automatic layer assignment, and model data push with a single `--cluster-key` flag. [Learn more](https://github.com/evilsocket/cake/blob/main/docs/clustering.md#zero-config-cluster-mdns-discovery).
-- **OpenAI-Compatible API** — REST API with streaming support, plus a [built-in web UI and TUI chat client](https://github.com/evilsocket/cake/blob/main/docs/usage.md#web-ui).
-- **Docker** — [Container builds](https://github.com/evilsocket/cake/blob/main/docs/docker.md) for Linux/NVIDIA with docker-compose cluster support.
-
-### Platform Support
-
-| OS | Architectures | Acceleration | Status |
-|----|---------------|--------------|--------|
-| GNU/Linux | arm, arm64, x86_64 | - | ✅ |
-| GNU/Linux | arm, arm64, x86_64 | CUDA | ✅ |
-| GNU/Linux | arm, arm64, x86_64 | BLAS | ✅ |
-| Windows | x86_64 | BLAS | [⚠️](https://github.com/evilsocket/cake/issues/7) |
-| Windows | x86_64 | CUDA | ✅ |
-| macOS | x86_64 | - | ✅ |
-| macOS | aarch64 | - | ✅ |
-| macOS | aarch64 | Metal | ✅ |
-| Android | arm, arm64, x86_64 | - | ✅ |
-| Android | arm, arm64, x86_64 | CUDA | [⚠️](https://docs.nvidia.com/gameworks/content/technologies/mobile/cuda_android_main.htm) |
-| iOS / iPadOS | aarch64 | - | ✅ |
-| iOS / iPadOS | aarch64 | Metal | ✅ (A13+ / M-series) |
-
-### Models
-
-| Model | Type | Feature Flag | Status |
-|-------|------|-------------|--------|
-| LLaMA 3.x | Text | `llama` (default) | ✅ |
-| SmolLM2 | Text | `llama` (default) | ✅ |
-| Qwen2 / Qwen2.5 | Text | `qwen2` (default) | ✅ |
-| Qwen3 (dense) | Text | `qwen3` (default) | ✅ |
-| Qwen3 MoE | Text | `qwen3_moe` (default) | ✅ |
-| Qwen3.5 | Text | `qwen3_5` (default) | ✅ |
-| Qwen3.5 MoE (GPTQ-Int4) | Text | `qwen3_5_moe` (default) | ✅ |
-| Phi-4-mini / Phi-4 | Text | `phi4` (default) | ✅ |
-| Mistral | Text | `mistral` (default) | ✅ |
-| Gemma 3 | Text | `gemma3` (default) | ✅ |
-| Falcon3 | Text | `falcon3` (default) | ✅ |
-| OLMo 2 | Text | `olmo2` (default) | ✅ |
-| EXAONE 4.0 | Text | `exaone4` (default) | ✅ |
-| DeepSeek-R1 (distilled) | Text | `llama` / `qwen2` (default) | ✅ |
-| Stable Diffusion (1.5, 2.1, XL, XL Turbo) | Image | - | ✅ |
-| FLUX.2-klein-4B | Image | `flux` (default) | ✅ |
-| FLUX.1-dev (FP8) | Image | `flux` (default) | ✅ |
+- **Multi Modal** — [Text generation](docs/models.md), [image generation](docs/image_generation.md) (Stable Diffusion, FLUX), and [voice synthesis](docs/voice_generation.md) (VibeVoice TTS with voice cloning).
+- **Multi Model** — [15 text model families](docs/models.md), 6 image model variants, and 2 TTS models. Architecture auto-detected from HuggingFace checkpoints.
+- **Multi Platform** — CUDA, Metal, and CPU backends across [Linux, macOS, Windows, iOS, and Android](docs/install.md).
+- **Multi Node** — Shard transformer blocks across devices with [zero-config mDNS clustering](docs/clustering.md) or manual topology. Also runs entirely on a single machine.
+- **OpenAI-Compatible API** — REST API with streaming, plus a [built-in web UI and TUI chat client](docs/usage.md#web-ui).
+- **Docker** — [Container builds](docs/docker.md) for Linux/NVIDIA with docker-compose cluster support.
 
 ## Quick Start
 
 ```sh
 cargo build --release --features cuda  # or: --features metal
-cake download Qwen/Qwen2.5-Coder-1.5B-Instruct
+
+# Text generation
 cake master --model Qwen/Qwen2.5-Coder-1.5B-Instruct --prompt "Hello!"
-```
 
-To start the API server and web UI:
-
-```sh
+# API server + web UI
 cake master --model Qwen/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080
+
+# Image generation (FLUX.1-dev FP8, 1024x768)
+cake master --model-type image-model --image-model-arch flux1 \
+  --sd-image-prompt "a cyberpunk cityscape at night" --flux-height 768 --flux-width 1024
+
+# Voice synthesis (VibeVoice-1.5B with voice cloning)
+cake master --model-type audio-model --model microsoft/VibeVoice-1.5B \
+  --voice-prompt voice.wav --prompt "Hello world, this is a test."
 ```
 
-For the full usage guide and API reference, [check the project documentation](https://github.com/evilsocket/cake/blob/main/docs/index.md).
-
-### FLUX Image Generation
-
-```sh
-# FLUX.2-klein-4B (fast, 4 steps, 512×512)
-cake master --model-type image-model --model black-forest-labs/FLUX.2-klein-4B \
-  --sd-image-prompt "a fluffy orange cat sitting on a wooden table"
-
-# FLUX.1-dev (high quality, 20 steps, 1024×1024, requires ~48GB VRAM in F32)
-cake master --model-type image-model --image-model-arch flux1 --model Comfy-Org/flux1-dev \
-  --sd-image-prompt "a photorealistic landscape at sunset"
-```
-
-Images are saved to the `images/` directory. Models are downloaded automatically from HuggingFace.
+Models are downloaded automatically from HuggingFace. For the full usage guide and API reference, [check the project documentation](docs/index.md).
 
 ## Contributors
 
@@ -107,7 +60,7 @@ Images are saved to the `images/` directory. Models are downloaded automatically
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=evilsocket/cake&type=Timeline)](https://www.github.com/evilsocket/cake&Timeline)
+[![Star History Chart](https://api.star-history.com/svg?repos=evilsocket/cake&type=Timeline)](https://star-history.com/#evilsocket/cake&Timeline)
 
 ## License
 

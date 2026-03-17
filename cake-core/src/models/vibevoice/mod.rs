@@ -1,24 +1,29 @@
-//! VibeVoice-Realtime-0.5B text-to-speech model.
+//! VibeVoice text-to-speech models.
 //!
-//! Architecture: Qwen2.5-0.5B LLM backbone + 4-layer diffusion prediction head
-//! + σ-VAE acoustic decoder. Generates streaming audio at 24kHz.
+//! Supports two model variants:
+//! - **VibeVoice-Realtime-0.5B** (streaming): Split LM (4 base + 20 TTS layers, 896 hidden)
+//! - **VibeVoice-1.5B** (non-streaming): Single 28-layer Qwen2 LM (1536 hidden) + semantic tokenizer
 //!
-//! Components:
-//! - `tts_language_model`: Qwen2.5-0.5B (24 layers, 896 hidden, reuses Qwen2 code)
-//! - `prediction_head`: 4-layer DiT with AdaLN + DDPM v-prediction
-//! - `acoustic_tokenizer.decoder`: σ-VAE Conv1d decoder (~340M params)
-//! - `acoustic_connector`: MLP mapping VAE latents to LLM space
-//! - `tts_eos_classifier`: Binary MLP for end-of-speech detection
+//! Shared components: prediction head, DPM-Solver++, σ-VAE decoder, acoustic connector.
 
+// Shared components
 pub mod config;
+pub mod config_1_5b;
 pub mod prediction_head;
 pub mod acoustic_connector;
 pub mod eos_classifier;
 pub mod ddpm;
 pub mod vae_decoder;
+pub mod vae_encoder;
+
+// 0.5B streaming model
 pub mod voice_prompt;
 #[allow(clippy::module_inception)]
 pub mod vibevoice;
 
+// 1.5B non-streaming model
+pub mod vibevoice_1_5b;
+
 pub use vibevoice::{VibeVoiceTTS, save_wav};
+pub use vibevoice_1_5b::VibeVoice1_5B;
 pub use voice_prompt::VoicePrompt;

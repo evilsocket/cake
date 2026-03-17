@@ -90,19 +90,14 @@ impl Fp8Linear {
     }
 
     fn get_weight(&self) -> Result<Tensor> {
-        // Fast path: cached weight (F16 for F8 source, or original dtype)
+        // Non-F8 path: return stored weight directly
         if let Some(w) = self.weight.read().unwrap().as_ref() {
             return Ok(w.clone());
         }
-        // Slow path: dequantize F8→F16 and cache
-        let mut cache = self.weight.write().unwrap();
-        if let Some(w) = cache.as_ref() {
-            return Ok(w.clone());
-        }
+        // F8 path: dequantize on-the-fly (no caching to save VRAM)
+        // This keeps only ~8.6GB of F8 weights on GPU instead of ~26GB (F8+F16).
         let f8_w = self.f8_weight.as_ref().expect("no F8 weight and no cached weight");
-        let f16_w = crate::utils::fused_ops::f8e4m3_to_f16(f8_w)?;
-        *cache = Some(f16_w.clone());
-        Ok(f16_w)
+        crate::utils::fused_ops::f8e4m3_to_f16(f8_w)
     }
 
     fn compute_dtype(&self) -> DType {
