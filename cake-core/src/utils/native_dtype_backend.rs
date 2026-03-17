@@ -26,14 +26,20 @@ impl NativeDtypeBackend {
         let file_dtype: DType = view.dtype().try_into()?;
 
         if file_dtype == DType::F8E4M3 {
-            // Dequantize ALL F8E4M3 tensors to F32 on CPU, then move to GPU.
-            // This uses more VRAM (~4x) but avoids missing F8 CUDA kernels for
-            // operations like RoPE, LayerNorm, etc. that candle doesn't support on F8.
-            // A100 80GB has plenty of headroom for the ~12GB→~48GB expansion.
             let tensor = self.inner.load(name, &Device::Cpu)?;
-            tensor.to_dtype(DType::F32)?.to_device(dev)
+            let ndim = tensor.dims().len();
+            if ndim <= 1 {
+                // Small tensors (norms, scales, biases): dequantize to F32 on CPU.
+                // These participate in non-matmul ops where F8 isn't supported.
+                tensor.to_dtype(DType::F32)?.to_device(dev)
+            } else {
+                // Large tensors (weights, 2D+): keep as F8E4M3 on GPU (~1 byte/param).
+                // Fp8Linear casts to F32 per-forward-call (~60MB temporary per layer).
+                // candle has cast_f8_e4m3_f32 kernel for the F8→F32 conversion.
+                tensor.to_device(dev)
+            }
         } else {
-            // Non-F8 tensors: load to device, cast to F32 if needed for consistency
+            // Non-F8 tensors: load to device, cast to F32 for consistency
             let tensor = self.inner.load(name, dev)?;
             if tensor.dtype() != DType::F32 {
                 tensor.to_dtype(DType::F32)
