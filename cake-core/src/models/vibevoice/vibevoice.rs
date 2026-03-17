@@ -79,10 +79,11 @@ impl VibeVoiceTTS {
             lm_vb.pp("norm"),
         )?;
 
-        // LLM layers
-        info!("  Loading {} LLM layers...", common_cfg.num_hidden_layers);
-        let mut lm_layers = Vec::with_capacity(common_cfg.num_hidden_layers);
-        for i in 0..common_cfg.num_hidden_layers {
+        // LLM layers — use tts_backbone_num_hidden_layers (may be fewer than decoder's full count)
+        let num_lm_layers = config.tts_backbone_num_hidden_layers;
+        info!("  Loading {} LLM layers...", num_lm_layers);
+        let mut lm_layers = Vec::with_capacity(num_lm_layers);
+        for i in 0..num_lm_layers {
             let block = crate::models::common::Transformer::load_for_vibevoice(
                 lm_vb.pp("layers").pp(i),
                 &common_cfg,
