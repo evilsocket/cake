@@ -218,25 +218,59 @@ impl AcousticVaeDecoder {
         }
     }
 
+    /// Apply causal left-padding to a tensor: zero-pad `amount` on the left of dim 2.
+    fn causal_pad(x: &Tensor, amount: usize) -> Result<Tensor> {
+        if amount == 0 {
+            return Ok(x.clone());
+        }
+        let pad = Tensor::zeros((x.dim(0)?, x.dim(1)?, amount), x.dtype(), x.device())?;
+        Tensor::cat(&[&pad, x], 2)
+    }
+
+    /// Trim causal ConvTranspose1d output to remove extra samples.
+    /// ConvTranspose1d with kernel=2*stride, stride=S, padding=0 produces:
+    /// out_len = (in_len - 1) * stride + kernel = in_len * stride + stride
+    /// We want: in_len * stride, so trim `stride` from the right.
+    fn causal_trim(x: &Tensor, trim: usize) -> Result<Tensor> {
+        if trim == 0 {
+            return Ok(x.clone());
+        }
+        let len = x.dim(2)?;
+        if len > trim {
+            x.narrow(2, 0, len - trim)
+        } else {
+            Ok(x.clone())
+        }
+    }
+
     /// Decode acoustic latents to audio waveform.
     /// Input: (batch, vae_dim, frames) or (batch, frames, vae_dim)
     /// Output: (batch, 1, samples)
     pub fn decode(&self, latents: &Tensor) -> Result<Tensor> {
-        // Ensure (batch, channels, seq) layout
         let x = if latents.dim(1)? == 64 {
             latents.clone()
         } else {
             latents.transpose(1, 2)?
         };
 
-        // Process through upsample + stage pairs
         let mut h = x;
-        for (upsample, stage) in self.upsample_layers.iter().zip(self.stages.iter()) {
+        let ratios = [0usize, 8, 5, 5, 4, 2, 2]; // first is Conv1d (no upsample ratio)
+
+        for (i, (upsample, stage)) in self.upsample_layers.iter().zip(self.stages.iter()).enumerate() {
+            if i == 0 {
+                // First layer: Conv1d kernel=7, causal left-pad 6
+                h = Self::causal_pad(&h, 6)?;
+            }
             h = upsample.forward(&h)?;
+            if i > 0 {
+                // ConvTranspose1d: trim extra samples from right
+                h = Self::causal_trim(&h, ratios[i])?;
+            }
             h = stage.forward(&h)?;
         }
 
-        // Final conv to mono
+        // Head conv: kernel=7, causal left-pad 6
+        h = Self::causal_pad(&h, 6)?;
         self.head_conv.forward(&h)
     }
 }
