@@ -7,6 +7,7 @@ pub mod fused_ops;
 pub mod gptq;
 pub mod hf;
 pub mod models;
+pub mod native_dtype_backend;
 pub mod split;
 
 use std::path::{Path, PathBuf};

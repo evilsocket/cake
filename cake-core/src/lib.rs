@@ -18,6 +18,18 @@ pub enum ModelType {
     ImageModel,
 }
 
+/// Supported image model architectures.
+#[derive(Copy, Clone, Parser, Default, Debug, Eq, PartialEq, PartialOrd, Ord, ValueEnum)]
+pub enum ImageModelArch {
+    /// Stable Diffusion (v1.5, v2.1, XL, Turbo)
+    #[default]
+    SD,
+    /// FLUX.2-klein (flow-matching transformer)
+    Flux,
+    /// FLUX.1-dev FP8 (12B flow-matching transformer)
+    Flux1,
+}
+
 /// Supported text model architectures.
 #[derive(Copy, Clone, Parser, Default, Debug, Eq, PartialEq, PartialOrd, Ord, ValueEnum)]
 pub enum TextModelArch {
@@ -138,11 +150,37 @@ pub struct Args {
     #[arg(long, default_value = "auto")]
     pub text_model_arch: TextModelArch,
 
+    /// Image model architecture (only used with --model-type image-model).
+    #[arg(long, default_value = "sd")]
+    pub image_model_arch: ImageModelArch,
+
     #[clap(flatten)]
     pub sd_args: SDArgs,
 
     #[clap(flatten)]
+    pub flux_args: FluxArgs,
+
+    #[clap(flatten)]
     pub sd_img_gen_args: ImageGenerationArgs,
+}
+
+#[derive(Clone, clap::Args, Default, Debug)]
+pub struct FluxArgs {
+    /// Image height for FLUX generation.
+    #[arg(long = "flux-height", default_value_t = 1024, id = "flux_height")]
+    pub height: usize,
+
+    /// Image width for FLUX generation.
+    #[arg(long = "flux-width", default_value_t = 1024, id = "flux_width")]
+    pub width: usize,
+
+    /// Number of denoising steps (20 for FLUX.1-dev, 4 for distilled FLUX.2-klein).
+    #[arg(long = "flux-steps", default_value_t = 20, id = "flux_steps")]
+    pub num_steps: usize,
+
+    /// Guidance scale for classifier-free guidance.
+    #[arg(long = "flux-guidance", default_value_t = 3.5, id = "flux_guidance")]
+    pub guidance_scale: f64,
 }
 
 #[derive(Clone, Parser, Default, Debug)]

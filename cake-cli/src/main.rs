@@ -7,7 +7,7 @@ mod chat;
 
 use cake_core::{
     cake::{self, Context, Mode, Worker},
-    utils, Args, ModelType, TextModelArch,
+    utils, Args, ImageModelArch, ModelType, TextModelArch,
 };
 
 use anyhow::Result;
@@ -197,6 +197,11 @@ async fn main() -> Result<()> {
 async fn run_master(ctx: Context) -> Result<()> {
     use cake_core::cake::Master;
 
+    // Image model dispatch — early return to avoid duplicating text arch arms
+    if ctx.args.model_type == ModelType::ImageModel {
+        return run_master_image(ctx).await;
+    }
+
     match ctx.text_model_arch {
         #[cfg(feature = "qwen2")]
         TextModelArch::Qwen2 => {
@@ -286,6 +291,40 @@ async fn run_master(ctx: Context) -> Result<()> {
         _ => anyhow::bail!(
             "no text model feature enabled for architecture {:?}",
             ctx.text_model_arch
+        ),
+    }
+}
+
+#[cfg(feature = "master")]
+async fn run_master_image(ctx: Context) -> Result<()> {
+    use cake_core::cake::Master;
+
+    // Use LLama as dummy TG — it's never loaded for ImageModel.
+    match ctx.args.image_model_arch {
+        ImageModelArch::SD => {
+            Master::<cake_core::models::llama3::LLama, cake_core::models::sd::SD>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
+        #[cfg(feature = "flux")]
+        ImageModelArch::Flux => {
+            Master::<cake_core::models::llama3::LLama, cake_core::models::flux::FluxGen>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
+        #[cfg(feature = "flux")]
+        ImageModelArch::Flux1 => {
+            Master::<cake_core::models::llama3::LLama, cake_core::models::flux::Flux1Gen>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
+        #[allow(unreachable_patterns)]
+        _ => anyhow::bail!(
+            "no image model feature enabled for architecture {:?}",
+            ctx.args.image_model_arch
         ),
     }
 }
@@ -388,11 +427,32 @@ async fn run_worker(ctx: &mut Context) -> Result<()> {
                 ctx.text_model_arch
             ),
         },
-        ModelType::ImageModel => {
-            Worker::<cake_core::models::sd::SD>::new(ctx)
-                .await?
-                .run()
-                .await
+        ModelType::ImageModel => match ctx.args.image_model_arch {
+            ImageModelArch::SD => {
+                Worker::<cake_core::models::sd::SD>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(feature = "flux")]
+            ImageModelArch::Flux => {
+                Worker::<cake_core::models::flux::FluxGen>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(feature = "flux")]
+            ImageModelArch::Flux1 => {
+                Worker::<cake_core::models::flux::Flux1Gen>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[allow(unreachable_patterns)]
+            _ => anyhow::bail!(
+                "no image model feature enabled for architecture {:?}",
+                ctx.args.image_model_arch
+            ),
         }
     }
 }
