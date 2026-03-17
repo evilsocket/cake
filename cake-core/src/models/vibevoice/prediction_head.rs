@@ -5,7 +5,7 @@
 //! timestep → predicts noise (v-prediction).
 
 use candle_core::{DType, Module, Result, Tensor, D};
-use candle_nn::{linear_no_bias as linear, Linear, RmsNorm, VarBuilder};
+use candle_nn::{linear_no_bias as linear, Linear, VarBuilder};
 
 /// Sinusoidal timestep embedding → MLP.
 #[derive(Debug, Clone)]
@@ -64,7 +64,7 @@ impl FeedForward {
 /// Single diffusion block with AdaLN modulation.
 #[derive(Debug, Clone)]
 struct DiffusionBlock {
-    norm: RmsNorm,
+    norm: candle_nn::RmsNorm,
     ffn: FeedForward,
     ada_ln: Linear,
 }
@@ -82,37 +82,45 @@ impl DiffusionBlock {
         let modulation = candle_nn::ops::silu(cond)
             .and_then(|c| self.ada_ln.forward(&c))?;
         let chunks = modulation.chunk(3, D::Minus1)?;
-        let (scale, shift, gate) = (&chunks[0], &chunks[1], &chunks[2]);
+        // Reference order: shift, scale, gate (NOT scale, shift, gate!)
+        let (shift, scale, gate) = (&chunks[0], &chunks[1], &chunks[2]);
 
-        // AdaLN: norm(x) * (1 + scale) + shift
+        // AdaLN: modulate(norm(x), shift, scale) = norm(x) * (1 + scale) + shift
         let h = self.norm.forward(x)?;
         let h = h.broadcast_mul(&(scale + 1.0)?)?.broadcast_add(shift)?;
         let h = self.ffn.forward(&h)?;
-        // Gate
+        // Gated residual: x + gate * ffn(modulated)
         x + h.broadcast_mul(gate)?
     }
 }
 
-/// Final output layer with AdaLN and linear projection.
+/// Final output layer with LayerNorm + AdaLN + linear projection.
 #[derive(Debug, Clone)]
 struct FinalLayer {
+    norm: candle_nn::LayerNorm,
     ada_ln: Linear,
     linear: Linear,
 }
 
 impl FinalLayer {
     fn load(vb: VarBuilder, hidden: usize, latent: usize) -> Result<Self> {
+        // norm_final uses ones (no learned weight in checkpoint)
+        let norm_w = Tensor::ones(hidden, candle_core::DType::F32, vb.device())?
+            .to_dtype(vb.dtype())?;
+        let norm = candle_nn::LayerNorm::new_no_bias(norm_w, 1e-6);
         let ada_ln = linear(hidden, 2 * hidden, vb.pp("adaLN_modulation").pp("1"))?;
         let linear_proj = linear(hidden, latent, vb.pp("linear"))?;
-        Ok(Self { ada_ln, linear: linear_proj })
+        Ok(Self { norm, ada_ln, linear: linear_proj })
     }
 
     fn forward(&self, x: &Tensor, cond: &Tensor) -> Result<Tensor> {
         let modulation = candle_nn::ops::silu(cond)
             .and_then(|c| self.ada_ln.forward(&c))?;
         let chunks = modulation.chunk(2, D::Minus1)?;
-        let (scale, shift) = (&chunks[0], &chunks[1]);
-        let h = x.broadcast_mul(&(scale + 1.0)?)?.broadcast_add(shift)?;
+        let (shift, scale) = (&chunks[0], &chunks[1]);
+        // Reference: modulate(self.norm_final(x), shift, scale)
+        let h = self.norm.forward(x)?;
+        let h = h.broadcast_mul(&(scale + 1.0)?)?.broadcast_add(shift)?;
         self.linear.forward(&h)
     }
 }
@@ -163,19 +171,18 @@ impl PredictionHead {
     /// t: (batch,) timestep scalars
     /// condition: (batch, hidden_size) LLM hidden states
     pub fn forward(&self, x: &Tensor, t: &Tensor, condition: &Tensor) -> Result<Tensor> {
+        // Reference: x = noisy_images_proj(x), NOT summed with condition
+        let mut h = self.noisy_images_proj.forward(x)?;
         let t_emb = self.t_embedder.forward(t)?;
-        let x_proj = self.noisy_images_proj.forward(x)?;
         let c_proj = self.cond_proj.forward(condition)?;
-
-        // Fuse: h = x_proj + c_proj, cond = c_proj + t_emb
-        let mut h = (x_proj + &c_proj)?;
-        let cond = (c_proj + t_emb)?;
+        // c = projected_condition + timestep_embedding (used for AdaLN modulation)
+        let c = (c_proj + t_emb)?;
 
         for layer in &self.layers {
-            h = layer.forward(&h, &cond)?;
+            h = layer.forward(&h, &c)?;
         }
 
-        self.final_layer.forward(&h, &cond)
+        self.final_layer.forward(&h, &c)
     }
 }
 

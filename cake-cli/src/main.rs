@@ -346,7 +346,7 @@ async fn run_master_audio(ctx: Context) -> Result<()> {
 
         let max_frames = ctx.args.max_audio_frames;
         let mut model = model;
-        let samples = model.generate(token_ids, max_frames, 1.0)?;
+        let samples = model.generate(token_ids, max_frames, 3.0)?;
 
         let output_path = Path::new(&ctx.args.audio_output);
         vibevoice::save_wav(&samples, output_path, 24000)?;
