@@ -185,9 +185,13 @@ impl VibeVoiceTTS {
             // Sample speech token via DDPM
             let latent = self.sample_speech_latent(&condition)?;
 
-            // Denormalize for VAE
-            let scale = self.speech_scaling_factor.to_dtype(latent.dtype())?;
-            let bias = self.speech_bias_factor.to_dtype(latent.dtype())?;
+            // Denormalize for VAE: x = latent / scale - bias
+            let scale = self.speech_scaling_factor
+                .to_dtype(latent.dtype())?
+                .broadcast_as(latent.shape())?;
+            let bias = self.speech_bias_factor
+                .to_dtype(latent.dtype())?
+                .broadcast_as(latent.shape())?;
             let scaled_latent = ((&latent / &scale)? - &bias)?;
 
             audio_latents.push(scaled_latent);
