@@ -182,7 +182,8 @@ impl VibeVoiceTTS {
             .to_dtype(self.dtype)?;
 
         for t in &timesteps {
-            let t_tensor = Tensor::new(&[*t as f32 / 1000.0], &self.device)?
+            // Pass raw integer timestep (reference: t.repeat(...).to(combined))
+            let t_tensor = Tensor::new(&[*t as f32], &self.device)?
                 .to_dtype(self.dtype)?;
             let v_pred = self.prediction_head.forward(&sample, &t_tensor, condition)?;
             let v_pred = if cfg_scale != 1.0 {
@@ -229,17 +230,18 @@ impl VibeVoiceTTS {
         // Splice: replace TTS embeddings with base LM hidden states (reference: inputs_embeds[:, start_idx:, :] = lm_last_hidden_state)
         let tts_input = (base_hidden + text_type.broadcast_as(tts_text_embeds.shape())?)?;
 
-        let tts_hidden = self.forward_tts_lm(&tts_input, 0)?;
+        let mut last_hidden = self.forward_tts_lm(&tts_input, 0)?;
         let mut seq_pos = token_ids.len();
 
-        // Step 3: Generate speech frames
+        // Step 3: Generate speech frames autoregressively
         let mut audio_latents: Vec<Tensor> = Vec::new();
 
         for _frame in 0..max_frames {
-            // Get condition from last TTS LM hidden state
-            let condition = tts_hidden.narrow(1, tts_hidden.dim(1)? - 1, 1)?.squeeze(1)?;
+            // Condition = last hidden state of TTS LM (updated each frame)
+            let seq_len = last_hidden.dim(1)?;
+            let condition = last_hidden.narrow(1, seq_len - 1, 1)?.squeeze(1)?;
 
-            // Sample speech latent
+            // Sample speech latent via DDPM
             let latent = self.sample_speech_latent(&condition, cfg_scale)?;
 
             // Denormalize for VAE
@@ -255,11 +257,11 @@ impl VibeVoiceTTS {
                 break;
             }
 
-            // Feed acoustic latent back through connector → TTS LM for next frame
+            // Feed acoustic latent back through connector → TTS LM → update condition
             let acoustic_embed = self.connector.forward(&latent)?;
             let speech_input = (acoustic_embed.unsqueeze(1)?
                 + speech_type.unsqueeze(0)?.broadcast_as((1, 1, hidden_size))?)?;
-            let _tts_hidden = self.forward_tts_lm(&speech_input, seq_pos)?;
+            last_hidden = self.forward_tts_lm(&speech_input, seq_pos)?;
             seq_pos += 1;
 
             #[allow(clippy::manual_is_multiple_of)]
