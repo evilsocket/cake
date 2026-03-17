@@ -309,7 +309,11 @@ impl VibeVoiceTTS {
             let mx = af.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
             info!("  [debug] VAE output: shape={:?} mean={:.4} max={:.4}", audio.shape(), m, mx);
         }
-        let samples: Vec<f32> = audio.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?.to_vec1()?;
+        // Normalize audio to [-1, 1] by peak amplitude
+        let audio_f32 = audio.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
+        let peak = audio_f32.abs()?.max(0)?.to_scalar::<f32>()?.max(1e-6);
+        let normalized = (audio_f32 / peak as f64)?;
+        let samples: Vec<f32> = normalized.to_vec1()?;
         Ok(samples)
     }
 }
