@@ -33,8 +33,13 @@ impl NativeDtypeBackend {
             let tensor = self.inner.load(name, &Device::Cpu)?;
             tensor.to_dtype(DType::F32)?.to_device(dev)
         } else {
-            // Non-F8 tensors: load directly to device
-            self.inner.load(name, dev)
+            // Non-F8 tensors: load to device, cast to F32 if needed for consistency
+            let tensor = self.inner.load(name, dev)?;
+            if tensor.dtype() != DType::F32 {
+                tensor.to_dtype(DType::F32)
+            } else {
+                Ok(tensor)
+            }
         }
     }
 }
