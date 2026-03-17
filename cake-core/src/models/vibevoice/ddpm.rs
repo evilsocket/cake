@@ -30,15 +30,18 @@ impl DdpmScheduler {
             })
             .collect();
 
-        // Normalize so ᾱ_0 = 1
+        // Normalize, clip to [0.0001, 0.9999] (matching diffusers)
         let alpha_0 = alphas_cumprod[0];
-        let alphas_cumprod: Vec<f64> = alphas_cumprod.iter().map(|a| a / alpha_0).collect();
+        let alphas_cumprod: Vec<f64> = alphas_cumprod
+            .iter()
+            .map(|a| (a / alpha_0).clamp(0.0001, 0.9999))
+            .collect();
 
-        // Evenly spaced inference timesteps
+        // Diffusers-compatible timestep spacing: [900, 800, ..., 100, 0]
         let step_ratio = num_train_steps / num_inference_steps;
         let timesteps: Vec<usize> = (0..num_inference_steps)
             .rev()
-            .map(|i| (i + 1) * step_ratio - 1)
+            .map(|i| i * step_ratio)
             .collect();
 
         Self {
