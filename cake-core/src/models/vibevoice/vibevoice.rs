@@ -204,33 +204,8 @@ impl VibeVoiceTTS {
         let text_type = self.tts_input_types.forward(&Tensor::new(&[1u32], &dev)?)?;
         let speech_type = self.tts_input_types.forward(&Tensor::new(&[0u32], &dev)?)?;
 
-        // Process text through both positive models
-        let input_ids = Tensor::new(token_ids, &dev)?.unsqueeze(0)?;
-        let text_embeds = self.base_embed.forward(&input_ids)?;
-
-        // Forward text through positive base LM (continuing from voice prompt)
-        // Apply RmsNorm at end (Qwen2Model always does this, even though weight is ones)
-        let base_hidden = Self::forward_layers(
-            &self.base_layers, Some(&self.base_norm), &text_embeds, pos_base_seq, &mut pos_base_cache,
-        )?;
-        let _pos_base_pos = pos_base_seq + token_ids.len();
-
-        // Debug: base LM hidden states
-        {
-            let bh: Vec<f32> = base_hidden.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
-            let m: f32 = bh.iter().sum::<f32>() / bh.len() as f32;
-            let s: f32 = (bh.iter().map(|v| (v-m).powi(2)).sum::<f32>() / bh.len() as f32).sqrt();
-            info!("  [debug] base_hidden: mean={:.6} std={:.6} shape={:?}", m, s, base_hidden.shape());
-        }
-
-        // Forward text through positive TTS LM
-        let tts_input = (base_hidden + text_type.broadcast_as(text_embeds.shape())?)?;
-        let mut pos_last = Self::forward_layers(
-            &self.tts_layers, Some(&self.tts_norm), &tts_input, pos_tts_seq, &mut pos_tts_cache,
-        )?;
-        let mut pos_tts_pos = pos_tts_seq + token_ids.len();
-
-        // For negative: no new text, just use existing cache
+        let mut pos_base_pos = pos_base_seq;
+        let mut pos_tts_pos = pos_tts_seq;
         let mut neg_tts_pos = neg_tts_seq;
 
         // Get initial negative condition from cached hidden state
@@ -238,60 +213,135 @@ impl VibeVoiceTTS {
         let neg_seq = neg_last_hidden.dim(1)?;
         let mut neg_cond = neg_last_hidden.narrow(1, neg_seq - 1, 1)?.squeeze(1)?;
 
-        // Generate speech frames
         let mut audio_latents: Vec<Tensor> = Vec::new();
+        let mut text_cursor = 0;
+        let mut pos_last: Option<Tensor> = None;
 
-        for frame_idx in 0..max_frames {
-            let seq_len = pos_last.dim(1)?;
-            let pos_cond = pos_last.narrow(1, seq_len - 1, 1)?.squeeze(1)?;
+        // Interleaved generation: text window → speech window → text window → ...
+        // Matching reference: TTS_TEXT_WINDOW_SIZE=5 text tokens, TTS_SPEECH_WINDOW_SIZE=6 speech frames
+        while audio_latents.len() < max_frames {
+            // ── Text window: process up to 5 text tokens ──
+            let window_end = (text_cursor + TTS_TEXT_WINDOW_SIZE).min(token_ids.len());
+            let window_tokens = &token_ids[text_cursor..window_end];
+            let window_size = window_tokens.len();
 
-            // Debug: compare against Python reference (frame 0: pos mean=0.012, neg mean=0.173)
-            if frame_idx == 0 {
-                let pc: Vec<f32> = pos_cond.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
-                let nc: Vec<f32> = neg_cond.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
-                let pm: f32 = pc.iter().sum::<f32>() / pc.len() as f32;
-                let nm: f32 = nc.iter().sum::<f32>() / nc.len() as f32;
-                let ps: f32 = (pc.iter().map(|v| (v-pm).powi(2)).sum::<f32>() / pc.len() as f32).sqrt();
-                let ns: f32 = (nc.iter().map(|v| (v-nm).powi(2)).sum::<f32>() / nc.len() as f32).sqrt();
-                info!("  [debug] pos_cond: mean={:.6} std={:.6} (ref: 0.012, 3.758)", pm, ps);
-                info!("  [debug] neg_cond: mean={:.6} std={:.6} (ref: 0.173, 3.738)", nm, ns);
+            if window_size > 0 {
+                let win_ids = Tensor::new(window_tokens, &dev)?.unsqueeze(0)?;
+                let win_embeds = self.base_embed.forward(&win_ids)?;
+
+                // Forward through base LM
+                let base_hidden = Self::forward_layers(
+                    &self.base_layers, Some(&self.base_norm), &win_embeds,
+                    pos_base_pos, &mut pos_base_cache,
+                )?;
+                pos_base_pos += window_size;
+
+                // Forward through TTS LM (base hidden + text type)
+                let tts_input = (base_hidden + text_type.broadcast_as(win_embeds.shape())?)?;
+                pos_last = Some(Self::forward_layers(
+                    &self.tts_layers, Some(&self.tts_norm), &tts_input,
+                    pos_tts_pos, &mut pos_tts_cache,
+                )?);
+                pos_tts_pos += window_size;
+
+                text_cursor = window_end;
             }
 
-            // Sample with CFG
-            let latent = self.sample_speech_latent(&pos_cond, &neg_cond, cfg_scale)?;
+            // Need at least one text window before generating speech
+            let pos_hidden = match pos_last.clone() {
+                Some(h) => h,
+                None => break,
+            };
 
-            // Denormalize for VAE
-            let scale = self.speech_scaling_factor.to_dtype(self.dtype)?.broadcast_as(latent.shape())?;
-            let bias = self.speech_bias_factor.to_dtype(self.dtype)?.broadcast_as(latent.shape())?;
-            audio_latents.push(((&latent / &scale)? - &bias)?);
+            // ── Speech window: generate up to 6 speech frames ──
+            for _speech_idx in 0..TTS_SPEECH_WINDOW_SIZE {
+                if audio_latents.len() >= max_frames { break; }
 
-            // Check EOS
-            if self.eos_classifier.should_stop(&pos_cond, 0.99)? {
-                info!("  EOS at frame {}", audio_latents.len());
+                let seq_len = pos_hidden.dim(1)?;
+                let pos_cond = pos_hidden.narrow(1, seq_len - 1, 1)?.squeeze(1)?;
+
+                // Sample with CFG
+                let latent = self.sample_speech_latent(&pos_cond, &neg_cond, cfg_scale)?;
+
+                // Denormalize for VAE
+                let scale = self.speech_scaling_factor.to_dtype(self.dtype)?.broadcast_as(latent.shape())?;
+                let bias = self.speech_bias_factor.to_dtype(self.dtype)?.broadcast_as(latent.shape())?;
+                audio_latents.push(((&latent / &scale)? - &bias)?);
+
+                // Check EOS
+                if self.eos_classifier.should_stop(&pos_cond, 0.9)? {
+                    info!("  EOS at frame {}", audio_latents.len());
+                    break;
+                }
+
+                // Feed acoustic latent back through both TTS LMs
+                let acoustic_embed = self.connector.forward(&latent)?;
+                let speech_embed = (acoustic_embed.unsqueeze(1)?
+                    + speech_type.unsqueeze(0)?.broadcast_as((1, 1, hidden_size))?)?;
+
+                pos_last = Some(Self::forward_layers(
+                    &self.tts_layers, Some(&self.tts_norm), &speech_embed,
+                    pos_tts_pos, &mut pos_tts_cache,
+                )?);
+                pos_tts_pos += 1;
+
+                let neg_out = Self::forward_layers(
+                    &self.tts_layers, Some(&self.tts_norm), &speech_embed,
+                    neg_tts_pos, &mut neg_tts_cache,
+                )?;
+                neg_cond = neg_out.narrow(1, neg_out.dim(1)? - 1, 1)?.squeeze(1)?;
+                neg_tts_pos += 1;
+
+                #[allow(clippy::manual_is_multiple_of)]
+                if audio_latents.len() % 10 == 0 {
+                    info!("  {} frames...", audio_latents.len());
+                }
+            }
+
+            // If all text consumed and no more to process, keep generating speech
+            if text_cursor >= token_ids.len() {
+                // Continue generating speech-only windows until max or EOS
+                while audio_latents.len() < max_frames {
+                    let pos_hidden = match &pos_last {
+                        Some(h) => h,
+                        None => break,
+                    };
+                    let seq_len = pos_hidden.dim(1)?;
+                    let pos_cond = pos_hidden.narrow(1, seq_len - 1, 1)?.squeeze(1)?;
+
+                    let latent = self.sample_speech_latent(&pos_cond, &neg_cond, cfg_scale)?;
+                    let scale = self.speech_scaling_factor.to_dtype(self.dtype)?.broadcast_as(latent.shape())?;
+                    let bias = self.speech_bias_factor.to_dtype(self.dtype)?.broadcast_as(latent.shape())?;
+                    audio_latents.push(((&latent / &scale)? - &bias)?);
+
+                    if self.eos_classifier.should_stop(&pos_cond, 0.9)? {
+                        info!("  EOS at frame {}", audio_latents.len());
+                        break;
+                    }
+
+                    let acoustic_embed = self.connector.forward(&latent)?;
+                    let speech_embed = (acoustic_embed.unsqueeze(1)?
+                        + speech_type.unsqueeze(0)?.broadcast_as((1, 1, hidden_size))?)?;
+
+                    pos_last = Some(Self::forward_layers(
+                        &self.tts_layers, Some(&self.tts_norm), &speech_embed,
+                        pos_tts_pos, &mut pos_tts_cache,
+                    )?);
+                    pos_tts_pos += 1;
+
+                    let neg_out = Self::forward_layers(
+                        &self.tts_layers, Some(&self.tts_norm), &speech_embed,
+                        neg_tts_pos, &mut neg_tts_cache,
+                    )?;
+                    neg_cond = neg_out.narrow(1, neg_out.dim(1)? - 1, 1)?.squeeze(1)?;
+                    neg_tts_pos += 1;
+
+                    #[allow(clippy::manual_is_multiple_of)]
+                    if audio_latents.len() % 10 == 0 {
+                        info!("  {} frames...", audio_latents.len());
+                    }
+                }
                 break;
-            }
-
-            // Feed acoustic latent back through both TTS LMs for next frame condition
-            let acoustic_embed = self.connector.forward(&latent)?;
-            let speech_embed = (acoustic_embed.unsqueeze(1)?
-                + speech_type.unsqueeze(0)?.broadcast_as((1, 1, hidden_size))?)?;
-
-            // Positive TTS LM feedback
-            pos_last = Self::forward_layers(
-                &self.tts_layers, Some(&self.tts_norm), &speech_embed, pos_tts_pos, &mut pos_tts_cache,
-            )?;
-            pos_tts_pos += 1;
-
-            // Negative TTS LM feedback
-            let neg_out = Self::forward_layers(
-                &self.tts_layers, Some(&self.tts_norm), &speech_embed, neg_tts_pos, &mut neg_tts_cache,
-            )?;
-            neg_cond = neg_out.narrow(1, neg_out.dim(1)? - 1, 1)?.squeeze(1)?;
-            neg_tts_pos += 1;
-
-            #[allow(clippy::manual_is_multiple_of)]
-            if audio_latents.len() % 10 == 0 {
-                info!("  {} frames...", audio_latents.len());
             }
         }
 
