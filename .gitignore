@@ -85,3 +85,6 @@ cake-mobile-app/.gradle/
 cake-mobile-app/build/
 cake-mobile-app/kls_database.db
 flux-tests/target/
+
+/*.wav
+/*.png
