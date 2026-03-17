@@ -1,4 +1,11 @@
 
+[build]
+rustc-wrapper = "sccache"
+
 # https://github.com/huggingface/candle/issues/1625
 [target.'cfg(any(target_arch = "arm", target_arch = "aarch64"))']
 rustflags = ["-C", "target-feature=+fp16"]
+
+# use faster linker
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]

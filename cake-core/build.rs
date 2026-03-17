@@ -7,7 +7,7 @@ fn main() {
             .kernel_paths(vec!["src/cuda/fused_ops.cu"])
             .arg("--expt-relaxed-constexpr")
             .arg("-std=c++17")
-            .arg("-O3");
+            .arg("-O2");
         let bindings = builder.build_ptx().unwrap();
 
         let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
