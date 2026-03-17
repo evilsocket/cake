@@ -35,10 +35,9 @@ pub struct VoicePrompt {
 }
 
 impl VoicePrompt {
-    /// Load a voice prompt matching model dtype (BF16 on CUDA, F32 on CPU).
+    /// Load a voice prompt in F32 (matching model dtype for numerical stability).
     pub fn load_f32(path: &Path, device: &Device) -> Result<Self> {
-        let dtype = if matches!(device, Device::Cuda(_)) { DType::BF16 } else { DType::F32 };
-        Self::load(path, device, dtype)
+        Self::load(path, device, DType::F32)
     }
 
     /// Load a voice prompt from a safetensors file.

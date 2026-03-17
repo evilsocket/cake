@@ -67,9 +67,9 @@ impl VibeVoiceTTS {
         let common_cfg = config.into_config();
 
         info!("Loading VibeVoice-Realtime-0.5B...");
-        // Use BF16 on CUDA for flash attention compatibility + good precision
-        // (better than F16 which caused pos_cond std mismatch)
-        let dtype = if matches!(device, Device::Cuda(_)) { DType::BF16 } else { DType::F32 };
+        // Use F32 for exact numerical match with reference implementation.
+        // This disables Flash Attention but ensures correct conditioning.
+        let dtype = DType::F32;
 
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[weights_path.to_path_buf()], dtype, device)?
@@ -217,6 +217,21 @@ impl VibeVoiceTTS {
         let mut text_cursor = 0;
         let mut pos_last: Option<Tensor> = None;
 
+        // Debug: allow overriding conditions with reference values
+        let ref_conds = if let Ok(ref_path) = std::env::var("REF_CONDITIONS") {
+            let vb = unsafe {
+                candle_nn::VarBuilder::from_mmaped_safetensors(
+                    &[std::path::PathBuf::from(ref_path)], DType::F32, &dev,
+                )?
+            };
+            Some((
+                vb.get_unchecked("pos")?.to_dtype(self.dtype)?,
+                vb.get_unchecked("neg")?.to_dtype(self.dtype)?,
+            ))
+        } else {
+            None
+        };
+
         // Interleaved generation: text window → speech window → text window → ...
         // Matching reference: TTS_TEXT_WINDOW_SIZE=5 text tokens, TTS_SPEECH_WINDOW_SIZE=6 speech frames
         while audio_latents.len() < max_frames {
@@ -258,10 +273,19 @@ impl VibeVoiceTTS {
                 if audio_latents.len() >= max_frames { break; }
 
                 let seq_len = pos_hidden.dim(1)?;
-                let pos_cond = pos_hidden.narrow(1, seq_len - 1, 1)?.squeeze(1)?;
+                let pos_cond = if let Some((ref_pos, _)) = &ref_conds {
+                    ref_pos.clone()
+                } else {
+                    pos_hidden.narrow(1, seq_len - 1, 1)?.squeeze(1)?
+                };
+                let neg_cond_use = if let Some((_, ref_neg)) = &ref_conds {
+                    ref_neg.clone()
+                } else {
+                    neg_cond.clone()
+                };
 
                 // Sample with CFG
-                let latent = self.sample_speech_latent(&pos_cond, &neg_cond, cfg_scale)?;
+                let latent = self.sample_speech_latent(&pos_cond, &neg_cond_use, cfg_scale)?;
 
                 // Denormalize for VAE
                 let scale = self.speech_scaling_factor.to_dtype(self.dtype)?.broadcast_as(latent.shape())?;

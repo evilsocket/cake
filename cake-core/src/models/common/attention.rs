@@ -245,8 +245,11 @@ impl CausalSelfAttention {
         #[allow(unused_labels)]
         let y = 'attn: {
             // Flash Attention on CUDA — fused kernel, native GQA (no repeat_kv needed)
+            // Only for F16/BF16 (flash-attn doesn't support F32)
             #[cfg(feature = "cuda")]
-            if matches!(q.device(), candle_core::Device::Cuda(_)) {
+            if matches!(q.device(), candle_core::Device::Cuda(_))
+                && matches!(q.dtype(), DType::F16 | DType::BF16)
+            {
                 let scale = 1.0 / (self.head_dim as f32).sqrt();
                 break 'attn crate::utils::flash_attn::flash_attention(
                     &q, &k, &v, scale, seq_len > 1,
