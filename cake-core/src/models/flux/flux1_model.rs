@@ -204,7 +204,8 @@ mod tests {
         let x = Tensor::new(&[[0.5f32, 1.0, 0.5, 1.0]], &dev).unwrap();
         let y = linear.forward(&x).unwrap();
         assert_eq!(y.dims(), &[1, 2]);
-        assert_eq!(y.dtype(), DType::F16);
+        // Output dtype matches input dtype (F32), even though internal compute is F16
+        assert_eq!(y.dtype(), DType::F32);
     }
 
     #[test]
@@ -314,9 +315,17 @@ fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Te
     batch_dims.pop();
     batch_dims.pop();
 
-    // TODO: Flash Attention integration produces black images — numerical issue
-    // with F16 precision or transpose layout. Needs investigation.
-    // For now, use manual SDPA which produces correct results.
+    // Flash Attention on CUDA — O(n) memory instead of O(n²).
+    // Input tensors are F32 (outer loop precision), cast to F16 for flash_attn,
+    // then output cast back to F32.
+    #[cfg(feature = "cuda")]
+    if q.rank() == 4 && matches!(q.device(), candle_core::Device::Cuda(_)) {
+        let q16 = q.to_dtype(DType::F16)?.transpose(1, 2)?.contiguous()?;
+        let k16 = k.to_dtype(DType::F16)?.transpose(1, 2)?.contiguous()?;
+        let v16 = v.to_dtype(DType::F16)?.transpose(1, 2)?.contiguous()?;
+        let attn = candle_flash_attn::flash_attn(&q16, &k16, &v16, scale_factor as f32, false)?;
+        return attn.transpose(1, 2)?.to_dtype(q.dtype());
+    }
 
     // CPU/Metal fallback (or rank != 4): manual SDPA
     let q = q.flatten_to(batch_dims.len() - 1)?;

@@ -294,11 +294,8 @@ impl ImageGenerator for Flux1Gen {
                 &vec,
                 Some(&guidance_tensor),
             )?;
-            // Debug: check for NaN/zero in prediction
-            let pred_abs_mean = pred.abs()?.mean_all()?.to_dtype(DType::F32)?.to_scalar::<f32>().unwrap_or(-1.0);
             img = (img + pred * (t_prev - t_curr))?;
-            let img_abs_mean = img.abs()?.mean_all()?.to_dtype(DType::F32)?.to_scalar::<f32>().unwrap_or(-1.0);
-            info!("  step: t={t_curr:.3}→{t_prev:.3} pred={pred_abs_mean:.6} img={img_abs_mean:.6}");
+            info!("  step: t={t_curr:.3}→{t_prev:.3}");
         }
 
         // ── 7. Unpack latents and move to CPU ────────────────────────────
