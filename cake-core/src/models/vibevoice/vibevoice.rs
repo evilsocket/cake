@@ -291,7 +291,24 @@ impl VibeVoiceTTS {
         }
 
         let latents = Tensor::stack(&audio_latents, 1)?.transpose(1, 2)?;
+        // Debug: latent stats
+        {
+            let lf: Vec<f32> = latents.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+            let m: f32 = lf.iter().sum::<f32>() / lf.len() as f32;
+            let s: f32 = (lf.iter().map(|v| (v-m).powi(2)).sum::<f32>() / lf.len() as f32).sqrt();
+            info!("  [debug] VAE input: shape={:?} mean={:.4} std={:.4} min={:.4} max={:.4}",
+                latents.shape(), m, s,
+                lf.iter().cloned().fold(f32::INFINITY, f32::min),
+                lf.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
+        }
         let audio = self.vae_decoder.decode(&latents)?;
+        // Debug: audio stats
+        {
+            let af: Vec<f32> = audio.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+            let m: f32 = af.iter().sum::<f32>() / af.len() as f32;
+            let mx = af.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            info!("  [debug] VAE output: shape={:?} mean={:.4} max={:.4}", audio.shape(), m, mx);
+        }
         let samples: Vec<f32> = audio.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?.to_vec1()?;
         Ok(samples)
     }
