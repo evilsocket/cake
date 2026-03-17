@@ -29,9 +29,9 @@ impl NativeDtypeBackend {
             let tensor = self.inner.load(name, &Device::Cpu)?;
             let ndim = tensor.dims().len();
             if ndim <= 1 {
-                // Small tensors (norms, scales, biases): dequantize to BF16
+                // Small tensors (norms, scales, biases): dequantize to F32
                 // so they can participate in non-matmul ops (RmsNorm, LayerNorm, etc.)
-                tensor.to_dtype(DType::BF16)?.to_device(dev)
+                tensor.to_dtype(DType::F32)?.to_device(dev)
             } else {
                 // Large tensors (weights, 2D+): keep as F8E4M3 on GPU (~1 byte/param).
                 // Fp8Linear casts to BF16 per-forward-call via patched CUDA kernel.

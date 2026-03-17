@@ -100,8 +100,7 @@ fn fp8_linear_b(_in_d: usize, _out_d: usize, bias: bool, vb: VarBuilder) -> Resu
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 fn layer_norm(dim: usize, vb: VarBuilder) -> Result<LayerNorm> {
-    // LayerNorm uses ones (no learned weights), always in BF16
-    let ws = Tensor::ones(dim, DType::BF16, vb.device())?;
+    let ws = Tensor::ones(dim, DType::F32, vb.device())?;
     Ok(LayerNorm::new_no_bias(ws, 1e-6))
 }
 
