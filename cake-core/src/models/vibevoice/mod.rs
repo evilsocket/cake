@@ -16,3 +16,7 @@ pub mod acoustic_connector;
 pub mod eos_classifier;
 pub mod ddpm;
 pub mod vae_decoder;
+#[allow(clippy::module_inception)]
+pub mod vibevoice;
+
+pub use vibevoice::{VibeVoiceTTS, save_wav};

@@ -202,6 +202,11 @@ async fn run_master(ctx: Context) -> Result<()> {
         return run_master_image(ctx).await;
     }
 
+    // Audio (TTS) model dispatch
+    if ctx.args.model_type == ModelType::AudioModel {
+        return run_master_audio(ctx).await;
+    }
+
     match ctx.text_model_arch {
         #[cfg(feature = "qwen2")]
         TextModelArch::Qwen2 => {
@@ -292,6 +297,64 @@ async fn run_master(ctx: Context) -> Result<()> {
             "no text model feature enabled for architecture {:?}",
             ctx.text_model_arch
         ),
+    }
+}
+
+#[cfg(feature = "master")]
+async fn run_master_audio(ctx: Context) -> Result<()> {
+    #[cfg(feature = "vibevoice")]
+    {
+        use cake_core::models::vibevoice;
+        use std::path::Path;
+
+        // Resolve model path via HuggingFace cache
+        let model_path = utils::hf::ensure_model_downloaded(&ctx.args.model)?;
+        let config_path = model_path.join("config.json");
+        let weights_path = model_path.join("model.safetensors");
+
+        println!("[VibeVoice] Loading model from {}", model_path.display());
+
+        let model = vibevoice::VibeVoiceTTS::load(
+            &config_path,
+            &weights_path,
+            &ctx.device,
+        )?;
+
+        let prompt = &ctx.args.prompt;
+        println!("[VibeVoice] Generating speech for: \"{}\"", prompt);
+
+        // Tokenize — try local tokenizer.json first, then download
+        let tokenizer = {
+            let local = model_path.join("tokenizer.json");
+            if local.exists() {
+                tokenizers::Tokenizer::from_file(&local)
+                    .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?
+            } else {
+                let downloaded = utils::hf::ensure_model_downloaded(&ctx.args.model)?
+                    .join("tokenizer.json");
+                tokenizers::Tokenizer::from_file(&downloaded)
+                    .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?
+            }
+        };
+
+        let encoding = tokenizer.encode(prompt.as_str(), true)
+            .map_err(|e| anyhow::anyhow!("tokenize: {e}"))?;
+        let token_ids = encoding.get_ids();
+        println!("[VibeVoice] Tokenized: {} tokens", token_ids.len());
+
+        let max_frames = ctx.args.max_audio_frames;
+        let samples = model.generate(token_ids, max_frames)?;
+
+        let output_path = Path::new(&ctx.args.audio_output);
+        vibevoice::save_wav(&samples, output_path, 24000)?;
+        println!(
+            "[VibeVoice] Audio saved to {} ({:.1}s, {} samples)",
+            output_path.display(),
+            samples.len() as f64 / 24000.0,
+            samples.len()
+        );
+
+        Ok(())
     }
 }
 
@@ -453,6 +516,9 @@ async fn run_worker(ctx: &mut Context) -> Result<()> {
                 "no image model feature enabled for architecture {:?}",
                 ctx.args.image_model_arch
             ),
+        }
+        ModelType::AudioModel => {
+            anyhow::bail!("AudioModel workers not yet supported; run TTS on master")
         }
     }
 }

@@ -16,6 +16,8 @@ pub enum ModelType {
     #[default]
     TextModel,
     ImageModel,
+    /// Text-to-speech audio model
+    AudioModel,
 }
 
 /// Supported image model architectures.
@@ -162,6 +164,14 @@ pub struct Args {
 
     #[clap(flatten)]
     pub sd_img_gen_args: ImageGenerationArgs,
+
+    /// Output path for generated audio (WAV format, used with --model-type audio-model).
+    #[arg(long, default_value = "output.wav")]
+    pub audio_output: String,
+
+    /// Maximum speech frames to generate (each frame ≈ 133ms at 7.5 Hz).
+    #[arg(long, default_value_t = 150)]
+    pub max_audio_frames: usize,
 }
 
 #[derive(Clone, clap::Args, Default, Debug)]

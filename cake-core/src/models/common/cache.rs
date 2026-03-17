@@ -113,6 +113,22 @@ impl Cache {
         })
     }
 
+    /// Create a minimal cache with no KV caching (for single-pass encoding).
+    pub fn new_no_cache(device: &Device) -> Result<Self> {
+        let dummy = Tensor::zeros(1, DType::F32, device)?;
+        Ok(Self {
+            cos: dummy.clone(),
+            sin: dummy,
+            masks: HashMap::new(),
+            use_kv_cache: false,
+            kvs: vec![],
+            max_seq_len: 0,
+            recurrent_states: vec![],
+            conv_states: vec![],
+            device: device.clone(),
+        })
+    }
+
     /// Return true if kv-caching is enabled.
     pub fn with_kv_cache(&self) -> bool {
         self.use_kv_cache

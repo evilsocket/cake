@@ -29,7 +29,7 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
                     llm_model: None,
                 })
             }
-            ModelType::TextModel => {
+            ModelType::TextModel | ModelType::AudioModel => {
                 let llm_model = TG::load(&mut ctx).await?;
                 Ok(Self {
                     ctx,

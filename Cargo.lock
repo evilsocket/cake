@@ -697,6 +697,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tokenizers",
  "tokio",
 ]
 
