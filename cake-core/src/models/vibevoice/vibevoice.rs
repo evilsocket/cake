@@ -298,7 +298,21 @@ impl VibeVoiceTTS {
         info!("Generated {} frames, decoding...", audio_latents.len());
         if audio_latents.is_empty() { return Ok(vec![]); }
 
-        let latents = Tensor::stack(&audio_latents, 1)?.transpose(1, 2)?;
+        // Allow overriding latents with reference data for VAE isolation testing
+        let latents = if let Ok(ref_path) = std::env::var("REF_LATENTS") {
+            info!("  [debug] Loading reference latents from {}", ref_path);
+            let ref_vb = unsafe {
+                candle_nn::VarBuilder::from_mmaped_safetensors(
+                    &[std::path::PathBuf::from(ref_path)],
+                    DType::F32,
+                    &dev,
+                )?
+            };
+            let denorm = ref_vb.get_unchecked("denorm")?.to_dtype(self.dtype)?; // (18, 64)
+            denorm.unsqueeze(0)?.transpose(1, 2)? // (1, 64, 18)
+        } else {
+            Tensor::stack(&audio_latents, 1)?.transpose(1, 2)?
+        };
         let audio = self.vae_decoder.decode(&latents)?;
         let audio_f32 = audio.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
         let peak = audio_f32.abs()?.max(0)?.to_scalar::<f32>()?.max(1e-6);

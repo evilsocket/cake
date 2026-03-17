@@ -24,15 +24,14 @@ impl DecoderBlock {
         let norm = candle_nn::rms_norm(channels, eps, vb.pp("norm"))?;
         let gamma = vb.get(channels, "gamma")?;
 
-        // Depthwise conv: groups=channels, kernel=7
+        // Depthwise conv: groups=channels, kernel=7, NO padding (causal model)
         let mixer_conv = candle_nn::conv1d(
             channels,
             channels,
             7,
             Conv1dConfig {
-                padding: 3, // causal padding will be handled separately if needed
                 groups: channels,
-                ..Default::default()
+                ..Default::default() // padding=0
             },
             vb.pp("mixer").pp("conv").pp("conv").pp("conv"),
         )?;
@@ -54,9 +53,14 @@ impl DecoderBlock {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Mixer: norm → depthwise conv → scale by gamma
+        // Mixer: norm → causal left-pad → depthwise conv → scale by gamma
         let residual = x;
         let h = self.norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
+        // Causal left-padding: pad (kernel_size - 1) zeros on the left
+        let h = Tensor::cat(&[
+            &Tensor::zeros((h.dim(0)?, h.dim(1)?, 6), h.dtype(), h.device())?,
+            &h,
+        ], 2)?;
         let h = self.mixer_conv.forward(&h)?;
         let gamma = self.gamma.unsqueeze(0)?.unsqueeze(2)?;
         let x = (residual + h.broadcast_mul(&gamma)?)?;
@@ -143,12 +147,12 @@ impl AcousticVaeDecoder {
         // Upsample layers
         let mut upsample_layers = Vec::with_capacity(num_stages);
 
-        // First upsample: Conv1d (vae_dim → first_channels, kernel=7)
+        // First upsample: Conv1d (vae_dim → first_channels, kernel=7, NO padding — causal model)
         let first_up = candle_nn::conv1d(
             cfg.vae_dim,
             channels[0],
             7,
-            Conv1dConfig { padding: 3, ..Default::default() },
+            Conv1dConfig::default(), // padding=0, stride=1
             vb.pp("upsample_layers").pp("0").pp("0").pp("conv").pp("conv"),
         )?;
         upsample_layers.push(UpsampleLayer::Conv(first_up));
@@ -158,14 +162,14 @@ impl AcousticVaeDecoder {
             let in_ch = channels[i];
             let out_ch = channels[i + 1];
             let kernel = ratio * 2;
+            // ConvTranspose1d with NO padding (causal model handles padding externally)
             let ct = candle_nn::conv_transpose1d(
                 in_ch,
                 out_ch,
                 kernel,
                 ConvTranspose1dConfig {
                     stride: ratio,
-                    padding: ratio / 2,
-                    ..Default::default()
+                    ..Default::default() // padding=0, output_padding=0
                 },
                 vb.pp("upsample_layers").pp(i + 1).pp("0").pp("convtr").pp("convtr"),
             )?;
@@ -185,12 +189,12 @@ impl AcousticVaeDecoder {
             stages.push(stage);
         }
 
-        // Head conv: final channels → 1 (mono audio)
+        // Head conv: final channels → 1 (mono audio), NO padding (causal)
         let head_conv = candle_nn::conv1d(
             channels[num_stages - 1],
             1,
             7,
-            Conv1dConfig { padding: 3, ..Default::default() },
+            Conv1dConfig::default(), // padding=0
             vb.pp("head").pp("conv").pp("conv"),
         )?;
 
