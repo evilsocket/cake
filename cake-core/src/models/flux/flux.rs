@@ -113,24 +113,29 @@ impl ImageGenerator for FluxGen {
         let token_tensor =
             Tensor::new(token_ids.as_slice(), &dev)?.unsqueeze(0)?;
 
-        // 2. Text encode on CPU (lightweight, dropped before transformer loads)
-        info!("Loading and running text encoder (CPU)...");
-        let cpu_ctx = Context {
-            device: Device::Cpu,
+        // 2. Text encode (GPU when available for speed, CPU fallback)
+        info!("Loading and running text encoder...");
+        let enc_ctx = Context {
+            device: dev.clone(),
             dtype: DType::F32,
             ..self.context.clone()
         };
         let mut text_encoder = FluxTextEncoder::load(
             FluxModelFile::TextEncoder.name().to_string(),
-            &cpu_ctx,
+            &enc_ctx,
         )?;
-        let mut cpu_ctx = cpu_ctx;
+        let mut enc_ctx = enc_ctx;
         let enc_output = text_encoder
-            .forward_mut(&token_tensor.to_device(&Device::Cpu)?, real_len, 0, &mut cpu_ctx)
+            .forward_mut(&token_tensor, real_len, 0, &mut enc_ctx)
             .await?;
         let enc_tensors = unpack_tensors(&enc_output)?;
         let txt = enc_tensors[0].clone();
         info!("Text encoding done (shape={:?})", txt.shape());
+
+        // Free text encoder VRAM before loading transformer
+        drop(text_encoder);
+        drop(enc_ctx);
+        dev.synchronize()?;
 
         // 3. Load transformer (now fits in VRAM)
         info!("Loading transformer...");

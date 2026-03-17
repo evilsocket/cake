@@ -124,10 +124,24 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe_cos: &Tensor, pe_sin: &Tenso
     let k = apply_rope(k, pe_cos, pe_sin)?.contiguous()?;
     let dim = q.dim(D::Minus1)?;
     let scale = 1.0 / (dim as f64).sqrt();
+
+    // Flash Attention on CUDA — O(n) memory, faster for long sequences
+    #[cfg(feature = "cuda")]
+    if q.rank() == 4 && matches!(q.device(), candle_core::Device::Cuda(_)) {
+        // flash_attn needs F16 in (batch, seq, heads, head_dim) layout
+        let q16 = q.to_dtype(DType::F16)?.transpose(1, 2)?.contiguous()?;
+        let k16 = k.to_dtype(DType::F16)?.transpose(1, 2)?.contiguous()?;
+        let v16 = v.to_dtype(DType::F16)?.transpose(1, 2)?.contiguous()?;
+        let attn = candle_flash_attn::flash_attn(&q16, &k16, &v16, scale as f32, false)?
+            .to_dtype(w_dtype)?;
+        // (batch, seq, heads, head_dim) → (batch, heads, seq, head_dim) → flatten
+        return attn.transpose(1, 2)?.flatten_from(2);
+    }
+
+    // CPU/Metal fallback: manual SDPA in F32
     let mut batch_dims = q.dims().to_vec();
     batch_dims.pop();
     batch_dims.pop();
-    // Compute attention in F32 for softmax precision
     let q = q.flatten_to(batch_dims.len() - 1)?.to_dtype(DType::F32)?;
     let k = k.flatten_to(batch_dims.len() - 1)?.to_dtype(DType::F32)?;
     let v = v.flatten_to(batch_dims.len() - 1)?.to_dtype(DType::F32)?;
