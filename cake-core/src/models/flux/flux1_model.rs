@@ -717,7 +717,7 @@ impl Flux1Transformer {
         let dtype = img.dtype();
         let pe = {
             let ids = Tensor::cat(&[txt_ids, img_ids], 1)?;
-            ids.apply(&self.pe_embedder)?
+            ids.apply(&self.pe_embedder)?.to_dtype(dtype)?
         };
         let mut txt = self.txt_in.forward(txt)?;
         let mut img = self.img_in.forward(img)?;
