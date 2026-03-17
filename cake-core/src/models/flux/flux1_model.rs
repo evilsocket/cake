@@ -311,18 +311,9 @@ fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Te
     batch_dims.pop();
     batch_dims.pop();
 
-    // Use Flash Attention on CUDA — O(n) memory instead of O(n²)
-    #[cfg(feature = "cuda")]
-    if q.rank() == 4 && matches!(q.device(), candle_core::Device::Cuda(_)) {
-        // Input: (batch, heads, seq, head_dim)
-        // flash_attn expects: (batch, seq, heads, head_dim)
-        let q = q.transpose(1, 2)?.contiguous()?;
-        let k = k.transpose(1, 2)?.contiguous()?;
-        let v = v.transpose(1, 2)?.contiguous()?;
-        let attn = candle_flash_attn::flash_attn(&q, &k, &v, scale_factor as f32, false)?;
-        // Back to (batch, heads, seq, head_dim)
-        return attn.transpose(1, 2);
-    }
+    // TODO: Flash Attention integration produces black images — numerical issue
+    // with F16 precision or transpose layout. Needs investigation.
+    // For now, use manual SDPA which produces correct results.
 
     // CPU/Metal fallback (or rank != 4): manual SDPA
     let q = q.flatten_to(batch_dims.len() - 1)?;
