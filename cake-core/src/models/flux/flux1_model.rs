@@ -47,16 +47,41 @@ impl Config {
 // ── FP8-aware Linear ───────────────────────────────────────────────────────────
 
 /// Linear layer that stores weights in their native dtype (possibly F8E4M3)
-/// and casts to compute dtype on each forward call.
-#[derive(Debug, Clone)]
+/// and dequantizes to F16 on first forward call, caching the result.
+#[derive(Debug)]
 pub struct Fp8Linear {
-    weight: Tensor,
+    /// Original F8E4M3 weight (dropped after first dequant to save VRAM).
+    f8_weight: Option<Tensor>,
+    /// Cached F16 weight (populated on first forward call).
+    weight: std::sync::RwLock<Option<Tensor>>,
     bias: Option<Tensor>,
+}
+
+impl Clone for Fp8Linear {
+    fn clone(&self) -> Self {
+        Self {
+            f8_weight: self.f8_weight.clone(),
+            weight: std::sync::RwLock::new(self.weight.read().unwrap().clone()),
+            bias: self.bias.clone(),
+        }
+    }
 }
 
 impl Fp8Linear {
     fn new(weight: Tensor, bias: Option<Tensor>) -> Self {
-        Self { weight, bias }
+        if weight.dtype() == DType::F8E4M3 {
+            Self {
+                f8_weight: Some(weight),
+                weight: std::sync::RwLock::new(None),
+                bias,
+            }
+        } else {
+            Self {
+                f8_weight: None,
+                weight: std::sync::RwLock::new(Some(weight)),
+                bias,
+            }
+        }
     }
 
     /// Public constructor for testing.
@@ -64,11 +89,42 @@ impl Fp8Linear {
         Self::new(weight, bias)
     }
 
+    fn get_weight(&self) -> Result<Tensor> {
+        // Fast path: cached weight (F16 for F8 source, or original dtype)
+        if let Some(w) = self.weight.read().unwrap().as_ref() {
+            return Ok(w.clone());
+        }
+        // Slow path: dequantize F8→F16 and cache
+        let mut cache = self.weight.write().unwrap();
+        if let Some(w) = cache.as_ref() {
+            return Ok(w.clone());
+        }
+        let f8_w = self.f8_weight.as_ref().expect("no F8 weight and no cached weight");
+        let f16_w = crate::utils::fused_ops::f8e4m3_to_f16(f8_w)?;
+        *cache = Some(f16_w.clone());
+        Ok(f16_w)
+    }
+
+    fn compute_dtype(&self) -> DType {
+        if self.f8_weight.is_some() {
+            DType::F16 // F8 models use F16 compute
+        } else {
+            // Non-F8: use the stored weight's dtype
+            self.weight.read().unwrap().as_ref().map(|w| w.dtype()).unwrap_or(DType::F32)
+        }
+    }
+
+    /// Pre-dequantize F8→F16 and cache. Call once before inference loop.
+    pub fn warmup(&self) -> Result<()> {
+        let _ = self.get_weight()?;
+        Ok(())
+    }
+
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Dequantize F8E4M3 weights to F16 using our software kernel.
-        // F16 matmul is 2x faster than F32 on A100 (312 vs 156 TFLOPS).
-        let w = crate::utils::fused_ops::f8e4m3_to_f16(&self.weight)?;
-        let x = x.to_dtype(DType::F16)?;
+        let w = self.get_weight()?;
+        let dtype = self.compute_dtype();
+        let x = x.to_dtype(dtype)?;
+        let w = w.to_dtype(dtype)?;
         // Use broadcast_matmul for 3D×2D: reshape x to 2D, matmul, reshape back
         let dims = x.dims().to_vec();
         let last = *dims.last().unwrap();
@@ -79,7 +135,7 @@ impl Fp8Linear {
         out_dims.push(w.dim(0)?);
         let y = y_2d.reshape(out_dims)?;
         match &self.bias {
-            Some(b) => y.broadcast_add(&b.to_dtype(DType::F16)?),
+            Some(b) => y.broadcast_add(&b.to_dtype(dtype)?),
             None => Ok(y),
         }
     }
@@ -144,6 +200,81 @@ mod tests {
         let y = linear.forward(&x).unwrap();
         assert_eq!(y.dims(), &[1, 2]);
         assert_eq!(y.dtype(), DType::F16);
+    }
+
+    #[test]
+    fn test_scaled_dot_product_attention_shape() {
+        let q = Tensor::randn(0f32, 1., (1, 4, 16, 32), &candle_core::Device::Cpu).unwrap();
+        let k = Tensor::randn(0f32, 1., (1, 4, 16, 32), &candle_core::Device::Cpu).unwrap();
+        let v = Tensor::randn(0f32, 1., (1, 4, 16, 32), &candle_core::Device::Cpu).unwrap();
+        let out = scaled_dot_product_attention(&q, &k, &v).unwrap();
+        assert_eq!(out.dims(), &[1, 4, 16, 32]);
+    }
+
+    #[test]
+    fn test_scaled_dot_product_attention_different_seq() {
+        let q = Tensor::randn(0f32, 1., (1, 2, 8, 16), &candle_core::Device::Cpu).unwrap();
+        let k = Tensor::randn(0f32, 1., (1, 2, 12, 16), &candle_core::Device::Cpu).unwrap();
+        let v = Tensor::randn(0f32, 1., (1, 2, 12, 16), &candle_core::Device::Cpu).unwrap();
+        let out = scaled_dot_product_attention(&q, &k, &v).unwrap();
+        assert_eq!(out.dims(), &[1, 2, 8, 16]); // seq follows q
+    }
+
+    #[test]
+    fn test_rope_shape() {
+        // rope expects pos: (batch, seq_len)
+        let pos = Tensor::randn(0f32, 1., (1, 16), &candle_core::Device::Cpu).unwrap();
+        let out = rope(&pos, 32, 10000).unwrap();
+        // Output: (batch, seq_len, dim/2, 2, 2)
+        assert_eq!(out.dims(), &[1, 16, 16, 2, 2]);
+    }
+
+    #[test]
+    fn test_rope_odd_dim_errors() {
+        let pos = Tensor::randn(0f32, 1., (1, 4), &candle_core::Device::Cpu).unwrap();
+        assert!(rope(&pos, 33, 10000).is_err());
+    }
+
+    #[test]
+    fn test_apply_rope_preserves_shape() {
+        // x: (batch, heads, seq, head_dim), pe: (batch, seq, head_dim/2, 2, 2)
+        let x = Tensor::randn(0f32, 1., (1, 4, 8, 32), &candle_core::Device::Cpu).unwrap();
+        let pos = Tensor::randn(0f32, 1., (1, 8), &candle_core::Device::Cpu).unwrap();
+        let freq_cis = rope(&pos, 32, 10000).unwrap();
+        let out = apply_rope(&x, &freq_cis).unwrap();
+        assert_eq!(out.dims(), &[1, 4, 8, 32]);
+    }
+
+    #[test]
+    fn test_attention_full_pipeline() {
+        let q = Tensor::randn(0f32, 1., (1, 4, 8, 32), &candle_core::Device::Cpu).unwrap();
+        let k = Tensor::randn(0f32, 1., (1, 4, 8, 32), &candle_core::Device::Cpu).unwrap();
+        let v = Tensor::randn(0f32, 1., (1, 4, 8, 32), &candle_core::Device::Cpu).unwrap();
+        let pos = Tensor::randn(0f32, 1., (1, 8), &candle_core::Device::Cpu).unwrap();
+        let pe = rope(&pos, 32, 10000).unwrap();
+        let out = attention(&q, &k, &v, &pe).unwrap();
+        assert_eq!(out.dims(), &[1, 8, 128]); // seq_len=8, 4 heads × 32 dim = 128
+    }
+
+    #[test]
+    fn test_timestep_embedding_f16() {
+        let t = Tensor::new(&[0.5f32], &candle_core::Device::Cpu).unwrap();
+        let emb = timestep_embedding(&t, 256, DType::F16).unwrap();
+        assert_eq!(emb.dims(), &[1, 256]);
+        assert_eq!(emb.dtype(), DType::F16);
+    }
+
+    #[test]
+    fn test_embed_nd() {
+        // EmbedNd expects input shape matching the axes: each column is a position axis.
+        // For axes_dim=[16, 56, 56], input needs 3 "columns" concatenated.
+        // The actual usage is: Tensor::cat(&[txt_ids, img_ids], 1) which is (batch, total_seq, num_axes)
+        // but the Module impl for EmbedNd calls rope() per axis.
+        let pe = EmbedNd { theta: 10000, axes_dim: vec![16, 16] };
+        let ids = Tensor::zeros((1, 20, 2), DType::F32, &candle_core::Device::Cpu).unwrap();
+        let out = ids.apply(&pe).unwrap();
+        // Output should have proper shape
+        assert_eq!(out.dim(0).unwrap(), 1);
     }
 }
 

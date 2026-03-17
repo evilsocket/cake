@@ -39,6 +39,71 @@ fn flux2_pos_embed(bencher: divan::Bencher, seq_len: usize) {
     bencher.bench_local(|| pe.forward(&ids).unwrap());
 }
 
+// ── F8E4M3 dequantization ────────────────────────────────────────────
+
+#[divan::bench(args = [1024*1024, 3072*3072, 3072*9216])]
+fn f8_to_f32_dequant(bencher: divan::Bencher, numel: usize) {
+    // Create F8 tensor (simulate weight)
+    let f32_data: Vec<f32> = (0..numel).map(|i| (i as f32 * 0.001) % 2.0 - 1.0).collect();
+    let t = Tensor::from_vec(f32_data, &[numel], &Device::Cpu)
+        .unwrap()
+        .to_dtype(DType::F8E4M3)
+        .unwrap();
+    bencher
+        .counter(divan::counter::BytesCount::new(numel))
+        .bench_local(|| cake_core::utils::fused_ops::f8e4m3_to_f32(&t).unwrap());
+}
+
+#[divan::bench(args = [1024*1024, 3072*3072, 3072*9216])]
+fn f8_to_f16_dequant(bencher: divan::Bencher, numel: usize) {
+    let f32_data: Vec<f32> = (0..numel).map(|i| (i as f32 * 0.001) % 2.0 - 1.0).collect();
+    let t = Tensor::from_vec(f32_data, &[numel], &Device::Cpu)
+        .unwrap()
+        .to_dtype(DType::F8E4M3)
+        .unwrap();
+    bencher
+        .counter(divan::counter::BytesCount::new(numel))
+        .bench_local(|| cake_core::utils::fused_ops::f8e4m3_to_f16(&t).unwrap());
+}
+
+// ── Fp8Linear at FLUX.1 realistic sizes ──────────────────────────────
+
+#[divan::bench(args = [4096, 1024, 256])]
+fn fp8_linear_flux1_qkv(bencher: divan::Bencher, seq_len: usize) {
+    // QKV projection: (seq_len, 3072) → (seq_len, 9216) [3*hidden_size]
+    let weight = make_tensor(&[9216, 3072], 300)
+        .to_dtype(DType::F8E4M3)
+        .unwrap();
+    let linear = cake_core::models::flux::flux1_model::Fp8Linear::new_pub(weight, None);
+    let x = make_tensor(&[1, seq_len, 3072], 301).to_dtype(DType::F16).unwrap();
+    bencher.bench_local(|| linear.forward(&x).unwrap());
+}
+
+#[divan::bench(args = [4096, 1024, 256])]
+fn fp8_linear_flux1_mlp(bencher: divan::Bencher, seq_len: usize) {
+    // MLP first layer: (seq_len, 3072) → (seq_len, 12288) [4*hidden_size]
+    let weight = make_tensor(&[12288, 3072], 310)
+        .to_dtype(DType::F8E4M3)
+        .unwrap();
+    let linear = cake_core::models::flux::flux1_model::Fp8Linear::new_pub(weight, None);
+    let x = make_tensor(&[1, seq_len, 3072], 311).to_dtype(DType::F16).unwrap();
+    bencher.bench_local(|| linear.forward(&x).unwrap());
+}
+
+// ── Scaled dot-product attention ─────────────────────────────────────
+
+#[divan::bench(args = [256, 1024])]
+fn sdpa_flux1(bencher: divan::Bencher, seq_len: usize) {
+    // 24 heads, head_dim=128
+    let q = make_tensor(&[1, 24, seq_len, 128], 400);
+    let k = make_tensor(&[1, 24, seq_len, 128], 401);
+    let v = make_tensor(&[1, 24, seq_len, 128], 402);
+    bencher.bench_local(|| {
+        let attn = (q.matmul(&k.t().unwrap()).unwrap() * (1.0 / 128.0f64.sqrt())).unwrap();
+        candle_nn::ops::softmax_last_dim(&attn).unwrap().matmul(&v).unwrap()
+    });
+}
+
 // ── VAE ResnetBlock2D ────────────────────────────────────────────────
 
 #[divan::bench(args = [8, 16])]
