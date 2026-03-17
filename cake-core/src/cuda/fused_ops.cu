@@ -24,6 +24,39 @@ template<> __device__ __forceinline__ __nv_bfloat16 expg<__nv_bfloat16>(__nv_bfl
 }
 #endif
 
+// ─── f8e4m3_to_f32: software FP8 dequantization for SM < 8.9 ────────
+// On SM89+ (Ada/Hopper), candle uses native __nv_fp8_e4m3 hardware.
+// On SM80 (A100) and below, the native FP8 type doesn't exist.
+// F8E4M3 format: 1 sign bit, 4 exponent bits (bias=7), 3 mantissa bits.
+extern "C" __global__ void f8e4m3_to_f32(
+    const size_t numel,
+    const uint8_t *inp,
+    float *out
+) {
+    for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < numel; i += blockDim.x * gridDim.x) {
+        uint8_t bits = inp[i];
+        uint32_t sign = (bits >> 7) & 1;
+        uint32_t exp  = (bits >> 3) & 0xF;
+        uint32_t mant = bits & 0x7;
+
+        float result;
+        if (exp == 0 && mant == 0) {
+            result = 0.0f;
+        } else if (exp == 0) {
+            // Subnormal: 2^(-6) * (mant / 8)
+            result = ldexpf((float)mant / 8.0f, -6);
+        } else if (exp == 0xF && mant == 0x7) {
+            result = __int_as_float(0x7FC00000); // NaN
+        } else {
+            // Normal: 2^(exp-7) * (1 + mant/8)
+            result = ldexpf(1.0f + (float)mant / 8.0f, (int)exp - 7);
+        }
+        if (sign) result = -result;
+        out[i] = result;
+    }
+}
+
 // ─── silu_mul: silu(x) * y = x * sigmoid(x) * y ────────────────────
 // Fuses 2 kernels (silu + mul) into 1.
 // Used in every MLP (gate activation * up projection).

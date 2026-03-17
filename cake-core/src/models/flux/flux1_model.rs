@@ -65,9 +65,9 @@ impl Fp8Linear {
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Cast everything to F32 for compute — avoids missing F8→BF16 CUDA kernels
-        // and BF16 matmul kernel gaps on some GPU architectures.
-        let w = self.weight.to_dtype(DType::F32)?;
+        // Dequantize F8E4M3 weights to F32 using our software kernel
+        // (works on A100/SM80 where candle lacks native F8 support).
+        let w = crate::utils::fused_ops::f8e4m3_to_f32(&self.weight)?;
         let x = x.to_dtype(DType::F32)?;
         // Use broadcast_matmul for 3D×2D: reshape x to 2D, matmul, reshape back
         let dims = x.dims().to_vec();
@@ -101,26 +101,27 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
-    fn test_f8_to_f32_cast_on_cuda() {
+    fn test_f8_to_f32_software_dequant_cuda() {
         let dev = match candle_core::Device::new_cuda(0) {
             Ok(d) => d,
             Err(_) => return,
         };
-        // Create F32 tensor, cast to F8E4M3, move to GPU, cast back to F32
+        // Create F32 tensor, cast to F8E4M3 on CPU, move to GPU, dequant with our kernel
         let original = Tensor::new(&[0.5f32, 1.0, -0.5, 2.0], &candle_core::Device::Cpu).unwrap();
         let f8 = original.to_dtype(DType::F8E4M3).unwrap();
         let f8_gpu = f8.to_device(&dev).unwrap();
         assert_eq!(f8_gpu.dtype(), DType::F8E4M3);
 
-        // This is the critical operation — F8→F32 on CUDA
-        let f32_gpu = f8_gpu.to_dtype(DType::F32).unwrap();
+        // Use our software dequant (works on all SM including A100/SM80)
+        let f32_gpu = crate::utils::fused_ops::f8e4m3_to_f32(&f8_gpu).unwrap();
         assert_eq!(f32_gpu.dtype(), DType::F32);
 
         let vals: Vec<f32> = f32_gpu.to_vec1().unwrap();
         assert_eq!(vals.len(), 4);
-        // F8E4M3 has limited precision, check roughly
         assert!((vals[0] - 0.5).abs() < 0.1, "val[0]={}", vals[0]);
         assert!((vals[1] - 1.0).abs() < 0.1, "val[1]={}", vals[1]);
+        assert!((vals[2] + 0.5).abs() < 0.1, "val[2]={}", vals[2]);
+        assert!((vals[3] - 2.0).abs() < 0.1, "val[3]={}", vals[3]);
     }
 
     #[cfg(feature = "cuda")]
@@ -130,7 +131,7 @@ mod tests {
             Ok(d) => d,
             Err(_) => return,
         };
-        // Create F8 weight on GPU
+        // Create F8 weight on GPU via our software path
         let w_f32 = Tensor::new(
             &[[1.0f32, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
             &candle_core::Device::Cpu,
