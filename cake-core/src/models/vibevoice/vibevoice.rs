@@ -230,12 +230,14 @@ impl VibeVoiceTTS {
     fn sample_speech_latent(&self, condition: &Tensor) -> Result<Tensor> {
         let vae_dim = self.config.acoustic_vae_dim;
 
-        // Start from random noise
-        let mut sample = Tensor::randn(0f32, 1., (1, vae_dim), &self.device)?;
+        // Start from random noise in the same dtype as the model
+        let mut sample = Tensor::randn(0f32, 1., (1, vae_dim), &self.device)?
+            .to_dtype(condition.dtype())?;
 
         // Reverse diffusion loop
         for &t in self.scheduler.timesteps() {
-            let t_tensor = Tensor::new(&[t as f32 / 1000.0], &self.device)?;
+            let t_tensor = Tensor::new(&[t as f32 / 1000.0], &self.device)?
+                .to_dtype(condition.dtype())?;
             let v_pred = self.prediction_head.forward(&sample, &t_tensor, condition)?;
             sample = self.scheduler.step(&v_pred, t, &sample)?;
         }
