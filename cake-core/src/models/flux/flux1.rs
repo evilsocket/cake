@@ -268,23 +268,23 @@ impl ImageGenerator for Flux1Gen {
         // ── 6. Denoise ─────────────────────────────────────────────────────
         info!("Starting denoising ({num_steps} steps, guidance={guidance_scale})...");
         let b_sz = img.dim(0)?;
-        let guidance_tensor = Tensor::full(guidance_scale as f32, b_sz, &dev)?
-            .to_dtype(DType::F16)?;
+        let guidance_tensor = Tensor::full(guidance_scale as f32, b_sz, &dev)?;
 
-        // Cast state tensors to F16 for 2x faster matmul on A100
-        let img_ids = img_ids.to_dtype(DType::F32)?; // IDs stay F32 for position encoding
-        let txt = txt.to_dtype(DType::F16)?;
+        // Keep state in F32 for numerical stability (F16 causes NaN in modulation ops).
+        // Fp8Linear internally casts to F16 for fast matmul, then outputs F16 which gets
+        // cast back to F32 by downstream ops — so we still benefit from F16 TFLOPS.
+        let img_ids = img_ids.to_dtype(DType::F32)?;
+        let txt = txt.to_dtype(DType::F32)?;
         let txt_ids = txt_ids.to_dtype(DType::F32)?;
-        let vec = vec.to_dtype(DType::F16)?;
+        let vec = vec.to_dtype(DType::F32)?;
 
-        let mut img = img.to_dtype(DType::F16)?;
+        let mut img = img.to_dtype(DType::F32)?;
         for window in schedule.windows(2) {
             let (t_curr, t_prev) = match window {
                 [a, b] => (a, b),
                 _ => continue,
             };
-            let t_vec = Tensor::full(*t_curr as f32, b_sz, &dev)?
-                .to_dtype(DType::F16)?;
+            let t_vec = Tensor::full(*t_curr as f32, b_sz, &dev)?;
             let pred = transformer.forward(
                 &img,
                 &img_ids,
