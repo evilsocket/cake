@@ -129,24 +129,16 @@ impl AcousticVaeDecoder {
         let n_filters = cfg.decoder_n_filters.unwrap_or(cfg.encoder_n_filters);
         let ratios = cfg.decoder_ratios.as_ref().unwrap_or(&cfg.encoder_ratios);
 
-        // Channel sizes: from inner (largest) to outer (smallest)
-        // n_filters=32, ratios=[8,5,5,4,2,2]
-        // channels[0] = n_filters * product(ratios) = 32 * 3200 = ... no
-        // Actually from the weights: stage 0 has 2048 channels, which is n_filters * 2^6 = 32 * 64
-        // Let me compute from weight shapes
         let num_stages = ratios.len() + 1; // 7 stages for 6 ratios
 
-        // Channel progression matches weights:
-        // upsample_layers.0: maps vae_dim(64) → first_channels(2048)
-        // Then each upsample halves channels: 2048→1024→512→256→128→64→32
+        // Channel progression: n_filters * 2^(num_stages-1) down to n_filters
+        // From weights: 2048, 1024, 512, 256, 128, 64, 32 for n_filters=32, 7 stages
         let mut channels = Vec::with_capacity(num_stages);
-        let first_ch = n_filters * ratios.iter().product::<usize>();
+        let first_ch = n_filters * (1 << (num_stages - 1)); // 32 * 64 = 2048
         channels.push(first_ch);
-        for &r in ratios {
-            channels.push(channels.last().unwrap() / r.max(1));
+        for _ in 0..ratios.len() {
+            channels.push(channels.last().unwrap() / 2);
         }
-        // Clamp minimum to n_filters
-        let channels: Vec<usize> = channels.iter().map(|&c| c.max(n_filters)).collect();
 
         // Upsample layers
         let mut upsample_layers = Vec::with_capacity(num_stages);
