@@ -60,14 +60,10 @@ impl Fp8Linear {
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Cast weight to F32 first (candle may lack direct F8E4M3→BF16 kernel),
-        // then to BF16 for matmul. The F8→F32 cast is supported natively.
-        let w = if self.weight.dtype() == DType::F8E4M3 {
-            self.weight.to_dtype(DType::F32)?.to_dtype(DType::BF16)?
-        } else {
-            self.weight.to_dtype(DType::BF16)?
-        };
-        let x = x.to_dtype(DType::BF16)?;
+        // Cast everything to F32 for compute — avoids missing F8→BF16 CUDA kernels
+        // and BF16 matmul kernel gaps on some GPU architectures.
+        let w = self.weight.to_dtype(DType::F32)?;
+        let x = x.to_dtype(DType::F32)?;
         // Use broadcast_matmul for 3D×2D: reshape x to 2D, matmul, reshape back
         let dims = x.dims().to_vec();
         let last = *dims.last().unwrap();
@@ -78,7 +74,7 @@ impl Fp8Linear {
         out_dims.push(w.dim(0)?);
         let y = y_2d.reshape(out_dims)?;
         match &self.bias {
-            Some(b) => y.broadcast_add(&b.to_dtype(DType::BF16)?),
+            Some(b) => y.broadcast_add(&b.to_dtype(DType::F32)?),
             None => Ok(y),
         }
     }
@@ -247,9 +243,9 @@ pub struct QkNorm {
 impl QkNorm {
     fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
         // Norm weights must be in BF16 (not F8) for RmsNorm computation
-        let query_norm = vb.get(dim, "query_norm.scale")?.to_dtype(DType::BF16)?;
+        let query_norm = vb.get(dim, "query_norm.scale")?.to_dtype(DType::F32)?;
         let query_norm = RmsNorm::new(query_norm, 1e-6);
-        let key_norm = vb.get(dim, "key_norm.scale")?.to_dtype(DType::BF16)?;
+        let key_norm = vb.get(dim, "key_norm.scale")?.to_dtype(DType::F32)?;
         let key_norm = RmsNorm::new(key_norm, 1e-6);
         Ok(Self {
             query_norm,
