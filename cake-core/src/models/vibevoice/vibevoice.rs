@@ -181,11 +181,17 @@ impl VibeVoiceTTS {
         let mut sample = Tensor::randn(0f32, 1., (1, vae_dim), &self.device)?
             .to_dtype(self.dtype)?;
 
-        for t in &timesteps {
-            // Pass raw integer timestep (reference: t.repeat(...).to(combined))
+        for (step_i, t) in timesteps.iter().enumerate() {
             let t_tensor = Tensor::new(&[*t as f32], &self.device)?
                 .to_dtype(self.dtype)?;
             let v_pred = self.prediction_head.forward(&sample, &t_tensor, condition)?;
+            if step_i == 0 {
+                let vp: Vec<f32> = v_pred.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1()?;
+                let sp: Vec<f32> = sample.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1()?;
+                let vm: f32 = vp.iter().sum::<f32>() / vp.len() as f32;
+                let sm: f32 = sp.iter().sum::<f32>() / sp.len() as f32;
+                info!("  [debug] t={} sample_mean={:.6} vpred_mean={:.6}", t, sm, vm);
+            }
             let v_pred = if cfg_scale != 1.0 {
                 (v_pred * cfg_scale as f64)?
             } else {
@@ -236,10 +242,19 @@ impl VibeVoiceTTS {
         // Step 3: Generate speech frames autoregressively
         let mut audio_latents: Vec<Tensor> = Vec::new();
 
-        for _frame in 0..max_frames {
+        for frame_idx in 0..max_frames {
             // Condition = last hidden state of TTS LM (updated each frame)
             let seq_len = last_hidden.dim(1)?;
             let condition = last_hidden.narrow(1, seq_len - 1, 1)?.squeeze(1)?;
+
+            // Debug: dump condition stats for first frame
+            if frame_idx == 0 {
+                let cond_f32 = condition.to_dtype(DType::F32)?;
+                let cond_vals: Vec<f32> = cond_f32.flatten_all()?.to_vec1()?;
+                let mean: f32 = cond_vals.iter().sum::<f32>() / cond_vals.len() as f32;
+                let std: f32 = (cond_vals.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / cond_vals.len() as f32).sqrt();
+                info!("  [debug] condition mean={:.6} std={:.6} first5={:?}", mean, std, &cond_vals[..5.min(cond_vals.len())]);
+            }
 
             // Sample speech latent via DDPM
             let latent = self.sample_speech_latent(&condition, cfg_scale)?;
