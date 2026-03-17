@@ -176,6 +176,10 @@ pub struct Args {
     /// Number of DDPM diffusion steps per speech frame (lower = faster, less quality).
     #[arg(long, default_value_t = 10)]
     pub tts_diffusion_steps: usize,
+
+    /// Path to voice prompt (.safetensors) for TTS voice cloning.
+    #[arg(long)]
+    pub voice_prompt: Option<String>,
 }
 
 #[derive(Clone, clap::Args, Default, Debug)]

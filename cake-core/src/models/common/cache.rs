@@ -209,6 +209,14 @@ impl Cache {
         Ok((k, v))
     }
 
+    /// Directly set the KV cache for a layer (used for voice prompt injection).
+    pub fn set_kv(&mut self, block_idx: usize, k: Tensor, v: Tensor) {
+        if block_idx >= self.kvs.len() {
+            self.kvs.resize(block_idx + 1, None);
+        }
+        self.kvs[block_idx] = Some((k, v));
+    }
+
     /// Get the recurrent state for a linear attention layer.
     pub fn get_recurrent_state(&self, block_idx: usize) -> Option<&Tensor> {
         self.recurrent_states[block_idx].as_ref()

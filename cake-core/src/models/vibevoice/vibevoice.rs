@@ -1,10 +1,8 @@
-//! VibeVoice-Realtime-0.5B TTS pipeline.
+//! VibeVoice-Realtime-0.5B TTS pipeline with voice cloning.
 //!
-//! Two-LM architecture:
-//! 1. Base LM (4 layers) encodes text → hidden states
-//! 2. TTS LM (20 layers) takes text embeds + base LM hidden states → conditions
-//! 3. Diffusion head (4 layers, DDPM) generates acoustic latents per frame
-//! 4. σ-VAE decoder converts latents to 24kHz audio
+//! Requires a voice prompt (pre-computed KV caches from a reference voice).
+//! Uses classifier-free guidance with 4 parallel model streams:
+//! positive (base LM + TTS LM) and negative (unconditional).
 
 use anyhow::Result;
 use candle_core::{DType, Device, Module, Tensor};
@@ -17,6 +15,7 @@ use super::ddpm::DdpmScheduler;
 use super::eos_classifier::EosClassifier;
 use super::prediction_head::PredictionHead;
 use super::vae_decoder::AcousticVaeDecoder;
+use super::voice_prompt::{self, VoicePrompt};
 
 /// Text tokens processed per window before generating speech frames.
 #[allow(dead_code)]
@@ -25,20 +24,19 @@ const TTS_TEXT_WINDOW_SIZE: usize = 5;
 #[allow(dead_code)]
 const TTS_SPEECH_WINDOW_SIZE: usize = 6;
 
-/// VibeVoice TTS model.
+/// VibeVoice TTS model with voice cloning support.
 pub struct VibeVoiceTTS {
-    // Base language model (4 layers — text encoder)
+    // Base LM (4 layers)
     base_embed: candle_nn::Embedding,
     base_layers: Vec<crate::models::common::Transformer>,
-    base_cache: crate::models::common::Cache,
 
-    // TTS language model (20 layers — speech generation)
+    // TTS LM (20 layers)
+    #[allow(dead_code)]
     tts_embed: candle_nn::Embedding,
     tts_norm: candle_nn::RmsNorm,
     tts_layers: Vec<crate::models::common::Transformer>,
-    tts_cache: crate::models::common::Cache,
 
-    // Input type embedding: 0 = speech, 1 = text
+    // Type embedding: 0=speech, 1=text
     tts_input_types: candle_nn::Embedding,
 
     // Diffusion + decoding
@@ -52,6 +50,7 @@ pub struct VibeVoiceTTS {
     speech_bias_factor: Tensor,
 
     config: VibeVoiceConfig,
+    common_cfg: crate::models::common::Config,
     device: Device,
     dtype: DType,
 }
@@ -67,217 +66,199 @@ impl VibeVoiceTTS {
         let common_cfg = config.into_config();
 
         info!("Loading VibeVoice-Realtime-0.5B...");
-
         let dtype = if matches!(device, Device::Cuda(_)) { DType::F16 } else { DType::F32 };
 
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(&[weights_path.to_path_buf()], dtype, device)?
         };
 
-        // Base LM (4 layers for text encoding)
+        // Base LM (4 layers)
         info!("  Loading base LM (4 layers)...");
         let base_vb = vb.pp("model").pp("language_model");
-        let base_embed = candle_nn::embedding(
-            common_cfg.vocab_size, common_cfg.hidden_size, base_vb.pp("embed_tokens"),
-        )?;
+        let base_embed = candle_nn::embedding(common_cfg.vocab_size, common_cfg.hidden_size, base_vb.pp("embed_tokens"))?;
         let mut base_layers = Vec::new();
         for i in 0..4 {
-            base_layers.push(crate::models::common::Transformer::load_for_vibevoice(
-                base_vb.pp("layers").pp(i), &common_cfg,
-            )?);
+            base_layers.push(crate::models::common::Transformer::load_for_vibevoice(base_vb.pp("layers").pp(i), &common_cfg)?);
         }
-        let base_cache = crate::models::common::Cache::new(false, dtype, &common_cfg, device)?;
 
-        // TTS LM (20 layers for speech generation)
-        let num_tts_layers = config.tts_backbone_num_hidden_layers;
-        info!("  Loading TTS LM ({} layers)...", num_tts_layers);
+        // TTS LM (20 layers)
+        let num_tts = config.tts_backbone_num_hidden_layers;
+        info!("  Loading TTS LM ({num_tts} layers)...");
         let tts_vb = vb.pp("model").pp("tts_language_model");
-        let tts_embed = candle_nn::embedding(
-            common_cfg.vocab_size, common_cfg.hidden_size, tts_vb.pp("embed_tokens"),
-        )?;
-        let tts_norm = candle_nn::rms_norm(
-            common_cfg.hidden_size, common_cfg.rms_norm_eps, tts_vb.pp("norm"),
-        )?;
+        let tts_embed = candle_nn::embedding(common_cfg.vocab_size, common_cfg.hidden_size, tts_vb.pp("embed_tokens"))?;
+        let tts_norm = candle_nn::rms_norm(common_cfg.hidden_size, common_cfg.rms_norm_eps, tts_vb.pp("norm"))?;
         let mut tts_layers = Vec::new();
-        for i in 0..num_tts_layers {
-            tts_layers.push(crate::models::common::Transformer::load_for_vibevoice(
-                tts_vb.pp("layers").pp(i), &common_cfg,
-            )?);
+        for i in 0..num_tts {
+            tts_layers.push(crate::models::common::Transformer::load_for_vibevoice(tts_vb.pp("layers").pp(i), &common_cfg)?);
         }
-        let tts_cache = crate::models::common::Cache::new(true, dtype, &common_cfg, device)?;
 
-        // Type embedding
-        let tts_input_types = candle_nn::embedding(
-            2, common_cfg.hidden_size, vb.pp("model").pp("tts_input_types"),
-        )?;
+        let tts_input_types = candle_nn::embedding(2, common_cfg.hidden_size, vb.pp("model").pp("tts_input_types"))?;
 
-        // Diffusion
-        info!("  Loading prediction head...");
-        let prediction_head = PredictionHead::load(
-            vb.pp("model").pp("prediction_head"), &config.diffusion_head_config,
-        )?;
-
-        // VAE decoder
-        info!("  Loading acoustic VAE decoder...");
-        let vae_decoder = AcousticVaeDecoder::load(
-            vb.pp("model").pp("acoustic_tokenizer").pp("decoder"),
-            &config.acoustic_tokenizer_config,
-        )?;
-
-        // Connector + EOS
-        info!("  Loading connector + EOS...");
-        let connector = AcousticConnector::load(
-            vb.pp("model").pp("acoustic_connector"),
-            config.acoustic_vae_dim, config.decoder_config.hidden_size,
-            config.decoder_config.rms_norm_eps,
-        )?;
+        info!("  Loading prediction head + VAE + connector...");
+        let prediction_head = PredictionHead::load(vb.pp("model").pp("prediction_head"), &config.diffusion_head_config)?;
+        let vae_decoder = AcousticVaeDecoder::load(vb.pp("model").pp("acoustic_tokenizer").pp("decoder"), &config.acoustic_tokenizer_config)?;
+        let connector = AcousticConnector::load(vb.pp("model").pp("acoustic_connector"), config.acoustic_vae_dim, config.decoder_config.hidden_size, config.decoder_config.rms_norm_eps)?;
         let eos_classifier = EosClassifier::load(vb.pp("tts_eos_classifier"))?;
 
         let speech_scaling_factor = vb.pp("model").get((), "speech_scaling_factor")?;
         let speech_bias_factor = vb.pp("model").get((), "speech_bias_factor")?;
 
-        let inference_steps = diffusion_steps
-            .unwrap_or(config.diffusion_head_config.ddpm_num_inference_steps);
-        info!("  DDPM: {} inference steps", inference_steps);
-        let scheduler = DdpmScheduler::new_cosine(
-            config.diffusion_head_config.ddpm_num_steps, inference_steps,
-        );
+        let steps = diffusion_steps.unwrap_or(config.diffusion_head_config.ddpm_num_inference_steps);
+        info!("  DDPM: {steps} steps");
+        let scheduler = DdpmScheduler::new_cosine(config.diffusion_head_config.ddpm_num_steps, steps);
 
-        info!("VibeVoice model loaded!");
+        info!("VibeVoice loaded!");
 
         Ok(Self {
-            base_embed, base_layers, base_cache,
-            tts_embed, tts_norm, tts_layers, tts_cache,
+            base_embed, base_layers,
+            tts_embed, tts_norm, tts_layers,
             tts_input_types,
             prediction_head, scheduler, vae_decoder, connector, eos_classifier,
             speech_scaling_factor, speech_bias_factor,
-            config, device: device.clone(), dtype,
+            config, common_cfg, device: device.clone(), dtype,
         })
     }
 
-    /// Forward through base LM (text encoder, 4 layers).
-    fn forward_base_lm(&mut self, embeds: &Tensor) -> Result<Tensor> {
+    /// Forward through a set of transformer layers with a cache.
+    fn forward_layers(
+        layers: &[crate::models::common::Transformer],
+        norm: Option<&candle_nn::RmsNorm>,
+        embeds: &Tensor,
+        index_pos: usize,
+        cache: &mut crate::models::common::Cache,
+    ) -> Result<Tensor> {
         let mut h = embeds.clone();
-        for (i, layer) in self.base_layers.iter().enumerate() {
-            h = layer.forward_with_cache(&h, 0, i, &mut self.base_cache)?;
+        for (i, layer) in layers.iter().enumerate() {
+            h = layer.forward_with_cache(&h, index_pos, i, cache)?;
+        }
+        if let Some(n) = norm {
+            h = n.forward(&h).map_err(|e| anyhow::anyhow!("norm: {e}"))?;
         }
         Ok(h)
     }
 
-    /// Forward through TTS LM (20 layers) with KV caching.
-    fn forward_tts_lm(&mut self, embeds: &Tensor, index_pos: usize) -> Result<Tensor> {
-        let mut h = embeds.clone();
-        for (i, layer) in self.tts_layers.iter().enumerate() {
-            h = layer.forward_with_cache(&h, index_pos, i, &mut self.tts_cache)?;
-        }
-        self.tts_norm.forward(&h).map_err(|e| anyhow::anyhow!("tts_norm: {e}"))
-    }
-
-    /// Sample speech latent via DDPM.
-    fn sample_speech_latent(&self, condition: &Tensor, cfg_scale: f32) -> Result<Tensor> {
+    /// Sample speech latent with CFG.
+    fn sample_speech_latent(&self, pos_cond: &Tensor, neg_cond: &Tensor, cfg_scale: f32) -> Result<Tensor> {
         let vae_dim = self.config.acoustic_vae_dim;
         let timesteps = self.scheduler.timesteps().to_vec();
 
-        let mut sample = Tensor::randn(0f32, 1., (1, vae_dim), &self.device)?
-            .to_dtype(self.dtype)?;
+        // Stack positive+negative for batched prediction
+        let condition = Tensor::cat(&[pos_cond, neg_cond], 0)?; // (2, hidden)
 
-        for (step_i, t) in timesteps.iter().enumerate() {
-            let t_tensor = Tensor::new(&[*t as f32], &self.device)?
-                .to_dtype(self.dtype)?;
-            let v_pred = self.prediction_head.forward(&sample, &t_tensor, condition)?;
-            if step_i == 0 {
-                let vp: Vec<f32> = v_pred.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1()?;
-                let sp: Vec<f32> = sample.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1()?;
-                let vm: f32 = vp.iter().sum::<f32>() / vp.len() as f32;
-                let sm: f32 = sp.iter().sum::<f32>() / sp.len() as f32;
-                info!("  [debug] t={} sample_mean={:.6} vpred_mean={:.6}", t, sm, vm);
-            }
-            let v_pred = if cfg_scale != 1.0 {
-                (v_pred * cfg_scale as f64)?
-            } else {
-                v_pred
-            };
-            sample = self.scheduler.step(&v_pred, *t, &sample)?;
+        let mut sample = Tensor::randn(0f32, 1., (1, vae_dim), &self.device)?.to_dtype(self.dtype)?;
+
+        for t in &timesteps {
+            let t_tensor = Tensor::new(&[*t as f32], &self.device)?.to_dtype(self.dtype)?;
+
+            // Duplicate sample for both conditions
+            let doubled = Tensor::cat(&[&sample, &sample], 0)?; // (2, vae_dim)
+            let t_doubled = Tensor::cat(&[&t_tensor, &t_tensor], 0)?; // (2,)
+
+            let v_pred = self.prediction_head.forward(&doubled, &t_doubled, &condition)?;
+
+            // CFG: uncond + scale * (cond - uncond)
+            let cond_pred = v_pred.narrow(0, 0, 1)?;
+            let uncond_pred = v_pred.narrow(0, 1, 1)?;
+            let guided = (&uncond_pred + (&cond_pred - &uncond_pred)? * cfg_scale as f64)?;
+
+            sample = self.scheduler.step(&guided, *t, &sample)?;
         }
         Ok(sample)
     }
 
-    /// Generate audio from text.
+    /// Generate audio from text with a voice prompt.
     pub fn generate(
         &mut self,
         token_ids: &[u32],
+        voice_prompt: &VoicePrompt,
         max_frames: usize,
         cfg_scale: f32,
     ) -> Result<Vec<f32>> {
         let dev = self.device.clone();
         let hidden_size = self.config.decoder_config.hidden_size;
 
-        // Reset caches
-        self.base_cache.clear();
-        self.tts_cache.clear();
+        // Create 4 caches (positive + negative × base + TTS)
+        let mut pos_base_cache = crate::models::common::Cache::new(true, self.dtype, &self.common_cfg, &dev)?;
+        let mut pos_tts_cache = crate::models::common::Cache::new(true, self.dtype, &self.common_cfg, &dev)?;
+        let mut neg_base_cache = crate::models::common::Cache::new(true, self.dtype, &self.common_cfg, &dev)?;
+        let mut neg_tts_cache = crate::models::common::Cache::new(true, self.dtype, &self.common_cfg, &dev)?;
+
+        // Inject voice prompt KV caches
+        voice_prompt::inject_kv_cache(&mut pos_base_cache, &voice_prompt.lm);
+        voice_prompt::inject_kv_cache(&mut pos_tts_cache, &voice_prompt.tts_lm);
+        voice_prompt::inject_kv_cache(&mut neg_base_cache, &voice_prompt.neg_lm);
+        voice_prompt::inject_kv_cache(&mut neg_tts_cache, &voice_prompt.neg_tts_lm);
+
+        let pos_base_seq = voice_prompt.lm.seq_len;
+        let pos_tts_seq = voice_prompt.tts_lm.seq_len;
+        #[allow(unused)] let neg_base_seq = voice_prompt.neg_lm.seq_len;
+        let neg_tts_seq = voice_prompt.neg_tts_lm.seq_len;
 
         // Type embeddings
-        let text_type = self.tts_input_types.forward(
-            &Tensor::new(&[1u32], &dev)?,
-        )?;
-        let speech_type = self.tts_input_types.forward(
-            &Tensor::new(&[0u32], &dev)?,
-        )?;
+        let text_type = self.tts_input_types.forward(&Tensor::new(&[1u32], &dev)?)?;
+        let speech_type = self.tts_input_types.forward(&Tensor::new(&[0u32], &dev)?)?;
 
-        // Step 1: Encode ALL text through base LM
+        // Process text through both positive models
         let input_ids = Tensor::new(token_ids, &dev)?.unsqueeze(0)?;
         let text_embeds = self.base_embed.forward(&input_ids)?;
-        let base_hidden = self.forward_base_lm(&text_embeds)?;
-        // base_hidden: (1, seq_len, hidden_size) — text context
 
-        // Step 2: Feed text through TTS LM
-        // TTS LM input = TTS embeddings + base LM hidden states + text type embedding
-        let tts_text_embeds = self.tts_embed.forward(&input_ids)?;
-        // Splice: replace TTS embeddings with base LM hidden states (reference: inputs_embeds[:, start_idx:, :] = lm_last_hidden_state)
-        let tts_input = (base_hidden + text_type.broadcast_as(tts_text_embeds.shape())?)?;
+        // Forward text through positive base LM (continuing from voice prompt)
+        let base_hidden = Self::forward_layers(
+            &self.base_layers, None, &text_embeds, pos_base_seq, &mut pos_base_cache,
+        )?;
+        let _pos_base_pos = pos_base_seq + token_ids.len();
 
-        let mut last_hidden = self.forward_tts_lm(&tts_input, 0)?;
-        let mut seq_pos = token_ids.len();
+        // Forward text through positive TTS LM
+        let tts_input = (base_hidden + text_type.broadcast_as(text_embeds.shape())?)?;
+        let mut pos_last = Self::forward_layers(
+            &self.tts_layers, Some(&self.tts_norm), &tts_input, pos_tts_seq, &mut pos_tts_cache,
+        )?;
+        let mut pos_tts_pos = pos_tts_seq + token_ids.len();
 
-        // Step 3: Generate speech frames autoregressively
+        // For negative: no new text, just use existing cache
+        let mut neg_tts_pos = neg_tts_seq;
+
+        // Get initial negative condition from cached hidden state
+        let neg_last_hidden = &voice_prompt.neg_tts_lm.last_hidden_state;
+        let neg_seq = neg_last_hidden.dim(1)?;
+        let mut neg_cond = neg_last_hidden.narrow(1, neg_seq - 1, 1)?.squeeze(1)?;
+
+        // Generate speech frames
         let mut audio_latents: Vec<Tensor> = Vec::new();
 
-        for frame_idx in 0..max_frames {
-            // Condition = last hidden state of TTS LM (updated each frame)
-            let seq_len = last_hidden.dim(1)?;
-            let condition = last_hidden.narrow(1, seq_len - 1, 1)?.squeeze(1)?;
+        for _frame in 0..max_frames {
+            let seq_len = pos_last.dim(1)?;
+            let pos_cond = pos_last.narrow(1, seq_len - 1, 1)?.squeeze(1)?;
 
-            // Debug: dump condition stats for first frame
-            if frame_idx == 0 {
-                let cond_f32 = condition.to_dtype(DType::F32)?;
-                let cond_vals: Vec<f32> = cond_f32.flatten_all()?.to_vec1()?;
-                let mean: f32 = cond_vals.iter().sum::<f32>() / cond_vals.len() as f32;
-                let std: f32 = (cond_vals.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / cond_vals.len() as f32).sqrt();
-                info!("  [debug] condition mean={:.6} std={:.6} first5={:?}", mean, std, &cond_vals[..5.min(cond_vals.len())]);
-            }
-
-            // Sample speech latent via DDPM
-            let latent = self.sample_speech_latent(&condition, cfg_scale)?;
+            // Sample with CFG
+            let latent = self.sample_speech_latent(&pos_cond, &neg_cond, cfg_scale)?;
 
             // Denormalize for VAE
-            let scale = self.speech_scaling_factor.to_dtype(self.dtype)?
-                .broadcast_as(latent.shape())?;
-            let bias = self.speech_bias_factor.to_dtype(self.dtype)?
-                .broadcast_as(latent.shape())?;
+            let scale = self.speech_scaling_factor.to_dtype(self.dtype)?.broadcast_as(latent.shape())?;
+            let bias = self.speech_bias_factor.to_dtype(self.dtype)?.broadcast_as(latent.shape())?;
             audio_latents.push(((&latent / &scale)? - &bias)?);
 
             // Check EOS
-            if self.eos_classifier.should_stop(&condition, 0.5)? {
+            if self.eos_classifier.should_stop(&pos_cond, 0.5)? {
                 info!("  EOS at frame {}", audio_latents.len());
                 break;
             }
 
-            // Feed acoustic latent back through connector → TTS LM → update condition
+            // Feed back through positive TTS LM
             let acoustic_embed = self.connector.forward(&latent)?;
-            let speech_input = (acoustic_embed.unsqueeze(1)?
-                + speech_type.unsqueeze(0)?.broadcast_as((1, 1, hidden_size))?)?;
-            last_hidden = self.forward_tts_lm(&speech_input, seq_pos)?;
-            seq_pos += 1;
+            let speech_input = (acoustic_embed.unsqueeze(1)? + speech_type.unsqueeze(0)?.broadcast_as((1, 1, hidden_size))?)?;
+            pos_last = Self::forward_layers(
+                &self.tts_layers, Some(&self.tts_norm), &speech_input, pos_tts_pos, &mut pos_tts_cache,
+            )?;
+            pos_tts_pos += 1;
+
+            // Feed back through negative TTS LM (same latent, different cache)
+            let neg_speech_input = (acoustic_embed.unsqueeze(1)? + speech_type.unsqueeze(0)?.broadcast_as((1, 1, hidden_size))?)?;
+            let neg_out = Self::forward_layers(
+                &self.tts_layers, Some(&self.tts_norm), &neg_speech_input, neg_tts_pos, &mut neg_tts_cache,
+            )?;
+            neg_cond = neg_out.narrow(1, neg_out.dim(1)? - 1, 1)?.squeeze(1)?;
+            neg_tts_pos += 1;
 
             #[allow(clippy::manual_is_multiple_of)]
             if audio_latents.len() % 10 == 0 {
@@ -286,35 +267,14 @@ impl VibeVoiceTTS {
         }
 
         info!("Generated {} frames, decoding...", audio_latents.len());
-        if audio_latents.is_empty() {
-            return Ok(vec![]);
-        }
+        if audio_latents.is_empty() { return Ok(vec![]); }
 
         let latents = Tensor::stack(&audio_latents, 1)?.transpose(1, 2)?;
-        // Debug: latent stats
-        {
-            let lf: Vec<f32> = latents.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
-            let m: f32 = lf.iter().sum::<f32>() / lf.len() as f32;
-            let s: f32 = (lf.iter().map(|v| (v-m).powi(2)).sum::<f32>() / lf.len() as f32).sqrt();
-            info!("  [debug] VAE input: shape={:?} mean={:.4} std={:.4} min={:.4} max={:.4}",
-                latents.shape(), m, s,
-                lf.iter().cloned().fold(f32::INFINITY, f32::min),
-                lf.iter().cloned().fold(f32::NEG_INFINITY, f32::max));
-        }
         let audio = self.vae_decoder.decode(&latents)?;
-        // Debug: audio stats
-        {
-            let af: Vec<f32> = audio.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
-            let m: f32 = af.iter().sum::<f32>() / af.len() as f32;
-            let mx = af.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            info!("  [debug] VAE output: shape={:?} mean={:.4} max={:.4}", audio.shape(), m, mx);
-        }
-        // Normalize audio to [-1, 1] by peak amplitude
         let audio_f32 = audio.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32)?;
         let peak = audio_f32.abs()?.max(0)?.to_scalar::<f32>()?.max(1e-6);
         let normalized = (audio_f32 / peak as f64)?;
-        let samples: Vec<f32> = normalized.to_vec1()?;
-        Ok(samples)
+        Ok(normalized.to_vec1()?)
     }
 }
 

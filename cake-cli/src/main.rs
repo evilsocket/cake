@@ -345,8 +345,19 @@ async fn run_master_audio(ctx: Context) -> Result<()> {
         println!("[VibeVoice] Tokenized: {} tokens", token_ids.len());
 
         let max_frames = ctx.args.max_audio_frames;
+        // Load voice prompt
+        let voice_path = ctx.args.voice_prompt.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("--voice-prompt required for TTS (path to .safetensors voice preset)"))?;
+        println!("[VibeVoice] Loading voice prompt: {}", voice_path);
+        let dtype = ctx.dtype;
+        let voice_prompt = vibevoice::VoicePrompt::load(
+            std::path::Path::new(voice_path),
+            &ctx.device,
+            dtype,
+        )?;
+
         let mut model = model;
-        let samples = model.generate(token_ids, max_frames, 3.0)?;
+        let samples = model.generate(token_ids, &voice_prompt, max_frames, 3.0)?;
 
         let output_path = Path::new(&ctx.args.audio_output);
         vibevoice::save_wav(&samples, output_path, 24000)?;
