@@ -57,6 +57,39 @@ extern "C" __global__ void f8e4m3_to_f32(
     }
 }
 
+// ─── f8e4m3_to_f16: software FP8→FP16 dequantization ────────────────
+// Same algorithm as f8e4m3_to_f32 but outputs __half for faster matmul.
+// A100 has 312 TFLOPS F16 vs 156 TFLOPS F32.
+#if __CUDA_ARCH__ >= 530
+#include <cuda_fp16.h>
+extern "C" __global__ void f8e4m3_to_f16(
+    const size_t numel,
+    const uint8_t *inp,
+    __half *out
+) {
+    for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < numel; i += blockDim.x * gridDim.x) {
+        uint8_t bits = inp[i];
+        uint32_t sign = (bits >> 7) & 1;
+        uint32_t exp  = (bits >> 3) & 0xF;
+        uint32_t mant = bits & 0x7;
+
+        float result;
+        if (exp == 0 && mant == 0) {
+            result = 0.0f;
+        } else if (exp == 0) {
+            result = ldexpf((float)mant / 8.0f, -6);
+        } else if (exp == 0xF && mant == 0x7) {
+            result = __int_as_float(0x7FC00000);
+        } else {
+            result = ldexpf(1.0f + (float)mant / 8.0f, (int)exp - 7);
+        }
+        if (sign) result = -result;
+        out[i] = __float2half(result);
+    }
+}
+#endif
+
 // ─── silu_mul: silu(x) * y = x * sigmoid(x) * y ────────────────────
 // Fuses 2 kernels (silu + mul) into 1.
 // Used in every MLP (gate activation * up projection).

@@ -36,6 +36,74 @@ pub fn f8e4m3_to_f32(x: &Tensor) -> Result<Tensor> {
     x.apply_op1_no_bwd(&F8E4M3ToF32)
 }
 
+/// Dequantize F8E4M3 tensor to F16.
+/// Uses our custom CUDA kernel. F16 matmul is 2x faster than F32 on A100.
+pub fn f8e4m3_to_f16(x: &Tensor) -> Result<Tensor> {
+    if x.dtype() != candle_core::DType::F8E4M3 {
+        return x.to_dtype(candle_core::DType::F16);
+    }
+    x.apply_op1_no_bwd(&F8E4M3ToF16)
+}
+
+struct F8E4M3ToF16;
+
+impl candle_core::CustomOp1 for F8E4M3ToF16 {
+    fn name(&self) -> &'static str {
+        "f8e4m3_to_f16"
+    }
+
+    fn cpu_fwd(&self, s: &CpuStorage, l: &Layout) -> Result<(CpuStorage, Shape)> {
+        // CPU: decode to f32 then cast to f16
+        let (storage, shape) = F8E4M3ToF32.cpu_fwd(s, l)?;
+        // Re-wrap as F32, then convert — but we need the raw f32 data
+        let f32_tensor = Tensor::from_storage(candle_core::Storage::Cpu(storage), shape.clone());
+        let f16_tensor = f32_tensor.to_dtype(candle_core::DType::F16)?;
+        let (storage, _) = f16_tensor.storage_and_layout();
+        match &*storage {
+            candle_core::Storage::Cpu(s) => Ok((s.clone(), shape)),
+            _ => candle_core::bail!("expected CPU storage"),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        s: &candle_core::CudaStorage,
+        l: &Layout,
+    ) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle_core::cuda_backend::WrapErr;
+
+        let dev = s.device();
+        let src = match &s.slice {
+            candle_core::cuda_backend::CudaStorageSlice::F8E4M3(s) => s,
+            _ => candle_core::bail!("f8e4m3_to_f16: expected F8E4M3 storage"),
+        };
+        let src = match l.contiguous_offsets() {
+            Some((o1, o2)) => src.slice(o1..o2),
+            None => candle_core::bail!("f8e4m3_to_f16: input must be contiguous"),
+        };
+        let el = l.shape().elem_count();
+        let cfg = LaunchConfig::for_num_elems(el as u32);
+        let func =
+            dev.get_or_load_custom_func("f8e4m3_to_f16", "cake_fused_ops", FUSED_OPS_PTX)?;
+        let out = unsafe { dev.alloc::<half::f16>(el)? };
+        let mut builder = func.builder();
+        builder.arg(&el);
+        builder.arg(&src);
+        builder.arg(&out);
+        unsafe { builder.launch(cfg) }.w()?;
+
+        Ok((
+            candle_core::CudaStorage {
+                slice: candle_core::cuda_backend::CudaStorageSlice::F16(out),
+                device: dev.clone(),
+            },
+            l.shape().clone(),
+        ))
+    }
+}
+
 struct F8E4M3ToF32;
 
 impl candle_core::CustomOp1 for F8E4M3ToF32 {

@@ -65,10 +65,10 @@ impl Fp8Linear {
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Dequantize F8E4M3 weights to F32 using our software kernel
-        // (works on A100/SM80 where candle lacks native F8 support).
-        let w = crate::utils::fused_ops::f8e4m3_to_f32(&self.weight)?;
-        let x = x.to_dtype(DType::F32)?;
+        // Dequantize F8E4M3 weights to F16 using our software kernel.
+        // F16 matmul is 2x faster than F32 on A100 (312 vs 156 TFLOPS).
+        let w = crate::utils::fused_ops::f8e4m3_to_f16(&self.weight)?;
+        let x = x.to_dtype(DType::F16)?;
         // Use broadcast_matmul for 3D×2D: reshape x to 2D, matmul, reshape back
         let dims = x.dims().to_vec();
         let last = *dims.last().unwrap();
@@ -79,7 +79,7 @@ impl Fp8Linear {
         out_dims.push(w.dim(0)?);
         let y = y_2d.reshape(out_dims)?;
         match &self.bias {
-            Some(b) => y.broadcast_add(&b.to_dtype(DType::F32)?),
+            Some(b) => y.broadcast_add(&b.to_dtype(DType::F16)?),
             None => Ok(y),
         }
     }
@@ -143,7 +143,7 @@ mod tests {
         let x = Tensor::new(&[[0.5f32, 1.0, 0.5, 1.0]], &dev).unwrap();
         let y = linear.forward(&x).unwrap();
         assert_eq!(y.dims(), &[1, 2]);
-        assert_eq!(y.dtype(), DType::F32);
+        assert_eq!(y.dtype(), DType::F16);
     }
 }
 
@@ -167,7 +167,7 @@ fn fp8_linear_b(_in_d: usize, _out_d: usize, bias: bool, vb: VarBuilder) -> Resu
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 fn layer_norm(dim: usize, vb: VarBuilder) -> Result<LayerNorm> {
-    let ws = Tensor::ones(dim, DType::F32, vb.device())?;
+    let ws = Tensor::ones(dim, DType::F16, vb.device())?;
     Ok(LayerNorm::new_no_bias(ws, 1e-6))
 }
 
@@ -309,9 +309,9 @@ pub struct QkNorm {
 impl QkNorm {
     fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
         // Norm weights must be in BF16 (not F8) for RmsNorm computation
-        let query_norm = vb.get(dim, "query_norm.scale")?.to_dtype(DType::F32)?;
+        let query_norm = vb.get(dim, "query_norm.scale")?.to_dtype(DType::F16)?;
         let query_norm = RmsNorm::new(query_norm, 1e-6);
-        let key_norm = vb.get(dim, "key_norm.scale")?.to_dtype(DType::F32)?;
+        let key_norm = vb.get(dim, "key_norm.scale")?.to_dtype(DType::F16)?;
         let key_norm = RmsNorm::new(key_norm, 1e-6);
         Ok(Self {
             query_norm,
