@@ -56,10 +56,17 @@ impl VibeVoiceTTS {
 
         info!("Loading VibeVoice-Realtime-0.5B...");
 
+        // Use F16 on CUDA for Flash Attention compatibility, F32 on CPU
+        let load_dtype = if matches!(device, Device::Cuda(_)) {
+            DType::F16
+        } else {
+            DType::F32
+        };
+
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
                 &[weights_path.to_path_buf()],
-                DType::F32,
+                load_dtype,
                 device,
             )?
         };
