@@ -40,6 +40,11 @@ impl Flux2PosEmbed {
         Self { theta, axes_dim }
     }
 
+    /// Public constructor for testing.
+    pub fn new_pub(theta: usize, axes_dim: Vec<usize>) -> Self {
+        Self::new(theta, axes_dim)
+    }
+
     /// Compute (cos, sin) PE for given position IDs [S, num_axes].
     pub fn forward(&self, ids: &Tensor) -> Result<(Tensor, Tensor)> {
         let mut all_cos = Vec::new();
@@ -300,7 +305,7 @@ impl DoubleStreamBlock {
 // ── Single Stream Block ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-struct SingleStreamBlock {
+pub struct SingleStreamBlock {
     to_qkv_mlp_proj: Linear,
     to_out: Linear,
     norm_q: QkNorm,
@@ -364,7 +369,7 @@ impl SingleStreamBlock {
         let combined = Tensor::cat(&[&attn_out, &mlp_out], D::Minus1)?;
         let out = linear_matched(&self.to_out, &combined)?;
 
-        Ok((x + mod_tensors[2].unsqueeze(1)?.broadcast_mul(&out)?)?)
+        x + mod_tensors[2].unsqueeze(1)?.broadcast_mul(&out)?
     }
 }
 

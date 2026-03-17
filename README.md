@@ -24,7 +24,7 @@ Cake is a Rust framework for distributed inference of large language models and 
 ## Key Features
 
 - **Distributed Inference** — Shard transformer blocks across multiple devices to run models that don't fit on a single GPU. [Learn more](https://github.com/evilsocket/cake/blob/main/docs/clustering.md).
-- **Multi Model** — Support for [LLaMA 3.x, SmolLM2, Qwen2/2.5/3/3.5, Phi-4, Mistral, Gemma 3, Falcon3, OLMo 2, EXAONE 4.0](https://github.com/evilsocket/cake/blob/main/docs/models.md) and [Stable Diffusion](https://github.com/evilsocket/cake/blob/main/docs/stable_diffusion.md).
+- **Multi Model** — Support for [LLaMA 3.x, SmolLM2, Qwen2/2.5/3/3.5, Phi-4, Mistral, Gemma 3, Falcon3, OLMo 2, EXAONE 4.0](https://github.com/evilsocket/cake/blob/main/docs/models.md), [Stable Diffusion](https://github.com/evilsocket/cake/blob/main/docs/stable_diffusion.md), and **FLUX** (FLUX.2-klein-4B, FLUX.1-dev FP8).
 - **Multi Platform** — CUDA, Metal, and CPU backends across [Linux, macOS, Windows, iOS, and Android](https://github.com/evilsocket/cake/blob/main/docs/install.md).
 - **Zero-Config Clustering** — mDNS discovery, automatic layer assignment, and model data push with a single `--cluster-key` flag. [Learn more](https://github.com/evilsocket/cake/blob/main/docs/clustering.md#zero-config-cluster-mdns-discovery).
 - **OpenAI-Compatible API** — REST API with streaming support, plus a [built-in web UI and TUI chat client](https://github.com/evilsocket/cake/blob/main/docs/usage.md#web-ui).
@@ -66,6 +66,8 @@ Cake is a Rust framework for distributed inference of large language models and 
 | EXAONE 4.0 | Text | `exaone4` (default) | ✅ |
 | DeepSeek-R1 (distilled) | Text | `llama` / `qwen2` (default) | ✅ |
 | Stable Diffusion (1.5, 2.1, XL, XL Turbo) | Image | - | ✅ |
+| FLUX.2-klein-4B | Image | `flux` (default) | ✅ |
+| FLUX.1-dev (FP8) | Image | `flux` (default) | ✅ |
 
 ## Quick Start
 
@@ -82,6 +84,20 @@ cake master --model Qwen/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080
 ```
 
 For the full usage guide and API reference, [check the project documentation](https://github.com/evilsocket/cake/blob/main/docs/index.md).
+
+### FLUX Image Generation
+
+```sh
+# FLUX.2-klein-4B (fast, 4 steps, 512×512)
+cake master --model-type image-model --model black-forest-labs/FLUX.2-klein-4B \
+  --sd-image-prompt "a fluffy orange cat sitting on a wooden table"
+
+# FLUX.1-dev (high quality, 20 steps, 1024×1024, requires ~48GB VRAM in F32)
+cake master --model-type image-model --image-model-arch flux1 --model Comfy-Org/flux1-dev \
+  --sd-image-prompt "a photorealistic landscape at sunset"
+```
+
+Images are saved to the `images/` directory. Models are downloaded automatically from HuggingFace.
 
 ## Contributors
 

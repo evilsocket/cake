@@ -103,7 +103,7 @@ ssh stevie.local "cd ~/Lab/cake && ./target/release/cake worker --model Qwen/Qwe
 
 ## Testing
 
-### Unit Tests (474 tests, 62% line coverage, <3s)
+### Unit Tests (500 tests, <3s)
 
 All tests run offline — no model downloads, no GPU, no network servers required.
 
@@ -146,7 +146,8 @@ DIVAN_SAMPLE_COUNT=1 cargo bench -p cake-core
 
 Benchmarks use divan and are in `cake-core/benches/`. They share helpers with unit tests
 and run on CPU with small dimensions (hidden=64) for fast iteration. ~55 benchmarks covering:
-attention, MLP, GatedDeltaNet, MoE, full blocks, cache, serialization, protocol, auth,
+attention, MLP, GatedDeltaNet, MoE, FLUX (timestep embed, pos embed, Fp8Linear, VAE ResnetBlock),
+full blocks, cache, serialization, protocol, auth,
 discovery, topology, quantization, and SD utilities.
 
 ### Rules

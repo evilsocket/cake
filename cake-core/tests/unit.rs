@@ -18,3 +18,5 @@ mod test_moe;
 mod test_blocks;
 #[path = "unit_tests/test_client_worker.rs"]
 mod test_client_worker;
+#[path = "unit_tests/test_flux.rs"]
+mod test_flux;

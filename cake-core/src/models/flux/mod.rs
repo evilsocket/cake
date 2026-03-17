@@ -4,10 +4,11 @@
 //! - FLUX.2-klein: Qwen3 text encoder, custom VAE (32 latent channels)
 //! - FLUX.1-dev: CLIP-L + T5-XXL encoders, standard VAE (16 latent channels), FP8 weights
 
-mod config;
+pub mod config;
+#[allow(clippy::module_inception)]
 mod flux;
 pub mod flux2_model;
-mod flux2_vae;
+pub mod flux2_vae;
 mod flux_shardable;
 pub mod text_encoder;
 pub mod transformer;

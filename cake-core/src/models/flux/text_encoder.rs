@@ -193,7 +193,7 @@ impl EncoderBlock {
         let gate = candle_nn::ops::silu(&gate_out)?.to_dtype(gate_out.dtype())?;
         let up = self.up_proj.forward(&h)?;
         let x = self.down_proj.forward(&(gate * up)?)?;
-        Ok((x + residual)?)
+        x + residual
     }
 }
 
@@ -231,6 +231,7 @@ impl EncoderConfig {
 pub struct FluxTextEncoder {
     embeddings: Embedding,
     blocks: Vec<EncoderBlock>,
+    #[allow(dead_code)]
     final_norm: RmsNorm,
     #[allow(dead_code)]
     cfg: EncoderConfig,

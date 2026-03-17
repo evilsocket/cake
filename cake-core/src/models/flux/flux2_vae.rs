@@ -3,14 +3,14 @@
 //! The standard SD `AutoEncoderKL` doesn't match FLUX.2's decoder structure.
 //! This implements the decoder from scratch using candle-nn primitives.
 
-use candle_core::{Module, Result, Tensor, D};
+use candle_core::{Module, Result, Tensor};
 use candle_nn as nn;
 use candle_nn::VarBuilder;
 
 // ── ResNet Block ───────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
-struct ResnetBlock2D {
+pub struct ResnetBlock2D {
     norm1: nn::GroupNorm,
     conv1: nn::Conv2d,
     norm2: nn::GroupNorm,
@@ -19,6 +19,26 @@ struct ResnetBlock2D {
 }
 
 impl ResnetBlock2D {
+    /// Public load for testing.
+    pub fn load_pub(vb: VarBuilder, in_ch: usize, out_ch: usize, groups: usize) -> Result<Self> {
+        Self::load(vb, in_ch, out_ch, groups)
+    }
+
+    /// Public forward for testing.
+    pub fn forward_pub(&self, x: &Tensor) -> Result<Tensor> {
+        let residual = match &self.conv_shortcut {
+            Some(sc) => sc.forward(x)?,
+            None => x.clone(),
+        };
+        let h = self.norm1.forward(x)?;
+        let h = candle_nn::ops::silu(&h)?;
+        let h = self.conv1.forward(&h)?;
+        let h = self.norm2.forward(&h)?;
+        let h = candle_nn::ops::silu(&h)?;
+        let h = self.conv2.forward(&h)?;
+        h + residual
+    }
+
     fn load(vb: VarBuilder, in_ch: usize, out_ch: usize, groups: usize) -> Result<Self> {
         let conv_cfg = nn::Conv2dConfig { padding: 1, ..Default::default() };
         let norm1 = nn::group_norm(groups, in_ch, 1e-6, vb.pp("norm1"))?;
@@ -134,7 +154,7 @@ impl UpDecoderBlock {
             x = resnet.forward(&x)?;
         }
         if let Some(up) = &self.upsampler {
-            let (b, c, h, w) = x.dims4()?;
+            let (_b, _c, h, w) = x.dims4()?;
             // Nearest-neighbor 2x upsample
             x = x.upsample_nearest2d(h * 2, w * 2)?;
             x = up.forward(&x)?;

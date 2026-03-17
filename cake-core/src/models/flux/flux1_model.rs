@@ -59,6 +59,11 @@ impl Fp8Linear {
         Self { weight, bias }
     }
 
+    /// Public constructor for testing.
+    pub fn new_pub(weight: Tensor, bias: Option<Tensor>) -> Self {
+        Self::new(weight, bias)
+    }
+
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         // Cast everything to F32 for compute — avoids missing F8→BF16 CUDA kernels
         // and BF16 matmul kernel gaps on some GPU architectures.
