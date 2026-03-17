@@ -140,10 +140,11 @@ pub fn ensure_model_downloaded(repo_id: &str) -> Result<PathBuf> {
     repo.download("config.json")
         .map_err(|e| anyhow!("failed to download config.json from '{}': {}", repo_id, e))?;
 
-    // Download tokenizer.
+    // Download tokenizer (optional — some models like VibeVoice use external tokenizers).
     log::info!("downloading tokenizer.json ...");
-    repo.download("tokenizer.json")
-        .map_err(|e| anyhow!("failed to download tokenizer.json from '{}': {}", repo_id, e))?;
+    if let Err(e) = repo.download("tokenizer.json") {
+        log::warn!("tokenizer.json not available for '{}': {}", repo_id, e);
+    }
 
     // Try sharded model first (model.safetensors.index.json), fall back to single file.
     let snapshot_dir = if let Ok(index_path) = repo.download("model.safetensors.index.json") {

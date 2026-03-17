@@ -323,16 +323,17 @@ async fn run_master_audio(ctx: Context) -> Result<()> {
         let prompt = &ctx.args.prompt;
         println!("[VibeVoice] Generating speech for: \"{}\"", prompt);
 
-        // Tokenize — try local tokenizer.json first, then download
+        // Tokenize — VibeVoice uses Qwen2.5 tokenizer
         let tokenizer = {
             let local = model_path.join("tokenizer.json");
             if local.exists() {
                 tokenizers::Tokenizer::from_file(&local)
                     .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?
             } else {
-                let downloaded = utils::hf::ensure_model_downloaded(&ctx.args.model)?
-                    .join("tokenizer.json");
-                tokenizers::Tokenizer::from_file(&downloaded)
+                // VibeVoice doesn't ship a tokenizer — use Qwen2.5's
+                println!("[VibeVoice] Downloading Qwen2.5 tokenizer...");
+                let qwen_path = utils::hf::ensure_model_downloaded("Qwen/Qwen2.5-0.5B")?;
+                tokenizers::Tokenizer::from_file(qwen_path.join("tokenizer.json"))
                     .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?
             }
         };
