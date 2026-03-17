@@ -28,6 +28,7 @@ const TTS_SPEECH_WINDOW_SIZE: usize = 6;
 pub struct VibeVoiceTTS {
     // Base LM (4 layers)
     base_embed: candle_nn::Embedding,
+    base_norm: candle_nn::RmsNorm,
     base_layers: Vec<crate::models::common::Transformer>,
 
     // TTS LM (20 layers)
@@ -76,6 +77,9 @@ impl VibeVoiceTTS {
         info!("  Loading base LM (4 layers)...");
         let base_vb = vb.pp("model").pp("language_model");
         let base_embed = candle_nn::embedding(common_cfg.vocab_size, common_cfg.hidden_size, base_vb.pp("embed_tokens"))?;
+        // Base LM norm: not in checkpoint (initialized to ones, matching Qwen2Model default)
+        let base_norm_w = Tensor::ones(common_cfg.hidden_size, dtype, device)?;
+        let base_norm = candle_nn::RmsNorm::new(base_norm_w, common_cfg.rms_norm_eps);
         let mut base_layers = Vec::new();
         for i in 0..4 {
             base_layers.push(crate::models::common::Transformer::load_for_vibevoice(base_vb.pp("layers").pp(i), &common_cfg)?);
@@ -110,7 +114,7 @@ impl VibeVoiceTTS {
         info!("VibeVoice loaded!");
 
         Ok(Self {
-            base_embed, base_layers,
+            base_embed, base_norm, base_layers,
             tts_embed, tts_norm, tts_layers,
             tts_input_types,
             prediction_head, scheduler, vae_decoder, connector, eos_classifier,
@@ -203,10 +207,19 @@ impl VibeVoiceTTS {
         let text_embeds = self.base_embed.forward(&input_ids)?;
 
         // Forward text through positive base LM (continuing from voice prompt)
+        // Apply RmsNorm at end (Qwen2Model always does this, even though weight is ones)
         let base_hidden = Self::forward_layers(
-            &self.base_layers, None, &text_embeds, pos_base_seq, &mut pos_base_cache,
+            &self.base_layers, Some(&self.base_norm), &text_embeds, pos_base_seq, &mut pos_base_cache,
         )?;
         let _pos_base_pos = pos_base_seq + token_ids.len();
+
+        // Debug: base LM hidden states
+        {
+            let bh: Vec<f32> = base_hidden.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+            let m: f32 = bh.iter().sum::<f32>() / bh.len() as f32;
+            let s: f32 = (bh.iter().map(|v| (v-m).powi(2)).sum::<f32>() / bh.len() as f32).sqrt();
+            info!("  [debug] base_hidden: mean={:.6} std={:.6} shape={:?}", m, s, base_hidden.shape());
+        }
 
         // Forward text through positive TTS LM
         let tts_input = (base_hidden + text_type.broadcast_as(text_embeds.shape())?)?;
@@ -226,9 +239,21 @@ impl VibeVoiceTTS {
         // Generate speech frames
         let mut audio_latents: Vec<Tensor> = Vec::new();
 
-        for _frame in 0..max_frames {
+        for frame_idx in 0..max_frames {
             let seq_len = pos_last.dim(1)?;
             let pos_cond = pos_last.narrow(1, seq_len - 1, 1)?.squeeze(1)?;
+
+            // Debug: compare against Python reference (frame 0: pos mean=0.012, neg mean=0.173)
+            if frame_idx == 0 {
+                let pc: Vec<f32> = pos_cond.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+                let nc: Vec<f32> = neg_cond.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+                let pm: f32 = pc.iter().sum::<f32>() / pc.len() as f32;
+                let nm: f32 = nc.iter().sum::<f32>() / nc.len() as f32;
+                let ps: f32 = (pc.iter().map(|v| (v-pm).powi(2)).sum::<f32>() / pc.len() as f32).sqrt();
+                let ns: f32 = (nc.iter().map(|v| (v-nm).powi(2)).sum::<f32>() / nc.len() as f32).sqrt();
+                info!("  [debug] pos_cond: mean={:.6} std={:.6} (ref: 0.012, 3.758)", pm, ps);
+                info!("  [debug] neg_cond: mean={:.6} std={:.6} (ref: 0.173, 3.738)", nm, ns);
+            }
 
             // Sample with CFG
             let latent = self.sample_speech_latent(&pos_cond, &neg_cond, cfg_scale)?;
