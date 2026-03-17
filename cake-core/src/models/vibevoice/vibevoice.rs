@@ -155,9 +155,16 @@ impl VibeVoiceTTS {
         let input_ids = Tensor::new(token_ids, dev)?.unsqueeze(0)?;
         let mut hidden = self.embed_tokens.forward(&input_ids)?;
 
-        // 2. Run through LLM layers
-        for layer in &self.lm_layers {
-            hidden = layer.forward_simple(&hidden)?;
+        // 2. Run through LLM layers with proper RoPE cache
+        let common_cfg = self.config.into_config();
+        let mut cache = crate::models::common::Cache::new(
+            false, // no KV cache for encoding
+            hidden.dtype(),
+            &common_cfg,
+            dev,
+        )?;
+        for (i, layer) in self.lm_layers.iter().enumerate() {
+            hidden = layer.forward_with_cache(&hidden, 0, i, &mut cache)?;
         }
         hidden = self.lm_norm.forward(&hidden)?;
 

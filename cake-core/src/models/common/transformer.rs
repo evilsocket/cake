@@ -37,16 +37,17 @@ impl Transformer {
         })
     }
 
-    /// Simple forward pass with a cache for autoregressive generation.
-    pub fn forward_simple(&self, x: &Tensor) -> anyhow::Result<Tensor> {
+    /// Forward pass with external cache (for VibeVoice TTS).
+    pub fn forward_with_cache(
+        &self,
+        x: &Tensor,
+        index_pos: usize,
+        block_idx: usize,
+        cache: &mut super::Cache,
+    ) -> anyhow::Result<Tensor> {
         let residual = x;
         let h = self.rms_1.forward(x).map_err(|e| anyhow!("rms_1: {e}"))?;
-        // For TTS, we do full (non-causal) attention on the entire sequence.
-        // We need a cache — create a temporary one.
-        // NOTE: This is a simplified path. Full TTS requires proper KV caching
-        // for autoregressive frame generation.
-        let mut cache = super::Cache::new_no_cache(x.device())?;
-        let h = (self.attn.forward(&h, 0, 0, &mut cache)
+        let h = (self.attn.forward(&h, index_pos, block_idx, cache)
             .map_err(|e| anyhow!("attn: {e}"))? + residual)
             .map_err(|e| anyhow!("residual: {e}"))?;
         let residual = &h;
