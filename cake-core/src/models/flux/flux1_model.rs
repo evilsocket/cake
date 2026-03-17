@@ -60,8 +60,13 @@ impl Fp8Linear {
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Cast weight to BF16 on GPU (~60MB temporary per layer), then matmul
-        let w = self.weight.to_dtype(DType::BF16)?;
+        // Cast weight to F32 first (candle may lack direct F8E4M3→BF16 kernel),
+        // then to BF16 for matmul. The F8→F32 cast is supported natively.
+        let w = if self.weight.dtype() == DType::F8E4M3 {
+            self.weight.to_dtype(DType::F32)?.to_dtype(DType::BF16)?
+        } else {
+            self.weight.to_dtype(DType::BF16)?
+        };
         let x = x.to_dtype(DType::BF16)?;
         // Use broadcast_matmul for 3D×2D: reshape x to 2D, matmul, reshape back
         let dims = x.dims().to_vec();
