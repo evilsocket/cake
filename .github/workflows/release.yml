@@ -92,12 +92,6 @@ jobs:
             features: metal
             cuda: ""
 
-          - name: macos-arm64-cpu
-            os: macos-latest
-            target: ""
-            features: ""
-            cuda: ""
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
