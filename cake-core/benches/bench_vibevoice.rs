@@ -44,7 +44,8 @@ fn make_prediction_head(h: usize, latent: usize, layers: usize)
         rms_norm_eps: 1e-5,
         ddpm_beta_schedule: "cosine".into(),
     };
-    cake_core::models::vibevoice::prediction_head::PredictionHead::load(vb, &cfg).unwrap()
+    let sched = cake_core::models::vibevoice::ddpm::DpmSolverPP::new_cosine(cfg.ddpm_num_steps, cfg.ddpm_num_inference_steps);
+    cake_core::models::vibevoice::prediction_head::PredictionHead::load(vb, &cfg, sched.timesteps()).unwrap()
 }
 
 #[divan::bench(args = [1, 4])]

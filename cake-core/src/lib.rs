@@ -327,6 +327,16 @@ pub struct ImageGenerationArgs {
     image_seed: Option<u64>,
 }
 
+impl ImageGenerationArgs {
+    /// Create args from just a prompt (for OpenAI-compatible API).
+    pub fn from_prompt(prompt: &str) -> Self {
+        Self {
+            image_prompt: prompt.to_string(),
+            ..Default::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq, Default)]
 pub enum StableDiffusionVersion {
     #[default]

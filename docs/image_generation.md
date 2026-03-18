@@ -88,7 +88,20 @@ cake master --model /path/to/hf/cache \
   --api 0.0.0.0:8080 --model-type image-model --topology topology.yml
 ```
 
-### API Endpoint
+### API Endpoints
+
+**OpenAI-compatible** (`/v1/images/generations`) — returns raw PNG by default:
+
+```sh
+curl http://master-ip:8080/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "An old man sitting on the chair at seaside"}' \
+  -o seaside.png
+```
+
+For base64 JSON (OpenAI client compatibility), add `"response_format": "b64_json"`.
+
+**Legacy** (`/api/v1/image`):
 
 ```sh
 curl http://master-ip:8080/api/v1/image \
@@ -101,6 +114,8 @@ curl http://master-ip:8080/api/v1/image \
     }
 }'
 ```
+
+See the full [REST API Reference](api.md) for details.
 
 ### SD Versions
 

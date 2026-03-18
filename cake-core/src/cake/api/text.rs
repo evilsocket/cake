@@ -1,9 +1,8 @@
 use crate::cake::Master;
 use crate::models::chat::Message;
-use crate::models::{ImageGenerator, TextGenerator};
+use crate::models::{AudioGenerator, ImageGenerator, TextGenerator};
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
@@ -99,14 +98,15 @@ struct StreamResponse {
     pub choices: Vec<StreamChoice>,
 }
 
-pub async fn generate_text<TG, IG>(
-    state: web::Data<Arc<RwLock<Master<TG, IG>>>>,
+pub async fn generate_text<TG, IG, AG>(
+    state: web::Data<Arc<RwLock<Master<TG, IG, AG>>>>,
     req: HttpRequest,
     body: web::Json<ChatRequest>,
 ) -> impl Responder
 where
     TG: TextGenerator + Send + Sync + 'static,
     IG: ImageGenerator + Send + Sync + 'static,
+    AG: AudioGenerator + Send + Sync + 'static,
 {
     let client = req
         .peer_addr()
@@ -123,22 +123,28 @@ where
     }
 }
 
-async fn generate_text_blocking<TG, IG>(
-    state: web::Data<Arc<RwLock<Master<TG, IG>>>>,
+async fn generate_text_blocking<TG, IG, AG>(
+    state: web::Data<Arc<RwLock<Master<TG, IG, AG>>>>,
     request: ChatRequest,
 ) -> HttpResponse
 where
     TG: TextGenerator + Send + Sync + 'static,
     IG: ImageGenerator + Send + Sync + 'static,
+    AG: AudioGenerator + Send + Sync + 'static,
 {
     let mut master = state.write().await;
+
+    if master.llm_model.is_none() {
+        return HttpResponse::NotFound()
+            .json(serde_json::json!({"error": "No text model loaded"}));
+    }
 
     if let Err(e) = master.reset() {
         return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("{e}")}));
     }
 
     let num_messages = request.messages.len();
-    let llm_model = master.llm_model.as_mut().expect("LLM model not found");
+    let llm_model = master.llm_model.as_mut().unwrap();
     for message in request.messages {
         if let Err(e) = llm_model.add_message(message) {
             return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("{e}")}));
@@ -154,9 +160,7 @@ where
                 finish_reason = "stop".to_string();
             } else {
                 resp += data;
-                print!("{data}");
             }
-            let _ = std::io::stdout().flush();
         })
         .await;
 
@@ -165,8 +169,8 @@ where
     let completion_tokens = master
         .llm_model
         .as_ref()
-        .expect("LLM model not found")
-        .generated_tokens();
+        .map(|m| m.generated_tokens())
+        .unwrap_or(0);
 
     let _ = master.goodbye().await;
 
@@ -185,13 +189,14 @@ where
     HttpResponse::Ok().json(response)
 }
 
-async fn generate_text_stream<TG, IG>(
-    state: web::Data<Arc<RwLock<Master<TG, IG>>>>,
+async fn generate_text_stream<TG, IG, AG>(
+    state: web::Data<Arc<RwLock<Master<TG, IG, AG>>>>,
     request: ChatRequest,
 ) -> HttpResponse
 where
     TG: TextGenerator + Send + Sync + 'static,
     IG: ImageGenerator + Send + Sync + 'static,
+    AG: AudioGenerator + Send + Sync + 'static,
 {
     let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
     let created = SystemTime::now()
@@ -212,7 +217,14 @@ where
             return;
         }
 
-        let llm_model = master.llm_model.as_mut().expect("LLM model not found");
+        let llm_model = match master.llm_model.as_mut() {
+            Some(m) => m,
+            None => {
+                log::error!("no text model loaded");
+                let _ = tx.send(None);
+                return;
+            }
+        };
         for message in request.messages {
             if let Err(e) = llm_model.add_message(message) {
                 log::error!("add_message error: {e}");

@@ -79,6 +79,34 @@ cake master --model-type audio-model --model microsoft/VibeVoice-Realtime-0.5B \
 
 Voice presets for the 0.5B model are `.safetensors` files containing pre-computed KV caches. These can be found in the [VibeVoice community repo](https://github.com/vibevoice-community/VibeVoice/tree/main/demo/voices/streaming_model) as `.pt` files (PyTorch format) and converted to safetensors.
 
+## API Endpoint
+
+When running with `--api`, the audio endpoint is available at `/v1/audio/speech`:
+
+```sh
+# Start the API server
+cake master --model-type audio-model --model microsoft/VibeVoice-1.5B \
+  --voice-prompt voice_reference.wav --api 0.0.0.0:8080
+
+# Generate speech
+curl http://localhost:8080/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Hello from the API"}' \
+  -o output.wav
+```
+
+Voice cloning via API (base64-encoded WAV reference):
+
+```sh
+VOICE_B64=$(base64 -w0 voice_reference.wav)
+curl http://localhost:8080/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d "{\"input\": \"Hello with a cloned voice.\", \"voice_data\": \"$VOICE_B64\"}" \
+  -o output.wav
+```
+
+See the full [REST API Reference](api.md) for all parameters and response formats.
+
 ## Model Detection
 
 The model variant (1.5B vs 0.5B) is auto-detected from `config.json`:
