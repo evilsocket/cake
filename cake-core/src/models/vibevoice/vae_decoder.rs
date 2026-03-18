@@ -124,15 +124,18 @@ impl DecoderBlock {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Mixer: norm → causal left-pad → depthwise conv → scale by gamma
+        // Mixer: norm → causal left-pad → fused depthwise conv+bias → scale by gamma
         let residual = x;
         let h = self.norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
+        let channels = h.dim(1)?;
         // Causal left-padding: pad (kernel_size - 1) zeros on the left
         let h = Tensor::cat(&[
-            &Tensor::zeros((h.dim(0)?, h.dim(1)?, 6), h.dtype(), h.device())?,
+            &Tensor::zeros((h.dim(0)?, channels, 6), h.dtype(), h.device())?,
             &h,
         ], 2)?;
-        let h = depthwise_conv1d_manual(&h, &self.mixer_weight, &self.mixer_bias, 7)?;
+        let h = crate::utils::fused_ops::depthwise_conv1d_bias(
+            &h, &self.mixer_weight, &self.mixer_bias, 7, channels,
+        )?;
         let gamma = self.gamma.unsqueeze(0)?.unsqueeze(2)?;
         let x = (residual + h.broadcast_mul(&gamma)?)?;
 
@@ -153,11 +156,12 @@ impl DecoderBlock {
     fn forward_cached(&self, x: &Tensor, cache: &mut StreamingConvCache) -> Result<Tensor> {
         let residual = x;
         let h = self.norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
+        let channels = h.dim(1)?;
 
         // Streaming: prepend cached context instead of zeros
         let (slot, is_first) = cache.take_slot();
         let context = if is_first {
-            Tensor::zeros((h.dim(0)?, h.dim(1)?, 6), h.dtype(), h.device())?
+            Tensor::zeros((h.dim(0)?, channels, 6), h.dtype(), h.device())?
         } else {
             cache.get(slot).unwrap().clone()
         };
@@ -168,7 +172,9 @@ impl DecoderBlock {
         let start = plen.saturating_sub(6);
         cache.set(slot, padded.narrow(2, start, plen - start)?);
 
-        let h = depthwise_conv1d_manual(&padded, &self.mixer_weight, &self.mixer_bias, 7)?;
+        let h = crate::utils::fused_ops::depthwise_conv1d_bias(
+            &padded, &self.mixer_weight, &self.mixer_bias, 7, channels,
+        )?;
         let gamma = self.gamma.unsqueeze(0)?.unsqueeze(2)?;
         let x = (residual + h.broadcast_mul(&gamma)?)?;
 

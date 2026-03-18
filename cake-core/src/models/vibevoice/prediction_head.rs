@@ -55,9 +55,11 @@ impl FeedForward {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let gate = candle_nn::ops::silu(&self.gate_proj.forward(x)?)?;
+        let gate = self.gate_proj.forward(x)?;
         let up = self.up_proj.forward(x)?;
-        self.down_proj.forward(&(gate * up)?)
+        // Fused silu(gate) * up — 1 kernel instead of 2
+        let gated = crate::utils::fused_ops::silu_mul(&gate, &up)?;
+        self.down_proj.forward(&gated)
     }
 }
 

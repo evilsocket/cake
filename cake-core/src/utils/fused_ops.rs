@@ -1409,6 +1409,218 @@ pub fn depthwise_conv1d_silu(
     )
 }
 
+// ─── depthwise_conv1d_bias: full depthwise conv1d + bias (no activation) ──
+
+struct DepthwiseConv1dBias {
+    kernel_size: usize,
+    channels: usize,
+}
+
+impl candle_core::CustomOp3 for DepthwiseConv1dBias {
+    fn name(&self) -> &'static str {
+        "depthwise_conv1d_bias"
+    }
+
+    fn cpu_fwd(
+        &self,
+        s_in: &CpuStorage,
+        l_in: &Layout,
+        s_wt: &CpuStorage,
+        l_wt: &Layout,
+        s_bi: &CpuStorage,
+        l_bi: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        fn inner<T: candle_core::WithDType + num_traits::Float>(
+            input: &[T],
+            l_in: &Layout,
+            weight: &[T],
+            l_wt: &Layout,
+            bias: &[T],
+            l_bi: &Layout,
+            kernel_size: usize,
+            channels: usize,
+        ) -> Result<(CpuStorage, Shape)> {
+            let input = match l_in.contiguous_offsets() {
+                Some((o1, o2)) => &input[o1..o2],
+                None => candle_core::bail!("conv1d_bias: input must be contiguous"),
+            };
+            let weight = match l_wt.contiguous_offsets() {
+                Some((o1, o2)) => &weight[o1..o2],
+                None => candle_core::bail!("conv1d_bias: weight must be contiguous"),
+            };
+            let bias = match l_bi.contiguous_offsets() {
+                Some((o1, o2)) => &bias[o1..o2],
+                None => candle_core::bail!("conv1d_bias: bias must be contiguous"),
+            };
+            let dims = l_in.shape().dims();
+            let batch = dims[0];
+            let input_len = dims[2];
+            let out_len = input_len - kernel_size + 1;
+            let numel = batch * channels * out_len;
+            let mut dst = vec![T::zero(); numel];
+            for b in 0..batch {
+                for c in 0..channels {
+                    for t in 0..out_len {
+                        let mut acc = T::zero();
+                        let in_off = (b * channels + c) * input_len + t;
+                        let wt_off = c * kernel_size;
+                        for k in 0..kernel_size {
+                            acc = acc + input[in_off + k] * weight[wt_off + k];
+                        }
+                        acc = acc + bias[c];
+                        dst[(b * channels + c) * out_len + t] = acc;
+                    }
+                }
+            }
+            let out_shape = Shape::from_dims(&[batch, channels, out_len]);
+            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
+            Ok((storage, out_shape))
+        }
+
+        use CpuStorage as C;
+        match (s_in, s_wt, s_bi) {
+            (C::BF16(i), C::BF16(w), C::BF16(b)) => {
+                inner(i, l_in, w, l_wt, b, l_bi, self.kernel_size, self.channels)
+            }
+            (C::F16(i), C::F16(w), C::F16(b)) => {
+                inner(i, l_in, w, l_wt, b, l_bi, self.kernel_size, self.channels)
+            }
+            (C::F32(i), C::F32(w), C::F32(b)) => {
+                inner(i, l_in, w, l_wt, b, l_bi, self.kernel_size, self.channels)
+            }
+            (C::F64(i), C::F64(w), C::F64(b)) => {
+                inner(i, l_in, w, l_wt, b, l_bi, self.kernel_size, self.channels)
+            }
+            _ => candle_core::bail!("conv1d_bias: unsupported dtype {:?}", s_in.dtype()),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        s_in: &candle_core::CudaStorage,
+        l_in: &Layout,
+        s_wt: &candle_core::CudaStorage,
+        l_wt: &Layout,
+        s_bi: &candle_core::CudaStorage,
+        l_bi: &Layout,
+    ) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{
+            CudaSlice, DeviceRepr, LaunchConfig, PushKernelArg,
+        };
+        use candle_core::cuda_backend::{kernel_name, WrapErr};
+        use candle_core::{CudaDevice, WithDType};
+
+        let kernel_size = self.kernel_size;
+        let channels = self.channels;
+        let dims = l_in.shape().dims();
+        let batch = dims[0];
+        let input_len = dims[2];
+        let out_len = input_len - kernel_size + 1;
+        let numel = batch * channels * out_len;
+
+        fn launch<T: DeviceRepr + WithDType>(
+            input: &CudaSlice<T>,
+            l_in: &Layout,
+            weight: &CudaSlice<T>,
+            l_wt: &Layout,
+            bias: &CudaSlice<T>,
+            l_bi: &Layout,
+            dev: &CudaDevice,
+            kernel_size: i32,
+            channels: i32,
+            input_len: i32,
+            numel: usize,
+        ) -> Result<CudaSlice<T>> {
+            let input = match l_in.contiguous_offsets() {
+                Some((o1, o2)) => input.slice(o1..o2),
+                None => candle_core::bail!("conv1d_bias: input must be contiguous"),
+            };
+            let weight = match l_wt.contiguous_offsets() {
+                Some((o1, o2)) => weight.slice(o1..o2),
+                None => candle_core::bail!("conv1d_bias: weight must be contiguous"),
+            };
+            let bias = match l_bi.contiguous_offsets() {
+                Some((o1, o2)) => bias.slice(o1..o2),
+                None => candle_core::bail!("conv1d_bias: bias must be contiguous"),
+            };
+            let cfg = LaunchConfig::for_num_elems(numel as u32);
+            let func = dev.get_or_load_custom_func(
+                &kernel_name::<T>("depthwise_conv1d_bias"),
+                "cake_fused_ops",
+                FUSED_OPS_PTX,
+            )?;
+            let out = unsafe { dev.alloc::<T>(numel)? };
+            let mut builder = func.builder();
+            builder.arg(&numel);
+            builder.arg(&input);
+            builder.arg(&weight);
+            builder.arg(&bias);
+            builder.arg(&out);
+            candle_core::builder_arg!(builder, kernel_size, channels, input_len);
+            unsafe { builder.launch(cfg) }.w()?;
+            Ok(out)
+        }
+
+        use candle_core::backend::BackendStorage;
+        use candle_core::cuda_backend::CudaStorageSlice as S;
+        let dev = s_in.device();
+        let ks = kernel_size as i32;
+        let ch = channels as i32;
+        let il = input_len as i32;
+
+        let slice = match (&s_in.slice, &s_wt.slice, &s_bi.slice) {
+            (S::BF16(i), S::BF16(w), S::BF16(b)) => {
+                S::BF16(launch(i, l_in, w, l_wt, b, l_bi, dev, ks, ch, il, numel)?)
+            }
+            (S::F16(i), S::F16(w), S::F16(b)) => {
+                S::F16(launch(i, l_in, w, l_wt, b, l_bi, dev, ks, ch, il, numel)?)
+            }
+            (S::F32(i), S::F32(w), S::F32(b)) => {
+                S::F32(launch(i, l_in, w, l_wt, b, l_bi, dev, ks, ch, il, numel)?)
+            }
+            (S::F64(i), S::F64(w), S::F64(b)) => {
+                S::F64(launch(i, l_in, w, l_wt, b, l_bi, dev, ks, ch, il, numel)?)
+            }
+            _ => candle_core::bail!("conv1d_bias: unsupported dtype"),
+        };
+
+        let out_shape = Shape::from_dims(&[batch, channels, out_len]);
+        Ok((
+            candle_core::CudaStorage {
+                slice,
+                device: dev.clone(),
+            },
+            out_shape,
+        ))
+    }
+}
+
+/// Fused depthwise conv1d + bias — replaces 14 kernel launches with 1.
+/// padded_input: (batch, channels, input_len) — already causal-padded
+/// weight: (channels, kernel_size), bias: (channels,)
+/// Returns: (batch, channels, out_len) where out_len = input_len - kernel_size + 1
+pub fn depthwise_conv1d_bias(
+    padded_input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    kernel_size: usize,
+    channels: usize,
+) -> Result<Tensor> {
+    // Ensure all inputs are contiguous (weight may come from squeeze)
+    let inp = padded_input.contiguous()?;
+    let wt = weight.contiguous()?;
+    let bi = bias.contiguous()?;
+    inp.apply_op3_no_bwd(
+        &wt,
+        &bi,
+        &DepthwiseConv1dBias {
+            kernel_size,
+            channels,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

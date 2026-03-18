@@ -406,6 +406,52 @@ CONV1D_SILU_OP(__half, depthwise_conv1d_silu_f16)
 CONV1D_SILU_OP(__nv_bfloat16, depthwise_conv1d_silu_bf16)
 #endif
 
+// ─── depthwise_conv1d_bias: full depthwise conv1d + bias ────────────
+// Replaces 14 kernel launches (7 broadcast_mul + 6 add + 1 bias_add) with 1.
+// Used in VAE encoder/decoder blocks.
+// input: (batch, channels, input_len)  — already padded
+// weight: (channels, kernel_size)
+// bias: (channels,)
+// out: (batch, channels, out_len)  where out_len = input_len - kernel_size + 1
+#define CONV1D_BIAS_OP(TYPENAME, FN_NAME) \
+extern "C" __global__ void FN_NAME( \
+    const size_t numel, \
+    const TYPENAME *input, \
+    const TYPENAME *weight, \
+    const TYPENAME *bias, \
+    TYPENAME *out, \
+    const int kernel_size, \
+    const int channels, \
+    const int input_len \
+) { \
+    const int out_len = input_len - kernel_size + 1; \
+    for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; \
+         i < numel; i += blockDim.x * gridDim.x) { \
+        int t = i % out_len; \
+        int temp = i / out_len; \
+        int c = temp % channels; \
+        int b = temp / channels; \
+        float acc = 0.0f; \
+        int in_off = (b * channels + c) * input_len + t; \
+        int wt_off = c * kernel_size; \
+        for (int k = 0; k < kernel_size; k++) { \
+            acc += static_cast<float>(input[in_off + k]) \
+                 * static_cast<float>(weight[wt_off + k]); \
+        } \
+        acc += static_cast<float>(bias[c]); \
+        out[i] = static_cast<TYPENAME>(acc); \
+    } \
+}
+
+CONV1D_BIAS_OP(float, depthwise_conv1d_bias_f32)
+CONV1D_BIAS_OP(double, depthwise_conv1d_bias_f64)
+#if __CUDA_ARCH__ >= 530
+CONV1D_BIAS_OP(__half, depthwise_conv1d_bias_f16)
+#endif
+#if __CUDA_ARCH__ >= 800
+CONV1D_BIAS_OP(__nv_bfloat16, depthwise_conv1d_bias_bf16)
+#endif
+
 SUB_MUL_OP(float, sub_mul_f32)
 SUB_MUL_OP(double, sub_mul_f64)
 #if __CUDA_ARCH__ >= 530
