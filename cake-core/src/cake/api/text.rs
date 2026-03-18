@@ -1,6 +1,6 @@
 use crate::cake::Master;
 use crate::models::chat::Message;
-use crate::models::{AudioGenerator, ImageGenerator, TextGenerator};
+use crate::models::{Model, OutputModality};
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -98,16 +98,11 @@ struct StreamResponse {
     pub choices: Vec<StreamChoice>,
 }
 
-pub async fn generate_text<TG, IG, AG>(
-    state: web::Data<Arc<RwLock<Master<TG, IG, AG>>>>,
+pub async fn generate_text<M: Model>(
+    state: web::Data<Arc<RwLock<Master<M>>>>,
     req: HttpRequest,
     body: web::Json<ChatRequest>,
-) -> impl Responder
-where
-    TG: TextGenerator + Send + Sync + 'static,
-    IG: ImageGenerator + Send + Sync + 'static,
-    AG: AudioGenerator + Send + Sync + 'static,
-{
+) -> impl Responder {
     let client = req
         .peer_addr()
         .map(|a| a.to_string())
@@ -123,18 +118,13 @@ where
     }
 }
 
-async fn generate_text_blocking<TG, IG, AG>(
-    state: web::Data<Arc<RwLock<Master<TG, IG, AG>>>>,
+async fn generate_text_blocking<M: Model>(
+    state: web::Data<Arc<RwLock<Master<M>>>>,
     request: ChatRequest,
-) -> HttpResponse
-where
-    TG: TextGenerator + Send + Sync + 'static,
-    IG: ImageGenerator + Send + Sync + 'static,
-    AG: AudioGenerator + Send + Sync + 'static,
-{
+) -> HttpResponse {
     let mut master = state.write().await;
 
-    if master.llm_model.is_none() {
+    if !master.model.as_ref().is_some_and(|m| m.output_modality() == OutputModality::Text) {
         return HttpResponse::NotFound()
             .json(serde_json::json!({"error": "No text model loaded"}));
     }
@@ -144,9 +134,9 @@ where
     }
 
     let num_messages = request.messages.len();
-    let llm_model = master.llm_model.as_mut().unwrap();
+    let model = master.model.as_mut().unwrap();
     for message in request.messages {
-        if let Err(e) = llm_model.add_message(message) {
+        if let Err(e) = model.add_message(message) {
             return HttpResponse::InternalServerError().json(serde_json::json!({"error": format!("{e}")}));
         }
     }
@@ -167,7 +157,7 @@ where
     println!();
 
     let completion_tokens = master
-        .llm_model
+        .model
         .as_ref()
         .map(|m| m.generated_tokens())
         .unwrap_or(0);
@@ -179,7 +169,7 @@ where
     }
 
     let response = ChatResponse::new(
-        TG::MODEL_NAME.to_string(),
+        M::MODEL_NAME.to_string(),
         resp,
         num_messages,
         completion_tokens,
@@ -189,21 +179,16 @@ where
     HttpResponse::Ok().json(response)
 }
 
-async fn generate_text_stream<TG, IG, AG>(
-    state: web::Data<Arc<RwLock<Master<TG, IG, AG>>>>,
+async fn generate_text_stream<M: Model>(
+    state: web::Data<Arc<RwLock<Master<M>>>>,
     request: ChatRequest,
-) -> HttpResponse
-where
-    TG: TextGenerator + Send + Sync + 'static,
-    IG: ImageGenerator + Send + Sync + 'static,
-    AG: AudioGenerator + Send + Sync + 'static,
-{
+) -> HttpResponse {
     let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let model = TG::MODEL_NAME.to_string();
+    let model = M::MODEL_NAME.to_string();
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
 
@@ -217,16 +202,16 @@ where
             return;
         }
 
-        let llm_model = match master.llm_model.as_mut() {
-            Some(m) => m,
-            None => {
+        let model = match master.model.as_mut() {
+            Some(m) if m.output_modality() == OutputModality::Text => m,
+            _ => {
                 log::error!("no text model loaded");
                 let _ = tx.send(None);
                 return;
             }
         };
         for message in request.messages {
-            if let Err(e) = llm_model.add_message(message) {
+            if let Err(e) = model.add_message(message) {
                 log::error!("add_message error: {e}");
                 let _ = tx.send(None);
                 return;

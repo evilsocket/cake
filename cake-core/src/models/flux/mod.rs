@@ -23,3 +23,6 @@ mod t5_encoder;
 pub use flux::FluxGen;
 pub use flux1::Flux1Gen;
 pub use flux_shardable::FluxShardable;
+
+crate::impl_model_for_image!(FluxGen);
+crate::impl_model_for_image!(Flux1Gen);

@@ -29,3 +29,5 @@ pub use block::ZipformerBlock;
 pub use config::LuxTTSConfig;
 pub use model::LuxTTS;
 pub use vocos::save_wav;
+
+crate::impl_model_for_text!(LuxTTS);

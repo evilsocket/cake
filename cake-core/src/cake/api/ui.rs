@@ -8,22 +8,17 @@ use serde::Serialize;
 use tokio::sync::RwLock;
 
 use crate::cake::discovery;
-use crate::models::{AudioGenerator, ImageGenerator, TextGenerator};
+use crate::models::Model;
 
 use super::Master;
 
 const INDEX_HTML: &str = include_str!("index.html");
 
 /// Serve the single-page UI.
-pub async fn index<TG, IG, AG>(
-    state: web::Data<Arc<RwLock<Master<TG, IG, AG>>>>,
+pub async fn index<M: Model>(
+    state: web::Data<Arc<RwLock<Master<M>>>>,
     req: HttpRequest,
-) -> HttpResponse
-where
-    TG: TextGenerator + Send + Sync + 'static,
-    IG: ImageGenerator + Send + Sync + 'static,
-    AG: AudioGenerator + Send + Sync + 'static,
-{
+) -> HttpResponse {
     if !check_ui_auth(&state, &req).await {
         return HttpResponse::Unauthorized()
             .insert_header(("WWW-Authenticate", "Basic realm=\"cake\""))
@@ -87,15 +82,10 @@ struct WorkerTopologyInfo {
 }
 
 /// Return cluster topology as JSON.
-pub async fn topology<TG, IG, AG>(
-    state: web::Data<Arc<RwLock<Master<TG, IG, AG>>>>,
+pub async fn topology<M: Model>(
+    state: web::Data<Arc<RwLock<Master<M>>>>,
     req: HttpRequest,
-) -> HttpResponse
-where
-    TG: TextGenerator + Send + Sync + 'static,
-    IG: ImageGenerator + Send + Sync + 'static,
-    AG: AudioGenerator + Send + Sync + 'static,
-{
+) -> HttpResponse {
     if !check_ui_auth(&state, &req).await {
         return HttpResponse::Unauthorized()
             .insert_header(("WWW-Authenticate", "Basic realm=\"cake\""))
@@ -176,12 +166,8 @@ where
     let layer_details = read_layer_tensor_details(&ctx.data_path, num_layers, &layer_prefix);
 
     let response = TopologyResponse {
-        model: if master.llm_model.is_some() {
-            TG::MODEL_NAME.to_string()
-        } else if master.sd_model.is_some() {
-            IG::MODEL_NAME.to_string()
-        } else if master.audio_model.is_some() {
-            AG::MODEL_NAME.to_string()
+        model: if master.model.is_some() {
+            M::MODEL_NAME.to_string()
         } else {
             "none".to_string()
         },
@@ -349,16 +335,10 @@ fn estimate_layer_size(data_path: &std::path::Path, num_layers: usize) -> u64 {
 }
 
 /// Check basic auth if `--ui-auth` is configured. Returns true if OK.
-#[allow(clippy::type_complexity)]
-async fn check_ui_auth<TG, IG, AG>(
-    state: &web::Data<Arc<RwLock<Master<TG, IG, AG>>>>,
+async fn check_ui_auth<M: Model>(
+    state: &web::Data<Arc<RwLock<Master<M>>>>,
     req: &HttpRequest,
-) -> bool
-where
-    TG: TextGenerator + Send + Sync + 'static,
-    IG: ImageGenerator + Send + Sync + 'static,
-    AG: AudioGenerator + Send + Sync + 'static,
-{
+) -> bool {
     let master = state.read().await;
     let expected = match &master.ctx.args.ui_auth {
         Some(cred) => cred.clone(),

@@ -1,5 +1,5 @@
 use crate::cake::Master;
-use crate::models::{AudioGenerationArgs, AudioGenerator, ImageGenerator, TextGenerator};
+use crate::models::{AudioGenerationArgs, Model, OutputModality};
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use base64::engine::general_purpose;
 use base64::Engine;
@@ -47,16 +47,11 @@ fn default_diffusion_steps() -> usize {
     10
 }
 
-pub async fn generate_speech<TG, IG, AG>(
-    state: web::Data<Arc<RwLock<Master<TG, IG, AG>>>>,
+pub async fn generate_speech<M: Model>(
+    state: web::Data<Arc<RwLock<Master<M>>>>,
     req: HttpRequest,
     body: web::Json<AudioSpeechRequest>,
-) -> impl Responder
-where
-    TG: TextGenerator + Send + Sync + 'static,
-    IG: ImageGenerator + Send + Sync + 'static,
-    AG: AudioGenerator + Send + Sync + 'static,
-{
+) -> impl Responder {
     let client = req
         .peer_addr()
         .map(|a| a.to_string())
@@ -66,7 +61,7 @@ where
 
     let mut master = state.write().await;
 
-    if master.audio_model.is_none() {
+    if !master.model.as_ref().is_some_and(|m| m.output_modality() == OutputModality::Audio) {
         return HttpResponse::NotFound()
             .json(serde_json::json!({"error": "No audio model loaded"}));
     }

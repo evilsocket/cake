@@ -1,7 +1,5 @@
 use crate::cake::Master;
-use crate::models::AudioGenerator;
-use crate::models::ImageGenerator;
-use crate::models::TextGenerator;
+use crate::models::{Model, OutputModality};
 use crate::ImageGenerationArgs;
 use actix_web::{web, HttpRequest, HttpResponse, Responder};
 use base64::engine::general_purpose;
@@ -44,16 +42,11 @@ struct ImageResponse {
     pub images: Vec<String>,
 }
 
-pub async fn generate_image<TG, IG, AG>(
-    state: web::Data<Arc<RwLock<Master<TG, IG, AG>>>>,
+pub async fn generate_image<M: Model>(
+    state: web::Data<Arc<RwLock<Master<M>>>>,
     req: HttpRequest,
     image_request: web::Json<ImageRequest>,
-) -> impl Responder
-where
-    TG: TextGenerator + Send + Sync + 'static,
-    IG: ImageGenerator + Send + Sync + 'static,
-    AG: AudioGenerator + Send + Sync + 'static,
-{
+) -> impl Responder {
     let client = req
         .peer_addr()
         .map(|a| a.to_string())
@@ -63,7 +56,7 @@ where
 
     let mut master = state.write().await;
 
-    if master.sd_model.is_none() {
+    if !master.model.as_ref().is_some_and(|m| m.output_modality() == OutputModality::Image) {
         return HttpResponse::NotFound()
             .json(serde_json::json!({"error": "No image model loaded"}));
     }
@@ -139,16 +132,11 @@ struct OpenAIImageResponse {
     data: Vec<OpenAIImageData>,
 }
 
-pub async fn generate_image_openai<TG, IG, AG>(
-    state: web::Data<Arc<RwLock<Master<TG, IG, AG>>>>,
+pub async fn generate_image_openai<M: Model>(
+    state: web::Data<Arc<RwLock<Master<M>>>>,
     req: HttpRequest,
     body: web::Json<OpenAIImageRequest>,
-) -> impl Responder
-where
-    TG: TextGenerator + Send + Sync + 'static,
-    IG: ImageGenerator + Send + Sync + 'static,
-    AG: AudioGenerator + Send + Sync + 'static,
-{
+) -> impl Responder {
     let client = req
         .peer_addr()
         .map(|a| a.to_string())
@@ -158,7 +146,7 @@ where
 
     let mut master = state.write().await;
 
-    if master.sd_model.is_none() {
+    if !master.model.as_ref().is_some_and(|m| m.output_modality() == OutputModality::Image) {
         return HttpResponse::NotFound()
             .json(serde_json::json!({"error": "No image model loaded"}));
     }

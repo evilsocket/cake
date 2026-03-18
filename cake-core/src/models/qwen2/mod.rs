@@ -6,3 +6,5 @@ mod qwen;
 pub use config::*;
 pub use history::*;
 pub use qwen::*;
+
+crate::impl_model_for_text!(Qwen2);

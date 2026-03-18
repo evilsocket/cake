@@ -9,3 +9,5 @@ mod vae;
 
 pub use sd::*;
 pub use util::*;
+
+crate::impl_model_for_image!(SD);

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use async_trait::async_trait;
 use candle_core::Tensor;
 use image::{ImageBuffer, Rgb};
@@ -41,6 +41,24 @@ pub mod sd;
 pub mod luxtts;
 #[cfg(feature = "vibevoice")]
 pub mod vibevoice;
+
+/// The input modality a model accepts.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum InputModality {
+    /// The model accepts text input.
+    Text,
+}
+
+/// The output modality a model produces.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum OutputModality {
+    /// The model produces text tokens.
+    Text,
+    /// The model produces images.
+    Image,
+    /// The model produces audio.
+    Audio,
+}
 
 /// A token.
 pub struct Token {
@@ -179,6 +197,130 @@ pub fn encode_wav_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 #[async_trait]
 pub trait AudioGenerator: Generator {
     async fn generate_audio(&mut self, args: &AudioGenerationArgs) -> Result<AudioOutput>;
+}
+
+/// Unified model trait — every model used by Master implements this.
+/// Each model provides real implementations for its modality and
+/// default "not supported" stubs for the others.
+#[async_trait]
+pub trait Model: Generator + Send + Sync + 'static {
+    /// The input modality this model accepts (always Text for now).
+    fn input_modality(&self) -> InputModality {
+        InputModality::Text
+    }
+
+    /// The output modality this model produces.
+    fn output_modality(&self) -> OutputModality;
+
+    // ── Text generation (default: not supported) ──
+
+    fn add_message(&mut self, _message: Message) -> Result<()> {
+        bail!("text generation not supported by this model")
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn goodbye(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn next_token(&mut self, _index: usize) -> Result<Token> {
+        bail!("text generation not supported")
+    }
+
+    fn generated_tokens(&self) -> usize {
+        0
+    }
+
+    // ── Image generation (default: not supported) ──
+
+    async fn generate_image(
+        &mut self,
+        _args: &ImageGenerationArgs,
+        _callback: Box<dyn FnMut(Vec<ImageBuffer<Rgb<u8>, Vec<u8>>>) + Send>,
+    ) -> Result<()> {
+        bail!("image generation not supported")
+    }
+
+    // ── Audio generation (default: not supported) ──
+
+    async fn generate_audio(&mut self, _args: &AudioGenerationArgs) -> Result<AudioOutput> {
+        bail!("audio generation not supported")
+    }
+}
+
+/// Implement `Model` for a `TextGenerator` — delegates text methods, stubs the rest.
+#[macro_export]
+macro_rules! impl_model_for_text {
+    ($ty:ty) => {
+        #[async_trait::async_trait]
+        impl $crate::models::Model for $ty {
+            fn output_modality(&self) -> $crate::models::OutputModality {
+                $crate::models::OutputModality::Text
+            }
+            fn add_message(
+                &mut self,
+                message: $crate::models::chat::Message,
+            ) -> anyhow::Result<()> {
+                $crate::models::TextGenerator::add_message(self, message)
+            }
+            fn reset(&mut self) -> anyhow::Result<()> {
+                $crate::models::TextGenerator::reset(self)
+            }
+            async fn goodbye(&mut self) -> anyhow::Result<()> {
+                $crate::models::TextGenerator::goodbye(self).await
+            }
+            async fn next_token(&mut self, index: usize) -> anyhow::Result<$crate::models::Token> {
+                $crate::models::TextGenerator::next_token(self, index).await
+            }
+            fn generated_tokens(&self) -> usize {
+                $crate::models::TextGenerator::generated_tokens(self)
+            }
+        }
+    };
+}
+
+/// Implement `Model` for an `ImageGenerator` — delegates image method, stubs the rest.
+#[macro_export]
+macro_rules! impl_model_for_image {
+    ($ty:ty) => {
+        #[async_trait::async_trait]
+        impl $crate::models::Model for $ty {
+            fn output_modality(&self) -> $crate::models::OutputModality {
+                $crate::models::OutputModality::Image
+            }
+            async fn generate_image(
+                &mut self,
+                args: &$crate::ImageGenerationArgs,
+                callback: Box<
+                    dyn FnMut(Vec<image::ImageBuffer<image::Rgb<u8>, Vec<u8>>>) + Send,
+                >,
+            ) -> anyhow::Result<()> {
+                $crate::models::ImageGenerator::generate_image(self, args, callback).await
+            }
+        }
+    };
+}
+
+/// Implement `Model` for an `AudioGenerator` — delegates audio method, stubs the rest.
+#[macro_export]
+macro_rules! impl_model_for_audio {
+    ($ty:ty) => {
+        #[async_trait::async_trait]
+        impl $crate::models::Model for $ty {
+            fn output_modality(&self) -> $crate::models::OutputModality {
+                $crate::models::OutputModality::Audio
+            }
+            async fn generate_audio(
+                &mut self,
+                args: &$crate::models::AudioGenerationArgs,
+            ) -> anyhow::Result<$crate::models::AudioOutput> {
+                $crate::models::AudioGenerator::generate_audio(self, args).await
+            }
+        }
+    };
 }
 
 // ── NoAudio stub (always compiled, never loaded) ──

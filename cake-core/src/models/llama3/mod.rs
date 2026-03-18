@@ -6,3 +6,5 @@ mod llama;
 pub use config::*;
 pub use history::*;
 pub use llama::*;
+
+crate::impl_model_for_text!(LLama);

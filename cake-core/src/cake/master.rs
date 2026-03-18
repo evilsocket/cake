@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use crate::models::chat::Message;
-use crate::models::{AudioGenerationArgs, AudioGenerator, AudioOutput, ImageGenerator, TextGenerator};
+use crate::models::{AudioGenerationArgs, AudioOutput, Model};
 
 use super::{api, Context};
 
@@ -10,50 +10,16 @@ use anyhow::Result;
 use image::{ImageBuffer, Rgb};
 
 /// A master connects to, communicates with and orchestrates the workers.
-pub struct Master<TG, IG, AG> {
+pub struct Master<M: Model> {
     pub ctx: Context,
-    pub llm_model: Option<Box<TG>>,
-    pub sd_model: Option<Box<IG>>,
-    pub audio_model: Option<Box<AG>>,
+    pub model: Option<Box<M>>,
 }
 
-impl<
-        TG: TextGenerator + Send + Sync + 'static,
-        IG: ImageGenerator + Send + Sync + 'static,
-        AG: AudioGenerator + Send + Sync + 'static,
-    > Master<TG, IG, AG>
-{
+impl<M: Model> Master<M> {
     /// Create a new instance.
     pub async fn new(mut ctx: Context) -> Result<Self> {
-        match ctx.args.model_type {
-            ModelType::ImageModel => {
-                let sd_model = IG::load(&mut ctx).await?;
-                Ok(Self {
-                    ctx,
-                    sd_model,
-                    llm_model: None,
-                    audio_model: None,
-                })
-            }
-            ModelType::AudioModel => {
-                let audio_model = AG::load(&mut ctx).await?;
-                Ok(Self {
-                    ctx,
-                    audio_model,
-                    llm_model: None,
-                    sd_model: None,
-                })
-            }
-            ModelType::TextModel => {
-                let llm_model = TG::load(&mut ctx).await?;
-                Ok(Self {
-                    ctx,
-                    llm_model,
-                    sd_model: None,
-                    audio_model: None,
-                })
-            }
-        }
+        let model = M::load(&mut ctx).await?;
+        Ok(Self { ctx, model })
     }
 
     pub async fn run(mut self) -> Result<()> {
@@ -63,10 +29,9 @@ impl<
         } else {
             match self.ctx.args.model_type {
                 ModelType::TextModel => {
-                    let llm_model = self.llm_model.as_mut().expect("LLM model not found");
-                    llm_model
-                        .add_message(Message::system(self.ctx.args.system_prompt.clone()))?;
-                    llm_model.add_message(Message::user(self.ctx.args.prompt.clone()))?;
+                    let model = self.model.as_mut().expect("model not found");
+                    model.add_message(Message::system(self.ctx.args.system_prompt.clone()))?;
+                    model.add_message(Message::user(self.ctx.args.prompt.clone()))?;
 
                     self.generate_text(None, |data| {
                         if data.is_empty() {
@@ -122,7 +87,7 @@ impl<
 
     /// Reset the master state for a new inference.
     pub fn reset(&mut self) -> Result<()> {
-        match self.llm_model.as_mut() {
+        match self.model.as_mut() {
             Some(m) => m.reset(),
             None => Ok(()),
         }
@@ -130,7 +95,7 @@ impl<
 
     /// clear worker kv cache
     pub async fn goodbye(&mut self) -> Result<()> {
-        match self.llm_model.as_mut() {
+        match self.model.as_mut() {
             Some(m) => m.goodbye().await,
             None => Ok(()),
         }
@@ -155,8 +120,8 @@ impl<
         log::debug!("  sample_len = {}", sample_len);
 
         let mut start_gen = std::time::Instant::now();
-        let llm_model = self
-            .llm_model
+        let model = self
+            .model
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("No text model loaded"))?;
 
@@ -166,7 +131,7 @@ impl<
             }
 
             let token_start = std::time::Instant::now();
-            let token = llm_model.next_token(index).await?;
+            let token = model.next_token(index).await?;
             let token_elapsed = token_start.elapsed();
 
             log::debug!(
@@ -187,7 +152,7 @@ impl<
         stream("");
 
         let dt = start_gen.elapsed();
-        let generated = llm_model.generated_tokens();
+        let generated = model.generated_tokens();
 
         log::info!(
             "{} tokens generated ({:.2} token/s) - mem={}",
@@ -203,18 +168,18 @@ impl<
     where
         F: FnMut(Vec<ImageBuffer<Rgb<u8>, Vec<u8>>>) + Send + 'static,
     {
-        let sd_model = self
-            .sd_model
+        let model = self
+            .model
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("No image model loaded"))?;
-        sd_model.generate_image(&args, callback).await
+        model.generate_image(&args, Box::new(callback)).await
     }
 
     pub async fn generate_audio(&mut self, args: &AudioGenerationArgs) -> Result<AudioOutput> {
-        let audio_model = self
-            .audio_model
+        let model = self
+            .model
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("No audio model loaded"))?;
-        audio_model.generate_audio(args).await
+        model.generate_audio(args).await
     }
 }

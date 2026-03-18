@@ -7,7 +7,6 @@ mod chat;
 
 use cake_core::{
     cake::{self, Context, Mode, Worker},
-    models::NoAudio,
     utils, Args, ImageModelArch, ModelType, TextModelArch,
 };
 
@@ -217,87 +216,51 @@ async fn run_master(ctx: Context) -> Result<()> {
     match ctx.text_model_arch {
         #[cfg(feature = "qwen2")]
         TextModelArch::Qwen2 => {
-            Master::<cake_core::models::qwen2::Qwen2, cake_core::models::sd::SD, NoAudio>::new(ctx)
-                .await?
-                .run()
-                .await
+            Master::<cake_core::models::qwen2::Qwen2>::new(ctx).await?.run().await
         }
         #[cfg(feature = "qwen3_5")]
         TextModelArch::Qwen3_5 => {
-            Master::<cake_core::models::qwen3_5::Qwen3_5, cake_core::models::sd::SD, NoAudio>::new(ctx)
-                .await?
-                .run()
-                .await
+            Master::<cake_core::models::qwen3_5::Qwen3_5>::new(ctx).await?.run().await
         }
         #[cfg(feature = "qwen3")]
         TextModelArch::Qwen3 => {
-            Master::<cake_core::models::qwen3::Qwen3, cake_core::models::sd::SD, NoAudio>::new(ctx)
-                .await?
-                .run()
-                .await
+            Master::<cake_core::models::qwen3::Qwen3>::new(ctx).await?.run().await
         }
         #[cfg(feature = "qwen3_moe")]
         TextModelArch::Qwen3Moe => {
-            Master::<cake_core::models::qwen3_moe::Qwen3Moe, cake_core::models::sd::SD, NoAudio>::new(ctx)
-                .await?
-                .run()
-                .await
+            Master::<cake_core::models::qwen3_moe::Qwen3Moe>::new(ctx).await?.run().await
         }
         #[cfg(feature = "qwen3_5_moe")]
         TextModelArch::Qwen3_5Moe => {
-            Master::<cake_core::models::qwen3_5_moe::Qwen3_5Moe, cake_core::models::sd::SD, NoAudio>::new(ctx)
-                .await?
-                .run()
-                .await
+            Master::<cake_core::models::qwen3_5_moe::Qwen3_5Moe>::new(ctx).await?.run().await
         }
         #[cfg(feature = "phi4")]
         TextModelArch::Phi4 => {
-            Master::<cake_core::models::phi4::Phi4, cake_core::models::sd::SD, NoAudio>::new(ctx)
-                .await?
-                .run()
-                .await
+            Master::<cake_core::models::phi4::Phi4>::new(ctx).await?.run().await
         }
         #[cfg(feature = "mistral")]
         TextModelArch::Mistral => {
-            Master::<cake_core::models::mistral::Mistral, cake_core::models::sd::SD, NoAudio>::new(ctx)
-                .await?
-                .run()
-                .await
+            Master::<cake_core::models::mistral::Mistral>::new(ctx).await?.run().await
         }
         #[cfg(feature = "gemma3")]
         TextModelArch::Gemma3 => {
-            Master::<cake_core::models::gemma3::Gemma3, cake_core::models::sd::SD, NoAudio>::new(ctx)
-                .await?
-                .run()
-                .await
+            Master::<cake_core::models::gemma3::Gemma3>::new(ctx).await?.run().await
         }
         #[cfg(feature = "falcon3")]
         TextModelArch::Falcon3 => {
-            Master::<cake_core::models::falcon3::Falcon3, cake_core::models::sd::SD, NoAudio>::new(ctx)
-                .await?
-                .run()
-                .await
+            Master::<cake_core::models::falcon3::Falcon3>::new(ctx).await?.run().await
         }
         #[cfg(feature = "olmo2")]
         TextModelArch::OLMo2 => {
-            Master::<cake_core::models::olmo2::OLMo2, cake_core::models::sd::SD, NoAudio>::new(ctx)
-                .await?
-                .run()
-                .await
+            Master::<cake_core::models::olmo2::OLMo2>::new(ctx).await?.run().await
         }
         #[cfg(feature = "exaone4")]
         TextModelArch::EXAONE4 => {
-            Master::<cake_core::models::exaone4::EXAONE4, cake_core::models::sd::SD, NoAudio>::new(ctx)
-                .await?
-                .run()
-                .await
+            Master::<cake_core::models::exaone4::EXAONE4>::new(ctx).await?.run().await
         }
         #[cfg(feature = "llama")]
         TextModelArch::Llama | TextModelArch::Auto => {
-            Master::<cake_core::models::llama3::LLama, cake_core::models::sd::SD, NoAudio>::new(ctx)
-                .await?
-                .run()
-                .await
+            Master::<cake_core::models::llama3::LLama>::new(ctx).await?.run().await
         }
         #[allow(unreachable_patterns)]
         _ => anyhow::bail!(
@@ -691,27 +654,17 @@ async fn run_master_luxtts(mut ctx: Context) -> Result<()> {
 async fn run_master_image(ctx: Context) -> Result<()> {
     use cake_core::cake::Master;
 
-    // Use LLama as dummy TG, NoAudio as dummy AG — they're never loaded for ImageModel.
     match ctx.args.image_model_arch {
         ImageModelArch::SD => {
-            Master::<cake_core::models::llama3::LLama, cake_core::models::sd::SD, NoAudio>::new(ctx)
-                .await?
-                .run()
-                .await
+            Master::<cake_core::models::sd::SD>::new(ctx).await?.run().await
         }
         #[cfg(feature = "flux")]
         ImageModelArch::Flux => {
-            Master::<cake_core::models::llama3::LLama, cake_core::models::flux::FluxGen, NoAudio>::new(ctx)
-                .await?
-                .run()
-                .await
+            Master::<cake_core::models::flux::FluxGen>::new(ctx).await?.run().await
         }
         #[cfg(feature = "flux")]
         ImageModelArch::Flux1 => {
-            Master::<cake_core::models::llama3::LLama, cake_core::models::flux::Flux1Gen, NoAudio>::new(ctx)
-                .await?
-                .run()
-                .await
+            Master::<cake_core::models::flux::Flux1Gen>::new(ctx).await?.run().await
         }
         #[allow(unreachable_patterns)]
         _ => anyhow::bail!(

@@ -14,8 +14,8 @@ use crate::cake::api;
 use crate::cake::{Context, Forwarder, Master};
 use crate::models::chat::Message;
 use crate::models::{
-    AudioGenerationArgs, AudioGenerator, AudioOutput, Generator, ImageGenerator, NoAudio,
-    TextGenerator, Token,
+    AudioGenerationArgs, AudioGenerator, AudioOutput, Generator, ImageGenerator, Model,
+    OutputModality, TextGenerator, Token,
 };
 use crate::ImageGenerationArgs;
 use image::{ImageBuffer, Rgb};
@@ -132,6 +132,32 @@ impl TextGenerator for MockTextGenerator {
     }
 }
 
+#[async_trait]
+impl Model for MockTextGenerator {
+    fn output_modality(&self) -> OutputModality {
+        OutputModality::Text
+    }
+    fn add_message(&mut self, message: Message) -> Result<()> {
+        TextGenerator::add_message(self, message)
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        TextGenerator::reset(self)
+    }
+
+    async fn goodbye(&mut self) -> Result<()> {
+        TextGenerator::goodbye(self).await
+    }
+
+    async fn next_token(&mut self, index: usize) -> Result<Token> {
+        TextGenerator::next_token(self, index).await
+    }
+
+    fn generated_tokens(&self) -> usize {
+        TextGenerator::generated_tokens(self)
+    }
+}
+
 // ── MockImageGenerator ──
 
 pub struct MockImageGenerator;
@@ -162,6 +188,20 @@ impl ImageGenerator for MockImageGenerator {
     }
 }
 
+#[async_trait]
+impl Model for MockImageGenerator {
+    fn output_modality(&self) -> OutputModality {
+        OutputModality::Image
+    }
+    async fn generate_image(
+        &mut self,
+        args: &ImageGenerationArgs,
+        callback: Box<dyn FnMut(Vec<ImageBuffer<Rgb<u8>, Vec<u8>>>) + Send>,
+    ) -> Result<()> {
+        ImageGenerator::generate_image(self, args, callback).await
+    }
+}
+
 // ── MockAudioGenerator ──
 
 pub struct MockAudioGenerator;
@@ -189,6 +229,38 @@ impl AudioGenerator for MockAudioGenerator {
     }
 }
 
+#[async_trait]
+impl Model for MockAudioGenerator {
+    fn output_modality(&self) -> OutputModality {
+        OutputModality::Audio
+    }
+    async fn generate_audio(&mut self, args: &AudioGenerationArgs) -> Result<AudioOutput> {
+        AudioGenerator::generate_audio(self, args).await
+    }
+}
+
+// ── MockNoneModel (no capabilities — all stubs return errors/defaults) ──
+
+pub struct MockNoneModel;
+
+#[async_trait]
+impl Generator for MockNoneModel {
+    type Shardable = MockBlock;
+    const MODEL_NAME: &'static str = "mock-none";
+
+    async fn load(_ctx: &mut Context) -> Result<Option<Box<Self>>> {
+        // Return None so Master.model is None — all endpoints 404
+        Ok(None)
+    }
+}
+
+#[async_trait]
+impl Model for MockNoneModel {
+    fn output_modality(&self) -> OutputModality {
+        OutputModality::Text // unreachable — load() returns None
+    }
+}
+
 // ── Helper: create Master with specific model combos ──
 
 fn dummy_context() -> Context {
@@ -212,48 +284,40 @@ fn dummy_context() -> Context {
     }
 }
 
-/// Master with text model loaded (image/audio return 404).
-pub fn mock_master_text() -> Master<MockTextGenerator, MockImageGenerator, NoAudio> {
+/// Master with text model loaded (image/audio return errors from stubs).
+pub fn mock_master_text() -> Master<MockTextGenerator> {
     Master {
         ctx: dummy_context(),
-        llm_model: Some(Box::new(MockTextGenerator {
+        model: Some(Box::new(MockTextGenerator {
             tokens: vec!["Hello".into(), " world".into()],
             cursor: 0,
             messages: Vec::new(),
             generated: 0,
         })),
-        sd_model: None,
-        audio_model: None,
     }
 }
 
 /// Master with image model loaded.
-pub fn mock_master_image() -> Master<MockTextGenerator, MockImageGenerator, NoAudio> {
+pub fn mock_master_image() -> Master<MockImageGenerator> {
     Master {
         ctx: dummy_context(),
-        llm_model: None,
-        sd_model: Some(Box::new(MockImageGenerator)),
-        audio_model: None,
+        model: Some(Box::new(MockImageGenerator)),
     }
 }
 
 /// Master with audio model loaded.
-pub fn mock_master_audio() -> Master<MockTextGenerator, MockImageGenerator, MockAudioGenerator> {
+pub fn mock_master_audio() -> Master<MockAudioGenerator> {
     Master {
         ctx: dummy_context(),
-        llm_model: None,
-        sd_model: None,
-        audio_model: Some(Box::new(MockAudioGenerator)),
+        model: Some(Box::new(MockAudioGenerator)),
     }
 }
 
 /// Master with no models loaded (all 404).
-pub fn mock_master_none() -> Master<MockTextGenerator, MockImageGenerator, NoAudio> {
+pub fn mock_master_none() -> Master<MockNoneModel> {
     Master {
         ctx: dummy_context(),
-        llm_model: None,
-        sd_model: None,
-        audio_model: None,
+        model: None,
     }
 }
 
@@ -269,36 +333,34 @@ pub fn test_app_text(
         InitError = (),
     >,
 > {
-    type TG = MockTextGenerator;
-    type IG = MockImageGenerator;
-    type AG = NoAudio;
+    type M = MockTextGenerator;
 
     let state = Arc::new(RwLock::new(mock_master_text()));
     App::new()
         .app_data(web::Data::new(state))
         .route(
             "/v1/chat/completions",
-            web::post().to(api::text::generate_text::<TG, IG, AG>),
+            web::post().to(api::text::generate_text::<M>),
         )
         .route(
             "/api/v1/chat/completions",
-            web::post().to(api::text::generate_text::<TG, IG, AG>),
+            web::post().to(api::text::generate_text::<M>),
         )
         .route(
             "/v1/models",
-            web::get().to(api::list_models::<TG, IG, AG>),
+            web::get().to(api::list_models::<M>),
         )
         .route(
             "/v1/audio/speech",
-            web::post().to(api::audio::generate_speech::<TG, IG, AG>),
+            web::post().to(api::audio::generate_speech::<M>),
         )
         .route(
             "/v1/images/generations",
-            web::post().to(api::image::generate_image_openai::<TG, IG, AG>),
+            web::post().to(api::image::generate_image_openai::<M>),
         )
         .route(
             "/api/v1/image",
-            web::post().to(api::image::generate_image::<TG, IG, AG>),
+            web::post().to(api::image::generate_image::<M>),
         )
 }
 
@@ -312,32 +374,30 @@ pub fn test_app_audio(
         InitError = (),
     >,
 > {
-    type TG = MockTextGenerator;
-    type IG = MockImageGenerator;
-    type AG = MockAudioGenerator;
+    type M = MockAudioGenerator;
 
     let state = Arc::new(RwLock::new(mock_master_audio()));
     App::new()
         .app_data(web::Data::new(state))
         .route(
             "/v1/chat/completions",
-            web::post().to(api::text::generate_text::<TG, IG, AG>),
+            web::post().to(api::text::generate_text::<M>),
         )
         .route(
             "/v1/models",
-            web::get().to(api::list_models::<TG, IG, AG>),
+            web::get().to(api::list_models::<M>),
         )
         .route(
             "/v1/audio/speech",
-            web::post().to(api::audio::generate_speech::<TG, IG, AG>),
+            web::post().to(api::audio::generate_speech::<M>),
         )
         .route(
             "/v1/images/generations",
-            web::post().to(api::image::generate_image_openai::<TG, IG, AG>),
+            web::post().to(api::image::generate_image_openai::<M>),
         )
         .route(
             "/api/v1/image",
-            web::post().to(api::image::generate_image::<TG, IG, AG>),
+            web::post().to(api::image::generate_image::<M>),
         )
 }
 
@@ -351,32 +411,30 @@ pub fn test_app_image(
         InitError = (),
     >,
 > {
-    type TG = MockTextGenerator;
-    type IG = MockImageGenerator;
-    type AG = NoAudio;
+    type M = MockImageGenerator;
 
     let state = Arc::new(RwLock::new(mock_master_image()));
     App::new()
         .app_data(web::Data::new(state))
         .route(
             "/v1/chat/completions",
-            web::post().to(api::text::generate_text::<TG, IG, AG>),
+            web::post().to(api::text::generate_text::<M>),
         )
         .route(
             "/v1/models",
-            web::get().to(api::list_models::<TG, IG, AG>),
+            web::get().to(api::list_models::<M>),
         )
         .route(
             "/v1/audio/speech",
-            web::post().to(api::audio::generate_speech::<TG, IG, AG>),
+            web::post().to(api::audio::generate_speech::<M>),
         )
         .route(
             "/v1/images/generations",
-            web::post().to(api::image::generate_image_openai::<TG, IG, AG>),
+            web::post().to(api::image::generate_image_openai::<M>),
         )
         .route(
             "/api/v1/image",
-            web::post().to(api::image::generate_image::<TG, IG, AG>),
+            web::post().to(api::image::generate_image::<M>),
         )
 }
 
@@ -390,31 +448,29 @@ pub fn test_app_none(
         InitError = (),
     >,
 > {
-    type TG = MockTextGenerator;
-    type IG = MockImageGenerator;
-    type AG = NoAudio;
+    type M = MockNoneModel;
 
     let state = Arc::new(RwLock::new(mock_master_none()));
     App::new()
         .app_data(web::Data::new(state))
         .route(
             "/v1/chat/completions",
-            web::post().to(api::text::generate_text::<TG, IG, AG>),
+            web::post().to(api::text::generate_text::<M>),
         )
         .route(
             "/v1/models",
-            web::get().to(api::list_models::<TG, IG, AG>),
+            web::get().to(api::list_models::<M>),
         )
         .route(
             "/v1/audio/speech",
-            web::post().to(api::audio::generate_speech::<TG, IG, AG>),
+            web::post().to(api::audio::generate_speech::<M>),
         )
         .route(
             "/v1/images/generations",
-            web::post().to(api::image::generate_image_openai::<TG, IG, AG>),
+            web::post().to(api::image::generate_image_openai::<M>),
         )
         .route(
             "/api/v1/image",
-            web::post().to(api::image::generate_image::<TG, IG, AG>),
+            web::post().to(api::image::generate_image::<M>),
         )
 }

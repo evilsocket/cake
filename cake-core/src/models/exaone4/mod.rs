@@ -6,3 +6,5 @@ mod model;
 pub use block::*;
 pub use config::*;
 pub use model::*;
+
+crate::impl_model_for_text!(EXAONE4);
