@@ -17,11 +17,15 @@ use super::vae_decoder::{AcousticVaeDecoder, StreamingConvCache};
 use super::vae_encoder::TokenizerEncoder;
 
 /// VibeVoice-1.5B TTS model.
+///
+/// The LM backbone (28 Qwen2 layers) can be sharded across workers using topology.
+/// Each layer either runs locally or is forwarded to a remote worker via `Client`.
+/// Non-LM components (prediction head, VAE, encoders) always stay on master.
 pub struct VibeVoice1_5B {
-    // Single Qwen2 LM (28 layers)
+    // Single Qwen2 LM (28 layers) — each is either local Transformer or remote Client
     embed_tokens: candle_nn::Embedding,
     lm_norm: candle_nn::RmsNorm,
-    layers: Vec<crate::models::common::Transformer>,
+    layers: Vec<Box<dyn crate::cake::Forwarder>>,
     lm_head_weight: Tensor, // tied to embed_tokens
 
     // Tokenizers
@@ -48,14 +52,18 @@ pub struct VibeVoice1_5B {
     common_cfg: crate::models::common::Config,
     device: Device,
     dtype: DType,
+    /// Lightweight context for forwarding through Forwarder trait (holds mutable cache).
+    fwd_ctx: crate::cake::Context,
 }
 
 impl VibeVoice1_5B {
-    pub fn load(
+    pub async fn load(
         config_path: &std::path::Path,
         weight_paths: &[std::path::PathBuf],
         device: &Device,
         diffusion_steps: Option<usize>,
+        topology: &crate::cake::Topology,
+        cluster_key: Option<&str>,
     ) -> Result<Self> {
         let config = VibeVoice1_5BConfig::from_path(config_path)?;
         let common_cfg = config.into_config();
@@ -82,12 +90,28 @@ impl VibeVoice1_5B {
             lm_vb.pp("norm"),
         )?;
 
-        let mut layers = Vec::with_capacity(num_layers);
+        let mut layers: Vec<Box<dyn crate::cake::Forwarder>> = Vec::with_capacity(num_layers);
         for i in 0..num_layers {
-            layers.push(crate::models::common::Transformer::load_for_vibevoice(
-                lm_vb.pp("layers").pp(i),
-                &common_cfg,
-            )?);
+            let layer_name = format!("{}.layers.{i}", common_cfg.model_prefix);
+            if let Some((_node_name, node)) = topology.get_node_for_layer(&layer_name) {
+                info!("  {layer_name} → remote worker at {}", node.host);
+                layers.push(Box::new(
+                    crate::cake::Client::new(
+                        device.clone(),
+                        &node.host,
+                        &layer_name,
+                        cluster_key,
+                    )
+                    .await?,
+                ));
+            } else {
+                layers.push(Box::new(
+                    crate::models::common::Transformer::load_for_vibevoice(
+                        lm_vb.pp("layers").pp(i),
+                        &common_cfg,
+                    )?,
+                ));
+            }
         }
 
         // lm_head weight is tied to embed_tokens
@@ -178,22 +202,43 @@ impl VibeVoice1_5B {
             speech_bias_factor,
             speech_diff_embed,
             config,
-            common_cfg,
+            common_cfg: common_cfg.clone(),
             device: device.clone(),
             dtype,
+            fwd_ctx: crate::cake::Context {
+                args: Default::default(),
+                dtype,
+                topology: topology.clone(),
+                data_path: std::path::PathBuf::new(),
+                device: device.clone(),
+                config: Some(common_cfg),
+                cache: None,
+                var_builder: None,
+                text_model_arch: crate::TextModelArch::Auto,
+                quant: std::sync::Arc::new(crate::utils::NoQuantization),
+                listener_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            },
         })
     }
 
     /// Forward through LM layers with cache.
-    fn forward_lm(
-        &self,
+    /// Sets the cache in fwd_ctx before each call. Local layers use it for KV caching;
+    /// remote layers (Client) ignore it and manage their own cache on the worker.
+    async fn forward_lm(
+        &mut self,
         embeds: &Tensor,
         index_pos: usize,
         cache: &mut crate::models::common::Cache,
     ) -> Result<Tensor> {
+        // Swap the cache into fwd_ctx for local Transformer layers
+        self.fwd_ctx.cache = Some(cache.clone());
         let mut h = embeds.clone();
-        for (i, layer) in self.layers.iter().enumerate() {
-            h = layer.forward_with_cache(&h, index_pos, i, cache)?;
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            h = layer.forward_mut(&h, index_pos, i, &mut self.fwd_ctx).await?;
+        }
+        // Swap the updated cache back
+        if let Some(updated) = self.fwd_ctx.cache.take() {
+            *cache = updated;
         }
         h = self.lm_norm.forward(&h).map_err(|e| anyhow::anyhow!("lm_norm: {e}"))?;
         Ok(h)
@@ -279,7 +324,7 @@ impl VibeVoice1_5B {
     /// * `speech_embeds` - Pre-computed speech embeddings from voice reference (connected)
     /// * `max_tokens` - Maximum generation steps
     /// * `cfg_scale` - Classifier-free guidance scale
-    pub fn generate(
+    pub async fn generate(
         &mut self,
         token_ids: &[u32],
         speech_input_mask: &[bool],
@@ -341,14 +386,14 @@ impl VibeVoice1_5B {
         }
 
         // Forward through LM
-        let hidden = self.forward_lm(&embeds, 0, &mut pos_cache)?;
+        let hidden = self.forward_lm(&embeds, 0, &mut pos_cache).await?;
         let mut pos_pos = token_ids.len();
 
         // === PREFILL NEGATIVE ===
         // Negative prompt is just [speech_start_id]
         let neg_ids = Tensor::new(&[SPEECH_START_ID], &dev)?.unsqueeze(0)?;
         let neg_embeds = self.embed_tokens.forward(&neg_ids)?;
-        let _neg_hidden = self.forward_lm(&neg_embeds, 0, &mut neg_cache)?;
+        let _neg_hidden = self.forward_lm(&neg_embeds, 0, &mut neg_cache).await?;
         let mut neg_pos = 1usize;
 
         // === AUTOREGRESSIVE GENERATION ===
@@ -409,7 +454,7 @@ impl VibeVoice1_5B {
                 )?;
                 let neg_ids = Tensor::new(&[SPEECH_START_ID], &dev)?.unsqueeze(0)?;
                 let neg_embeds = self.embed_tokens.forward(&neg_ids)?;
-                let _neg_h = self.forward_lm(&neg_embeds, 0, &mut neg_cache)?;
+                let _neg_h = self.forward_lm(&neg_embeds, 0, &mut neg_cache).await?;
                 neg_pos = 1;
                 // Clear streaming caches
                 acoustic_cache.clear();
@@ -423,7 +468,7 @@ impl VibeVoice1_5B {
 
                 // Forward negative model with pre-computed speech_diffusion embedding
                 let neg_hidden =
-                    self.forward_lm(&self.speech_diff_embed.clone(), neg_pos, &mut neg_cache)?;
+                    self.forward_lm(&self.speech_diff_embed.clone(), neg_pos, &mut neg_cache).await?;
                 neg_pos += 1;
                 let t_neg_lm = frame_start.elapsed();
 
@@ -482,7 +527,7 @@ impl VibeVoice1_5B {
             }
 
             // Forward through positive LM
-            last_hidden = self.forward_lm(&next_embed, pos_pos, &mut pos_cache)?;
+            last_hidden = self.forward_lm(&next_embed, pos_pos, &mut pos_cache).await?;
             pos_pos += 1;
         }
 

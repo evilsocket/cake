@@ -439,7 +439,10 @@ async fn run_vibevoice_1_5b(
         &weight_paths,
         &ctx.device,
         Some(ctx.args.tts_diffusion_steps),
-    )?;
+        &ctx.topology,
+        ctx.args.cluster_key.as_deref(),
+    )
+    .await?;
 
     let prompt = &ctx.args.prompt;
     println!("[VibeVoice-1.5B] Generating speech for: \"{}\"", prompt);
@@ -515,7 +518,8 @@ async fn run_vibevoice_1_5b(
         &voice_embeds,
         max_tokens,
         ctx.args.tts_cfg_scale,
-    )?;
+    )
+    .await?;
 
     let output_path = std::path::Path::new(&ctx.args.audio_output);
     vibevoice::save_wav(&samples, output_path, 24000)?;
