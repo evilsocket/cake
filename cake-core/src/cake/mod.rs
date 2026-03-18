@@ -161,6 +161,35 @@ impl Context {
         let mut fp8 = false;
 
         if args.model_type == ModelType::TextModel {
+            // Check if the model path is a GGUF file
+            let is_gguf = utils::gguf::is_gguf_file(&data_path);
+
+            if is_gguf {
+                // GGUF path: extract config and architecture from GGUF metadata
+                let arch_str = utils::gguf::arch_from_gguf(&data_path)?;
+                text_model_arch = arch_str_to_text_model_arch(&arch_str);
+                log::info!("GGUF model: architecture={:?} (from metadata)", text_model_arch);
+
+                let config_internal = utils::gguf::config_from_gguf(&data_path)?;
+                log::info!(
+                    "GGUF config: hidden={}, layers={}, heads={}/{}, vocab={}",
+                    config_internal.hidden_size,
+                    config_internal.num_hidden_layers,
+                    config_internal.num_attention_heads,
+                    config_internal.num_key_value_heads,
+                    config_internal.vocab_size,
+                );
+
+                var_builder = Some(utils::gguf::load_gguf_var_builder(
+                    &data_path,
+                    dtype,
+                    &device,
+                    &config_internal.model_prefix,
+                )?);
+                cache = Some(Cache::new(true, dtype, &config_internal, &device)?);
+                config = Some(config_internal);
+            } else {
+            // Safetensors path (existing flow)
             let config_filename = data_path.join("config.json");
 
             // Auto-detect architecture if needed
@@ -287,6 +316,7 @@ impl Context {
             });
             cache = Some(Cache::new(true, dtype, &config_internal, &device)?);
             config = Some(config_internal);
+            } // end else (safetensors path)
         }
 
         Ok(Context {

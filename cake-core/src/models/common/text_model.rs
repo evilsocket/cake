@@ -21,7 +21,15 @@ pub fn load_tokenizer(
     ctx: &Context,
     default_eos_token: &str,
 ) -> Result<(Tokenizer, Option<EosTokenId>)> {
-    let tokenizer_filename = ctx.data_path.join("tokenizer.json");
+    // For GGUF files, look for tokenizer.json in the same directory as the .gguf file
+    let tokenizer_filename = if ctx.data_path.is_file() {
+        ctx.data_path
+            .parent()
+            .unwrap_or(&ctx.data_path)
+            .join("tokenizer.json")
+    } else {
+        ctx.data_path.join("tokenizer.json")
+    };
 
     log::info!("loading tokenizer from {}", tokenizer_filename.display());
 

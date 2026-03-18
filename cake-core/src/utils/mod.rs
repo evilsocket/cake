@@ -4,6 +4,7 @@ pub mod fp8;
 #[cfg(feature = "cuda")]
 pub mod flash_attn;
 pub mod fused_ops;
+pub mod gguf;
 pub mod gptq;
 pub mod hf;
 pub mod models;
