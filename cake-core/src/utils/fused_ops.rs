@@ -1622,6 +1622,216 @@ pub fn depthwise_conv1d_bias(
     )
 }
 
+// ─── depthwise_conv1d_bias_ctx: conv with separate context + input ──
+
+struct DepthwiseConv1dBiasCtx {
+    kernel_size: usize,
+    channels: usize,
+    bias: Tensor,
+}
+
+#[allow(clippy::too_many_arguments)]
+impl candle_core::CustomOp3 for DepthwiseConv1dBiasCtx {
+    fn name(&self) -> &'static str {
+        "depthwise_conv1d_bias_ctx"
+    }
+
+    fn cpu_fwd(
+        &self,
+        s_ctx: &CpuStorage,
+        l_ctx: &Layout,
+        s_in: &CpuStorage,
+        l_in: &Layout,
+        s_wt: &CpuStorage,
+        l_wt: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        fn inner<T: candle_core::WithDType + num_traits::Float + num_traits::AsPrimitive<f32> + num_traits::FromPrimitive>(
+            ctx: &[T], l_ctx: &Layout,
+            input: &[T], l_in: &Layout,
+            weight: &[T], l_wt: &Layout,
+            bias_t: &Tensor,
+            kernel_size: usize, channels: usize,
+        ) -> Result<(CpuStorage, Shape)> {
+            let ctx = match l_ctx.contiguous_offsets() {
+                Some((o1, o2)) => &ctx[o1..o2],
+                None => candle_core::bail!("conv1d_bias_ctx: ctx must be contiguous"),
+            };
+            let input = match l_in.contiguous_offsets() {
+                Some((o1, o2)) => &input[o1..o2],
+                None => candle_core::bail!("conv1d_bias_ctx: input must be contiguous"),
+            };
+            let weight = match l_wt.contiguous_offsets() {
+                Some((o1, o2)) => &weight[o1..o2],
+                None => candle_core::bail!("conv1d_bias_ctx: weight must be contiguous"),
+            };
+            let bias_v: Vec<f32> = bias_t.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1()?;
+            let dims = l_in.shape().dims();
+            let (batch, time_len) = (dims[0], dims[2]);
+            let ctx_len = kernel_size - 1;
+            let numel = batch * channels * time_len;
+            let mut dst = vec![T::zero(); numel];
+            for b in 0..batch {
+                for c in 0..channels {
+                    for t in 0..time_len {
+                        let mut acc = 0f32;
+                        for k in 0..kernel_size {
+                            let pos = t + k;
+                            let v: f32 = if pos < ctx_len {
+                                num_traits::AsPrimitive::as_(ctx[(b * channels + c) * ctx_len + pos])
+                            } else {
+                                num_traits::AsPrimitive::as_(input[(b * channels + c) * time_len + (pos - ctx_len)])
+                            };
+                            let w: f32 = num_traits::AsPrimitive::as_(weight[c * kernel_size + k]);
+                            acc += v * w;
+                        }
+                        acc += bias_v[c];
+                        dst[(b * channels + c) * time_len + t] =
+                            num_traits::FromPrimitive::from_f32(acc).unwrap_or(T::zero());
+                    }
+                }
+            }
+            let out_shape = Shape::from_dims(&[batch, channels, time_len]);
+            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
+            Ok((storage, out_shape))
+        }
+
+        use CpuStorage as C;
+        match (s_ctx, s_in, s_wt) {
+            (C::BF16(c), C::BF16(i), C::BF16(w)) => inner(c, l_ctx, i, l_in, w, l_wt, &self.bias, self.kernel_size, self.channels),
+            (C::F16(c), C::F16(i), C::F16(w)) => inner(c, l_ctx, i, l_in, w, l_wt, &self.bias, self.kernel_size, self.channels),
+            (C::F32(c), C::F32(i), C::F32(w)) => inner(c, l_ctx, i, l_in, w, l_wt, &self.bias, self.kernel_size, self.channels),
+            (C::F64(c), C::F64(i), C::F64(w)) => inner(c, l_ctx, i, l_in, w, l_wt, &self.bias, self.kernel_size, self.channels),
+            _ => candle_core::bail!("conv1d_bias_ctx: unsupported dtype"),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        s_ctx: &candle_core::CudaStorage,
+        l_ctx: &Layout,
+        s_in: &candle_core::CudaStorage,
+        l_in: &Layout,
+        s_wt: &candle_core::CudaStorage,
+        l_wt: &Layout,
+    ) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{
+            CudaSlice, DeviceRepr, LaunchConfig, PushKernelArg,
+        };
+        use candle_core::cuda_backend::{kernel_name, WrapErr};
+        use candle_core::{CudaDevice, WithDType};
+
+        let kernel_size = self.kernel_size;
+        let channels = self.channels;
+        let dims = l_in.shape().dims();
+        let (batch, time_len) = (dims[0], dims[2]);
+        let ctx_len = kernel_size - 1;
+        let numel = batch * channels * time_len;
+
+        // Get bias CUDA storage
+        let bias_cuda = self.bias.storage_and_layout();
+        let (bias_storage, bias_layout) = (&*bias_cuda.0, &bias_cuda.1);
+
+        fn launch<T: DeviceRepr + WithDType>(
+            ctx: &CudaSlice<T>, l_ctx: &Layout,
+            input: &CudaSlice<T>, l_in: &Layout,
+            weight: &CudaSlice<T>, l_wt: &Layout,
+            bias: &CudaSlice<T>, l_bi: &Layout,
+            dev: &CudaDevice,
+            kernel_size: i32, channels: i32, ctx_len: i32, time_len: i32,
+            numel: usize,
+        ) -> Result<CudaSlice<T>> {
+            let ctx = match l_ctx.contiguous_offsets() {
+                Some((o1, o2)) => ctx.slice(o1..o2),
+                None => candle_core::bail!("conv1d_bias_ctx: ctx must be contiguous"),
+            };
+            let input = match l_in.contiguous_offsets() {
+                Some((o1, o2)) => input.slice(o1..o2),
+                None => candle_core::bail!("conv1d_bias_ctx: input must be contiguous"),
+            };
+            let weight = match l_wt.contiguous_offsets() {
+                Some((o1, o2)) => weight.slice(o1..o2),
+                None => candle_core::bail!("conv1d_bias_ctx: weight must be contiguous"),
+            };
+            let bias = match l_bi.contiguous_offsets() {
+                Some((o1, o2)) => bias.slice(o1..o2),
+                None => candle_core::bail!("conv1d_bias_ctx: bias must be contiguous"),
+            };
+            let cfg = LaunchConfig::for_num_elems(numel as u32);
+            let func = dev.get_or_load_custom_func(
+                &kernel_name::<T>("depthwise_conv1d_bias_ctx"),
+                "cake_fused_ops",
+                FUSED_OPS_PTX,
+            )?;
+            let out = unsafe { dev.alloc::<T>(numel)? };
+            let mut builder = func.builder();
+            builder.arg(&numel);
+            builder.arg(&ctx);
+            builder.arg(&input);
+            builder.arg(&weight);
+            builder.arg(&bias);
+            builder.arg(&out);
+            candle_core::builder_arg!(builder, kernel_size, channels, ctx_len, time_len);
+            unsafe { builder.launch(cfg) }.w()?;
+            Ok(out)
+        }
+
+        use candle_core::backend::BackendStorage;
+        use candle_core::cuda_backend::CudaStorageSlice as S;
+        let dev = s_in.device();
+        let ks = kernel_size as i32;
+        let ch = channels as i32;
+        let cl = ctx_len as i32;
+        let tl = time_len as i32;
+
+        let bias_s = match bias_storage {
+            candle_core::Storage::Cuda(cs) => cs,
+            _ => candle_core::bail!("conv1d_bias_ctx: bias must be on CUDA"),
+        };
+
+        let slice = match (&s_ctx.slice, &s_in.slice, &s_wt.slice, &bias_s.slice) {
+            (S::BF16(c), S::BF16(i), S::BF16(w), S::BF16(b)) => S::BF16(launch(c, l_ctx, i, l_in, w, l_wt, b, bias_layout, dev, ks, ch, cl, tl, numel)?),
+            (S::F16(c), S::F16(i), S::F16(w), S::F16(b)) => S::F16(launch(c, l_ctx, i, l_in, w, l_wt, b, bias_layout, dev, ks, ch, cl, tl, numel)?),
+            (S::F32(c), S::F32(i), S::F32(w), S::F32(b)) => S::F32(launch(c, l_ctx, i, l_in, w, l_wt, b, bias_layout, dev, ks, ch, cl, tl, numel)?),
+            (S::F64(c), S::F64(i), S::F64(w), S::F64(b)) => S::F64(launch(c, l_ctx, i, l_in, w, l_wt, b, bias_layout, dev, ks, ch, cl, tl, numel)?),
+            _ => candle_core::bail!("conv1d_bias_ctx: unsupported dtype"),
+        };
+
+        let out_shape = Shape::from_dims(&[batch, channels, time_len]);
+        Ok((
+            candle_core::CudaStorage { slice, device: dev.clone() },
+            out_shape,
+        ))
+    }
+}
+
+/// Fused depthwise conv1d with separate context + input (no cat needed).
+/// Replaces Tensor::zeros + Tensor::cat + depthwise_conv1d_bias (3 kernels → 1).
+/// ctx: (batch, channels, kernel_size-1), input: (batch, channels, time_len)
+/// weight: (channels, kernel_size), bias: (channels,)
+/// Returns: (batch, channels, time_len)
+pub fn depthwise_conv1d_bias_ctx(
+    ctx: &Tensor,
+    input: &Tensor,
+    weight: &Tensor,
+    bias: &Tensor,
+    kernel_size: usize,
+    channels: usize,
+) -> Result<Tensor> {
+    let ctx = ctx.contiguous()?;
+    let inp = input.contiguous()?;
+    let wt = weight.contiguous()?;
+    ctx.apply_op3_no_bwd(
+        &inp,
+        &wt,
+        &DepthwiseConv1dBiasCtx {
+            kernel_size,
+            channels,
+            bias: bias.contiguous()?,
+        },
+    )
+}
+
 // ─── rms_norm_channel: RMS-normalize over channel dim of (b,c,t) ────
 
 struct RmsNormChannel {

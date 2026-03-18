@@ -51,11 +51,10 @@ impl EncoderBlock {
         let channels = x.dim(1)?;
 
         let h = fused_ops::rms_norm_channel(x, &self.norm_weight, self.eps)?;
-        let h = Tensor::cat(
-            &[&Tensor::zeros((h.dim(0)?, channels, 6), h.dtype(), h.device())?, &h],
-            2,
+        let zeros = Tensor::zeros((h.dim(0)?, channels, 6), h.dtype(), h.device())?;
+        let h = fused_ops::depthwise_conv1d_bias_ctx(
+            &zeros, &h, &self.mixer_weight, &self.mixer_bias, 7, channels,
         )?;
-        let h = fused_ops::depthwise_conv1d_bias(&h, &self.mixer_weight, &self.mixer_bias, 7, channels)?;
         let x = fused_ops::add_scaled(x, &h, &self.gamma)?;
 
         let h = fused_ops::rms_norm_channel(&x, &self.ffn_norm_weight, self.eps)?;
@@ -82,12 +81,21 @@ impl EncoderBlock {
         } else {
             cache.get(slot).unwrap().clone()
         };
-        let padded = Tensor::cat(&[&context, &h], 2)?;
-        let plen = padded.dim(2)?;
-        let start = plen.saturating_sub(6);
-        cache.set(slot, padded.narrow(2, start, plen - start)?);
 
-        let h = fused_ops::depthwise_conv1d_bias(&padded, &self.mixer_weight, &self.mixer_bias, 7, channels)?;
+        // Update cache: last 6 samples of [context, h]
+        let h_len = h.dim(2)?;
+        if h_len >= 6 {
+            cache.set(slot, h.narrow(2, h_len - 6, 6)?);
+        } else {
+            let ctx_take = 6 - h_len;
+            let ctx_part = context.narrow(2, 6 - ctx_take, ctx_take)?;
+            cache.set(slot, Tensor::cat(&[&ctx_part, &h], 2)?);
+        }
+
+        // Fused conv reads from [context, h] virtually — no cat allocation
+        let h = fused_ops::depthwise_conv1d_bias_ctx(
+            &context, &h, &self.mixer_weight, &self.mixer_bias, 7, channels,
+        )?;
         let x = fused_ops::add_scaled(x, &h, &self.gamma)?;
 
         let h = fused_ops::rms_norm_channel(&x, &self.ffn_norm_weight, self.eps)?;

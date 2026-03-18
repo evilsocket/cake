@@ -452,6 +452,59 @@ CONV1D_BIAS_OP(__half, depthwise_conv1d_bias_f16)
 CONV1D_BIAS_OP(__nv_bfloat16, depthwise_conv1d_bias_bf16)
 #endif
 
+// ─── depthwise_conv1d_bias_ctx: conv with separate context + input ──
+// Replaces Tensor::zeros + Tensor::cat + depthwise_conv1d_bias (3 kernels) with 1.
+// Reads from virtual [ctx, input] concatenation without allocating the merged tensor.
+// ctx: (batch, channels, kernel_size-1) — cached context from previous frame
+// input: (batch, channels, time_len) — new data
+// weight: (channels, kernel_size), bias: (channels,)
+// out: (batch, channels, time_len) — same length as input
+#define CONV1D_BIAS_CTX_OP(TYPENAME, FN_NAME) \
+extern "C" __global__ void FN_NAME( \
+    const size_t numel, \
+    const TYPENAME *ctx, \
+    const TYPENAME *input, \
+    const TYPENAME *weight, \
+    const TYPENAME *bias, \
+    TYPENAME *out, \
+    const int kernel_size, \
+    const int channels, \
+    const int ctx_len, \
+    const int time_len \
+) { \
+    for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; \
+         i < numel; i += blockDim.x * gridDim.x) { \
+        int t = i % time_len; \
+        int temp = i / time_len; \
+        int c = temp % channels; \
+        int b = temp / channels; \
+        float acc = 0.0f; \
+        int wt_off = c * kernel_size; \
+        /* Virtual position in [ctx, input]: t + k, where ctx occupies [0, ctx_len) */ \
+        for (int k = 0; k < kernel_size; k++) { \
+            int pos = t + k; /* position in virtual [ctx, input] */ \
+            float v; \
+            if (pos < ctx_len) { \
+                v = static_cast<float>(ctx[(b * channels + c) * ctx_len + pos]); \
+            } else { \
+                v = static_cast<float>(input[(b * channels + c) * time_len + (pos - ctx_len)]); \
+            } \
+            acc += v * static_cast<float>(weight[wt_off + k]); \
+        } \
+        acc += static_cast<float>(bias[c]); \
+        out[i] = static_cast<TYPENAME>(acc); \
+    } \
+}
+
+CONV1D_BIAS_CTX_OP(float, depthwise_conv1d_bias_ctx_f32)
+CONV1D_BIAS_CTX_OP(double, depthwise_conv1d_bias_ctx_f64)
+#if __CUDA_ARCH__ >= 530
+CONV1D_BIAS_CTX_OP(__half, depthwise_conv1d_bias_ctx_f16)
+#endif
+#if __CUDA_ARCH__ >= 800
+CONV1D_BIAS_CTX_OP(__nv_bfloat16, depthwise_conv1d_bias_ctx_bf16)
+#endif
+
 // ─── rms_norm_channel: RMS-normalize over channel dim of (batch, channels, time) ──
 // Replaces transpose + rms_norm + transpose (3 kernels including copy) with 1.
 // Each (batch, time) position normalizes its c-dimensional channel vector.
