@@ -94,8 +94,7 @@ impl Fp8Linear {
         if let Some(w) = self.weight.read().unwrap().as_ref() {
             return Ok(w.clone());
         }
-        // F8 path: dequantize on-the-fly (no caching to save VRAM)
-        // This keeps only ~8.6GB of F8 weights on GPU instead of ~26GB (F8+F16).
+        // F8 path: dequantize on-the-fly to F16 (fastest matmul dtype on Ampere)
         let f8_w = self.f8_weight.as_ref().expect("no F8 weight and no cached weight");
         crate::utils::fused_ops::f8e4m3_to_f16(f8_w)
     }
@@ -119,26 +118,24 @@ impl Fp8Linear {
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let in_dtype = x.dtype();
         let w = self.get_weight()?;
-        // When input dtype matches weight dtype (both F16), skip all conversions
-        let x = if x.dtype() != w.dtype() {
-            x.to_dtype(w.dtype())?
-        } else {
-            x.clone()
+        let compute = w.dtype();
+        let x = x.to_dtype(compute)?;
+        // Reshape to 2D for matmul (faster than broadcast_matmul for 3D inputs)
+        let dims = x.dims().to_vec();
+        let last = *dims.last().unwrap();
+        let batch: usize = dims[..dims.len() - 1].iter().product();
+        let x_2d = x.reshape((batch, last))?;
+        let y_2d = x_2d.matmul(&w.t()?)?;
+        let mut out_dims = dims[..dims.len() - 1].to_vec();
+        out_dims.push(w.dim(0)?);
+        let y = y_2d.reshape(out_dims)?;
+        let y = match &self.bias {
+            Some(b) => y.broadcast_add(&b.to_dtype(compute)?)?,
+            None => y,
         };
-        // matmul: use broadcast_matmul for 3D, direct matmul for 2D
-        let y = x.broadcast_matmul(&w.t()?)?;
-        match &self.bias {
-            Some(b) => {
-                let b = if b.dtype() != y.dtype() {
-                    b.to_dtype(y.dtype())?
-                } else {
-                    b.clone()
-                };
-                y.broadcast_add(&b)
-            }
-            None => Ok(y),
-        }
+        y.to_dtype(in_dtype)
     }
 }
 
@@ -300,8 +297,8 @@ fn fp8_linear_b(_in_d: usize, _out_d: usize, bias: bool, vb: VarBuilder) -> Resu
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 fn layer_norm(dim: usize, vb: VarBuilder) -> Result<LayerNorm> {
-    // Use F16 weights to match the F16 compute dtype
-    let ws = Tensor::ones(dim, DType::F16, vb.device())?;
+    // Use BF16 weights to match the BF16 compute dtype
+    let ws = Tensor::ones(dim, DType::BF16, vb.device())?;
     Ok(LayerNorm::new_no_bias(ws, 1e-6))
 }
 
@@ -456,9 +453,9 @@ pub struct QkNorm {
 
 impl QkNorm {
     fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
-        let query_norm = vb.get(dim, "query_norm.scale")?.to_dtype(DType::F16)?;
+        let query_norm = vb.get(dim, "query_norm.scale")?.to_dtype(DType::BF16)?;
         let query_norm = RmsNorm::new(query_norm, 1e-6);
-        let key_norm = vb.get(dim, "key_norm.scale")?.to_dtype(DType::F16)?;
+        let key_norm = vb.get(dim, "key_norm.scale")?.to_dtype(DType::BF16)?;
         let key_norm = RmsNorm::new(key_norm, 1e-6);
         Ok(Self {
             query_norm,

@@ -36,6 +36,73 @@ pub fn f8e4m3_to_f32(x: &Tensor) -> Result<Tensor> {
     x.apply_op1_no_bwd(&F8E4M3ToF32)
 }
 
+/// Dequantize F8E4M3 tensor to BF16.
+/// Direct F8→BF16 avoids F16 intermediate when using BF16 compute.
+pub fn f8e4m3_to_bf16(x: &Tensor) -> Result<Tensor> {
+    if x.dtype() != candle_core::DType::F8E4M3 {
+        return x.to_dtype(candle_core::DType::BF16);
+    }
+    x.apply_op1_no_bwd(&F8E4M3ToBF16)
+}
+
+struct F8E4M3ToBF16;
+
+impl candle_core::CustomOp1 for F8E4M3ToBF16 {
+    fn name(&self) -> &'static str {
+        "f8e4m3_to_bf16"
+    }
+
+    fn cpu_fwd(&self, s: &CpuStorage, l: &Layout) -> Result<(CpuStorage, Shape)> {
+        let (f32_storage, shape) = F8E4M3ToF32.cpu_fwd(s, l)?;
+        match f32_storage {
+            CpuStorage::F32(data) => {
+                let bf16_data: Vec<half::bf16> =
+                    data.iter().map(|&v| half::bf16::from_f32(v)).collect();
+                Ok((CpuStorage::BF16(bf16_data), shape))
+            }
+            _ => candle_core::bail!("expected F32 from F8E4M3ToF32"),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        s: &candle_core::CudaStorage,
+        l: &Layout,
+    ) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle_core::cuda_backend::WrapErr;
+
+        let dev = s.device();
+        let src = match &s.slice {
+            candle_core::cuda_backend::CudaStorageSlice::F8E4M3(s) => s,
+            _ => candle_core::bail!("f8e4m3_to_bf16: expected F8E4M3 storage"),
+        };
+        let src = match l.contiguous_offsets() {
+            Some((o1, o2)) => src.slice(o1..o2),
+            None => candle_core::bail!("f8e4m3_to_bf16: input must be contiguous"),
+        };
+        let el = l.shape().elem_count();
+        let cfg = LaunchConfig::for_num_elems(el as u32);
+        let func =
+            dev.get_or_load_custom_func("f8e4m3_to_bf16", "cake_fused_ops", FUSED_OPS_PTX)?;
+        let out = unsafe { dev.alloc::<half::bf16>(el)? };
+        let mut builder = func.builder();
+        builder.arg(&el);
+        builder.arg(&src);
+        builder.arg(&out);
+        unsafe { builder.launch(cfg) }.w()?;
+
+        Ok((
+            candle_core::CudaStorage {
+                slice: candle_core::cuda_backend::CudaStorageSlice::BF16(out),
+                device: dev.clone(),
+            },
+            l.shape().clone(),
+        ))
+    }
+}
+
 /// Dequantize F8E4M3 tensor to F16.
 /// Uses our custom CUDA kernel. F16 matmul is 2x faster than F32 on A100.
 pub fn f8e4m3_to_f16(x: &Tensor) -> Result<Tensor> {

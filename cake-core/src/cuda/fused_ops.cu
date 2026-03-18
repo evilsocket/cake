@@ -90,6 +90,38 @@ extern "C" __global__ void f8e4m3_to_f16(
 }
 #endif
 
+// ─── f8e4m3_to_bf16: software FP8→BF16 dequantization ───────────────
+// Direct F8→BF16 avoids the F16 intermediate when using BF16 compute.
+#if __CUDA_ARCH__ >= 800
+#include <cuda_bf16.h>
+extern "C" __global__ void f8e4m3_to_bf16(
+    const size_t numel,
+    const uint8_t *inp,
+    __nv_bfloat16 *out
+) {
+    for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < numel; i += blockDim.x * gridDim.x) {
+        uint8_t bits = inp[i];
+        uint32_t sign = (bits >> 7) & 1;
+        uint32_t exp  = (bits >> 3) & 0xF;
+        uint32_t mant = bits & 0x7;
+
+        float result;
+        if (exp == 0 && mant == 0) {
+            result = 0.0f;
+        } else if (exp == 0) {
+            result = ldexpf((float)mant / 8.0f, -6);
+        } else if (exp == 0xF && mant == 0x7) {
+            result = __int_as_float(0x7FC00000);
+        } else {
+            result = ldexpf(1.0f + (float)mant / 8.0f, (int)exp - 7);
+        }
+        if (sign) result = -result;
+        out[i] = __float2bfloat16(result);
+    }
+}
+#endif
+
 // ─── silu_mul: silu(x) * y = x * sigmoid(x) * y ────────────────────
 // Fuses 2 kernels (silu + mul) into 1.
 // Used in every MLP (gate activation * up projection).

@@ -269,10 +269,9 @@ impl ImageGenerator for Flux1Gen {
         info!("Starting denoising ({num_steps} steps, guidance={guidance_scale})...");
         let b_sz = img.dim(0)?;
 
-        // Use F16 for denoising state — matches Fp8Linear's F8→F16 dequant output,
-        // eliminating ALL dtype conversions inside Fp8Linear (BF16 caused 456 extra
-        // BF16↔F16 conversion kernels per step). FLUX.1 was trained in F16.
-        let compute_dtype = DType::F16;
+        // Use BF16 for denoising state — same exponent range as F32 (no overflow risk).
+        // Fp8Linear dequants F8→BF16 directly to match, avoiding dtype conversions.
+        let compute_dtype = DType::BF16;
         let guidance_tensor = Tensor::full(guidance_scale as f32, b_sz, &dev)?
             .to_dtype(compute_dtype)?;
         let img_ids = img_ids.to_dtype(compute_dtype)?;
