@@ -494,11 +494,13 @@ pub fn advertise_worker(
 fn get_broadcast_addresses() -> Vec<Ipv4Addr> {
     let mut addrs = Vec::new();
 
-    // On Unix, use libc::getifaddrs to enumerate interfaces without spawning a subprocess.
+    // On Unix (excluding Android), use libc::getifaddrs to enumerate interfaces without
+    // spawning a subprocess. getifaddrs is not available below Android API 24, and Android
+    // is a mobile-client platform where broadcast discovery is not needed.
     // The broadcast address field differs by platform:
-    //   Linux:        ifa_ifu   (union of ifa_broadaddr / ifa_dstaddr)
+    //   Linux:   ifa_ifu   (union of ifa_broadaddr / ifa_dstaddr)
     //   macOS / iOS:  ifa_dstaddr
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "android")))]
     {
         let mut ifaddrs_ptr: *mut libc::ifaddrs = std::ptr::null_mut();
         if unsafe { libc::getifaddrs(&mut ifaddrs_ptr) } == 0 {
@@ -511,9 +513,9 @@ fn get_broadcast_addresses() -> Vec<Ipv4Addr> {
                         && (ifa.ifa_flags & libc::IFF_BROADCAST as libc::c_uint) != 0
                     {
                         // Get the broadcast address pointer (platform-specific field name).
-                        #[cfg(any(target_os = "linux", target_os = "android"))]
+                        #[cfg(target_os = "linux")]
                         let brd_ptr = ifa.ifa_ifu;
-                        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                        #[cfg(not(target_os = "linux"))]
                         let brd_ptr = ifa.ifa_dstaddr;
 
                         if !brd_ptr.is_null() {
