@@ -452,6 +452,100 @@ CONV1D_BIAS_OP(__half, depthwise_conv1d_bias_f16)
 CONV1D_BIAS_OP(__nv_bfloat16, depthwise_conv1d_bias_bf16)
 #endif
 
+// ─── rms_norm_channel: RMS-normalize over channel dim of (batch, channels, time) ──
+// Replaces transpose + rms_norm + transpose (3 kernels including copy) with 1.
+// Each (batch, time) position normalizes its c-dimensional channel vector.
+// x: (batch, channels, time), weight: (channels,)
+// out: (batch, channels, time)
+// Grid: one block per (batch * time) element
+#define RMS_NORM_CHANNEL_OP(TYPENAME, FN_NAME) \
+extern "C" __global__ void FN_NAME( \
+    const TYPENAME *x, \
+    const TYPENAME *weight, \
+    TYPENAME *out, \
+    const int channels, \
+    const int time_len, \
+    const int block_size, \
+    const float eps \
+) { \
+    const int idx = blockIdx.x; \
+    const int b = idx / time_len; \
+    const int t = idx % time_len; \
+    /* Compute sum of squares over channels for this (b, t) position */ \
+    /* x layout: (batch, channels, time) → x[b*channels*time + c*time + t] */ \
+    float sum2 = 0.0f; \
+    for (int c = threadIdx.x; c < channels; c += block_size) { \
+        float v = static_cast<float>(x[b * channels * time_len + c * time_len + t]); \
+        sum2 += v * v; \
+    } \
+    /* Warp-level reduction */ \
+    for (int mask = 16; mask > 0; mask >>= 1) { \
+        sum2 += __shfl_xor_sync(0xffffffff, sum2, mask); \
+    } \
+    /* Block-level reduction via shared memory */ \
+    __shared__ float shared[32]; \
+    int warp_id = threadIdx.x / 32; \
+    int lane_id = threadIdx.x % 32; \
+    if (lane_id == 0) shared[warp_id] = sum2; \
+    __syncthreads(); \
+    sum2 = (threadIdx.x < (block_size + 31) / 32) ? shared[lane_id] : 0.0f; \
+    for (int mask = 16; mask > 0; mask >>= 1) { \
+        sum2 += __shfl_xor_sync(0xffffffff, sum2, mask); \
+    } \
+    float inv_rms = rsqrtf(sum2 / (float)channels + eps); \
+    /* Apply normalization: out[b,c,t] = x[b,c,t] * inv_rms * weight[c] */ \
+    for (int c = threadIdx.x; c < channels; c += block_size) { \
+        int off = b * channels * time_len + c * time_len + t; \
+        float xv = static_cast<float>(x[off]); \
+        float wv = static_cast<float>(weight[c]); \
+        out[off] = static_cast<TYPENAME>(xv * inv_rms * wv); \
+    } \
+}
+
+RMS_NORM_CHANNEL_OP(float, rms_norm_channel_f32)
+RMS_NORM_CHANNEL_OP(double, rms_norm_channel_f64)
+#if __CUDA_ARCH__ >= 530
+RMS_NORM_CHANNEL_OP(__half, rms_norm_channel_f16)
+#endif
+#if __CUDA_ARCH__ >= 800
+RMS_NORM_CHANNEL_OP(__nv_bfloat16, rms_norm_channel_bf16)
+#endif
+
+// ─── add_scaled: a + b * c with broadcast on c ─────────────────────
+// Replaces broadcast_mul + add (2 kernels) with 1.
+// Used for residual + h * gamma where gamma is (1, channels, 1).
+// a, b: (batch, channels, time), c: (channels,)
+// out: (batch, channels, time) = a + b * c[channel_idx]
+#define ADD_SCALED_OP(TYPENAME, FN_NAME) \
+extern "C" __global__ void FN_NAME( \
+    const size_t numel, \
+    const TYPENAME *a, \
+    const TYPENAME *b, \
+    const TYPENAME *c, \
+    TYPENAME *out, \
+    const int channels, \
+    const int time_len \
+) { \
+    for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; \
+         i < numel; i += blockDim.x * gridDim.x) { \
+        int t = i % time_len; \
+        int chan = (i / time_len) % channels; \
+        float av = static_cast<float>(a[i]); \
+        float bv = static_cast<float>(b[i]); \
+        float cv = static_cast<float>(c[chan]); \
+        out[i] = static_cast<TYPENAME>(av + bv * cv); \
+    } \
+}
+
+ADD_SCALED_OP(float, add_scaled_f32)
+ADD_SCALED_OP(double, add_scaled_f64)
+#if __CUDA_ARCH__ >= 530
+ADD_SCALED_OP(__half, add_scaled_f16)
+#endif
+#if __CUDA_ARCH__ >= 800
+ADD_SCALED_OP(__nv_bfloat16, add_scaled_bf16)
+#endif
+
 SUB_MUL_OP(float, sub_mul_f32)
 SUB_MUL_OP(double, sub_mul_f64)
 #if __CUDA_ARCH__ >= 530

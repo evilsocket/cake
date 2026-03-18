@@ -5,7 +5,7 @@
 //! RMSNorm, FFN blocks, and ConvTranspose1d upsampling.
 
 use candle_core::{Module, Result, Tensor};
-use candle_nn::{Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, RmsNorm, VarBuilder};
+use candle_nn::{Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, VarBuilder};
 
 /// Streaming cache for Conv1d context between frames.
 ///
@@ -60,12 +60,12 @@ impl StreamingConvCache {
 /// A single decoder block with depthwise conv mixer + FFN.
 #[derive(Debug, Clone)]
 struct DecoderBlock {
-    norm: RmsNorm,
+    norm: candle_nn::RmsNorm,
     gamma: Tensor,
     /// Depthwise conv weight: (channels, 1, 7) — stored as (channels, 7) for manual impl
     mixer_weight: Tensor,
     mixer_bias: Tensor,
-    ffn_norm: RmsNorm,
+    ffn_norm: candle_nn::RmsNorm,
     ffn_gamma: Tensor,
     ffn_linear1: candle_nn::Linear,
     ffn_linear2: candle_nn::Linear,
@@ -101,9 +101,8 @@ impl DecoderBlock {
         let norm = candle_nn::rms_norm(channels, eps, vb.pp("norm"))?;
         let gamma = vb.get(channels, "gamma")?;
 
-        // Load depthwise conv weights manually: (channels, 1, 7) → squeeze to (channels, 7)
         let conv_vb = vb.pp("mixer").pp("conv").pp("conv").pp("conv");
-        let mixer_weight = conv_vb.get((channels, 1, 7), "weight")?.squeeze(1)?; // (channels, 7)
+        let mixer_weight = conv_vb.get((channels, 1, 7), "weight")?.squeeze(1)?;
         let mixer_bias = conv_vb.get(channels, "bias")?;
 
         let ffn_norm = candle_nn::rms_norm(channels, eps, vb.pp("ffn_norm"))?;
@@ -124,11 +123,9 @@ impl DecoderBlock {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Mixer: norm → causal left-pad → fused depthwise conv+bias → scale by gamma
         let residual = x;
         let h = self.norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
         let channels = h.dim(1)?;
-        // Causal left-padding: pad (kernel_size - 1) zeros on the left
         let h = Tensor::cat(&[
             &Tensor::zeros((h.dim(0)?, channels, 6), h.dtype(), h.device())?,
             &h,
@@ -139,10 +136,8 @@ impl DecoderBlock {
         let gamma = self.gamma.unsqueeze(0)?.unsqueeze(2)?;
         let x = (residual + h.broadcast_mul(&gamma)?)?;
 
-        // FFN: norm → linear1 → gelu → linear2 → scale by gamma
         let residual = &x;
         let h = self.ffn_norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
-        // FFN operates on last dim, so transpose to (batch, seq, channels)
         let h = h.transpose(1, 2)?;
         let h = self.ffn_linear1.forward(&h)?;
         let h = h.gelu()?;
@@ -158,7 +153,6 @@ impl DecoderBlock {
         let h = self.norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
         let channels = h.dim(1)?;
 
-        // Streaming: prepend cached context instead of zeros
         let (slot, is_first) = cache.take_slot();
         let context = if is_first {
             Tensor::zeros((h.dim(0)?, channels, 6), h.dtype(), h.device())?
@@ -166,8 +160,6 @@ impl DecoderBlock {
             cache.get(slot).unwrap().clone()
         };
         let padded = Tensor::cat(&[&context, &h], 2)?;
-
-        // Update cache: store last 6 samples of padded input
         let plen = padded.dim(2)?;
         let start = plen.saturating_sub(6);
         cache.set(slot, padded.narrow(2, start, plen - start)?);
@@ -178,7 +170,6 @@ impl DecoderBlock {
         let gamma = self.gamma.unsqueeze(0)?.unsqueeze(2)?;
         let x = (residual + h.broadcast_mul(&gamma)?)?;
 
-        // FFN (no conv caching needed)
         let residual = &x;
         let h = self.ffn_norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
         let h = h.transpose(1, 2)?;
@@ -410,8 +401,11 @@ impl AcousticVaeDecoder {
 
         cache.reset_counter();
         let mut h = x;
+        let profile = log::log_enabled!(log::Level::Trace);
+        let mut stage_times: Vec<(f64, f64, usize)> = Vec::new(); // (upsample_ms, blocks_ms, seq_len)
 
         for (i, (upsample, stage)) in self.upsample_layers.iter().zip(self.stages.iter()).enumerate() {
+            let t_stage = std::time::Instant::now();
             if i == 0 {
                 // Conv1d k=7: use cached context (6 samples) instead of zero-pad
                 let (slot, is_first) = cache.take_slot();
@@ -459,7 +453,23 @@ impl AcousticVaeDecoder {
                     cache.set(slot, full_input);
                 }
             }
+            let t_up = t_stage.elapsed();
+            let seq_len = h.dim(2)?;
+            let t_blocks_start = std::time::Instant::now();
             h = stage.forward_cached(&h, cache)?;
+            if profile {
+                stage_times.push((
+                    t_up.as_secs_f64() * 1000.0,
+                    t_blocks_start.elapsed().as_secs_f64() * 1000.0,
+                    seq_len,
+                ));
+            }
+        }
+
+        if profile {
+            for (i, (up_ms, blk_ms, slen)) in stage_times.iter().enumerate() {
+                log::trace!("    dec stage {i}: up={up_ms:.2}ms blocks={blk_ms:.2}ms seq={slen}");
+            }
         }
 
         // Head conv: use cached context

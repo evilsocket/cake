@@ -392,7 +392,7 @@ impl VibeVoice1_5B {
             let next_token = scores
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(i, _)| i as u32)
                 .unwrap_or(EOS_ID);
 
@@ -462,23 +462,26 @@ impl VibeVoice1_5B {
                 let t_sem_encode = t0.elapsed();
 
                 // Combine acoustic + semantic for next input
+                let t0 = std::time::Instant::now();
                 let acoustic_embed = self.acoustic_connector.forward(&latent)?; // (1, hidden)
                 let semantic_embed = self.semantic_connector.forward(&semantic_features)?; // (1, frames, hidden)
                 let semantic_mean = semantic_embed.mean(1)?; // (1, hidden)
                 next_embed = (acoustic_embed + semantic_mean)?.unsqueeze(1)?; // (1, 1, hidden)
+                let t_connectors = t0.elapsed();
 
                 let t_total = frame_start.elapsed();
 
                 #[allow(clippy::manual_is_multiple_of)]
                 if audio_chunks.len() % 10 == 0 || audio_chunks.len() <= 3 {
                     info!(
-                        "  frame {} ({:.0}ms): neg_lm={:.0}ms diffusion={:.0}ms vae_dec={:.0}ms sem_enc={:.0}ms",
+                        "  frame {} ({:.0}ms): neg_lm={:.1}ms diff={:.1}ms vae_dec={:.1}ms sem_enc={:.1}ms conn={:.1}ms",
                         audio_chunks.len(),
                         t_total.as_secs_f64() * 1000.0,
                         t_neg_lm.as_secs_f64() * 1000.0,
                         t_diffusion.as_secs_f64() * 1000.0,
                         t_vae_decode.as_secs_f64() * 1000.0,
                         t_sem_encode.as_secs_f64() * 1000.0,
+                        t_connectors.as_secs_f64() * 1000.0,
                     );
                 }
             } else {

@@ -8,18 +8,18 @@
 //! and semantic tokenizer (vae_dim=128, no sampling).
 
 use candle_core::{Module, Result, Tensor};
-use candle_nn::{Conv1d, Conv1dConfig, RmsNorm, VarBuilder};
+use candle_nn::{Conv1d, Conv1dConfig, VarBuilder};
 
 /// A single encoder block with depthwise conv mixer + FFN.
 /// Identical architecture to DecoderBlock in vae_decoder.rs.
 #[derive(Debug, Clone)]
 struct EncoderBlock {
-    norm: RmsNorm,
+    norm: candle_nn::RmsNorm,
     gamma: Tensor,
-    /// Depthwise conv weight: (channels, 7) for manual broadcast_mul implementation
+    /// Depthwise conv weight: (channels, 7) for fused conv implementation
     mixer_weight: Tensor,
     mixer_bias: Tensor,
-    ffn_norm: RmsNorm,
+    ffn_norm: candle_nn::RmsNorm,
     ffn_gamma: Tensor,
     ffn_linear1: candle_nn::Linear,
     ffn_linear2: candle_nn::Linear,
@@ -30,7 +30,6 @@ impl EncoderBlock {
         let norm = candle_nn::rms_norm(channels, eps, vb.pp("norm"))?;
         let gamma = vb.get(channels, "gamma")?;
 
-        // Load depthwise conv weights manually: (channels, 1, 7) → (channels, 7)
         let conv_vb = vb.pp("mixer").pp("conv").pp("conv").pp("conv");
         let mixer_weight = conv_vb.get((channels, 1, 7), "weight")?.squeeze(1)?;
         let mixer_bias = conv_vb.get(channels, "bias")?;
@@ -53,11 +52,9 @@ impl EncoderBlock {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        // Mixer: norm → causal left-pad → fused depthwise conv+bias → scale by gamma
         let residual = x;
         let h = self.norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
         let channels = h.dim(1)?;
-        // Causal left-padding: pad (kernel_size - 1) zeros on the left
         let h = Tensor::cat(
             &[
                 &Tensor::zeros((h.dim(0)?, channels, 6), h.dtype(), h.device())?,
@@ -65,19 +62,14 @@ impl EncoderBlock {
             ],
             2,
         )?;
-        // Fused depthwise conv1d + bias (1 kernel instead of 14)
         let h = crate::utils::fused_ops::depthwise_conv1d_bias(
             &h, &self.mixer_weight, &self.mixer_bias, 7, channels,
         )?;
         let gamma = self.gamma.unsqueeze(0)?.unsqueeze(2)?;
         let x = (residual + h.broadcast_mul(&gamma)?)?;
 
-        // FFN: norm → linear1 → gelu → linear2 → scale by gamma
         let residual = &x;
-        let h = self
-            .ffn_norm
-            .forward(&x.transpose(1, 2)?)?
-            .transpose(1, 2)?;
+        let h = self.ffn_norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
         let h = h.transpose(1, 2)?;
         let h = self.ffn_linear1.forward(&h)?;
         let h = h.gelu()?;
@@ -93,6 +85,7 @@ impl EncoderBlock {
         x: &Tensor,
         cache: &mut super::vae_decoder::StreamingConvCache,
     ) -> Result<Tensor> {
+        use crate::utils::fused_ops;
         let residual = x;
         let h = self.norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
         let channels = h.dim(1)?;
@@ -108,17 +101,14 @@ impl EncoderBlock {
         let start = plen.saturating_sub(6);
         cache.set(slot, padded.narrow(2, start, plen - start)?);
 
-        let h = crate::utils::fused_ops::depthwise_conv1d_bias(
+        let h = fused_ops::depthwise_conv1d_bias(
             &padded, &self.mixer_weight, &self.mixer_bias, 7, channels,
         )?;
         let gamma = self.gamma.unsqueeze(0)?.unsqueeze(2)?;
         let x = (residual + h.broadcast_mul(&gamma)?)?;
 
         let residual = &x;
-        let h = self
-            .ffn_norm
-            .forward(&x.transpose(1, 2)?)?
-            .transpose(1, 2)?;
+        let h = self.ffn_norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
         let h = h.transpose(1, 2)?;
         let h = self.ffn_linear1.forward(&h)?;
         let h = h.gelu()?;

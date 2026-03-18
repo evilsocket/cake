@@ -1621,6 +1621,314 @@ pub fn depthwise_conv1d_bias(
     )
 }
 
+// ─── rms_norm_channel: RMS-normalize over channel dim of (b,c,t) ────
+
+struct RmsNormChannel {
+    eps: f32,
+}
+
+impl candle_core::CustomOp2 for RmsNormChannel {
+    fn name(&self) -> &'static str {
+        "rms_norm_channel"
+    }
+
+    fn cpu_fwd(
+        &self,
+        s_x: &CpuStorage,
+        l_x: &Layout,
+        s_w: &CpuStorage,
+        l_w: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        fn inner<
+            T: candle_core::WithDType
+                + num_traits::Float
+                + num_traits::AsPrimitive<f32>
+                + num_traits::FromPrimitive,
+        >(
+            x: &[T],
+            l_x: &Layout,
+            w: &[T],
+            l_w: &Layout,
+            eps: f32,
+        ) -> Result<(CpuStorage, Shape)> {
+            let x = match l_x.contiguous_offsets() {
+                Some((o1, o2)) => &x[o1..o2],
+                None => candle_core::bail!("rms_norm_channel: x must be contiguous"),
+            };
+            let w = match l_w.contiguous_offsets() {
+                Some((o1, o2)) => &w[o1..o2],
+                None => candle_core::bail!("rms_norm_channel: weight must be contiguous"),
+            };
+            let dims = l_x.shape().dims();
+            let (batch, channels, time_len) = (dims[0], dims[1], dims[2]);
+            let mut dst = vec![T::zero(); batch * channels * time_len];
+            for b in 0..batch {
+                for t in 0..time_len {
+                    let mut sum2 = 0f32;
+                    for c in 0..channels {
+                        let v: f32 = x[b * channels * time_len + c * time_len + t].as_();
+                        sum2 += v * v;
+                    }
+                    let inv_rms = 1.0f32 / (sum2 / channels as f32 + eps).sqrt();
+                    for c in 0..channels {
+                        let off = b * channels * time_len + c * time_len + t;
+                        let xv: f32 = x[off].as_();
+                        let wv: f32 = w[c].as_();
+                        dst[off] = T::from_f32(xv * inv_rms * wv).unwrap_or(T::zero());
+                    }
+                }
+            }
+            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
+            Ok((storage, l_x.shape().clone()))
+        }
+
+        use CpuStorage as C;
+        match (s_x, s_w) {
+            (C::BF16(x), C::BF16(w)) => inner(x, l_x, w, l_w, self.eps),
+            (C::F16(x), C::F16(w)) => inner(x, l_x, w, l_w, self.eps),
+            (C::F32(x), C::F32(w)) => inner(x, l_x, w, l_w, self.eps),
+            (C::F64(x), C::F64(w)) => inner(x, l_x, w, l_w, self.eps),
+            _ => candle_core::bail!("rms_norm_channel: unsupported dtype"),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        s_x: &candle_core::CudaStorage,
+        l_x: &Layout,
+        s_w: &candle_core::CudaStorage,
+        l_w: &Layout,
+    ) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{
+            CudaSlice, DeviceRepr, LaunchConfig, PushKernelArg,
+        };
+        use candle_core::cuda_backend::{kernel_name, WrapErr};
+        use candle_core::{CudaDevice, WithDType};
+
+        let dims = l_x.shape().dims();
+        let (batch, channels, time_len) = (dims[0], dims[1], dims[2]);
+        let n_rows = batch * time_len; // one block per (batch, time) position
+        let el = l_x.shape().elem_count();
+        let eps = self.eps;
+
+        fn launch<T: DeviceRepr + WithDType>(
+            x: &CudaSlice<T>,
+            l_x: &Layout,
+            w: &CudaSlice<T>,
+            l_w: &Layout,
+            dev: &CudaDevice,
+            channels: i32,
+            time_len: i32,
+            n_rows: usize,
+            el: usize,
+            eps: f32,
+        ) -> Result<CudaSlice<T>> {
+            let x = match l_x.contiguous_offsets() {
+                Some((o1, o2)) => x.slice(o1..o2),
+                None => candle_core::bail!("rms_norm_channel: x must be contiguous"),
+            };
+            let w = match l_w.contiguous_offsets() {
+                Some((o1, o2)) => w.slice(o1..o2),
+                None => candle_core::bail!("rms_norm_channel: weight must be contiguous"),
+            };
+            let block_size: u32 = if channels < 1024 { 32 } else { 1024 };
+            let cfg = LaunchConfig {
+                grid_dim: (n_rows as u32, 1, 1),
+                block_dim: (block_size, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let func = dev.get_or_load_custom_func(
+                &kernel_name::<T>("rms_norm_channel"),
+                "cake_fused_ops",
+                FUSED_OPS_PTX,
+            )?;
+            let out = unsafe { dev.alloc::<T>(el)? };
+            let mut builder = func.builder();
+            builder.arg(&x);
+            builder.arg(&w);
+            builder.arg(&out);
+            candle_core::builder_arg!(builder, channels, time_len, block_size as i32, eps);
+            unsafe { builder.launch(cfg) }.w()?;
+            Ok(out)
+        }
+
+        use candle_core::backend::BackendStorage;
+        use candle_core::cuda_backend::CudaStorageSlice as S;
+        let dev = s_x.device();
+        let ch = channels as i32;
+        let tl = time_len as i32;
+
+        let slice = match (&s_x.slice, &s_w.slice) {
+            (S::BF16(x), S::BF16(w)) => S::BF16(launch(x, l_x, w, l_w, dev, ch, tl, n_rows, el, eps)?),
+            (S::F16(x), S::F16(w)) => S::F16(launch(x, l_x, w, l_w, dev, ch, tl, n_rows, el, eps)?),
+            (S::F32(x), S::F32(w)) => S::F32(launch(x, l_x, w, l_w, dev, ch, tl, n_rows, el, eps)?),
+            (S::F64(x), S::F64(w)) => S::F64(launch(x, l_x, w, l_w, dev, ch, tl, n_rows, el, eps)?),
+            _ => candle_core::bail!("rms_norm_channel: unsupported dtype"),
+        };
+
+        Ok((
+            candle_core::CudaStorage { slice, device: dev.clone() },
+            l_x.shape().clone(),
+        ))
+    }
+}
+
+/// RMS-normalize over the channel dimension of a (batch, channels, time) tensor.
+/// Replaces transpose + rms_norm + transpose (3 ops including copy) with 1 kernel.
+pub fn rms_norm_channel(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+    let x = x.contiguous()?;
+    let w = weight.contiguous()?;
+    x.apply_op2_no_bwd(&w, &RmsNormChannel { eps })
+}
+
+// ─── add_scaled: a + b * c with broadcast on c ─────────────────────
+
+struct AddScaled;
+
+impl candle_core::CustomOp3 for AddScaled {
+    fn name(&self) -> &'static str {
+        "add_scaled"
+    }
+
+    fn cpu_fwd(
+        &self,
+        s_a: &CpuStorage,
+        l_a: &Layout,
+        s_b: &CpuStorage,
+        l_b: &Layout,
+        s_c: &CpuStorage,
+        l_c: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        fn inner<T: candle_core::WithDType + num_traits::Float>(
+            a: &[T],
+            l_a: &Layout,
+            b: &[T],
+            l_b: &Layout,
+            c: &[T],
+            l_c: &Layout,
+        ) -> Result<(CpuStorage, Shape)> {
+            let a = match l_a.contiguous_offsets() {
+                Some((o1, o2)) => &a[o1..o2],
+                None => candle_core::bail!("add_scaled: a must be contiguous"),
+            };
+            let b = match l_b.contiguous_offsets() {
+                Some((o1, o2)) => &b[o1..o2],
+                None => candle_core::bail!("add_scaled: b must be contiguous"),
+            };
+            let c = match l_c.contiguous_offsets() {
+                Some((o1, o2)) => &c[o1..o2],
+                None => candle_core::bail!("add_scaled: c must be contiguous"),
+            };
+            let dims = l_a.shape().dims();
+            let (channels, time_len) = (dims[1], dims[2]);
+            let numel = l_a.shape().elem_count();
+            let mut dst = vec![T::zero(); numel];
+            for (i, d) in dst.iter_mut().enumerate() {
+                let chan = (i / time_len) % channels;
+                *d = a[i] + b[i] * c[chan];
+            }
+            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
+            Ok((storage, l_a.shape().clone()))
+        }
+
+        use CpuStorage as C;
+        match (s_a, s_b, s_c) {
+            (C::BF16(a), C::BF16(b), C::BF16(c)) => inner(a, l_a, b, l_b, c, l_c),
+            (C::F16(a), C::F16(b), C::F16(c)) => inner(a, l_a, b, l_b, c, l_c),
+            (C::F32(a), C::F32(b), C::F32(c)) => inner(a, l_a, b, l_b, c, l_c),
+            (C::F64(a), C::F64(b), C::F64(c)) => inner(a, l_a, b, l_b, c, l_c),
+            _ => candle_core::bail!("add_scaled: unsupported dtype"),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        s_a: &candle_core::CudaStorage,
+        l_a: &Layout,
+        s_b: &candle_core::CudaStorage,
+        l_b: &Layout,
+        s_c: &candle_core::CudaStorage,
+        l_c: &Layout,
+    ) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{
+            CudaSlice, DeviceRepr, LaunchConfig, PushKernelArg,
+        };
+        use candle_core::cuda_backend::{kernel_name, WrapErr};
+        use candle_core::{CudaDevice, WithDType};
+
+        let dims = l_a.shape().dims();
+        let (channels, time_len) = (dims[1], dims[2]);
+        let numel = l_a.shape().elem_count();
+
+        fn launch<T: DeviceRepr + WithDType>(
+            a: &CudaSlice<T>, l_a: &Layout,
+            b: &CudaSlice<T>, l_b: &Layout,
+            c: &CudaSlice<T>, l_c: &Layout,
+            dev: &CudaDevice,
+            channels: i32, time_len: i32, numel: usize,
+        ) -> Result<CudaSlice<T>> {
+            let a = match l_a.contiguous_offsets() {
+                Some((o1, o2)) => a.slice(o1..o2),
+                None => candle_core::bail!("add_scaled: a must be contiguous"),
+            };
+            let b = match l_b.contiguous_offsets() {
+                Some((o1, o2)) => b.slice(o1..o2),
+                None => candle_core::bail!("add_scaled: b must be contiguous"),
+            };
+            let c = match l_c.contiguous_offsets() {
+                Some((o1, o2)) => c.slice(o1..o2),
+                None => candle_core::bail!("add_scaled: c must be contiguous"),
+            };
+            let cfg = LaunchConfig::for_num_elems(numel as u32);
+            let func = dev.get_or_load_custom_func(
+                &kernel_name::<T>("add_scaled"),
+                "cake_fused_ops",
+                FUSED_OPS_PTX,
+            )?;
+            let out = unsafe { dev.alloc::<T>(numel)? };
+            let mut builder = func.builder();
+            builder.arg(&numel);
+            builder.arg(&a);
+            builder.arg(&b);
+            builder.arg(&c);
+            builder.arg(&out);
+            candle_core::builder_arg!(builder, channels, time_len);
+            unsafe { builder.launch(cfg) }.w()?;
+            Ok(out)
+        }
+
+        use candle_core::backend::BackendStorage;
+        use candle_core::cuda_backend::CudaStorageSlice as S;
+        let dev = s_a.device();
+        let ch = channels as i32;
+        let tl = time_len as i32;
+
+        let slice = match (&s_a.slice, &s_b.slice, &s_c.slice) {
+            (S::BF16(a), S::BF16(b), S::BF16(c)) => S::BF16(launch(a, l_a, b, l_b, c, l_c, dev, ch, tl, numel)?),
+            (S::F16(a), S::F16(b), S::F16(c)) => S::F16(launch(a, l_a, b, l_b, c, l_c, dev, ch, tl, numel)?),
+            (S::F32(a), S::F32(b), S::F32(c)) => S::F32(launch(a, l_a, b, l_b, c, l_c, dev, ch, tl, numel)?),
+            (S::F64(a), S::F64(b), S::F64(c)) => S::F64(launch(a, l_a, b, l_b, c, l_c, dev, ch, tl, numel)?),
+            _ => candle_core::bail!("add_scaled: unsupported dtype"),
+        };
+
+        Ok((
+            candle_core::CudaStorage { slice, device: dev.clone() },
+            l_a.shape().clone(),
+        ))
+    }
+}
+
+/// Fused a + b * c where c is (channels,) broadcast over (batch, channels, time).
+/// Replaces broadcast_mul + add (2 kernels) with 1.
+pub fn add_scaled(a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
+    let a = a.contiguous()?;
+    let b = b.contiguous()?;
+    let c = c.contiguous()?;
+    a.apply_op3_no_bwd(&b, &c, &AddScaled)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2173,6 +2481,181 @@ mod tests {
         assert!(
             approx_eq(&fused, &reference, 1e-5),
             "CUDA sub_mul mismatch: fused={fused:?} ref={reference:?}"
+        );
+    }
+
+    #[test]
+    fn test_rms_norm_channel_cpu() {
+        // x: (1, 4, 3) — batch=1, channels=4, time=3
+        let x = Tensor::new(
+            &[1f32, 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12.],
+            &Device::Cpu,
+        )
+        .unwrap()
+        .reshape((1, 4, 3))
+        .unwrap();
+        let w = Tensor::ones(4, DType::F32, &Device::Cpu).unwrap();
+        let out = rms_norm_channel(&x, &w, 1e-5).unwrap();
+        let out_v: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(!out_v.iter().any(|v| v.is_nan()), "NaN in rms_norm_channel: {out_v:?}");
+        assert_eq!(out.dims(), &[1, 4, 3]);
+        // For time=0: values [1,4,7,10], rms = sqrt((1+16+49+100)/4) = sqrt(41.5) ≈ 6.44
+        // normalized: [1/6.44, 4/6.44, 7/6.44, 10/6.44] ≈ [0.155, 0.621, 1.087, 1.553]
+        assert!((out_v[0] - 0.1553).abs() < 0.01, "wrong norm val: {}", out_v[0]);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_rms_norm_channel_bf16_cuda() {
+        let dev = match cuda_device() {
+            Some(d) => d,
+            None => return,
+        };
+        // Larger test: (1, 32, 100) in BF16
+        let data: Vec<f32> = (0..3200).map(|i| (i as f32 * 0.01) - 16.0).collect();
+        let x = Tensor::new(data.as_slice(), &dev)
+            .unwrap()
+            .reshape((1, 32, 100))
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let w = Tensor::ones(32, DType::BF16, &dev).unwrap();
+        let out = rms_norm_channel(&x, &w, 1e-5).unwrap();
+        let out_v: Vec<f32> = out
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_device(&Device::Cpu)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        let nan_count = out_v.iter().filter(|v| v.is_nan()).count();
+        assert!(
+            nan_count == 0,
+            "NaN in bf16 rms_norm_channel: {nan_count}/{} values",
+            out_v.len()
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_add_scaled_cuda() {
+        let dev = match cuda_device() {
+            Some(d) => d,
+            None => return,
+        };
+        // (1, 4, 3) tensor
+        let a = Tensor::new(&[1f32, 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12.], &dev)
+            .unwrap()
+            .reshape((1, 4, 3))
+            .unwrap();
+        let b = Tensor::new(&[0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2], &dev)
+            .unwrap()
+            .reshape((1, 4, 3))
+            .unwrap();
+        let c = Tensor::new(&[2.0f32, 3.0, 4.0, 5.0], &dev).unwrap();
+        let out: Vec<f32> = add_scaled(&a, &b, &c)
+            .unwrap()
+            .to_device(&Device::Cpu)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        // Expected: a[i] + b[i] * c[chan]
+        // chan 0 (scale=2): [1+0.1*2, 2+0.2*2, 3+0.3*2] = [1.2, 2.4, 3.6]
+        assert!((out[0] - 1.2).abs() < 1e-5, "wrong: {}", out[0]);
+        assert!((out[1] - 2.4).abs() < 1e-5, "wrong: {}", out[1]);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_rms_norm_channel_large_channels_cuda() {
+        let dev = match cuda_device() {
+            Some(d) => d,
+            None => return,
+        };
+        // Large channels like encoder stage 6: (1, 2048, 1) in BF16
+        let n = 2048;
+        let data: Vec<f32> = (0..n).map(|i| ((i as f32) * 0.01) - 10.0).collect();
+        let x = Tensor::new(data.as_slice(), &dev)
+            .unwrap()
+            .reshape((1, 2048, 1))
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let w = Tensor::ones(2048, DType::BF16, &dev).unwrap();
+        let out = rms_norm_channel(&x, &w, 1e-5).unwrap();
+        let out_v: Vec<f32> = out
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_device(&Device::Cpu)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        let nan_count = out_v.iter().filter(|v| v.is_nan()).count();
+        assert!(
+            nan_count == 0,
+            "NaN in 2048-channel rms_norm_channel: {nan_count}/{n} values"
+        );
+        // Also check correctness vs CPU
+        let x_cpu = x.to_dtype(DType::F32).unwrap().to_device(&Device::Cpu).unwrap();
+        let w_cpu = w.to_dtype(DType::F32).unwrap().to_device(&Device::Cpu).unwrap();
+        let ref_v: Vec<f32> = rms_norm_channel(&x_cpu, &w_cpu, 1e-5)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+        // BF16 precision: ~0.4% relative error, use wider tolerance
+        assert!(
+            approx_eq(&out_v, &ref_v, 0.5),
+            "2048-channel CUDA/CPU mismatch: cuda[0..5]={:?} cpu[0..5]={:?}",
+            &out_v[..5],
+            &ref_v[..5]
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_rms_norm_channel_cuda() {
+        let dev = match cuda_device() {
+            Some(d) => d,
+            None => return,
+        };
+        let x = Tensor::new(
+            &[1f32, 2., 3., 4., 5., 6., 7., 8., 9., 10., 11., 12.],
+            &dev,
+        )
+        .unwrap()
+        .reshape((1, 4, 3))
+        .unwrap();
+        let w = Tensor::ones(4, DType::F32, &dev).unwrap();
+        let out_cuda: Vec<f32> = rms_norm_channel(&x, &w, 1e-5)
+            .unwrap()
+            .to_device(&Device::Cpu)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+
+        // Compare with CPU
+        let x_cpu = x.to_device(&Device::Cpu).unwrap();
+        let w_cpu = w.to_device(&Device::Cpu).unwrap();
+        let out_cpu: Vec<f32> = rms_norm_channel(&x_cpu, &w_cpu, 1e-5)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1()
+            .unwrap();
+
+        assert!(
+            approx_eq(&out_cuda, &out_cpu, 1e-3),
+            "CUDA rms_norm_channel mismatch:\n  cuda={out_cuda:?}\n  cpu ={out_cpu:?}"
         );
     }
 }
