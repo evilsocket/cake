@@ -7,7 +7,7 @@
 
 </div>
 
-Cake is a Rust framework for **multimodal distributed inference** based on [Candle](https://github.com/huggingface/candle). It shards models across a heterogeneous cluster of consumer devices — iOS, Android, macOS, Linux, Windows — to run workloads that wouldn't fit on a single GPU, effectively leveraging [planned obsolescence](https://en.wikipedia.org/wiki/Planned_obsolescence) to make AI more accessible and democratic.
+Cake is a **multimodal AI inference server** written in Rust. It can either run models as a single node, or shard them across a heterogeneous cluster of devices — iOS, Android, macOS, Linux, Windows — to run workloads that wouldn't fit on a single GPU, effectively leveraging [planned obsolescence](https://en.wikipedia.org/wiki/Planned_obsolescence) to make AI more accessible and democratic.
 
 <p align="center">
   <strong>
