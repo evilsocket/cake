@@ -800,3 +800,103 @@ impl Flux1Transformer {
         self.final_layer.forward(&img, &vec_)
     }
 }
+
+// ── Forwarder wrapper for distributed inference ──────────────────────────────
+
+use crate::models::sd::util::{pack_tensors, unpack_tensors};
+
+/// Wraps `Flux1Transformer` to implement the `Forwarder` trait for distributed use.
+/// Packs 7 forward args into a single tensor for network transfer.
+#[derive(Debug)]
+pub struct Flux1TransformerForwarder {
+    model: Flux1Transformer,
+    name: String,
+}
+
+impl std::fmt::Display for Flux1TransformerForwarder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (local)", self.name)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::cake::Forwarder for Flux1TransformerForwarder {
+    fn load(name: String, ctx: &crate::cake::Context) -> anyhow::Result<Box<Self>>
+    where
+        Self: Sized,
+    {
+        let dev = &ctx.device;
+        let cfg = Config::dev();
+        let vb = unsafe {
+            crate::utils::native_dtype_backend::load_native_dtype_var_builder(
+                std::slice::from_ref(&ctx.data_path),
+                DType::F32,
+                dev,
+            )?
+        };
+        let vb = vb.pp(super::config::flux1_prefixes::TRANSFORMER);
+        let model = Flux1Transformer::new(&cfg, vb)?;
+        Ok(Box::new(Self { model, name }))
+    }
+
+    async fn forward(
+        &self,
+        x: &Tensor,
+        _index_pos: usize,
+        _block_idx: usize,
+        _ctx: &mut crate::cake::Context,
+    ) -> anyhow::Result<Tensor> {
+        let unpacked = unpack_tensors(x)?;
+        // [img, img_ids, txt, txt_ids, timesteps, vec, guidance]
+        let img = &unpacked[0];
+        let img_ids = &unpacked[1];
+        let txt = &unpacked[2];
+        let txt_ids = &unpacked[3];
+        let timesteps = &unpacked[4];
+        let y = &unpacked[5];
+        let guidance = if unpacked.len() > 6 {
+            Some(&unpacked[6])
+        } else {
+            None
+        };
+        self.model.forward(img, img_ids, txt, txt_ids, timesteps, y, guidance)
+            .map_err(|e| anyhow::anyhow!("flux1 transformer: {e}"))
+    }
+
+    async fn forward_mut(
+        &mut self,
+        x: &Tensor,
+        index_pos: usize,
+        block_idx: usize,
+        ctx: &mut crate::cake::Context,
+    ) -> anyhow::Result<Tensor> {
+        self.forward(x, index_pos, block_idx, ctx).await
+    }
+
+    fn layer_name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Flux1TransformerForwarder {
+    /// Create from an already-loaded model (for local use without re-loading).
+    pub fn from_model(model: Flux1Transformer, name: String) -> Self {
+        Self { model, name }
+    }
+
+    /// Pack args and forward through any Forwarder (local or remote).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn forward_unpacked(
+        forwarder: &mut Box<dyn crate::cake::Forwarder>,
+        img: Tensor, img_ids: Tensor, txt: Tensor, txt_ids: Tensor,
+        timesteps: Tensor, vec: Tensor, guidance: Option<Tensor>,
+        ctx: &mut crate::cake::Context,
+    ) -> anyhow::Result<Tensor> {
+        let mut tensors = vec![img, img_ids, txt, txt_ids, timesteps, vec];
+        if let Some(g) = guidance {
+            tensors.push(g);
+        }
+        let combined = pack_tensors(tensors, &ctx.device)?;
+        forwarder.forward_mut(&combined, 0, 0, ctx).await
+    }
+}

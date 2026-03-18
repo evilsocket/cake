@@ -4,10 +4,10 @@
 //! transformer (F8E4M3), CLIP-L (F16), T5-XXL (F8E4M3), and VAE (F32).
 //! Components are loaded sequentially to fit in 16GB VRAM.
 
-use crate::cake::Context;
+use crate::cake::{Context, Forwarder};
 use crate::models::flux::clip_encoder;
 use crate::models::flux::config::{flux1_prefixes, Flux1ModelFile};
-use crate::models::flux::flux1_model::{Config, Flux1Transformer};
+use crate::models::flux::flux1_model::{Config, Flux1Transformer, Flux1TransformerForwarder};
 use crate::models::flux::t5_encoder;
 use crate::models::{Generator, ImageGenerator};
 use crate::ImageGenerationArgs;
@@ -31,47 +31,72 @@ pub struct Flux1Gen {
     width: usize,
 }
 
-// Dummy shardable — FLUX.1 is local-only for now
+/// Shardable router for FLUX.1-dev — dispatches to transformer or VAE component.
 #[derive(Debug)]
-pub struct Flux1Shardable;
+pub struct Flux1Shardable {
+    forwarder: Box<dyn crate::cake::Forwarder>,
+    layer_name: String,
+}
 
 impl std::fmt::Display for Flux1Shardable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Flux1Shardable (local-only)")
+        write!(f, "{} (local)", self.layer_name)
     }
 }
 
 #[async_trait]
 impl crate::cake::Forwarder for Flux1Shardable {
-    fn load(_name: String, _ctx: &Context) -> anyhow::Result<Box<Self>>
+    fn load(name: String, ctx: &Context) -> anyhow::Result<Box<Self>>
     where
         Self: Sized,
     {
-        anyhow::bail!("FLUX.1-dev does not support distributed inference yet")
+        let model: Box<dyn crate::cake::Forwarder> = match name.as_str() {
+            "flux1_transformer" => {
+                Flux1TransformerForwarder::load(name.clone(), ctx)?
+            }
+            _ => anyhow::bail!("Unknown FLUX.1 component: {name}"),
+        };
+        Ok(Box::new(Self {
+            forwarder: model,
+            layer_name: name,
+        }))
     }
 
     async fn forward(
         &self,
-        _x: &candle_core::Tensor,
-        _index_pos: usize,
-        _block_idx: usize,
-        _ctx: &mut Context,
+        x: &candle_core::Tensor,
+        index_pos: usize,
+        block_idx: usize,
+        ctx: &mut Context,
     ) -> anyhow::Result<candle_core::Tensor> {
-        anyhow::bail!("FLUX.1-dev does not support distributed inference yet")
+        self.forwarder.forward(x, index_pos, block_idx, ctx).await
     }
 
     async fn forward_mut(
         &mut self,
-        _x: &candle_core::Tensor,
-        _index_pos: usize,
-        _block_idx: usize,
-        _ctx: &mut Context,
+        x: &candle_core::Tensor,
+        index_pos: usize,
+        block_idx: usize,
+        ctx: &mut Context,
     ) -> anyhow::Result<candle_core::Tensor> {
-        anyhow::bail!("FLUX.1-dev does not support distributed inference yet")
+        self.forwarder.forward_mut(x, index_pos, block_idx, ctx).await
+    }
+
+    async fn forward_batch(
+        &mut self,
+        x: &candle_core::Tensor,
+        batch: Vec<(String, usize, usize)>,
+        ctx: &mut Context,
+    ) -> anyhow::Result<candle_core::Tensor> {
+        self.forwarder.forward_batch(x, batch, ctx).await
     }
 
     fn layer_name(&self) -> &str {
-        "flux1_shardable"
+        &self.layer_name
+    }
+
+    fn ident(&self) -> &str {
+        &self.layer_name
     }
 }
 
@@ -240,30 +265,38 @@ impl ImageGenerator for Flux1Gen {
         drop(clip_embed);
         drop(state);
 
-        // ── 5. Load transformer on GPU ─────────────────────────────────────
-        info!("Loading FLUX.1 transformer (FP8 on GPU, ~12GB)...");
-        let cfg = Config::dev();
-
-        // Load with native dtypes: F8E4M3 tensors stay in F8 on GPU (~12GB).
-        // During forward, Fp8Linear casts weights to BF16 per-layer (temporary ~60MB).
-        // Total VRAM: ~12GB (F8 weights) + ~2GB (activations) ≈ 14GB.
-        let vb = unsafe {
-            crate::utils::native_dtype_backend::load_native_dtype_var_builder(
-                &[self.checkpoint_path.clone()],
-                DType::F32,
-                &dev,
-            )?
+        // ── 5. Load transformer (local or remote worker) ─────────────────
+        info!("Loading FLUX.1 transformer...");
+        let mut transformer: Box<dyn Forwarder> = if let Some((_node_name, node)) =
+            self.context.topology.get_node_for_layer("flux1_transformer")
+        {
+            info!("flux1_transformer → remote worker at {}", node.host);
+            Box::new(
+                crate::cake::Client::new(
+                    dev.clone(),
+                    &node.host,
+                    "flux1_transformer",
+                    self.context.args.cluster_key.as_deref(),
+                )
+                .await?,
+            )
+        } else {
+            let cfg = Config::dev();
+            let vb = unsafe {
+                crate::utils::native_dtype_backend::load_native_dtype_var_builder(
+                    &[self.checkpoint_path.clone()],
+                    DType::F32,
+                    &dev,
+                )?
+            };
+            let vb = vb.pp(flux1_prefixes::TRANSFORMER);
+            let t = Flux1Transformer::new(&cfg, vb)?;
+            info!(
+                "Transformer loaded locally ({} double + {} single blocks)",
+                cfg.depth, cfg.depth_single_blocks
+            );
+            Box::new(Flux1TransformerForwarder::from_model(t, "flux1_transformer".to_string()))
         };
-        let vb = vb.pp(flux1_prefixes::TRANSFORMER);
-        let transformer = Flux1Transformer::new(&cfg, vb)?;
-        info!(
-            "Transformer loaded ({} double + {} single blocks)",
-            cfg.depth, cfg.depth_single_blocks
-        );
-
-        // First forward call triggers F8→F16 dequant and caching for all Fp8Linear layers.
-        // After this, F8 weights can be garbage-collected (only F16 cache is kept).
-        // The F8 originals will be dropped when Fp8Linear's RwLock cache is populated.
 
         // ── 6. Denoise ─────────────────────────────────────────────────────
         info!("Starting denoising ({num_steps} steps, guidance={guidance_scale})...");
@@ -297,15 +330,14 @@ impl ImageGenerator for Flux1Gen {
                 _ => continue,
             };
             let t_step = std::time::Instant::now();
-            let pred = transformer.forward(
-                &img,
-                &img_ids,
-                &txt,
-                &txt_ids,
-                &pre_t_vecs[step_idx],
-                &vec,
-                Some(&guidance_tensor),
-            )?;
+            let pred = Flux1TransformerForwarder::forward_unpacked(
+                &mut transformer,
+                img.clone(), img_ids.clone(), txt.clone(), txt_ids.clone(),
+                pre_t_vecs[step_idx].clone(), vec.clone(),
+                Some(guidance_tensor.clone()),
+                &mut self.context,
+            )
+            .await?;
             img = (img + pred.broadcast_mul(&pre_dts[step_idx])?)?;
             // Force GPU sync for accurate per-step timing
             dev.synchronize()?;
