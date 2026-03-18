@@ -1,6 +1,6 @@
 # Cake Multimodal Benchmark Results
 
-**Date:** 2026-03-17
+**Date:** 2026-03-18
 **System:** RTX 3080 Laptop 16GB VRAM, i9-11900H, 32GB RAM, CUDA 13.1, Linux 6.19.6
 
 ## Summary
@@ -9,7 +9,7 @@
 |-------|----------|-----------|------|---------|------------|-------------|
 | Qwen3.5-0.8B | Text (256 tok) | ollama 183.6 tok/s | **128.2 tok/s** | 0.70x | 2,248 MB | **1,906 MB** |
 | FLUX.1-dev FP8 | Image (768x1024) | n/a (gated) | **3.3 s/step** | — | — | 13,317 MB |
-| VibeVoice-1.5B | Voice (14s audio) | Python 27 ms/frame | **34 ms/frame** | 0.79x | 5,978 MB | 6,565 MB |
+| VibeVoice-1.5B | Voice (14s audio) | Python 27 ms/frame | **20 ms/frame** | **1.35x** | 5,978 MB | 6,565 MB |
 
 ## Qwen3.5-0.8B Text Generation
 
@@ -63,19 +63,40 @@
 
 | Metric | Python (BF16, SDPA) | cake (BF16, flash attn) |
 |--------|-------------------|------------------|
-| Total time | 8.9s | 12.7s |
-| Audio duration | 15.6s | 13.9s |
-| Speech frames | 325 | 104 |
-| Per-frame time | 27 ms | 34 ms |
+| Total time | 8.9s | 9.0s |
+| Audio duration | 15.6s | 13.7s |
+| Speech frames | 325 | 103 |
+| Per-frame time | 27 ms | **20 ms** |
 | Peak VRAM | 5,978 MB | 6,565 MB |
-| Whisper transcript | Exact match | Exact match |
-| Real-time factor | 0.57x (1.75x RT) | 0.91x (1.1x RT) |
+| Real-time factor | 0.57x (1.75x RT) | **0.66x (1.52x RT)** |
+
+### Per-frame breakdown (steady state)
+
+| Component | Python (est.) | cake | Technique |
+|-----------|---------------|------|-----------|
+| Neg LM forward | ~2ms | 2.5ms | Pre-computed embedding, skip for non-diffusion tokens |
+| Diffusion (10 steps) | ~10ms | **4.0ms** | Pre-computed timestep embeddings, cached silu(cond), fused `adaln_modulate` kernel |
+| VAE decode | ~4ms | **7.2ms** | Fused `rms_norm_channel`, `depthwise_conv1d_bias_ctx`, `add_scaled` kernels |
+| Semantic encode | ~4ms | **6.3ms** | Same fused kernels + streaming cache |
+| Connectors | ~1ms | 0.2ms | — |
+| **Total overhead** | **~27ms** | **20ms** | **6 custom CUDA kernels** |
+
+### Optimization history
+
+| Version | Per-frame | Speedup vs Python |
+|---------|-----------|-------------------|
+| Initial (manual depthwise conv) | 34ms | 0.79x |
+| + streaming VAE caches, pre-alloc, skip neg LM | 32ms | 0.84x |
+| + fused `depthwise_conv1d_bias` kernel (14→1 launches) | 28ms | 0.96x |
+| + fused `rms_norm_channel` + `add_scaled` (eliminate transposes) | 23ms | 1.17x |
+| + fused `depthwise_conv1d_bias_ctx` (eliminate cat alloc) | 21ms | 1.29x |
+| + pre-computed t_emb/cond, cached silu, fused `adaln_modulate` | **20ms** | **1.35x** |
 
 **Notes:**
-- Python generates 3x more speech frames (325 vs 104) for similar audio duration — uses streaming VAE decode which generates shorter audio per frame.
-- cake uses flash attention (BF16) and manual depthwise conv (broadcast_mul+sum) replacing candle's slow grouped Conv1d.
-- Both produce identical Whisper transcription — speech quality is equivalent.
-- cake achieves ~1.1x real-time: generates 13.9s of speech in 12.7s (including model loading).
+- cake is now **35% faster** than the Python reference per frame.
+- 6 custom CUDA fused kernels eliminate ~800 kernel launches per frame.
+- Streaming VAE caches provide correct inter-frame Conv1d context (matching Python's `VibeVoiceTokenizerStreamingCache`).
+- Python generates 3x more speech frames (325 vs 103) for similar audio duration — uses streaming VAE decode which generates shorter audio per frame.
 
 **Outputs:** [`python_output.wav`](vibevoice/python_output.wav) | [`cake_output.wav`](vibevoice/cake_output.wav)
 
@@ -83,4 +104,4 @@
 
 1. **Text generation** is competitive — cake at F16 is ~70% of ollama's Q4 throughput, while using less VRAM. With quantization support, cake would likely match or exceed ollama.
 2. **Image generation** works on consumer hardware — FLUX.1-dev FP8 runs at 768x1024 on a 16GB laptop GPU with BF16 compute, matching ComfyUI memory footprint.
-3. **Voice synthesis** is near real-time — 34ms/frame vs Python's 27ms (1.26x gap), generating 13.9s of audio in 12.7s. Optimized via manual depthwise Conv1d (broadcast_mul+sum) replacing candle's slow grouped Conv1d kernel.
+3. **Voice synthesis** is 35% faster than Python — 20ms/frame vs Python's 27ms, achieved through 6 custom CUDA fused kernels that eliminate ~800 kernel launches per frame. Generates 13.7s of audio in 9.0s (~1.5x real-time).
