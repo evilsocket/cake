@@ -82,44 +82,24 @@ The Chat tab shows streaming responses with tokens/second stats. The Cluster tab
 
 ## API
 
-Cake exposes an OpenAI-compatible REST API when running with `--api`:
+Cake exposes an OpenAI-compatible REST API when running with `--api`, supporting chat completion, audio/TTS, and image generation. All endpoints are served from the same server; only the loaded model type produces results — others return `404`.
 
-### Endpoints
+```sh
+cake master --model Qwen/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080
+```
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | Web UI |
-| `/v1/chat/completions` | POST | Chat completion (streaming or blocking) |
-| `/api/v1/chat/completions` | POST | Same as above (alternative path) |
-| `/v1/models` | GET | List available models |
-| `/api/v1/topology` | GET | Cluster topology as JSON |
-| `/api/v1/image` | POST | Image generation (see [Image Generation](image_generation.md)) |
-
-### Chat Completion
+Quick example:
 
 ```sh
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "messages": [
-        {"role": "system", "content": "You are a helpful AI assistant."},
-        {"role": "user", "content": "Why is the sky blue?"}
-    ],
-    "stream": true,
-    "max_tokens": 4096
+    "messages": [{"role": "user", "content": "Why is the sky blue?"}],
+    "stream": true
 }'
 ```
 
-The request body accepts:
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `messages` | array | Chat messages with `role` and `content` |
-| `stream` | bool | Enable SSE streaming (default: false) |
-| `max_tokens` | int | Maximum tokens to generate |
-| `temperature` | float | Sampling temperature |
-
-Streaming responses use Server-Sent Events (SSE) format, compatible with the OpenAI API.
+See the full [REST API Reference](api.md) for all endpoints, request/response formats, and client library examples.
 
 ## CLI Arguments
 

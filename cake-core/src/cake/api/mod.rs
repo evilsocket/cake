@@ -1,6 +1,12 @@
-mod image;
+pub(crate) mod audio;
+pub(crate) mod image;
 pub mod text;
 mod ui;
+
+#[cfg(test)]
+mod test_helpers;
+#[cfg(test)]
+mod integration_tests;
 
 use std::sync::Arc;
 
@@ -11,8 +17,9 @@ use actix_web::HttpServer;
 use serde::Serialize;
 use tokio::sync::RwLock;
 
-use crate::models::{ImageGenerator, TextGenerator};
+use crate::models::{AudioGenerator, ImageGenerator, TextGenerator};
 
+use audio::*;
 use image::*;
 use text::*;
 
@@ -31,20 +38,42 @@ struct ModelsResponse {
     data: Vec<ModelObject>,
 }
 
-pub async fn list_models<TG, IG>(
-    _state: web::Data<Arc<RwLock<Master<TG, IG>>>>,
+pub async fn list_models<TG, IG, AG>(
+    state: web::Data<Arc<RwLock<Master<TG, IG, AG>>>>,
 ) -> HttpResponse
 where
     TG: TextGenerator + Send + Sync + 'static,
     IG: ImageGenerator + Send + Sync + 'static,
+    AG: AudioGenerator + Send + Sync + 'static,
 {
-    let response = ModelsResponse {
-        object: "list".to_string(),
-        data: vec![ModelObject {
+    let master = state.read().await;
+    let mut models = Vec::new();
+
+    if master.llm_model.is_some() {
+        models.push(ModelObject {
             id: TG::MODEL_NAME.to_string(),
             object: "model".to_string(),
             owned_by: "cake".to_string(),
-        }],
+        });
+    }
+    if master.sd_model.is_some() {
+        models.push(ModelObject {
+            id: IG::MODEL_NAME.to_string(),
+            object: "model".to_string(),
+            owned_by: "cake".to_string(),
+        });
+    }
+    if master.audio_model.is_some() {
+        models.push(ModelObject {
+            id: AG::MODEL_NAME.to_string(),
+            object: "model".to_string(),
+            owned_by: "cake".to_string(),
+        });
+    }
+
+    let response = ModelsResponse {
+        object: "list".to_string(),
+        data: models,
     };
     HttpResponse::Ok().json(response)
 }
@@ -53,10 +82,11 @@ async fn not_found() -> actix_web::Result<HttpResponse> {
     Ok(HttpResponse::NotFound().body("nope"))
 }
 
-pub(crate) async fn start<TG, IG>(master: Master<TG, IG>) -> anyhow::Result<()>
+pub(crate) async fn start<TG, IG, AG>(master: Master<TG, IG, AG>) -> anyhow::Result<()>
 where
     TG: TextGenerator + Send + Sync + 'static,
     IG: ImageGenerator + Send + Sync + 'static,
+    AG: AudioGenerator + Send + Sync + 'static,
 {
     let address = master.ctx.args.api.as_ref().unwrap().to_string();
 
@@ -68,18 +98,38 @@ where
         move || {
             App::new()
                 .app_data(web::Data::new(state.clone()))
+                // Text / Chat
                 .route(
                     "/v1/chat/completions",
-                    web::post().to(generate_text::<TG, IG>),
+                    web::post().to(generate_text::<TG, IG, AG>),
                 )
                 .route(
                     "/api/v1/chat/completions",
-                    web::post().to(generate_text::<TG, IG>),
+                    web::post().to(generate_text::<TG, IG, AG>),
                 )
-                .route("/v1/models", web::get().to(list_models::<TG, IG>))
-                .route("/api/v1/image", web::post().to(generate_image::<TG, IG>))
-                .route("/api/v1/topology", web::get().to(ui::topology::<TG, IG>))
-                .route("/", web::get().to(ui::index::<TG, IG>))
+                // Models
+                .route("/v1/models", web::get().to(list_models::<TG, IG, AG>))
+                // Audio / TTS
+                .route(
+                    "/v1/audio/speech",
+                    web::post().to(generate_speech::<TG, IG, AG>),
+                )
+                // Image (OpenAI-compatible)
+                .route(
+                    "/v1/images/generations",
+                    web::post().to(generate_image_openai::<TG, IG, AG>),
+                )
+                // Image (legacy)
+                .route(
+                    "/api/v1/image",
+                    web::post().to(generate_image::<TG, IG, AG>),
+                )
+                // Topology & UI
+                .route(
+                    "/api/v1/topology",
+                    web::get().to(ui::topology::<TG, IG, AG>),
+                )
+                .route("/", web::get().to(ui::index::<TG, IG, AG>))
                 .default_service(web::route().to(not_found))
         }, //.wrap(actix_web::middleware::Logger::default()))
     )

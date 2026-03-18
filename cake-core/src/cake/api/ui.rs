@@ -8,20 +8,21 @@ use serde::Serialize;
 use tokio::sync::RwLock;
 
 use crate::cake::discovery;
-use crate::models::{ImageGenerator, TextGenerator};
+use crate::models::{AudioGenerator, ImageGenerator, TextGenerator};
 
 use super::Master;
 
 const INDEX_HTML: &str = include_str!("index.html");
 
 /// Serve the single-page UI.
-pub async fn index<TG, IG>(
-    state: web::Data<Arc<RwLock<Master<TG, IG>>>>,
+pub async fn index<TG, IG, AG>(
+    state: web::Data<Arc<RwLock<Master<TG, IG, AG>>>>,
     req: HttpRequest,
 ) -> HttpResponse
 where
     TG: TextGenerator + Send + Sync + 'static,
     IG: ImageGenerator + Send + Sync + 'static,
+    AG: AudioGenerator + Send + Sync + 'static,
 {
     if !check_ui_auth(&state, &req).await {
         return HttpResponse::Unauthorized()
@@ -86,13 +87,14 @@ struct WorkerTopologyInfo {
 }
 
 /// Return cluster topology as JSON.
-pub async fn topology<TG, IG>(
-    state: web::Data<Arc<RwLock<Master<TG, IG>>>>,
+pub async fn topology<TG, IG, AG>(
+    state: web::Data<Arc<RwLock<Master<TG, IG, AG>>>>,
     req: HttpRequest,
 ) -> HttpResponse
 where
     TG: TextGenerator + Send + Sync + 'static,
     IG: ImageGenerator + Send + Sync + 'static,
+    AG: AudioGenerator + Send + Sync + 'static,
 {
     if !check_ui_auth(&state, &req).await {
         return HttpResponse::Unauthorized()
@@ -174,7 +176,15 @@ where
     let layer_details = read_layer_tensor_details(&ctx.data_path, num_layers, &layer_prefix);
 
     let response = TopologyResponse {
-        model: TG::MODEL_NAME.to_string(),
+        model: if master.llm_model.is_some() {
+            TG::MODEL_NAME.to_string()
+        } else if master.sd_model.is_some() {
+            IG::MODEL_NAME.to_string()
+        } else if master.audio_model.is_some() {
+            AG::MODEL_NAME.to_string()
+        } else {
+            "none".to_string()
+        },
         model_id: {
             let m = ctx.args.model.trim_end_matches('/');
             // If it looks like a HF repo ID (org/name, no dots or path seps at start), keep as-is
@@ -339,13 +349,15 @@ fn estimate_layer_size(data_path: &std::path::Path, num_layers: usize) -> u64 {
 }
 
 /// Check basic auth if `--ui-auth` is configured. Returns true if OK.
-async fn check_ui_auth<TG, IG>(
-    state: &web::Data<Arc<RwLock<Master<TG, IG>>>>,
+#[allow(clippy::type_complexity)]
+async fn check_ui_auth<TG, IG, AG>(
+    state: &web::Data<Arc<RwLock<Master<TG, IG, AG>>>>,
     req: &HttpRequest,
 ) -> bool
 where
     TG: TextGenerator + Send + Sync + 'static,
     IG: ImageGenerator + Send + Sync + 'static,
+    AG: AudioGenerator + Send + Sync + 'static,
 {
     let master = state.read().await;
     let expected = match &master.ctx.args.ui_auth {

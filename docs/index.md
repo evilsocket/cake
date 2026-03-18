@@ -8,7 +8,8 @@ Built on [Candle](https://github.com/huggingface/candle) with support for CUDA, 
 
 - [Installation](install.md) — Building from source, platform support, acceleration backends
 - [Models](models.md) — Supported text, image, and voice model architectures
-- [Usage](usage.md) — Downloading models, running inference, Web UI, TUI chat, API reference
+- [Usage](usage.md) — Downloading models, running inference, Web UI, TUI chat
+- [REST API](api.md) — OpenAI-compatible endpoints for chat, audio, and image generation
 - [Clustering](clustering.md) — Zero-config mDNS discovery, manual topology, model splitting
 - [Image Generation](image_generation.md) — FLUX and Stable Diffusion image synthesis
 - [Voice Generation](voice_generation.md) — VibeVoice TTS with voice cloning

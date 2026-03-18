@@ -1,6 +1,7 @@
 use std::io::Write;
 
-use crate::models::{chat::Message, ImageGenerator, TextGenerator};
+use crate::models::chat::Message;
+use crate::models::{AudioGenerationArgs, AudioGenerator, AudioOutput, ImageGenerator, TextGenerator};
 
 use super::{api, Context};
 
@@ -9,14 +10,18 @@ use anyhow::Result;
 use image::{ImageBuffer, Rgb};
 
 /// A master connects to, communicates with and orchestrates the workers.
-pub struct Master<TG, IG> {
+pub struct Master<TG, IG, AG> {
     pub ctx: Context,
     pub llm_model: Option<Box<TG>>,
     pub sd_model: Option<Box<IG>>,
+    pub audio_model: Option<Box<AG>>,
 }
 
-impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync + 'static>
-    Master<TG, IG>
+impl<
+        TG: TextGenerator + Send + Sync + 'static,
+        IG: ImageGenerator + Send + Sync + 'static,
+        AG: AudioGenerator + Send + Sync + 'static,
+    > Master<TG, IG, AG>
 {
     /// Create a new instance.
     pub async fn new(mut ctx: Context) -> Result<Self> {
@@ -27,14 +32,25 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
                     ctx,
                     sd_model,
                     llm_model: None,
+                    audio_model: None,
                 })
             }
-            ModelType::TextModel | ModelType::AudioModel => {
+            ModelType::AudioModel => {
+                let audio_model = AG::load(&mut ctx).await?;
+                Ok(Self {
+                    ctx,
+                    audio_model,
+                    llm_model: None,
+                    sd_model: None,
+                })
+            }
+            ModelType::TextModel => {
                 let llm_model = TG::load(&mut ctx).await?;
                 Ok(Self {
                     ctx,
                     llm_model,
                     sd_model: None,
+                    audio_model: None,
                 })
             }
         }
@@ -45,37 +61,59 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
             // run as REST api
             api::start(self).await?;
         } else {
-            // if running in cli mode, pre add system and user prompts
-            if self.ctx.args.model_type == ModelType::TextModel {
-                let llm_model = self.llm_model.as_mut().expect("LLM model not found");
-                llm_model.add_message(Message::system(self.ctx.args.system_prompt.clone()))?;
-                llm_model.add_message(Message::user(self.ctx.args.prompt.clone()))?;
+            match self.ctx.args.model_type {
+                ModelType::TextModel => {
+                    let llm_model = self.llm_model.as_mut().expect("LLM model not found");
+                    llm_model
+                        .add_message(Message::system(self.ctx.args.system_prompt.clone()))?;
+                    llm_model.add_message(Message::user(self.ctx.args.prompt.clone()))?;
 
-                // just run one generation to stdout
-                self.generate_text(None, |data| {
-                    if data.is_empty() {
-                        println!();
-                    } else {
-                        print!("{data}")
-                    }
-                    std::io::stdout().flush().unwrap();
-                })
-                .await?;
-            } else {
-                let image_output = self.ctx.args.image_output.clone();
-                self.generate_image(self.ctx.args.sd_img_gen_args.clone(), move |images| {
-                    if let Some(image) = images.into_iter().next() {
-                        if let Some(parent) = std::path::Path::new(&image_output).parent() {
-                            if !parent.as_os_str().is_empty() {
-                                std::fs::create_dir_all(parent).ok();
-                            }
+                    self.generate_text(None, |data| {
+                        if data.is_empty() {
+                            println!();
+                        } else {
+                            print!("{data}")
                         }
-                        image
-                            .save(&image_output)
-                            .expect("Error saving image to disk");
-                    }
-                })
-                .await?;
+                        std::io::stdout().flush().unwrap();
+                    })
+                    .await?;
+                }
+                ModelType::ImageModel => {
+                    let image_output = self.ctx.args.image_output.clone();
+                    self.generate_image(self.ctx.args.sd_img_gen_args.clone(), move |images| {
+                        if let Some(image) = images.into_iter().next() {
+                            if let Some(parent) = std::path::Path::new(&image_output).parent() {
+                                if !parent.as_os_str().is_empty() {
+                                    std::fs::create_dir_all(parent).ok();
+                                }
+                            }
+                            image
+                                .save(&image_output)
+                                .expect("Error saving image to disk");
+                        }
+                    })
+                    .await?;
+                }
+                ModelType::AudioModel => {
+                    let args = AudioGenerationArgs {
+                        input: self.ctx.args.prompt.clone(),
+                        voice_data: None,
+                        voice_path: self.ctx.args.voice_prompt.clone(),
+                        cfg_scale: self.ctx.args.tts_cfg_scale,
+                        max_frames: self.ctx.args.max_audio_frames,
+                        diffusion_steps: self.ctx.args.tts_diffusion_steps,
+                    };
+                    let output = self.generate_audio(&args).await?;
+                    let wav_bytes = output.to_wav_bytes();
+                    let output_path = &self.ctx.args.audio_output;
+                    std::fs::write(output_path, &wav_bytes)?;
+                    log::info!(
+                        "Audio saved to {} ({:.1}s, {} samples)",
+                        output_path,
+                        output.samples.len() as f64 / output.sample_rate as f64,
+                        output.samples.len()
+                    );
+                }
             }
         }
 
@@ -84,24 +122,27 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
 
     /// Reset the master state for a new inference.
     pub fn reset(&mut self) -> Result<()> {
-        self.llm_model
-            .as_mut()
-            .expect("LLM model not found")
-            .reset()
+        match self.llm_model.as_mut() {
+            Some(m) => m.reset(),
+            None => Ok(()),
+        }
     }
 
     /// clear worker kv cache
     pub async fn goodbye(&mut self) -> Result<()> {
-        self.llm_model
-            .as_mut()
-            .expect("LLM model not found")
-            .goodbye()
-            .await
+        match self.llm_model.as_mut() {
+            Some(m) => m.goodbye().await,
+            None => Ok(()),
+        }
     }
 
     /// Start the generation loop and call the stream function for every token.
     /// `max_tokens` overrides the default sample length if provided.
-    pub async fn generate_text<S>(&mut self, max_tokens: Option<usize>, mut stream: S) -> Result<()>
+    pub async fn generate_text<S>(
+        &mut self,
+        max_tokens: Option<usize>,
+        mut stream: S,
+    ) -> Result<()>
     where
         S: FnMut(&str),
     {
@@ -113,14 +154,14 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
         let sample_len = max_tokens.unwrap_or(self.ctx.args.sample_len);
         log::debug!("  sample_len = {}", sample_len);
 
-        // stream(&self.ctx.args.prompt);
-
         let mut start_gen = std::time::Instant::now();
-        let llm_model = self.llm_model.as_mut().expect("LLM model not found");
+        let llm_model = self
+            .llm_model
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("No text model loaded"))?;
 
         for index in 0..sample_len {
             if index == 1 {
-                // record start time again since the first token is the warmup
                 start_gen = std::time::Instant::now()
             }
 
@@ -162,7 +203,18 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
     where
         F: FnMut(Vec<ImageBuffer<Rgb<u8>, Vec<u8>>>) + Send + 'static,
     {
-        let sd_model = self.sd_model.as_mut().expect("SD model not found");
+        let sd_model = self
+            .sd_model
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("No image model loaded"))?;
         sd_model.generate_image(&args, callback).await
+    }
+
+    pub async fn generate_audio(&mut self, args: &AudioGenerationArgs) -> Result<AudioOutput> {
+        let audio_model = self
+            .audio_model
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("No audio model loaded"))?;
+        audio_model.generate_audio(args).await
     }
 }
