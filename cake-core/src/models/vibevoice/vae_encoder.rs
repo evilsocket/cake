@@ -83,6 +83,49 @@ impl EncoderBlock {
         let ffn_gamma = self.ffn_gamma.unsqueeze(0)?.unsqueeze(2)?;
         residual + h.broadcast_mul(&ffn_gamma)?
     }
+
+    /// Forward with streaming cache: uses cached context instead of zero-padding.
+    fn forward_cached(
+        &self,
+        x: &Tensor,
+        cache: &mut super::vae_decoder::StreamingConvCache,
+    ) -> Result<Tensor> {
+        let residual = x;
+        let h = self.norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
+
+        let (slot, is_first) = cache.take_slot();
+        let context = if is_first {
+            Tensor::zeros((h.dim(0)?, h.dim(1)?, 6), h.dtype(), h.device())?
+        } else {
+            cache.get(slot).unwrap().clone()
+        };
+        let padded = Tensor::cat(&[&context, &h], 2)?;
+        let plen = padded.dim(2)?;
+        let start = plen.saturating_sub(6);
+        cache.set(slot, padded.narrow(2, start, plen - start)?);
+
+        let h = super::vae_decoder::depthwise_conv1d_manual(
+            &padded,
+            &self.mixer_weight,
+            &self.mixer_bias,
+            7,
+        )?;
+        let gamma = self.gamma.unsqueeze(0)?.unsqueeze(2)?;
+        let x = (residual + h.broadcast_mul(&gamma)?)?;
+
+        let residual = &x;
+        let h = self
+            .ffn_norm
+            .forward(&x.transpose(1, 2)?)?
+            .transpose(1, 2)?;
+        let h = h.transpose(1, 2)?;
+        let h = self.ffn_linear1.forward(&h)?;
+        let h = h.gelu()?;
+        let h = self.ffn_linear2.forward(&h)?;
+        let h = h.transpose(1, 2)?;
+        let ffn_gamma = self.ffn_gamma.unsqueeze(0)?.unsqueeze(2)?;
+        residual + h.broadcast_mul(&ffn_gamma)?
+    }
 }
 
 /// One encoder stage: N blocks (applied after its corresponding downsample).
@@ -104,6 +147,18 @@ impl EncoderStage {
         let mut x = x.clone();
         for block in &self.blocks {
             x = block.forward(&x)?;
+        }
+        Ok(x)
+    }
+
+    fn forward_cached(
+        &self,
+        x: &Tensor,
+        cache: &mut super::vae_decoder::StreamingConvCache,
+    ) -> Result<Tensor> {
+        let mut x = x.clone();
+        for block in &self.blocks {
+            x = block.forward_cached(&x, cache)?;
         }
         Ok(x)
     }
@@ -303,6 +358,61 @@ impl TokenizerEncoder {
         h = self.head_conv.forward(&h)?;
 
         // Return as (batch, frames, vae_dim)
+        h.transpose(1, 2)
+    }
+
+    /// Streaming encode: uses cache for correct context between frames.
+    pub fn encode_streaming(
+        &self,
+        audio: &Tensor,
+        cache: &mut super::vae_decoder::StreamingConvCache,
+    ) -> Result<Tensor> {
+        let x = if audio.rank() == 2 {
+            audio.unsqueeze(1)?
+        } else {
+            audio.clone()
+        };
+
+        cache.reset_counter();
+        let mut h = x;
+
+        for (i, (conv, stage)) in self
+            .downsample_convs
+            .iter()
+            .zip(self.stages.iter())
+            .enumerate()
+        {
+            // Streaming: use cached context instead of zero-padding
+            let ctx_size = self.downsample_paddings[i];
+            let (slot, is_first) = cache.take_slot();
+            let context = if is_first {
+                Tensor::zeros((h.dim(0)?, h.dim(1)?, ctx_size), h.dtype(), h.device())?
+            } else {
+                cache.get(slot).unwrap().clone()
+            };
+            let padded = Tensor::cat(&[&context, &h], 2)?;
+
+            // Update cache: last ctx_size samples of padded
+            let plen = padded.dim(2)?;
+            let start = plen.saturating_sub(ctx_size);
+            cache.set(slot, padded.narrow(2, start, plen - start)?);
+
+            h = conv.forward(&padded)?;
+            h = stage.forward_cached(&h, cache)?;
+        }
+
+        // Head conv: streaming context
+        let (slot, is_first) = cache.take_slot();
+        let ctx = if is_first {
+            Tensor::zeros((h.dim(0)?, h.dim(1)?, 6), h.dtype(), h.device())?
+        } else {
+            cache.get(slot).unwrap().clone()
+        };
+        let padded = Tensor::cat(&[&ctx, &h], 2)?;
+        let plen = padded.dim(2)?;
+        cache.set(slot, padded.narrow(2, plen.saturating_sub(6), 6.min(plen))?);
+        h = self.head_conv.forward(&padded)?;
+
         h.transpose(1, 2)
     }
 }

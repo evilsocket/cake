@@ -13,7 +13,7 @@ use super::acoustic_connector::AcousticConnector;
 use super::config_1_5b::*;
 use super::ddpm::DpmSolverPP;
 use super::prediction_head::PredictionHead;
-use super::vae_decoder::AcousticVaeDecoder;
+use super::vae_decoder::{AcousticVaeDecoder, StreamingConvCache};
 use super::vae_encoder::TokenizerEncoder;
 
 /// VibeVoice-1.5B TTS model.
@@ -40,6 +40,10 @@ pub struct VibeVoice1_5B {
     // Scaling factors
     speech_scaling_factor: Tensor,
     speech_bias_factor: Tensor,
+
+    // Pre-computed tensors for diffusion (avoid per-frame allocations)
+    pre_t_doubled: Vec<Tensor>,
+    speech_diff_embed: Tensor,
 
     config: VibeVoice1_5BConfig,
     common_cfg: crate::models::common::Config,
@@ -152,6 +156,22 @@ impl VibeVoice1_5B {
         let scheduler =
             DpmSolverPP::new_cosine(config.diffusion_head_config.ddpm_num_steps, steps);
 
+        // Pre-compute doubled timestep tensors for diffusion (avoid per-frame allocations)
+        let pre_t_doubled: Vec<Tensor> = scheduler
+            .timesteps()
+            .iter()
+            .map(|&t| {
+                Tensor::new(&[t as f32, t as f32], device)
+                    .unwrap()
+                    .to_dtype(dtype)
+                    .unwrap()
+            })
+            .collect();
+
+        // Pre-compute speech_diffusion embedding (reused every diffusion frame)
+        let diff_token = Tensor::new(&[SPEECH_DIFFUSION_ID], device)?.unsqueeze(0)?;
+        let speech_diff_embed = embed_tokens.forward(&diff_token)?;
+
         info!("VibeVoice-1.5B loaded!");
 
         Ok(Self {
@@ -168,6 +188,8 @@ impl VibeVoice1_5B {
             scheduler,
             speech_scaling_factor,
             speech_bias_factor,
+            pre_t_doubled,
+            speech_diff_embed,
             config,
             common_cfg,
             device: device.clone(),
@@ -240,15 +262,11 @@ impl VibeVoice1_5B {
         let mut ts_buffer: Vec<usize> = Vec::new();
 
         for step_idx in 0..num_steps {
-            let t = self.scheduler.timesteps()[step_idx];
-            let t_tensor = Tensor::new(&[t as f32], &self.device)?.to_dtype(self.dtype)?;
-
             let doubled = Tensor::cat(&[&sample, &sample], 0)?;
-            let t_doubled = Tensor::cat(&[&t_tensor, &t_tensor], 0)?;
 
             let v_pred = self
                 .prediction_head
-                .forward(&doubled, &t_doubled, &condition)?;
+                .forward(&doubled, &self.pre_t_doubled[step_idx], &condition)?;
 
             let cond_pred = v_pred.narrow(0, 0, 1)?;
             let uncond_pred = v_pred.narrow(0, 1, 1)?;
@@ -353,6 +371,10 @@ impl VibeVoice1_5B {
         // Valid token IDs for generation (constrained logits)
         let valid_tokens = [SPEECH_START_ID, SPEECH_END_ID, SPEECH_DIFFUSION_ID, EOS_ID];
 
+        // Streaming VAE caches for correct inter-frame context
+        let mut acoustic_cache = StreamingConvCache::new(64);
+        let mut semantic_cache = StreamingConvCache::new(64);
+
         for step in 0..max_tokens {
             // Get logits and select next token
             let logits = self.lm_head(&last_hidden)?; // (1, 1, vocab)
@@ -381,11 +403,13 @@ impl VibeVoice1_5B {
 
             if next_token == SPEECH_END_ID {
                 info!("  Speech end at step {step}");
-                // Reset streaming caches would go here
+                // Clear streaming caches for next speech segment
+                acoustic_cache.clear();
+                semantic_cache.clear();
             }
 
             if next_token == SPEECH_START_ID {
-                // Reset negative cache
+                // Reset negative cache (matches Python refresh_negative=True)
                 neg_cache = crate::models::common::Cache::new(
                     true,
                     self.dtype,
@@ -396,17 +420,19 @@ impl VibeVoice1_5B {
                 let neg_embeds = self.embed_tokens.forward(&neg_ids)?;
                 let _neg_h = self.forward_lm(&neg_embeds, 0, &mut neg_cache)?;
                 neg_pos = 1;
+                // Clear streaming caches
+                acoustic_cache.clear();
+                semantic_cache.clear();
             }
 
-            let mut next_embed;
+            let next_embed;
 
             if next_token == SPEECH_DIFFUSION_ID {
                 let frame_start = std::time::Instant::now();
 
-                // Forward negative model to get neg condition
-                let diff_id = Tensor::new(&[SPEECH_DIFFUSION_ID], &dev)?.unsqueeze(0)?;
-                let diff_embed = self.embed_tokens.forward(&diff_id)?;
-                let neg_hidden = self.forward_lm(&diff_embed, neg_pos, &mut neg_cache)?;
+                // Forward negative model with pre-computed speech_diffusion embedding
+                let neg_hidden =
+                    self.forward_lm(&self.speech_diff_embed.clone(), neg_pos, &mut neg_cache)?;
                 neg_pos += 1;
                 let t_neg_lm = frame_start.elapsed();
 
@@ -418,27 +444,28 @@ impl VibeVoice1_5B {
                 let latent = self.sample_speech_latent(&pos_cond, &neg_cond, cfg_scale)?;
                 let t_diffusion = t0.elapsed();
 
-                // Decode to audio
+                // Decode to audio with streaming cache
                 let t0 = std::time::Instant::now();
                 let scaled_latent = latent.broadcast_div(&scale)?.broadcast_sub(&bias)?;
 
-                let audio_chunk = self
-                    .acoustic_decoder
-                    .decode(&scaled_latent.unsqueeze(0)?.transpose(1, 2)?)?;
+                let audio_chunk = self.acoustic_decoder.decode_streaming(
+                    &scaled_latent.unsqueeze(0)?.transpose(1, 2)?,
+                    &mut acoustic_cache,
+                )?;
                 let t_vae_decode = t0.elapsed();
                 audio_chunks.push(audio_chunk.clone());
 
-                // Encode feedback through semantic encoder
+                // Encode feedback through semantic encoder with streaming cache
                 let t0 = std::time::Instant::now();
-                let semantic_features = self.semantic_encoder.encode(&audio_chunk)?;
+                let semantic_features =
+                    self.semantic_encoder.encode_streaming(&audio_chunk, &mut semantic_cache)?;
                 let t_sem_encode = t0.elapsed();
 
                 // Combine acoustic + semantic for next input
                 let acoustic_embed = self.acoustic_connector.forward(&latent)?; // (1, hidden)
                 let semantic_embed = self.semantic_connector.forward(&semantic_features)?; // (1, frames, hidden)
                 let semantic_mean = semantic_embed.mean(1)?; // (1, hidden)
-                next_embed = (acoustic_embed + semantic_mean)?; // (1, hidden)
-                next_embed = next_embed.unsqueeze(1)?; // (1, 1, hidden)
+                next_embed = (acoustic_embed + semantic_mean)?.unsqueeze(1)?; // (1, 1, hidden)
 
                 let t_total = frame_start.elapsed();
 
@@ -455,14 +482,9 @@ impl VibeVoice1_5B {
                     );
                 }
             } else {
-                // Non-diffusion token: embed normally
+                // Non-diffusion token: embed normally, skip neg model (Python refresh_negative=True)
                 let tid = Tensor::new(&[next_token], &dev)?.unsqueeze(0)?;
                 next_embed = self.embed_tokens.forward(&tid)?;
-
-                // Also forward negative model with this token
-                let neg_hidden = self.forward_lm(&next_embed.clone(), neg_pos, &mut neg_cache)?;
-                let _ = neg_hidden;
-                neg_pos += 1;
             }
 
             // Forward through positive LM

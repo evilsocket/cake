@@ -7,6 +7,56 @@
 use candle_core::{Module, Result, Tensor};
 use candle_nn::{Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, RmsNorm, VarBuilder};
 
+/// Streaming cache for Conv1d context between frames.
+///
+/// Each conv layer gets a sequential slot index (assigned by `take_slot()`).
+/// The counter is reset at the start of each decode/encode call via `reset_counter()`.
+pub struct StreamingConvCache {
+    states: Vec<Option<Tensor>>,
+    counter: usize,
+}
+
+impl StreamingConvCache {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            states: vec![None; capacity],
+            counter: 0,
+        }
+    }
+
+    pub fn reset_counter(&mut self) {
+        self.counter = 0;
+    }
+
+    /// Take the next cache slot, returning (index, is_first_use).
+    pub fn take_slot(&mut self) -> (usize, bool) {
+        let idx = self.counter;
+        self.counter += 1;
+        if idx >= self.states.len() {
+            self.states.resize(idx + 1, None);
+        }
+        let is_first = self.states[idx].is_none();
+        (idx, is_first)
+    }
+
+    pub fn get(&self, idx: usize) -> Option<&Tensor> {
+        self.states.get(idx).and_then(|s| s.as_ref())
+    }
+
+    pub fn set(&mut self, idx: usize, state: Tensor) {
+        if idx >= self.states.len() {
+            self.states.resize(idx + 1, None);
+        }
+        self.states[idx] = Some(state);
+    }
+
+    pub fn clear(&mut self) {
+        for s in &mut self.states {
+            *s = None;
+        }
+    }
+}
+
 /// A single decoder block with depthwise conv mixer + FFN.
 #[derive(Debug, Clone)]
 struct DecoderBlock {
@@ -98,6 +148,41 @@ impl DecoderBlock {
         let ffn_gamma = self.ffn_gamma.unsqueeze(0)?.unsqueeze(2)?;
         residual + h.broadcast_mul(&ffn_gamma)?
     }
+
+    /// Forward with streaming cache: uses cached context instead of zero-padding.
+    fn forward_cached(&self, x: &Tensor, cache: &mut StreamingConvCache) -> Result<Tensor> {
+        let residual = x;
+        let h = self.norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
+
+        // Streaming: prepend cached context instead of zeros
+        let (slot, is_first) = cache.take_slot();
+        let context = if is_first {
+            Tensor::zeros((h.dim(0)?, h.dim(1)?, 6), h.dtype(), h.device())?
+        } else {
+            cache.get(slot).unwrap().clone()
+        };
+        let padded = Tensor::cat(&[&context, &h], 2)?;
+
+        // Update cache: store last 6 samples of padded input
+        let plen = padded.dim(2)?;
+        let start = plen.saturating_sub(6);
+        cache.set(slot, padded.narrow(2, start, plen - start)?);
+
+        let h = depthwise_conv1d_manual(&padded, &self.mixer_weight, &self.mixer_bias, 7)?;
+        let gamma = self.gamma.unsqueeze(0)?.unsqueeze(2)?;
+        let x = (residual + h.broadcast_mul(&gamma)?)?;
+
+        // FFN (no conv caching needed)
+        let residual = &x;
+        let h = self.ffn_norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
+        let h = h.transpose(1, 2)?;
+        let h = self.ffn_linear1.forward(&h)?;
+        let h = h.gelu()?;
+        let h = self.ffn_linear2.forward(&h)?;
+        let h = h.transpose(1, 2)?;
+        let ffn_gamma = self.ffn_gamma.unsqueeze(0)?.unsqueeze(2)?;
+        residual + h.broadcast_mul(&ffn_gamma)?
+    }
 }
 
 /// One decoder stage: upsample + N blocks.
@@ -119,6 +204,14 @@ impl DecoderStage {
         let mut x = x.clone();
         for block in &self.blocks {
             x = block.forward(&x)?;
+        }
+        Ok(x)
+    }
+
+    fn forward_cached(&self, x: &Tensor, cache: &mut StreamingConvCache) -> Result<Tensor> {
+        let mut x = x.clone();
+        for block in &self.blocks {
+            x = block.forward_cached(&x, cache)?;
         }
         Ok(x)
     }
@@ -146,6 +239,8 @@ pub struct AcousticVaeDecoder {
     upsample_layers: Vec<UpsampleLayer>,
     stages: Vec<DecoderStage>,
     head_conv: Conv1d,
+    /// Upsample ratios per stage (0 for first Conv1d stage).
+    ratios: Vec<usize>,
 }
 
 impl AcousticVaeDecoder {
@@ -219,7 +314,11 @@ impl AcousticVaeDecoder {
             vb.pp("head").pp("conv").pp("conv"),
         )?;
 
-        Ok(Self { upsample_layers, stages, head_conv })
+        // Build ratios vec: 0 for first Conv1d, then the actual ratios
+        let mut ratios_vec = vec![0usize];
+        ratios_vec.extend_from_slice(ratios);
+
+        Ok(Self { upsample_layers, stages, head_conv, ratios: ratios_vec })
     }
 
     fn parse_depths(cfg: &super::config::AcousticTokenizerConfig, num_stages: usize) -> Vec<usize> {
@@ -275,7 +374,6 @@ impl AcousticVaeDecoder {
         };
 
         let mut h = x;
-        let ratios = [0usize, 8, 5, 5, 4, 2, 2]; // first is Conv1d (no upsample ratio)
 
         for (i, (upsample, stage)) in self.upsample_layers.iter().zip(self.stages.iter()).enumerate() {
             if i == 0 {
@@ -285,7 +383,7 @@ impl AcousticVaeDecoder {
             h = upsample.forward(&h)?;
             if i > 0 {
                 // ConvTranspose1d: trim extra samples from right
-                h = Self::causal_trim(&h, ratios[i])?;
+                h = Self::causal_trim(&h, self.ratios[i])?;
             }
             h = stage.forward(&h)?;
         }
@@ -293,6 +391,82 @@ impl AcousticVaeDecoder {
         // Head conv: kernel=7, causal left-pad 6
         h = Self::causal_pad(&h, 6)?;
         self.head_conv.forward(&h)
+    }
+
+    /// Streaming decode: uses cache for correct context between frames.
+    /// Each call processes a single latent frame and produces audio samples.
+    pub fn decode_streaming(&self, latents: &Tensor, cache: &mut StreamingConvCache) -> Result<Tensor> {
+        let x = if latents.dim(1)? == 64 {
+            latents.clone()
+        } else {
+            latents.transpose(1, 2)?
+        };
+
+        cache.reset_counter();
+        let mut h = x;
+
+        for (i, (upsample, stage)) in self.upsample_layers.iter().zip(self.stages.iter()).enumerate() {
+            if i == 0 {
+                // Conv1d k=7: use cached context (6 samples) instead of zero-pad
+                let (slot, is_first) = cache.take_slot();
+                let ctx = if is_first {
+                    Tensor::zeros((h.dim(0)?, h.dim(1)?, 6), h.dtype(), h.device())?
+                } else {
+                    cache.get(slot).unwrap().clone()
+                };
+                let padded = Tensor::cat(&[&ctx, &h], 2)?;
+                let plen = padded.dim(2)?;
+                cache.set(slot, padded.narrow(2, plen.saturating_sub(6), 6.min(plen))?);
+                h = upsample.forward(&padded)?;
+            } else {
+                // ConvTranspose1d: cache input history for context
+                let kernel_size = self.ratios[i] * 2;
+                let ctx_size = kernel_size - 1;
+                let stride = self.ratios[i];
+                let new_len = h.dim(2)?;
+
+                let (slot, is_first) = cache.take_slot();
+
+                let full_input = if is_first {
+                    h.clone()
+                } else {
+                    let cached = cache.get(slot).unwrap();
+                    Tensor::cat(&[cached, &h], 2)?
+                };
+
+                let full_output = upsample.forward(&full_input)?;
+                let full_output = Self::causal_trim(&full_output, stride)?;
+
+                h = if is_first {
+                    full_output
+                } else {
+                    let out_len = full_output.dim(2)?;
+                    let new_out = new_len * stride;
+                    full_output.narrow(2, out_len - new_out, new_out)?
+                };
+
+                // Update cache: last ctx_size samples of full_input
+                let fi_len = full_input.dim(2)?;
+                if fi_len > ctx_size {
+                    cache.set(slot, full_input.narrow(2, fi_len - ctx_size, ctx_size)?);
+                } else {
+                    cache.set(slot, full_input);
+                }
+            }
+            h = stage.forward_cached(&h, cache)?;
+        }
+
+        // Head conv: use cached context
+        let (slot, is_first) = cache.take_slot();
+        let ctx = if is_first {
+            Tensor::zeros((h.dim(0)?, h.dim(1)?, 6), h.dtype(), h.device())?
+        } else {
+            cache.get(slot).unwrap().clone()
+        };
+        let padded = Tensor::cat(&[&ctx, &h], 2)?;
+        let plen = padded.dim(2)?;
+        cache.set(slot, padded.narrow(2, plen.saturating_sub(6), 6.min(plen))?);
+        self.head_conv.forward(&padded)
     }
 }
 
