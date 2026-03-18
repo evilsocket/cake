@@ -26,16 +26,16 @@ const TTS_SPEECH_WINDOW_SIZE: usize = 6;
 
 /// VibeVoice TTS model with voice cloning support.
 pub struct VibeVoiceTTS {
-    // Base LM (4 layers)
+    // Base LM (4 layers) — each local Transformer or remote Client
     base_embed: candle_nn::Embedding,
     base_norm: candle_nn::RmsNorm,
-    base_layers: Vec<crate::models::common::Transformer>,
+    base_layers: Vec<Box<dyn crate::cake::Forwarder>>,
 
-    // TTS LM (20 layers)
+    // TTS LM (20 layers) — each local Transformer or remote Client
     #[allow(dead_code)]
     tts_embed: candle_nn::Embedding,
     tts_norm: candle_nn::RmsNorm,
-    tts_layers: Vec<crate::models::common::Transformer>,
+    tts_layers: Vec<Box<dyn crate::cake::Forwarder>>,
 
     // Type embedding: 0=speech, 1=text
     tts_input_types: candle_nn::Embedding,
@@ -54,14 +54,17 @@ pub struct VibeVoiceTTS {
     common_cfg: crate::models::common::Config,
     device: Device,
     dtype: DType,
+    fwd_ctx: crate::cake::Context,
 }
 
 impl VibeVoiceTTS {
-    pub fn load(
+    pub async fn load(
         config_path: &std::path::Path,
         weights_path: &std::path::Path,
         device: &Device,
         diffusion_steps: Option<usize>,
+        topology: &crate::cake::Topology,
+        cluster_key: Option<&str>,
     ) -> Result<Self> {
         let config = VibeVoiceConfig::from_path(config_path)?;
         let common_cfg = config.into_config();
@@ -82,9 +85,19 @@ impl VibeVoiceTTS {
         // Base LM norm: not in checkpoint (initialized to ones, matching Qwen2Model default)
         let base_norm_w = Tensor::ones(common_cfg.hidden_size, dtype, device)?;
         let base_norm = candle_nn::RmsNorm::new(base_norm_w, common_cfg.rms_norm_eps);
-        let mut base_layers = Vec::new();
+        let mut base_layers: Vec<Box<dyn crate::cake::Forwarder>> = Vec::new();
         for i in 0..4 {
-            base_layers.push(crate::models::common::Transformer::load_for_vibevoice(base_vb.pp("layers").pp(i), &common_cfg)?);
+            let layer_name = format!("model.language_model.layers.{i}");
+            if let Some((_node_name, node)) = topology.get_node_for_layer(&layer_name) {
+                info!("  {layer_name} → remote worker at {}", node.host);
+                base_layers.push(Box::new(crate::cake::Client::new(
+                    device.clone(), &node.host, &layer_name, cluster_key,
+                ).await?));
+            } else {
+                base_layers.push(Box::new(
+                    crate::models::common::Transformer::load_for_vibevoice(base_vb.pp("layers").pp(i), &common_cfg)?,
+                ));
+            }
         }
 
         // TTS LM (20 layers)
@@ -93,9 +106,19 @@ impl VibeVoiceTTS {
         let tts_vb = vb.pp("model").pp("tts_language_model");
         let tts_embed = candle_nn::embedding(common_cfg.vocab_size, common_cfg.hidden_size, tts_vb.pp("embed_tokens"))?;
         let tts_norm = candle_nn::rms_norm(common_cfg.hidden_size, common_cfg.rms_norm_eps, tts_vb.pp("norm"))?;
-        let mut tts_layers = Vec::new();
+        let mut tts_layers: Vec<Box<dyn crate::cake::Forwarder>> = Vec::new();
         for i in 0..num_tts {
-            tts_layers.push(crate::models::common::Transformer::load_for_vibevoice(tts_vb.pp("layers").pp(i), &common_cfg)?);
+            let layer_name = format!("model.tts_language_model.layers.{i}");
+            if let Some((_node_name, node)) = topology.get_node_for_layer(&layer_name) {
+                info!("  {layer_name} → remote worker at {}", node.host);
+                tts_layers.push(Box::new(crate::cake::Client::new(
+                    device.clone(), &node.host, &layer_name, cluster_key,
+                ).await?));
+            } else {
+                tts_layers.push(Box::new(
+                    crate::models::common::Transformer::load_for_vibevoice(tts_vb.pp("layers").pp(i), &common_cfg)?,
+                ));
+            }
         }
 
         let tts_input_types = candle_nn::embedding(2, common_cfg.hidden_size, vb.pp("model").pp("tts_input_types"))?;
@@ -120,21 +143,39 @@ impl VibeVoiceTTS {
             tts_input_types,
             prediction_head, scheduler, vae_decoder, connector, eos_classifier,
             speech_scaling_factor, speech_bias_factor,
-            config, common_cfg, device: device.clone(), dtype,
+            config, common_cfg: common_cfg.clone(), device: device.clone(), dtype,
+            fwd_ctx: crate::cake::Context {
+                args: Default::default(),
+                dtype,
+                topology: topology.clone(),
+                data_path: std::path::PathBuf::new(),
+                device: device.clone(),
+                config: Some(common_cfg),
+                cache: None,
+                var_builder: None,
+                text_model_arch: crate::TextModelArch::Auto,
+                quant: std::sync::Arc::new(crate::utils::NoQuantization),
+                listener_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            },
         })
     }
 
     /// Forward through a set of transformer layers with a cache.
-    fn forward_layers(
-        layers: &[crate::models::common::Transformer],
+    async fn forward_layers(
+        layers: &mut [Box<dyn crate::cake::Forwarder>],
         norm: Option<&candle_nn::RmsNorm>,
         embeds: &Tensor,
         index_pos: usize,
         cache: &mut crate::models::common::Cache,
+        fwd_ctx: &mut crate::cake::Context,
     ) -> Result<Tensor> {
+        fwd_ctx.cache = Some(cache.clone());
         let mut h = embeds.clone();
-        for (i, layer) in layers.iter().enumerate() {
-            h = layer.forward_with_cache(&h, index_pos, i, cache)?;
+        for (i, layer) in layers.iter_mut().enumerate() {
+            h = layer.forward_mut(&h, index_pos, i, fwd_ctx).await?;
+        }
+        if let Some(updated) = fwd_ctx.cache.take() {
+            *cache = updated;
         }
         if let Some(n) = norm {
             h = n.forward(&h).map_err(|e| anyhow::anyhow!("norm: {e}"))?;
@@ -175,7 +216,7 @@ impl VibeVoiceTTS {
     }
 
     /// Generate audio from text with a voice prompt.
-    pub fn generate(
+    pub async fn generate(
         &mut self,
         token_ids: &[u32],
         voice_prompt: &VoicePrompt,
@@ -248,17 +289,18 @@ impl VibeVoiceTTS {
 
                 // Forward through base LM
                 let base_hidden = Self::forward_layers(
-                    &self.base_layers, Some(&self.base_norm), &win_embeds,
+                    &mut self.base_layers, Some(&self.base_norm), &win_embeds,
                     pos_base_pos, &mut pos_base_cache,
-                )?;
+                    &mut self.fwd_ctx,
+                ).await?;
                 pos_base_pos += window_size;
 
                 // Forward through TTS LM (base hidden + text type)
                 let tts_input = (base_hidden + text_type.broadcast_as(win_embeds.shape())?)?;
                 pos_last = Some(Self::forward_layers(
-                    &self.tts_layers, Some(&self.tts_norm), &tts_input,
-                    pos_tts_pos, &mut pos_tts_cache,
-                )?);
+                    &mut self.tts_layers, Some(&self.tts_norm), &tts_input,
+                    pos_tts_pos, &mut pos_tts_cache, &mut self.fwd_ctx,
+                ).await?);
                 pos_tts_pos += window_size;
 
                 text_cursor = window_end;
@@ -306,15 +348,16 @@ impl VibeVoiceTTS {
                     + speech_type.unsqueeze(0)?.broadcast_as((1, 1, hidden_size))?)?;
 
                 pos_last = Some(Self::forward_layers(
-                    &self.tts_layers, Some(&self.tts_norm), &speech_embed,
-                    pos_tts_pos, &mut pos_tts_cache,
-                )?);
+                    &mut self.tts_layers, Some(&self.tts_norm), &speech_embed,
+                    pos_tts_pos, &mut pos_tts_cache, &mut self.fwd_ctx,
+                ).await?);
                 pos_tts_pos += 1;
 
                 let neg_out = Self::forward_layers(
-                    &self.tts_layers, Some(&self.tts_norm), &speech_embed,
+                    &mut self.tts_layers, Some(&self.tts_norm), &speech_embed,
                     neg_tts_pos, &mut neg_tts_cache,
-                )?;
+                    &mut self.fwd_ctx,
+                ).await?;
                 neg_cond = neg_out.narrow(1, neg_out.dim(1)? - 1, 1)?.squeeze(1)?;
                 neg_tts_pos += 1;
 
@@ -350,15 +393,16 @@ impl VibeVoiceTTS {
                         + speech_type.unsqueeze(0)?.broadcast_as((1, 1, hidden_size))?)?;
 
                     pos_last = Some(Self::forward_layers(
-                        &self.tts_layers, Some(&self.tts_norm), &speech_embed,
-                        pos_tts_pos, &mut pos_tts_cache,
-                    )?);
+                        &mut self.tts_layers, Some(&self.tts_norm), &speech_embed,
+                        pos_tts_pos, &mut pos_tts_cache, &mut self.fwd_ctx,
+                    ).await?);
                     pos_tts_pos += 1;
 
                     let neg_out = Self::forward_layers(
-                        &self.tts_layers, Some(&self.tts_norm), &speech_embed,
+                        &mut self.tts_layers, Some(&self.tts_norm), &speech_embed,
                         neg_tts_pos, &mut neg_tts_cache,
-                    )?;
+                        &mut self.fwd_ctx,
+                ).await?;
                     neg_cond = neg_out.narrow(1, neg_out.dim(1)? - 1, 1)?.squeeze(1)?;
                     neg_tts_pos += 1;
 
