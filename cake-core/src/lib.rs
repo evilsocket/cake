@@ -169,6 +169,10 @@ pub struct Args {
     #[arg(long, default_value = "output.wav")]
     pub audio_output: String,
 
+    /// Output path for generated image (PNG format, used with --model-type image-model).
+    #[arg(long, default_value = "output.png")]
+    pub image_output: String,
+
     /// Maximum speech frames to generate (each frame ≈ 133ms at 7.5 Hz).
     #[arg(long, default_value_t = 150)]
     pub max_audio_frames: usize,

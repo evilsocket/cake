@@ -62,15 +62,18 @@ impl<TG: TextGenerator + Send + Sync + 'static, IG: ImageGenerator + Send + Sync
                 })
                 .await?;
             } else {
-                let mut step_num = 0;
-
+                let image_output = self.ctx.args.image_output.clone();
                 self.generate_image(self.ctx.args.sd_img_gen_args.clone(), move |images| {
-                    for (batched_num, image) in images.into_iter().enumerate() {
+                    if let Some(image) = images.into_iter().next() {
+                        if let Some(parent) = std::path::Path::new(&image_output).parent() {
+                            if !parent.as_os_str().is_empty() {
+                                std::fs::create_dir_all(parent).ok();
+                            }
+                        }
                         image
-                            .save(format!("images/image_{}_{}.png", batched_num, step_num))
+                            .save(&image_output)
                             .expect("Error saving image to disk");
                     }
-                    step_num += 1;
                 })
                 .await?;
             }
