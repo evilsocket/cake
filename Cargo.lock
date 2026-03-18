@@ -730,6 +730,7 @@ dependencies = [
  "memmap2",
  "memory-stats",
  "num-traits",
+ "openssl",
  "rand 0.8.5",
  "rayon",
  "regex",
