@@ -2,7 +2,9 @@
 //! Exposes UniFFI functions callable from Kotlin (via JNI on Android) or Swift/ObjC (via static lib on iOS).
 uniffi::setup_scaffolding!("cake_mobile");
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+#[cfg(not(target_os = "android"))]
+use std::sync::OnceLock;
 
 use cake_core::{
     cake::{self, Context, Mode, Topology, Worker},
@@ -111,6 +113,7 @@ fn get_cache_dir() -> std::path::PathBuf {
 // Logging
 // ---------------------------------------------------------------------------
 
+#[cfg(not(target_os = "android"))]
 static LOG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
 
 fn log_mobile(msg: &str) {

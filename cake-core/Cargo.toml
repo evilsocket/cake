@@ -86,6 +86,10 @@ bindgen_cuda = { version = "0.1.6", optional = true }
 tempfile = "3"
 divan = "0.1"
 
+# Build OpenSSL from source when cross-compiling tests for Android (no system OpenSSL available)
+[target.'cfg(target_os = "android")'.dev-dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+
 [[bench]]
 name = "benchmarks"
 harness = false
