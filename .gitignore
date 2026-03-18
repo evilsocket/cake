@@ -88,3 +88,4 @@ flux-tests/target/
 
 /*.wav
 /*.png
+/.claude
