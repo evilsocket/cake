@@ -120,7 +120,11 @@ See the full [REST API Reference](api.md) for all endpoints, request/response fo
 | `--device` | `0` | GPU device index |
 | `--cpu` | `false` | Force CPU inference |
 | `--dtype` | - | Override dtype (default: f16) |
-| `--text-model-arch` | `auto` | Force model architecture (`auto`, `llama`, `qwen2`, `qwen3`, `qwen3-moe`, `qwen3-5`, `phi4`, `mistral`, `gemma3`, `falcon3`, `ol-mo2`, `exaone4`) |
+| `--text-model-arch` | `auto` | Force model architecture (`auto`, `llama`, `qwen2`, `qwen3`, `qwen3-moe`, `qwen3-5`, `phi4`, `mistral`, `gemma3`, `falcon3`, `ol-mo2`, `exaone4`, `lux-tts`) |
 | `--cluster-key` | - | Zero-config cluster key (or `CAKE_CLUSTER_KEY` env) |
 | `--discovery-timeout` | `10` | Worker discovery timeout in seconds |
 | `--ui-auth` | - | Basic auth for web UI (`user:pass`) |
+| `--tts-reference-audio` | - | WAV file for LuxTTS voice cloning (24kHz mono) |
+| `--tts-t-shift` | `1.0` | LuxTTS flow matching time shift |
+| `--tts-speed` | `1.0` | LuxTTS speed factor (lower = longer audio) |
+| `--tts-token-ids` | - | Pre-computed IPA token IDs file for LuxTTS |

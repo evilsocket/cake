@@ -1,15 +1,149 @@
 # Voice Generation (TTS)
 
-Cake supports text-to-speech synthesis with voice cloning using Microsoft's VibeVoice models.
+Cake supports text-to-speech synthesis with voice cloning.
 
 ## Supported Models
 
-| Model | Parameters | VRAM | Max Duration | Speakers | Voice Ref |
-|-------|-----------|------|-------------|----------|-----------|
-| [VibeVoice-1.5B](https://huggingface.co/microsoft/VibeVoice-1.5B) | ~3B (BF16) | ~7 GB | ~90 min | Up to 4 | .wav file |
-| [VibeVoice-Realtime-0.5B](https://huggingface.co/microsoft/VibeVoice-Realtime-0.5B) | ~0.5B (F32) | ~3 GB | ~10 min | 1 | .safetensors preset |
+| Model | Parameters | VRAM | Speed | Architecture | Voice Ref |
+|-------|-----------|------|-------|-------------|-----------|
+| [LuxTTS](https://huggingface.co/YatharthS/LuxTTS) | ~123M | <1 GB | 150x realtime (GPU) | Zipformer + flow matching | .wav file (optional) |
+| [VibeVoice-1.5B](https://huggingface.co/microsoft/VibeVoice-1.5B) | ~3B (BF16) | ~7 GB | ~1x realtime | Qwen2.5 LM + diffusion | .wav file |
+| [VibeVoice-Realtime-0.5B](https://huggingface.co/microsoft/VibeVoice-Realtime-0.5B) | ~0.5B (F32) | ~3 GB | ~3x realtime | Qwen2.5 LM + diffusion | .safetensors preset |
 
-Both models generate 24kHz mono audio using a next-token diffusion framework: a Qwen2.5 LLM predicts context, then a diffusion head generates acoustic latents decoded by a VAE to a waveform.
+## LuxTTS
+
+A lightweight ZipVoice-based TTS model using Zipformer encoder + flow matching decoder with a 4-step Euler solver. Produces 48kHz audio at 150x realtime on GPU. Supports distributed inference — the 16 FM decoder layers can be sharded across workers.
+
+Original model: [`YatharthS/LuxTTS`](https://huggingface.co/YatharthS/LuxTTS) (PyTorch). Pre-converted safetensors for Cake: [`evilsocket/luxtts`](https://huggingface.co/evilsocket/luxtts).
+
+### Getting the Model
+
+Pre-converted safetensors weights are available at [`evilsocket/luxtts`](https://huggingface.co/evilsocket/luxtts):
+
+```sh
+cake download evilsocket/luxtts
+```
+
+#### Converting from Original Weights
+
+If you prefer to convert from the original PyTorch weights ([`YatharthS/LuxTTS`](https://huggingface.co/YatharthS/LuxTTS)):
+
+```sh
+cake download YatharthS/LuxTTS
+
+python scripts/convert_luxtts.py \
+  --model-dir ~/.cache/huggingface/hub/models--YatharthS--LuxTTS/snapshots/*/  \
+  --output-dir /path/to/luxtts-converted
+```
+
+The conversion script produces `model.safetensors`, `vocos.safetensors`, `config.json`, and `tokens.txt`.
+
+### Tokenization
+
+LuxTTS uses IPA phoneme tokens. The built-in tokenizer provides a basic rule-based English-to-IPA fallback. For best quality, pre-compute IPA token IDs using an external phonemizer (e.g. espeak-ng via `piper_phonemize`) and pass them via `--tts-token-ids`:
+
+```sh
+# Generate IPA token IDs (example using Python)
+python -c "
+from piper_phonemize import phonemize_espeak
+tokens_map = {}
+with open('tokens.txt') as f:
+    for line in f:
+        tok, idx = line.strip().rsplit('\t', 1)
+        tokens_map[tok] = int(idx)
+ipa = phonemize_espeak('Hello world', 'en-us')[0][0]
+ids = [tokens_map.get(c, 0) for c in '^' + ipa + '\$']
+print(' '.join(str(i) for i in ids))
+" > token_ids.txt
+
+# Generate audio using pre-computed tokens
+cake master --model evilsocket/luxtts \
+  --prompt "Hello world" \
+  --tts-token-ids token_ids.txt \
+  --tts-speed 0.16 \
+  --tts-diffusion-steps 4 \
+  --audio-output output.wav \
+  --dtype f32
+```
+
+### Basic Usage (built-in tokenizer)
+
+```sh
+cake master --model evilsocket/luxtts \
+  --prompt "Hello world, this is a test." \
+  --audio-output output.wav \
+  --tts-speed 0.16 \
+  --tts-diffusion-steps 4 \
+  --dtype f32
+```
+
+### Voice Cloning
+
+Provide a 24kHz mono WAV reference audio for voice cloning:
+
+```sh
+cake master --model evilsocket/luxtts \
+  --prompt "Hello world" \
+  --tts-reference-audio voice_sample.wav \
+  --audio-output output.wav \
+  --tts-speed 0.16 --tts-diffusion-steps 4 --dtype f32
+```
+
+### Distributed Inference
+
+The FM decoder layers can be split across workers:
+
+```yaml
+# topology-luxtts.yml
+worker1:
+  host: "192.168.1.100:10128"
+  layers:
+    - "fm_decoder.layers.0"
+    - "fm_decoder.layers.1"
+    - "fm_decoder.layers.2"
+    - "fm_decoder.layers.3"
+    - "fm_decoder.layers.4"
+    - "fm_decoder.layers.5"
+    - "fm_decoder.layers.6"
+    - "fm_decoder.layers.7"
+# Master keeps fm_decoder.layers.8-15 + text encoder + vocoder
+```
+
+```sh
+# Worker
+cake worker --model evilsocket/luxtts --name worker1 \
+  --topology topology-luxtts.yml --address 0.0.0.0:10128
+
+# Master
+cake master --model evilsocket/luxtts --topology topology-luxtts.yml \
+  --prompt "Hello world" --audio-output output.wav \
+  --tts-speed 0.16 --tts-diffusion-steps 4 --dtype f32
+```
+
+### Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--prompt` | (required) | Text to synthesize |
+| `--audio-output` | `output.wav` | Output WAV file path |
+| `--tts-diffusion-steps` | 10 | Euler solver steps (4 recommended for distilled LuxTTS) |
+| `--tts-speed` | 1.0 | Speed factor (lower = longer audio; 0.16 ≈ 6 frames/token) |
+| `--tts-t-shift` | 1.0 | Time shift for Euler solver schedule |
+| `--tts-reference-audio` | - | Path to 24kHz mono WAV for voice cloning |
+| `--tts-token-ids` | - | Pre-computed IPA token IDs file (space-separated) |
+| `--dtype` | f16 | Use `f32` for best quality on CPU |
+
+### Architecture
+
+LuxTTS consists of three components:
+
+1. **Text encoder** (4 Zipformer layers, dim=192) — converts IPA phoneme tokens to acoustic features. Always runs on master.
+2. **FM decoder** (16 Zipformer layers across 5 multi-resolution stacks, dim=512) — flow matching decoder that denoises random noise into mel features over 4 Euler steps. **Shardable** across workers.
+3. **Vocos vocoder** (ConvNeXt backbone + ISTFT head) — converts mel features to 24kHz waveform, then upsampled to 48kHz. Always runs on master.
+
+The FM decoder uses a U-Net-style multi-resolution structure with downsampling factors [1, 2, 4, 2, 1] and layer counts [2, 2, 4, 4, 4] = 16 total layers.
+
+---
 
 ## VibeVoice-1.5B
 

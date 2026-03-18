@@ -18,3 +18,5 @@ mod bench_topology;
 mod bench_utils;
 mod bench_flux;
 mod bench_vibevoice;
+#[cfg(feature = "luxtts")]
+mod bench_luxtts;

@@ -1,0 +1,20 @@
+# Example topology for LuxTTS distributed inference.
+# The FM decoder has 16 layers that can be split across workers.
+# Text encoder + vocoder always run on master.
+#
+# Usage:
+#   Worker:  cake worker --model <luxtts-repo> --name worker1 --topology topology-luxtts.yml --address 0.0.0.0:10128
+#   Master:  cake master --model <luxtts-repo> --topology topology-luxtts.yml --prompt "Hello world" --audio-output output.wav
+
+worker1:
+  host: "192.168.50.147:10128"
+  layers:
+    - "fm_decoder.layers.0"
+    - "fm_decoder.layers.1"
+    - "fm_decoder.layers.2"
+    - "fm_decoder.layers.3"
+    - "fm_decoder.layers.4"
+    - "fm_decoder.layers.5"
+    - "fm_decoder.layers.6"
+    - "fm_decoder.layers.7"
+# Master keeps fm_decoder.layers.8-15 + text encoder + vocoder

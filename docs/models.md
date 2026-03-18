@@ -35,10 +35,11 @@ See [Image Generation](image_generation.md) for usage.
 
 ## Voice Models (TTS)
 
-| Model | HuggingFace ID | VRAM | Max Duration | Feature Flag |
+| Model | HuggingFace ID | VRAM | Architecture | Feature Flag |
 |-------|---------------|------|-------------|-------------|
-| VibeVoice-1.5B | `microsoft/VibeVoice-1.5B` | ~7 GB | ~90 min | `vibevoice` (default) |
-| VibeVoice-Realtime-0.5B | `microsoft/VibeVoice-Realtime-0.5B` | ~3 GB | ~10 min | `vibevoice` (default) |
+| LuxTTS | `evilsocket/luxtts` ([original](https://huggingface.co/YatharthS/LuxTTS)) | <1 GB | Zipformer + flow matching | `luxtts` (default) |
+| VibeVoice-1.5B | `microsoft/VibeVoice-1.5B` | ~7 GB | Qwen2.5 LM + diffusion | `vibevoice` (default) |
+| VibeVoice-Realtime-0.5B | `microsoft/VibeVoice-Realtime-0.5B` | ~3 GB | Qwen2.5 LM + diffusion | `vibevoice` (default) |
 
 See [Voice Generation](voice_generation.md) for usage.
 
@@ -54,7 +55,13 @@ Image and voice model types are selected with `--model-type`:
 
 ```sh
 cake master --model-type image-model --image-model-arch sd|flux|flux1
-cake master --model-type audio-model  # auto-detects 1.5B vs 0.5B from config
+cake master --model-type audio-model  # VibeVoice (auto-detects 1.5B vs 0.5B)
+```
+
+LuxTTS is detected automatically from its `config.json` architecture string and uses the text model dispatch path (enabling distributed inference):
+
+```sh
+cake master --model evilsocket/luxtts --prompt "Hello world" --audio-output output.wav
 ```
 
 ## Model Notes
