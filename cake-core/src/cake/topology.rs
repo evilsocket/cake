@@ -71,7 +71,7 @@ impl Topology {
         let mut topology: Self = serde_yaml::from_str(&std::fs::read_to_string(path)?)
             .map_err(|e| anyhow!("can't read {path}: {e}"))?;
 
-        if *model_type == ModelType::TextModel {
+        if *model_type == ModelType::TextModel || *model_type == ModelType::AudioModel {
             // check for range expressions
             for (_worker_name, node) in topology.iter_mut() {
                 let mut layers = vec![];

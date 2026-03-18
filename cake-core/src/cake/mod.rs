@@ -288,6 +288,43 @@ impl Context {
             } // end else (safetensors path)
         }
 
+        // AudioModel workers need a VarBuilder and config to load transformer layers.
+        // Parse config.json for the LM backbone and create VarBuilder from safetensors.
+        if args.model_type == ModelType::AudioModel
+            && matches!(args.mode, Mode::Worker)
+            && var_builder.is_none()
+        {
+            let config_filename = data_path.join("config.json");
+            if config_filename.exists() {
+                // VibeVoice models: parse decoder_config for the LM backbone
+                text_model_arch = TextModelArch::Qwen2;
+                let config_internal = crate::models::vibevoice::config_1_5b::VibeVoice1_5BConfig::from_path(&config_filename)
+                    .map(|c| c.into_config())
+                    .or_else(|_| {
+                        crate::models::vibevoice::config::VibeVoiceConfig::from_path(&config_filename)
+                            .map(|c| c.into_config())
+                    })
+                    .ok();
+                if let Some(ref cfg) = config_internal {
+                    let model_tensors_index = data_path.join("model.safetensors.index.json");
+                    quant = Arc::from(utils::detect_quantization(&config_filename));
+                    let my_layers: Vec<String> = topology.all_worker_layers().into_iter().collect();
+                    var_builder = Some(if !my_layers.is_empty() {
+                        utils::load_var_builder_for_specific_layers(
+                            model_tensors_index, dtype, device.clone(), &my_layers, &*quant,
+                        )?
+                    } else {
+                        utils::load_var_builder_from_index(
+                            model_tensors_index, dtype, device.clone(), &*quant,
+                        )?
+                    });
+                    cache = Some(Cache::new(true, dtype, cfg, &device)?);
+                    config = Some(cfg.clone());
+                    log::info!("AudioModel worker: loaded Qwen2 config + VarBuilder for LM layers");
+                }
+            }
+        }
+
         Ok(Context {
             args,
             dtype,

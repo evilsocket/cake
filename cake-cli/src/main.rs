@@ -796,7 +796,17 @@ async fn run_worker(ctx: &mut Context) -> Result<()> {
             ),
         }
         ModelType::AudioModel => {
-            anyhow::bail!("AudioModel workers not yet supported; run TTS on master")
+            // VibeVoice LM layers are standard Transformer blocks — use Qwen2 worker
+            // (Transformer::load is architecture-agnostic, works for any model's layers)
+            #[cfg(feature = "qwen2")]
+            {
+                Worker::<cake_core::models::qwen2::Qwen2>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(not(feature = "qwen2"))]
+            anyhow::bail!("AudioModel workers require the qwen2 feature")
         }
     }
 }
