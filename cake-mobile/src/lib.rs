@@ -334,7 +334,7 @@ async fn run_zero_config_worker(
         update_status(stage, message, progress);
     };
 
-    let (layers, model_path, listener) = match cake::setup::worker_setup_with_progress(
+    let (layers, model_path, listener) = match cake::sharding::worker_setup_with_progress(
         name,
         cluster_key,
         address,

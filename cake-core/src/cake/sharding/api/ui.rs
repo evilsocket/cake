@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 use crate::cake::discovery;
 use crate::models::Model;
 
-use super::Master;
+use crate::cake::Master;
 
 const INDEX_HTML: &str = include_str!("index.html");
 

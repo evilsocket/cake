@@ -3,7 +3,8 @@ use std::io::Write;
 use crate::models::chat::Message;
 use crate::models::{AudioGenerationArgs, AudioOutput, Model};
 
-use super::{api, Context};
+use super::api;
+use crate::cake::Context;
 
 use crate::{ImageGenerationArgs, ModelType};
 use anyhow::Result;

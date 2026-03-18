@@ -14,26 +14,18 @@ use async_trait::async_trait;
 use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 
-#[cfg(feature = "master")]
-pub mod api;
-#[cfg(feature = "master")]
-mod master;
-
-pub mod auth;
-mod client;
-pub mod discovery;
-mod proto;
-pub mod setup;
-mod topology;
-mod worker;
+pub mod sharding;
 
 #[cfg(feature = "master")]
-pub use master::*;
+pub use sharding::master::*;
 
-pub use client::*;
-pub use proto::*;
-pub use topology::*;
-pub use worker::*;
+pub use sharding::{Strategy, WorkerCapacity, DefaultStrategy};
+pub use sharding::topology::*;
+pub use sharding::client::*;
+pub use sharding::proto::*;
+pub use sharding::worker::*;
+pub use sharding::discovery;
+pub use sharding::auth;
 
 /// Determines if we run in master or worker mode.
 #[derive(clap::ValueEnum, Clone, Debug, Default)]
@@ -120,7 +112,9 @@ impl Context {
         // transfers in multi-GPU setups. Safe since we use a single stream per device.
         #[cfg(feature = "cuda")]
         if let Device::Cuda(cuda_dev) = &device {
-            unsafe { cuda_dev.disable_event_tracking(); }
+            unsafe {
+                cuda_dev.disable_event_tracking();
+            }
         }
 
         log::info!(
@@ -128,7 +122,11 @@ impl Context {
             args.mode,
             &dtype,
             &device,
-            human_bytes::human_bytes(memory_stats::memory_stats().map(|m| m.physical_mem).unwrap_or(0) as f64)
+            human_bytes::human_bytes(
+                memory_stats::memory_stats()
+                    .map(|m| m.physical_mem)
+                    .unwrap_or(0) as f64
+            )
         );
 
         let data_path = PathBuf::from(&args.model);
@@ -146,7 +144,7 @@ impl Context {
             data_path
         };
 
-        let topology = if let Some(topo) = args.topology_override.take() {
+        let mut topology = if let Some(topo) = args.topology_override.take() {
             // Zero-config setup already built the topology
             topo
         } else if let Some(path) = &args.topology {
@@ -156,6 +154,67 @@ impl Context {
             Topology::new()
         };
 
+        // If the topology has nodes with no layer assignments, automatically
+        // distribute layers using the TFLOPS-proportional sharding algorithm.
+        // This lets users specify worker addresses without manual layer ranges.
+        if topology.needs_auto_sharding()
+            && (args.model_type == ModelType::TextModel || args.model_type == ModelType::AudioModel)
+        {
+            let config_path = data_path.join("config.json");
+            if config_path.exists() {
+                let config_data = std::fs::read_to_string(&config_path)?;
+                let config_json: serde_json::Value = serde_json::from_str(&config_data)?;
+
+                let num_layers = config_json
+                    .get("num_hidden_layers")
+                    .and_then(|v| v.as_u64())
+                    .or_else(|| {
+                        config_json
+                            .get("text_config")
+                            .and_then(|tc| tc.get("num_hidden_layers"))
+                            .and_then(|v| v.as_u64())
+                    })
+                    .unwrap_or(0) as usize;
+
+                if num_layers > 0 {
+                    let layer_prefix = sharding::default::layer_prefix_for_config(&config_json);
+                    let layer_size =
+                        sharding::default::estimate_layer_size(&data_path, num_layers, &layer_prefix);
+
+                    // Detect master GPU for TFLOPS estimate
+                    let master_gpus = discovery::detect_gpus();
+                    let master_tflops: f64 = master_gpus.iter().map(|g| g.tflops as f64).sum();
+
+                    log::info!(
+                        "topology has {} worker(s) with no layer assignments — auto-sharding {} layers",
+                        topology.len(),
+                        num_layers,
+                    );
+
+                    topology.auto_assign_layers(
+                        num_layers,
+                        master_tflops,
+                        layer_size,
+                        usize::MAX, // no master VRAM cap for topology mode
+                        &layer_prefix,
+                    );
+
+                    // Log final assignments
+                    for (name, node) in topology.iter() {
+                        if !node.layers.is_empty() {
+                            log::info!(
+                                "  {} → {} layers ({} — {})",
+                                name,
+                                node.layers.len(),
+                                node.layers.first().unwrap(),
+                                node.layers.last().unwrap(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         let mut config: Option<Config> = None;
         let mut cache: Option<Cache> = None;
         let mut var_builder: Option<VarBuilder> = None;
@@ -164,13 +223,14 @@ impl Context {
 
         if args.model_type == ModelType::TextModel {
             // Check if the model path is a GGUF file
-            let is_gguf = utils::gguf::is_gguf_file(&data_path);
-
-            if is_gguf {
+            if utils::gguf::is_gguf_file(&data_path) {
                 // GGUF path: extract config and architecture from GGUF metadata
                 let arch_str = utils::gguf::arch_from_gguf(&data_path)?;
                 text_model_arch = arch_str_to_text_model_arch(&arch_str);
-                log::info!("GGUF model: architecture={:?} (from metadata)", text_model_arch);
+                log::info!(
+                    "GGUF model: architecture={:?} (from metadata)",
+                    text_model_arch
+                );
 
                 let config_internal = utils::gguf::config_from_gguf(&data_path)?;
                 log::info!(
@@ -191,142 +251,170 @@ impl Context {
                 cache = Some(Cache::new(true, dtype, &config_internal, &device)?);
                 config = Some(config_internal);
             } else {
-            // Safetensors path (existing flow)
-            let config_filename = data_path.join("config.json");
+                // Safetensors path (existing flow)
+                let config_filename = data_path.join("config.json");
 
-            // Auto-detect architecture if needed
-            if text_model_arch == TextModelArch::Auto {
-                let arch_str = detect_text_model_arch(&config_filename).unwrap_or_default();
-                text_model_arch = arch_str_to_text_model_arch(&arch_str);
-            }
+                // Auto-detect architecture if needed
+                if text_model_arch == TextModelArch::Auto {
+                    let arch_str = detect_text_model_arch(&config_filename).unwrap_or_default();
+                    text_model_arch = arch_str_to_text_model_arch(&arch_str);
+                }
 
-            log::info!("text model architecture: {:?}", text_model_arch);
+                log::info!("text model architecture: {:?}", text_model_arch);
 
-            let config_internal = match text_model_arch {
-                #[cfg(feature = "qwen2")]
-                TextModelArch::Qwen2 => {
-                    crate::models::qwen2::QwenConfig::from_path(&config_filename)?.into_config()
-                }
-                #[cfg(feature = "qwen3_5")]
-                TextModelArch::Qwen3_5 => {
-                    crate::models::qwen3_5::Qwen3_5Config::from_path(&config_filename)?.into_config()
-                }
-                #[cfg(feature = "qwen3")]
-                TextModelArch::Qwen3 => {
-                    crate::models::qwen3::Qwen3Config::from_path(&config_filename)?.into_config()
-                }
-                #[cfg(feature = "qwen3_moe")]
-                TextModelArch::Qwen3Moe => {
-                    crate::models::qwen3_moe::Qwen3MoeConfig::from_path(&config_filename)?.into_config()
-                }
-                #[cfg(feature = "qwen3_5_moe")]
-                TextModelArch::Qwen3_5Moe => {
-                    crate::models::qwen3_5_moe::Qwen3_5MoeConfig::from_path(&config_filename)?.into_config()
-                }
-                #[cfg(feature = "phi4")]
-                TextModelArch::Phi4 => {
-                    crate::models::phi4::Phi4Config::from_path(&config_filename)?.into_config()
-                }
-                #[cfg(feature = "mistral")]
-                TextModelArch::Mistral => {
-                    crate::models::mistral::MistralConfig::from_path(&config_filename)?.into_config()
-                }
-                #[cfg(feature = "gemma3")]
-                TextModelArch::Gemma3 => {
-                    crate::models::gemma3::Gemma3Config::from_path(&config_filename)?.into_config()
-                }
-                #[cfg(feature = "falcon3")]
-                TextModelArch::Falcon3 => {
-                    crate::models::falcon3::Falcon3Config::from_path(&config_filename)?.into_config()
-                }
-                #[cfg(feature = "olmo2")]
-                TextModelArch::OLMo2 => {
-                    crate::models::olmo2::OLMo2Config::from_path(&config_filename)?.into_config()
-                }
-                #[cfg(feature = "exaone4")]
-                TextModelArch::EXAONE4 => {
-                    crate::models::exaone4::EXAONE4Config::from_path(&config_filename)?.into_config()
-                }
-                #[cfg(feature = "luxtts")]
-                TextModelArch::LuxTTS => {
-                    let luxtts_cfg = crate::models::luxtts::LuxTTSConfig::from_path(&config_filename)?;
-                    // Create a minimal common Config for the framework
-                    Config {
-                        hidden_size: luxtts_cfg.model.fm_decoder_dim,
-                        intermediate_size: luxtts_cfg.model.fm_decoder_feedforward_dim,
-                        vocab_size: luxtts_cfg.model.vocab_size,
-                        num_hidden_layers: luxtts_cfg.total_fm_layers(),
-                        num_attention_heads: luxtts_cfg.model.fm_decoder_num_heads,
-                        num_key_value_heads: luxtts_cfg.model.fm_decoder_num_heads,
-                        rms_norm_eps: 1e-5,
-                        rope_theta: 10000.0,
-                        bos_token_id: None,
-                        eos_token_id: None,
-                        rope_scaling: None,
-                        tie_word_embeddings: false,
-                        max_seq_len: 4096,
-                        use_qkv_bias: false,
-                        model_prefix: "fm_decoder".to_string(),
-                        head_dim: None,
-                        partial_rotary_factor: 1.0,
-                        linear_attn: None,
-                        residual_rms_norm: false,
-                        use_qk_norm: false,
-                        pre_reshape_qk_norm: false,
-                        sliding_window: None,
-                        fused_qkv_proj: false,
-                        fused_gate_up_proj: false,
-                        global_layers: vec![],
-                        use_gelu_mlp: false,
-                        embed_scale: None,
-                        moe_intermediate_size: None,
-                        num_experts: 0,
-                        num_experts_per_tok: 0,
-                        norm_topk_prob: false,
-                        shared_expert_intermediate_size: None,
-                        attn_output_gate: false,
+                let config_internal = match text_model_arch {
+                    #[cfg(feature = "qwen2")]
+                    TextModelArch::Qwen2 => {
+                        crate::models::qwen2::QwenConfig::from_path(&config_filename)?.into_config()
                     }
-                }
-                #[cfg(feature = "llama")]
-                TextModelArch::Llama => {
-                    crate::models::llama3::LlamaConfig::from_path(&config_filename)?.into_config()
-                }
-                _ => {
-                    bail!("no text model feature enabled for architecture {:?}", text_model_arch)
-                }
-            };
+                    #[cfg(feature = "qwen3_5")]
+                    TextModelArch::Qwen3_5 => {
+                        crate::models::qwen3_5::Qwen3_5Config::from_path(&config_filename)?
+                            .into_config()
+                    }
+                    #[cfg(feature = "qwen3")]
+                    TextModelArch::Qwen3 => {
+                        crate::models::qwen3::Qwen3Config::from_path(&config_filename)?
+                            .into_config()
+                    }
+                    #[cfg(feature = "qwen3_moe")]
+                    TextModelArch::Qwen3Moe => {
+                        crate::models::qwen3_moe::Qwen3MoeConfig::from_path(&config_filename)?
+                            .into_config()
+                    }
+                    #[cfg(feature = "qwen3_5_moe")]
+                    TextModelArch::Qwen3_5Moe => {
+                        crate::models::qwen3_5_moe::Qwen3_5MoeConfig::from_path(&config_filename)?
+                            .into_config()
+                    }
+                    #[cfg(feature = "phi4")]
+                    TextModelArch::Phi4 => {
+                        crate::models::phi4::Phi4Config::from_path(&config_filename)?.into_config()
+                    }
+                    #[cfg(feature = "mistral")]
+                    TextModelArch::Mistral => {
+                        crate::models::mistral::MistralConfig::from_path(&config_filename)?
+                            .into_config()
+                    }
+                    #[cfg(feature = "gemma3")]
+                    TextModelArch::Gemma3 => {
+                        crate::models::gemma3::Gemma3Config::from_path(&config_filename)?
+                            .into_config()
+                    }
+                    #[cfg(feature = "falcon3")]
+                    TextModelArch::Falcon3 => {
+                        crate::models::falcon3::Falcon3Config::from_path(&config_filename)?
+                            .into_config()
+                    }
+                    #[cfg(feature = "olmo2")]
+                    TextModelArch::OLMo2 => {
+                        crate::models::olmo2::OLMo2Config::from_path(&config_filename)?
+                            .into_config()
+                    }
+                    #[cfg(feature = "exaone4")]
+                    TextModelArch::EXAONE4 => {
+                        crate::models::exaone4::EXAONE4Config::from_path(&config_filename)?
+                            .into_config()
+                    }
+                    #[cfg(feature = "luxtts")]
+                    TextModelArch::LuxTTS => {
+                        let luxtts_cfg =
+                            crate::models::luxtts::LuxTTSConfig::from_path(&config_filename)?;
+                        // Create a minimal common Config for the framework
+                        Config {
+                            hidden_size: luxtts_cfg.model.fm_decoder_dim,
+                            intermediate_size: luxtts_cfg.model.fm_decoder_feedforward_dim,
+                            vocab_size: luxtts_cfg.model.vocab_size,
+                            num_hidden_layers: luxtts_cfg.total_fm_layers(),
+                            num_attention_heads: luxtts_cfg.model.fm_decoder_num_heads,
+                            num_key_value_heads: luxtts_cfg.model.fm_decoder_num_heads,
+                            rms_norm_eps: 1e-5,
+                            rope_theta: 10000.0,
+                            bos_token_id: None,
+                            eos_token_id: None,
+                            rope_scaling: None,
+                            tie_word_embeddings: false,
+                            max_seq_len: 4096,
+                            use_qkv_bias: false,
+                            model_prefix: "fm_decoder".to_string(),
+                            head_dim: None,
+                            partial_rotary_factor: 1.0,
+                            linear_attn: None,
+                            residual_rms_norm: false,
+                            use_qk_norm: false,
+                            pre_reshape_qk_norm: false,
+                            sliding_window: None,
+                            fused_qkv_proj: false,
+                            fused_gate_up_proj: false,
+                            global_layers: vec![],
+                            use_gelu_mlp: false,
+                            embed_scale: None,
+                            moe_intermediate_size: None,
+                            num_experts: 0,
+                            num_experts_per_tok: 0,
+                            norm_topk_prob: false,
+                            shared_expert_intermediate_size: None,
+                            attn_output_gate: false,
+                        }
+                    }
+                    #[cfg(feature = "llama")]
+                    TextModelArch::Llama => {
+                        crate::models::llama3::LlamaConfig::from_path(&config_filename)?
+                            .into_config()
+                    }
+                    _ => {
+                        bail!(
+                            "no text model feature enabled for architecture {:?}",
+                            text_model_arch
+                        )
+                    }
+                };
 
-            let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
-            quant = Arc::from(utils::detect_quantization(&config_filename));
-            let is_master = matches!(args.mode, Mode::Master);
-            let my_layers: Vec<String> = if !is_master {
-                topology.all_worker_layers().into_iter().collect()
-            } else {
-                vec![]
-            };
+                let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
+                quant = Arc::from(utils::detect_quantization(&config_filename));
+                let is_master = matches!(args.mode, Mode::Master);
+                let my_layers: Vec<String> = if !is_master {
+                    topology.all_worker_layers().into_iter().collect()
+                } else {
+                    vec![]
+                };
 
-            var_builder = Some(if is_master {
-                let worker_layers = topology.all_worker_layers();
-                if worker_layers.is_empty() {
-                    utils::load_var_builder_from_index(
-                        model_tensors_index, dtype, device.clone(), &*quant,
+                var_builder = Some(if is_master {
+                    let worker_layers = topology.all_worker_layers();
+                    if worker_layers.is_empty() {
+                        utils::load_var_builder_from_index(
+                            model_tensors_index,
+                            dtype,
+                            device.clone(),
+                            &*quant,
+                        )?
+                    } else {
+                        utils::load_var_builder_for_local_layers(
+                            model_tensors_index,
+                            dtype,
+                            device.clone(),
+                            &worker_layers,
+                            &*quant,
+                        )?
+                    }
+                } else if !my_layers.is_empty() {
+                    utils::load_var_builder_for_specific_layers(
+                        model_tensors_index,
+                        dtype,
+                        device.clone(),
+                        &my_layers,
+                        &*quant,
                     )?
                 } else {
-                    utils::load_var_builder_for_local_layers(
-                        model_tensors_index, dtype, device.clone(), &worker_layers, &*quant,
+                    utils::load_var_builder_from_index(
+                        model_tensors_index,
+                        dtype,
+                        device.clone(),
+                        &*quant,
                     )?
-                }
-            } else if !my_layers.is_empty() {
-                utils::load_var_builder_for_specific_layers(
-                    model_tensors_index, dtype, device.clone(), &my_layers, &*quant,
-                )?
-            } else {
-                utils::load_var_builder_from_index(
-                    model_tensors_index, dtype, device.clone(), &*quant,
-                )?
-            });
-            cache = Some(Cache::new(true, dtype, &config_internal, &device)?);
-            config = Some(config_internal);
+                });
+                cache = Some(Cache::new(true, dtype, &config_internal, &device)?);
+                config = Some(config_internal);
             } // end else (safetensors path)
         }
 
@@ -340,11 +428,16 @@ impl Context {
             if config_filename.exists() {
                 // VibeVoice models: parse decoder_config for the LM backbone
                 text_model_arch = TextModelArch::Qwen2;
-                let config_internal = crate::models::vibevoice::config_1_5b::VibeVoice1_5BConfig::from_path(&config_filename)
+                let config_internal =
+                    crate::models::vibevoice::config_1_5b::VibeVoice1_5BConfig::from_path(
+                        &config_filename,
+                    )
                     .map(|c| c.into_config())
                     .or_else(|_| {
-                        crate::models::vibevoice::config::VibeVoiceConfig::from_path(&config_filename)
-                            .map(|c| c.into_config())
+                        crate::models::vibevoice::config::VibeVoiceConfig::from_path(
+                            &config_filename,
+                        )
+                        .map(|c| c.into_config())
                     })
                     .ok();
                 if let Some(ref cfg) = config_internal {
@@ -353,11 +446,18 @@ impl Context {
                     let my_layers: Vec<String> = topology.all_worker_layers().into_iter().collect();
                     var_builder = Some(if !my_layers.is_empty() {
                         utils::load_var_builder_for_specific_layers(
-                            model_tensors_index, dtype, device.clone(), &my_layers, &*quant,
+                            model_tensors_index,
+                            dtype,
+                            device.clone(),
+                            &my_layers,
+                            &*quant,
                         )?
                     } else {
                         utils::load_var_builder_from_index(
-                            model_tensors_index, dtype, device.clone(), &*quant,
+                            model_tensors_index,
+                            dtype,
+                            device.clone(),
+                            &*quant,
                         )?
                     });
                     cache = Some(Cache::new(true, dtype, cfg, &device)?);
@@ -469,14 +569,20 @@ mod tests {
 
     #[test]
     fn arch_str_unknown_falls_back_to_llama() {
-        assert_eq!(arch_str_to_text_model_arch("UnknownArchXYZ"), TextModelArch::Llama);
+        assert_eq!(
+            arch_str_to_text_model_arch("UnknownArchXYZ"),
+            TextModelArch::Llama
+        );
         assert_eq!(arch_str_to_text_model_arch(""), TextModelArch::Llama);
     }
 
     #[test]
     #[cfg(feature = "qwen2")]
     fn arch_str_qwen2() {
-        assert_eq!(arch_str_to_text_model_arch("Qwen2ForCausalLM"), TextModelArch::Qwen2);
+        assert_eq!(
+            arch_str_to_text_model_arch("Qwen2ForCausalLM"),
+            TextModelArch::Qwen2
+        );
     }
 
     #[test]
@@ -491,13 +597,19 @@ mod tests {
     #[test]
     #[cfg(feature = "qwen3")]
     fn arch_str_qwen3() {
-        assert_eq!(arch_str_to_text_model_arch("Qwen3ForCausalLM"), TextModelArch::Qwen3);
+        assert_eq!(
+            arch_str_to_text_model_arch("Qwen3ForCausalLM"),
+            TextModelArch::Qwen3
+        );
     }
 
     #[test]
     #[cfg(feature = "qwen3_moe")]
     fn arch_str_qwen3_moe() {
-        assert_eq!(arch_str_to_text_model_arch("Qwen3MoeForCausalLM"), TextModelArch::Qwen3Moe);
+        assert_eq!(
+            arch_str_to_text_model_arch("Qwen3MoeForCausalLM"),
+            TextModelArch::Qwen3Moe
+        );
     }
 
     #[test]
@@ -512,44 +624,71 @@ mod tests {
     #[test]
     #[cfg(feature = "phi4")]
     fn arch_str_phi3_and_phi4() {
-        assert_eq!(arch_str_to_text_model_arch("Phi3ForCausalLM"), TextModelArch::Phi4);
-        assert_eq!(arch_str_to_text_model_arch("Phi4ForCausalLM"), TextModelArch::Phi4);
+        assert_eq!(
+            arch_str_to_text_model_arch("Phi3ForCausalLM"),
+            TextModelArch::Phi4
+        );
+        assert_eq!(
+            arch_str_to_text_model_arch("Phi4ForCausalLM"),
+            TextModelArch::Phi4
+        );
     }
 
     #[test]
     #[cfg(feature = "mistral")]
     fn arch_str_mistral() {
-        assert_eq!(arch_str_to_text_model_arch("MistralForCausalLM"), TextModelArch::Mistral);
+        assert_eq!(
+            arch_str_to_text_model_arch("MistralForCausalLM"),
+            TextModelArch::Mistral
+        );
     }
 
     #[test]
     #[cfg(feature = "gemma3")]
     fn arch_str_gemma3() {
-        assert_eq!(arch_str_to_text_model_arch("Gemma3ForCausalLM"), TextModelArch::Gemma3);
+        assert_eq!(
+            arch_str_to_text_model_arch("Gemma3ForCausalLM"),
+            TextModelArch::Gemma3
+        );
     }
 
     #[test]
     #[cfg(feature = "falcon3")]
     fn arch_str_falcon3() {
-        assert_eq!(arch_str_to_text_model_arch("FalconForCausalLM"), TextModelArch::Falcon3);
+        assert_eq!(
+            arch_str_to_text_model_arch("FalconForCausalLM"),
+            TextModelArch::Falcon3
+        );
     }
 
     #[test]
     #[cfg(feature = "olmo2")]
     fn arch_str_olmo2_both_spellings() {
-        assert_eq!(arch_str_to_text_model_arch("OLMo2ForCausalLM"), TextModelArch::OLMo2);
-        assert_eq!(arch_str_to_text_model_arch("Olmo2ForCausalLM"), TextModelArch::OLMo2);
+        assert_eq!(
+            arch_str_to_text_model_arch("OLMo2ForCausalLM"),
+            TextModelArch::OLMo2
+        );
+        assert_eq!(
+            arch_str_to_text_model_arch("Olmo2ForCausalLM"),
+            TextModelArch::OLMo2
+        );
     }
 
     #[test]
     #[cfg(feature = "exaone4")]
     fn arch_str_exaone4() {
-        assert_eq!(arch_str_to_text_model_arch("ExaoneForCausalLM"), TextModelArch::EXAONE4);
+        assert_eq!(
+            arch_str_to_text_model_arch("ExaoneForCausalLM"),
+            TextModelArch::EXAONE4
+        );
     }
 
     #[test]
     #[cfg(feature = "luxtts")]
     fn arch_str_luxtts() {
-        assert_eq!(arch_str_to_text_model_arch("LuxTTSForTextToSpeech"), TextModelArch::LuxTTS);
+        assert_eq!(
+            arch_str_to_text_model_arch("LuxTTSForTextToSpeech"),
+            TextModelArch::LuxTTS
+        );
     }
 }

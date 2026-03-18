@@ -23,7 +23,7 @@ use audio::*;
 use image::*;
 use text::*;
 
-use super::Master;
+use super::master::Master;
 
 #[derive(Serialize)]
 struct ModelObject {

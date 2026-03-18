@@ -5,7 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{Context, Forwarder, Message, WorkerInfo};
+use crate::cake::{Context, Forwarder};
+use super::{Message, WorkerInfo};
 use crate::models::Generator;
 
 use anyhow::Result;

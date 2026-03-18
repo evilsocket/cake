@@ -46,80 +46,28 @@ impl DiscoveredWorker {
     }
 
     /// Maximum number of layers this worker can fit, based on per-GPU VRAM.
-    ///
-    /// For dedicated GPUs (CUDA), reserves ~5% for driver/runtime overhead
-    /// (typically 200–600 MiB for CUDA context + cuBLAS workspace).
-    /// For unified-memory devices (Apple Silicon), reserves 28% of total
-    /// (minimum 6 GiB) for macOS + inference working memory, since model
-    /// weights compete with the OS for the same physical RAM and insufficient
-    /// headroom causes catastrophic memory-compressor thrashing.
     pub fn max_layers_for_size(&self, layer_size_bytes: u64) -> usize {
-        if layer_size_bytes == 0 || self.gpus.is_empty() {
-            return usize::MAX;
-        }
-        self.gpus
-            .iter()
-            .map(|g| {
-                let name_lower = g.name.to_lowercase();
-                let is_cpu = name_lower.starts_with("cpu");
-                let is_unified = name_lower.contains("apple");
-                let usable = if is_cpu {
-                    // CPU / mobile worker: reported vram_bytes is system RAM.
-                    // Reserve 20% for OS + runtime; no large fixed minimum since
-                    // mobile devices may have only 2–4 GiB total.
-                    let reserve = (g.vram_bytes as f64 * 0.20) as u64;
-                    g.vram_bytes.saturating_sub(reserve)
-                } else if is_unified {
-                    // Unified memory: reserve 28% of total (min 6 GiB) for OS +
-                    // Metal working memory. At 30 layers on a 36 GiB M3 Pro,
-                    // only 8 GiB remained and macOS memory compressor caused
-                    // 100+ sec/forward-pass thrashing; 28% keeps ~10 GiB free.
-                    let min_reserve = 6u64 * 1024 * 1024 * 1024;
-                    let pct_reserve = (g.vram_bytes as f64 * 0.28) as u64;
-                    let os_reserve = pct_reserve.max(min_reserve);
-                    g.vram_bytes.saturating_sub(os_reserve)
-                } else {
-                    // Dedicated VRAM: reserve max(5%, 768 MiB) for CUDA context,
-                    // cuBLAS workspace, and memory fragmentation. The percentage
-                    // works for large GPUs (24+ GB), but on 12 GB GPUs 5% = 600 MB
-                    // leaves only ~50 MB headroom after filling layers, causing OOM.
-                    let min_reserve = 768u64 * 1024 * 1024;
-                    let pct_reserve = (g.vram_bytes as f64 * 0.05) as u64;
-                    let reserve = pct_reserve.max(min_reserve);
-                    g.vram_bytes.saturating_sub(reserve)
-                };
-                (usable / layer_size_bytes) as usize
-            })
-            .sum()
+        super::max_layers_for_gpus(&self.gpus, layer_size_bytes)
     }
 
     /// Total estimated TFLOPS across all GPUs.
-    /// Falls back to a VRAM-based estimate when workers report 0 (old binaries).
     pub fn total_tflops(&self) -> f64 {
-        let reported: f64 = self.gpus.iter().map(|g| g.tflops as f64).sum();
-        if reported > 0.0 {
-            return reported;
-        }
-        // Fallback: estimate from VRAM and device name
-        self.gpus
-            .iter()
-            .map(|g| {
-                let vram_gb = g.vram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-                let name_lower = g.name.to_lowercase();
-                if name_lower.contains("nvidia")
-                    || name_lower.contains("geforce")
-                    || name_lower.contains("rtx")
-                    || name_lower.contains("gtx")
-                    || name_lower.contains("tesla")
-                {
-                    vram_gb * 3.0 // CUDA GPU fallback
-                } else if name_lower.contains("apple") || name_lower.contains("silicon") {
-                    vram_gb * 0.4 // Metal fallback
-                } else {
-                    2.0 // CPU fallback
-                }
-            })
-            .sum()
+        super::estimate_tflops_for_gpus(&self.gpus)
+    }
+}
+
+impl super::WorkerCapacity for DiscoveredWorker {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn total_vram(&self) -> u64 {
+        self.total_vram()
+    }
+    fn total_tflops(&self) -> f64 {
+        self.total_tflops()
+    }
+    fn max_layers_for_size(&self, layer_size_bytes: u64) -> usize {
+        self.max_layers_for_size(layer_size_bytes)
     }
 }
 

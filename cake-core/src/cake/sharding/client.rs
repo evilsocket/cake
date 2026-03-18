@@ -3,7 +3,8 @@ use async_trait::async_trait;
 use candle_core::{Device, Tensor};
 use tokio::net::TcpStream;
 
-use super::{Context, Message, WorkerInfo};
+use crate::cake::{Context, Forwarder};
+use super::{Message, WorkerInfo};
 
 /// A client object used by the master to connect and orchestrate the workers.
 /// From the Cake perspective, each worker is a server and the master uses
@@ -69,7 +70,7 @@ impl Client {
             .await
             .map_err(|e| anyhow!("error sending message {:?}: {}", req, e))?;
 
-        let (_, msg) = super::Message::from_reader_buf(&mut self.stream, &mut self.read_buf)
+        let (_, msg) = Message::from_reader_buf(&mut self.stream, &mut self.read_buf)
             .await
             .map_err(|e| anyhow!("error receiving response for {:?}: {}", req, e))?;
         Ok(msg)
@@ -83,7 +84,7 @@ impl Client {
         let send_elapsed = send_start.elapsed();
 
         let recv_start = std::time::Instant::now();
-        let (resp_size, msg) = super::Message::from_reader_buf(&mut self.stream, &mut self.read_buf)
+        let (resp_size, msg) = Message::from_reader_buf(&mut self.stream, &mut self.read_buf)
             .await
             .map_err(|e| anyhow!("error receiving response for {:?}: {}", req, e))?;
         let recv_elapsed = recv_start.elapsed();
@@ -125,7 +126,7 @@ impl std::fmt::Display for Client {
 }
 
 #[async_trait]
-impl super::Forwarder for Client {
+impl Forwarder for Client {
     fn load(_: String, _: &Context) -> Result<Box<Self>> {
         Err(anyhow!("load should never be called on cake::Client"))
     }
@@ -145,7 +146,7 @@ impl super::Forwarder for Client {
         _: &mut Context,
     ) -> Result<Tensor> {
         log::debug!("forwarding single op");
-        self.forward_request(super::Message::single_op(
+        self.forward_request(Message::single_op(
             &self.layer_name,
             x,
             index_pos,
@@ -162,7 +163,7 @@ impl super::Forwarder for Client {
         _: &mut Context,
     ) -> Result<Tensor> {
         log::debug!("forwarding batch of {} elements", batch.len());
-        self.forward_request(super::Message::from_batch(x, batch))
+        self.forward_request(Message::from_batch(x, batch))
             .await
     }
 

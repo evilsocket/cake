@@ -135,7 +135,7 @@ async fn main() -> Result<()> {
             if args.cluster_key.is_some() && args.topology.is_none() {
                 let model_path = resolve_model_path(&args.model)?;
                 let timeout = Duration::from_secs(args.discovery_timeout);
-                let topology = cake::setup::master_setup(
+                let topology = cake::sharding::master_setup(
                     args.cluster_key.as_ref().unwrap(),
                     &model_path,
                     timeout,
@@ -162,7 +162,7 @@ async fn main() -> Result<()> {
                 }
                 let worker_name = args.name.as_deref().unwrap();
                 let cache_dir = cache_base_dir();
-                let (layers, model_path, listener) = cake::setup::worker_setup(
+                let (layers, model_path, listener) = cake::sharding::worker_setup(
                     worker_name,
                     args.cluster_key.as_ref().unwrap(),
                     &args.address,

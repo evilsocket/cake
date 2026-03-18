@@ -6,6 +6,9 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use super::{WorkerCapacity, max_layers_for_gpus, estimate_tflops_for_gpus};
+use super::discovery;
+
 lazy_static! {
     static ref LAYER_RANGE_PARSER: Regex = Regex::new(r"(?m)^(.+[^\d])(\d+)-(\d+)$").unwrap();
 }
@@ -45,6 +48,57 @@ impl Node {
         }
 
         false
+    }
+
+    /// Build a synthetic [`discovery::GpuInfo`] list from this node's VRAM/TFLOPS.
+    ///
+    /// Used when a topology file specifies nodes without layer assignments,
+    /// so the sharding algorithm can estimate capacity.
+    fn as_gpu_info(&self) -> Vec<discovery::GpuInfo> {
+        if self.vram_bytes == 0 {
+            return vec![];
+        }
+        vec![discovery::GpuInfo {
+            name: self
+                .description
+                .clone()
+                .or_else(|| {
+                    if !self.backend.is_empty() {
+                        Some(self.backend.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| format!("GPU ({})", self.hostname)),
+            vram_bytes: self.vram_bytes,
+            tflops: self.tflops as f32,
+        }]
+    }
+}
+
+/// Wrapper that pairs a worker name with a [`Node`] reference, implementing
+/// [`WorkerCapacity`] so topology nodes can be fed to the sharding algorithm.
+pub struct NamedNode<'a> {
+    /// Worker name (topology map key).
+    pub name: &'a str,
+    /// Reference to the node.
+    pub node: &'a Node,
+}
+
+impl WorkerCapacity for NamedNode<'_> {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn total_vram(&self) -> u64 {
+        self.node.vram_bytes
+    }
+    fn total_tflops(&self) -> f64 {
+        let gpus = self.node.as_gpu_info();
+        estimate_tflops_for_gpus(&gpus)
+    }
+    fn max_layers_for_size(&self, layer_size_bytes: u64) -> usize {
+        let gpus = self.node.as_gpu_info();
+        max_layers_for_gpus(&gpus, layer_size_bytes)
     }
 }
 
@@ -123,6 +177,76 @@ impl Topology {
             }
         }
         None
+    }
+
+    /// Returns `true` if any node in this topology has an empty `layers` list,
+    /// meaning layer assignments should be computed automatically.
+    pub fn needs_auto_sharding(&self) -> bool {
+        !self.0.is_empty() && self.0.values().all(|n| n.layers.is_empty())
+    }
+
+    /// Automatically assign layers to nodes using the provided [`Strategy`].
+    ///
+    /// This is used when a topology file specifies worker addresses but
+    /// leaves `layers` empty — letting the master decide distribution
+    /// without requiring mDNS discovery.
+    pub fn auto_assign_layers(
+        &mut self,
+        num_layers: usize,
+        master_tflops: f64,
+        layer_size_bytes: u64,
+        master_max_layers: usize,
+        layer_prefix: &str,
+    ) {
+        self.auto_assign_layers_with_strategy(
+            &super::DefaultStrategy,
+            num_layers,
+            master_tflops,
+            layer_size_bytes,
+            master_max_layers,
+            layer_prefix,
+        )
+    }
+
+    /// Automatically assign layers to nodes using the specified [`Strategy`].
+    pub fn auto_assign_layers_with_strategy(
+        &mut self,
+        strategy: &dyn super::Strategy,
+        num_layers: usize,
+        master_tflops: f64,
+        layer_size_bytes: u64,
+        master_max_layers: usize,
+        layer_prefix: &str,
+    ) {
+        // Build a stable ordering of worker names (sorted alphabetically)
+        // so assignments are deterministic.
+        let mut worker_names: Vec<String> = self.0.keys().cloned().collect();
+        worker_names.sort();
+
+        let named_nodes: Vec<NamedNode<'_>> = worker_names
+            .iter()
+            .map(|name| NamedNode {
+                name: name.as_str(),
+                node: &self.0[name],
+            })
+            .collect();
+
+        let dyn_workers: Vec<&dyn WorkerCapacity> = named_nodes.iter().map(|n| n as &dyn WorkerCapacity).collect();
+        let assignments = strategy.assign_layers(
+            &dyn_workers,
+            num_layers,
+            master_tflops,
+            layer_size_bytes,
+            master_max_layers,
+            layer_prefix,
+        );
+
+        for (worker_idx, layers) in assignments {
+            let name = &worker_names[worker_idx];
+            if let Some(node) = self.0.get_mut(name) {
+                node.layers = layers;
+            }
+        }
     }
 }
 

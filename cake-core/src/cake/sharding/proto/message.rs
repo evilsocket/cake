@@ -483,11 +483,11 @@ mod tests {
         // Write valid magic, then size > MESSAGE_MAX_SIZE
         // write_u32 already writes in big-endian, so pass native values directly.
         writer
-            .write_u32(crate::cake::proto::PROTO_MAGIC)
+            .write_u32(crate::cake::sharding::proto::PROTO_MAGIC)
             .await
             .unwrap();
         writer
-            .write_u32(crate::cake::proto::MESSAGE_MAX_SIZE + 1)
+            .write_u32(crate::cake::sharding::proto::MESSAGE_MAX_SIZE + 1)
             .await
             .unwrap();
         drop(writer);
