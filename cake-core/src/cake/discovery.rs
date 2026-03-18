@@ -211,11 +211,28 @@ pub fn detect_gpus() -> Vec<GpuInfo> {
 
 /// Detect the system hostname.
 pub fn detect_hostname() -> String {
-    if let Ok(output) = std::process::Command::new("hostname").output() {
-        if output.status.success() {
-            let h = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !h.is_empty() {
-                return h;
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        let ret =
+            unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+        if ret == 0 {
+            let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            if let Ok(name) = std::str::from_utf8(&buf[..len]) {
+                if !name.is_empty() {
+                    return name.to_string();
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = std::process::Command::new("hostname").output() {
+            if output.status.success() {
+                let h = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !h.is_empty() {
+                    return h;
+                }
             }
         }
     }
@@ -241,42 +258,45 @@ pub fn detect_backend() -> String {
     "CPU".to_string()
 }
 
-/// Detect the CUDA toolkit version via nvcc.
+/// Detect the CUDA toolkit version by reading version files from the CUDA install directory.
+///
+/// Checks `$CUDA_HOME`, `$CUDA_PATH`, and `/usr/local/cuda` for `version.json` (CUDA 11+)
+/// or `version.txt` (older). No subprocess spawning required.
 pub fn detect_cuda_version() -> Option<String> {
-    // Try nvcc from PATH first.
-    let output = std::process::Command::new("nvcc")
-        .arg("--version")
-        .output();
+    let cuda_home = std::env::var("CUDA_HOME").ok();
+    let cuda_path = std::env::var("CUDA_PATH").ok();
 
-    // On Windows, nvcc may not be in PATH but CUDA_PATH is always set by the installer.
-    // Only fall back to CUDA_PATH if the PATH lookup failed.
-    #[cfg(target_os = "windows")]
-    let output = output.or_else(|_| {
-        let cuda_path = std::env::var("CUDA_PATH")
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::NotFound, "CUDA_PATH not set"))?;
-        let nvcc_path = std::path::PathBuf::from(&cuda_path)
-            .join("bin")
-            .join("nvcc.exe");
-        std::process::Command::new(nvcc_path)
-            .arg("--version")
-            .output()
-    });
+    let candidates: Vec<std::path::PathBuf> = cuda_home
+        .iter()
+        .chain(cuda_path.iter())
+        .map(std::path::PathBuf::from)
+        .chain(std::iter::once(std::path::PathBuf::from("/usr/local/cuda")))
+        .collect();
 
-    let output = output.ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Look for "release X.Y" in output like "Cuda compilation tools, release 12.4, V12.4.131"
-    for line in stdout.lines() {
-        if let Some(idx) = line.find("release ") {
-            let rest = &line[idx + 8..];
-            let ver = rest.split(',').next().unwrap_or(rest).trim();
-            if !ver.is_empty() {
-                return Some(format!("CUDA {}", ver));
+    for base in &candidates {
+        // Try version.json first (modern CUDA 11+)
+        let json_path = base.join("version.json");
+        if let Ok(content) = std::fs::read_to_string(&json_path) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(ver) = val.pointer("/cuda/version").and_then(|v| v.as_str()) {
+                    let short: String =
+                        ver.splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
+                    return Some(format!("CUDA {}", short));
+                }
+            }
+        }
+        // Try version.txt fallback (older CUDA)
+        let txt_path = base.join("version.txt");
+        if let Ok(content) = std::fs::read_to_string(&txt_path) {
+            if let Some(rest) = content.strip_prefix("CUDA Version ") {
+                let ver = rest.trim();
+                let short: String =
+                    ver.splitn(3, '.').take(2).collect::<Vec<_>>().join(".");
+                return Some(format!("CUDA {}", short));
             }
         }
     }
+
     None
 }
 
@@ -521,46 +541,31 @@ pub fn advertise_worker(
 fn get_broadcast_addresses() -> Vec<Ipv4Addr> {
     let mut addrs = Vec::new();
 
-    // Parse `ip addr` on Linux or `ifconfig` on macOS to find broadcast addresses
-    #[cfg(target_os = "linux")]
+    // On Unix, use libc::getifaddrs to enumerate interfaces without spawning a subprocess.
+    #[cfg(unix)]
     {
-        if let Ok(output) = std::process::Command::new("ip")
-            .args(["-4", "addr", "show"])
-            .output()
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                // Lines like: "    inet 192.168.50.199/24 brd 192.168.50.255 scope global ..."
-                if let Some(brd_idx) = line.find("brd ") {
-                    let rest = &line[brd_idx + 4..];
-                    if let Some(end) = rest.find(' ') {
-                        if let Ok(ip) = rest[..end].parse::<Ipv4Addr>() {
-                            if !ip.is_loopback() {
-                                addrs.push(ip);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        if let Ok(output) = std::process::Command::new("ifconfig").output() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                // Lines like: "	inet 192.168.50.32 netmask 0xffffff00 broadcast 192.168.50.255"
-                if let Some(brd_idx) = line.find("broadcast ") {
-                    let rest = &line[brd_idx + 10..];
-                    let addr_str = rest.split_whitespace().next().unwrap_or("");
-                    if let Ok(ip) = addr_str.parse::<Ipv4Addr>() {
-                        if !ip.is_loopback() {
+        let mut ifaddrs_ptr: *mut libc::ifaddrs = std::ptr::null_mut();
+        if unsafe { libc::getifaddrs(&mut ifaddrs_ptr) } == 0 {
+            let mut cursor = ifaddrs_ptr;
+            while !cursor.is_null() {
+                let ifa = unsafe { &*cursor };
+                if !ifa.ifa_addr.is_null() {
+                    let family = unsafe { (*ifa.ifa_addr).sa_family } as i32;
+                    if family == libc::AF_INET
+                        && (ifa.ifa_flags & libc::IFF_BROADCAST as libc::c_uint) != 0
+                        && !ifa.ifa_ifu.is_null()
+                    {
+                        let brd_sa =
+                            unsafe { &*(ifa.ifa_ifu as *const libc::sockaddr_in) };
+                        let ip = Ipv4Addr::from(u32::from_be(brd_sa.sin_addr.s_addr));
+                        if !ip.is_loopback() && !addrs.contains(&ip) {
                             addrs.push(ip);
                         }
                     }
                 }
+                cursor = unsafe { (*cursor).ifa_next };
             }
+            unsafe { libc::freeifaddrs(ifaddrs_ptr) };
         }
     }
 
@@ -1386,5 +1391,106 @@ mod tests {
         let h1 = cluster_hash("key");
         let h2 = cluster_hash("key ");
         assert_ne!(h1, h2);
+    }
+
+    // ── detect_hostname (additional) ──────────────────────────
+
+    #[test]
+    fn test_detect_hostname_no_null_bytes() {
+        let h = detect_hostname();
+        assert!(!h.contains('\0'));
+    }
+
+    #[test]
+    fn test_detect_hostname_valid_utf8() {
+        let h = detect_hostname();
+        assert!(h.chars().all(|c| c.is_ascii_alphanumeric()
+            || c == '-'
+            || c == '.'
+            || c == '_'));
+    }
+
+    // ── detect_cuda_version ─────────────────────────────────────
+
+    #[test]
+    fn test_detect_cuda_version_from_version_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let json_path = dir.path().join("version.json");
+        std::fs::write(
+            &json_path,
+            r#"{"cuda": {"name": "CUDA SDK", "version": "12.4.1"}}"#,
+        )
+        .unwrap();
+        std::env::set_var("CUDA_HOME", dir.path().as_os_str());
+        let result = detect_cuda_version();
+        std::env::remove_var("CUDA_HOME");
+        assert_eq!(result, Some("CUDA 12.4".to_string()));
+    }
+
+    #[test]
+    fn test_detect_cuda_version_from_version_txt() {
+        let dir = tempfile::tempdir().unwrap();
+        let txt_path = dir.path().join("version.txt");
+        std::fs::write(&txt_path, "CUDA Version 11.8.0\n").unwrap();
+        std::env::set_var("CUDA_HOME", dir.path().as_os_str());
+        let result = detect_cuda_version();
+        std::env::remove_var("CUDA_HOME");
+        assert_eq!(result, Some("CUDA 11.8".to_string()));
+    }
+
+    #[test]
+    fn test_detect_cuda_version_missing_dir() {
+        std::env::set_var("CUDA_HOME", "/nonexistent/path/cuda-99.9");
+        // Also unset CUDA_PATH to avoid interference
+        let old_path = std::env::var("CUDA_PATH").ok();
+        std::env::remove_var("CUDA_PATH");
+        let result = detect_cuda_version();
+        std::env::remove_var("CUDA_HOME");
+        if let Some(p) = old_path {
+            std::env::set_var("CUDA_PATH", p);
+        }
+        // On a machine without /usr/local/cuda, this returns None.
+        // On a machine with it, it may return Some. We just verify no panic.
+        let _ = result;
+    }
+
+    #[test]
+    fn test_detect_cuda_version_malformed_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let json_path = dir.path().join("version.json");
+        std::fs::write(&json_path, "not valid json {{{").unwrap();
+        std::env::set_var("CUDA_HOME", dir.path().as_os_str());
+        let result = detect_cuda_version();
+        std::env::remove_var("CUDA_HOME");
+        // Should not panic, returns None (or falls through to /usr/local/cuda)
+        let _ = result;
+    }
+
+    // ── get_broadcast_addresses ─────────────────────────────────
+
+    #[test]
+    fn test_broadcast_addresses_nonempty() {
+        let addrs = get_broadcast_addresses();
+        assert!(!addrs.is_empty());
+    }
+
+    #[test]
+    fn test_broadcast_addresses_contains_fallback() {
+        let addrs = get_broadcast_addresses();
+        assert!(addrs.contains(&Ipv4Addr::BROADCAST));
+    }
+
+    #[test]
+    fn test_broadcast_addresses_no_loopback() {
+        let addrs = get_broadcast_addresses();
+        for addr in &addrs {
+            if *addr != Ipv4Addr::BROADCAST {
+                assert!(
+                    !addr.is_loopback(),
+                    "broadcast list should not contain loopback address: {}",
+                    addr
+                );
+            }
+        }
     }
 }
