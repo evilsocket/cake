@@ -1,0 +1,7 @@
+General relativity is a theory of physics that describes the gravitational force between massive objects, such as planets, stars, and galaxies. It was developed by Albert Einstein in the 20th century and is based on the idea that gravity is the result of the curvature of spacetime caused by the mass and energy of objects.
+
+In simple terms, general relativity suggests that the gravitational force between two objects is caused by the distribution of mass and energy in the space-time around them. This means that the gravitational force is not a force that acts directly between two objects, but rather a force that affects the distribution of mass and energy in the space-time around them.
+
+The theory of general relativity has been tested and confirmed by a wide range of experiments, including the bending of light by gravity, the motion of planets and stars, and the behavior of black holes. It has also been used to explain a wide range of phenomena, such as the bending of light by the sun, the motion of galaxies, and the behavior of atoms and molecules.
+
+In summary, general relativity is a theory that describes the gravitational force between massive objects and the curvature of spacetime caused by their mass and energy. It has been tested and confirmed by a wide range of experiments and has been used to explain

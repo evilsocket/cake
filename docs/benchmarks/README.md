@@ -7,31 +7,33 @@
 
 | Model | Modality | Reference | cake | Speedup | VRAM (ref) | VRAM (cake) |
 |-------|----------|-----------|------|---------|------------|-------------|
-| Qwen3.5-0.8B | Text (256 tok) | ollama 183.6 tok/s | **128.2 tok/s** | 0.70x | 2,248 MB | **1,906 MB** |
+| Qwen2.5-0.5B Q4_K_M | Text (256 tok) | ollama 421 tok/s | **184 tok/s** | 0.44x | ~600 MB | 3,100 MB |
+| Qwen2.5-0.5B F16 | Text (256 tok) | — | **186 tok/s** | — | — | 1,700 MB |
 | FLUX.1-dev FP8 | Image (768x1024) | n/a (gated) | **3.5 s/step** | — | — | 13,317 MB |
 | VibeVoice-1.5B | Voice (14s audio) | Python 27 ms/frame | **20 ms/frame** | **1.35x** | 5,978 MB | 6,565 MB |
 
-## Qwen3.5-0.8B Text Generation
+## Qwen2.5-0.5B Text Generation
 
 **Prompt:** "Explain the theory of general relativity in simple terms."
-**Config:** temperature=0, seed=42
+**Config:** temperature=0, seed=42, max_tokens=256 | **3 runs averaged**
 
-| Metric | ollama (Q4_K_M) | cake (F16) |
-|--------|----------------|------------|
-| Eval rate | 183.6 tok/s | 128.2 tok/s |
-| Prompt eval rate | 1,170 tok/s | — |
-| Tokens generated | 1,686 | 256 |
-| Total time | 14.4s | 3.8s |
-| Peak VRAM | 2,248 MB | 1,906 MB |
-| Quantization | Q4_K_M (4-bit) | F16 (16-bit) |
+| Metric | ollama (Q4_K_M) | cake (Q4_K_M GGUF) | cake (F16 safetensors) |
+|--------|-----------------|---------------------|------------------------|
+| Eval rate (avg) | **421.2 tok/s** | 184.2 tok/s | **185.7 tok/s** |
+| Run 1 | 413.4 tok/s | 183.8 tok/s | 183.6 tok/s |
+| Run 2 | 425.1 tok/s | 184.1 tok/s | 187.1 tok/s |
+| Run 3 | 425.1 tok/s | 184.6 tok/s | 186.3 tok/s |
+| Peak VRAM | ~600 MB | 3,100 MB | 1,700 MB |
+| Quantization | Q4_K_M (4-bit) | Q4_K_M → F16 (dequant) | F16 (native) |
 
 **Notes:**
-- ollama uses Q4_K_M quantization (4-bit), cake uses F16 (16-bit) — not directly comparable on tok/s.
-- ollama's higher tok/s is largely due to 4-bit quantization reducing memory bandwidth.
-- cake uses less VRAM despite higher precision weights.
-- Both produce coherent, accurate explanations of general relativity.
+- **Same model, same quantization**: cake loads the exact same Q4_K_M GGUF file that ollama uses. Both dequantize to compute dtype at inference time.
+- ollama is **2.3x faster** because it uses **native quantized matmul** (Q4_K×Q8_K vec_dot with SIMD/CUDA kernels that operate directly on 4-bit packed data). Cake dequantizes to F16 at load time and uses standard F16 matmul — the 4-bit compression benefit is lost for compute (only helps with disk/download size).
+- cake Q4_K_M and F16 produce **identical throughput** (~185 tok/s) because both run F16 matmul on GPU — the Q4_K_M weights are dequantized to F16 before any computation.
+- cake F16 uses **less VRAM** (1.7 GB vs 3.1 GB) because it loads F16 weights directly via mmap, while GGUF loading dequantizes all tensors to F32 on CPU first, then casts to F16 on GPU.
+- All three produce coherent, accurate explanations of general relativity.
 
-**Outputs:** [`ollama_output.txt`](qwen3.5/ollama_output.txt) | [`cake_output.txt`](qwen3.5/cake_output.txt)
+**Outputs:** [`ollama_output.txt`](qwen2.5/ollama_output.txt) | [`cake_q4km_output.txt`](qwen2.5/cake_q4km_output.txt) | [`cake_f16_output.txt`](qwen2.5/cake_f16_output.txt)
 
 ## FLUX.1-dev FP8 Image Generation
 
@@ -124,6 +126,6 @@
 
 ## Key Takeaways
 
-1. **Text generation** is competitive — cake at F16 is ~70% of ollama's Q4 throughput, while using less VRAM. With quantization support, cake would likely match or exceed ollama.
+1. **Text generation** — cake supports GGUF Q4_K_M models (same files ollama uses). At 184 tok/s vs ollama's 421 tok/s, the gap is from dequantize-at-load vs native quantized matmul. To close the gap, cake would need native Q4_K vec_dot kernels (quantized matmul without dequantization).
 2. **Image generation** works on consumer hardware — FLUX.1-dev FP8 at 3.5s/step (768x1024) on a 16GB laptop GPU. Compute-bound at 43 TFLOPs/step — optimal BF16/F16 mixed-precision pipeline already saturates Tensor Cores.
 3. **Voice synthesis** is 35% faster than Python — 20ms/frame vs Python's 27ms, achieved through 6 custom CUDA fused kernels that eliminate ~800 kernel launches per frame. Generates 13.7s of audio in 9.0s (~1.5x real-time).

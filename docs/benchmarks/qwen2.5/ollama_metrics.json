@@ -1,0 +1,14 @@
+{
+  "model": "qwen2.5:0.5b-instruct-q4_K_M",
+  "quantization": "Q4_K_M",
+  "prompt": "Explain the theory of general relativity in simple terms.",
+  "temperature": 0,
+  "seed": 42,
+  "max_tokens": 256,
+  "runs": [
+    { "tokens": 256, "time_s": 0.62, "tok_s": 413.4 },
+    { "tokens": 256, "time_s": 0.60, "tok_s": 425.1 },
+    { "tokens": 256, "time_s": 0.60, "tok_s": 425.1 }
+  ],
+  "avg_tok_s": 421.2
+}

@@ -1,0 +1,28 @@
+{
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "prompt": "Explain the theory of general relativity in simple terms.",
+  "temperature": 0,
+  "seed": 42,
+  "q4km_gguf": {
+    "quantization": "Q4_K_M",
+    "source": "Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+    "runs": [
+      { "tokens": 223, "tok_s": 183.78 },
+      { "tokens": 223, "tok_s": 184.08 },
+      { "tokens": 223, "tok_s": 184.64 }
+    ],
+    "avg_tok_s": 184.2,
+    "peak_vram_mb": 3100
+  },
+  "f16_safetensors": {
+    "quantization": "F16",
+    "source": "Qwen/Qwen2.5-0.5B-Instruct (HuggingFace safetensors)",
+    "runs": [
+      { "tokens": 275, "tok_s": 183.61 },
+      { "tokens": 275, "tok_s": 187.14 },
+      { "tokens": 275, "tok_s": 186.30 }
+    ],
+    "avg_tok_s": 185.7,
+    "peak_vram_mb": 1700
+  }
+}

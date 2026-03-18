@@ -1,0 +1,8 @@
+The theory of general relativity is a scientific explanation for gravity that was developed in the mid-20th century. The theory was created to attempt to explain how objects, such as planets and stars, move through space.
+
+The idea behind the theory of general relativity is that gravity is not just an attraction between masses, it is also caused by gravitational fields - these are fields of mass and energy that curve space-time itself. As a result, massive objects can attract small objects around them, changing their path and time as they do so.
+
+General relativity has been validated through many experiments over the years, including observations of the motion of stars and the bending of light by nearby galaxies. This validation suggests that the theory is correct in explaining the way objects in space move past each other.
+
+By studying the properties of spacetime and the motion of objects within it, physicists have been able to predict how planets and stars will behave over millions and billions of years. These predictions make up for mistakes made by earlier scientists who had thought they could explain gravity without regard for mass-energy fields or other natural phenomena.<|im_end|>
+
