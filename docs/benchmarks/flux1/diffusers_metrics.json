@@ -1,4 +1,5 @@
 {
-  "note": "diffusers FluxPipeline requires HuggingFace auth to fetch config from black-forest-labs/FLUX.1-dev (gated repo), even when using the publicly available Comfy-Org/flux1-dev FP8 checkpoint. Benchmark skipped — user not logged in to HuggingFace.",
-  "workaround": "Run: huggingface-cli login, accept FLUX.1-dev license at https://huggingface.co/black-forest-labs/FLUX.1-dev, then re-run benchmark."
+  "note": "diffusers FluxPipeline requires HuggingFace auth to fetch config from black-forest-labs/FLUX.1-dev (gated repo), even when using the publicly available Comfy-Org/flux1-dev FP8 checkpoint. Benchmark skipped \u2014 user not logged in to HuggingFace.",
+  "workaround": "Run: huggingface-cli login, accept FLUX.1-dev license at https://huggingface.co/black-forest-labs/FLUX.1-dev, then re-run benchmark.",
+  "peak_vram_mb": 88
 }
