@@ -1416,6 +1416,7 @@ struct DepthwiseConv1dBias {
     channels: usize,
 }
 
+#[allow(clippy::too_many_arguments)]
 impl candle_core::CustomOp3 for DepthwiseConv1dBias {
     fn name(&self) -> &'static str {
         "depthwise_conv1d_bias"
@@ -1465,9 +1466,9 @@ impl candle_core::CustomOp3 for DepthwiseConv1dBias {
                         let in_off = (b * channels + c) * input_len + t;
                         let wt_off = c * kernel_size;
                         for k in 0..kernel_size {
-                            acc = acc + input[in_off + k] * weight[wt_off + k];
+                            acc += input[in_off + k] * weight[wt_off + k];
                         }
-                        acc = acc + bias[c];
+                        acc += bias[c];
                         dst[(b * channels + c) * out_len + t] = acc;
                     }
                 }
@@ -1627,6 +1628,7 @@ struct RmsNormChannel {
     eps: f32,
 }
 
+#[allow(clippy::too_many_arguments)]
 impl candle_core::CustomOp2 for RmsNormChannel {
     fn name(&self) -> &'static str {
         "rms_norm_channel"
@@ -1670,10 +1672,10 @@ impl candle_core::CustomOp2 for RmsNormChannel {
                         sum2 += v * v;
                     }
                     let inv_rms = 1.0f32 / (sum2 / channels as f32 + eps).sqrt();
-                    for c in 0..channels {
+                    for (c, wv_t) in w.iter().enumerate().take(channels) {
                         let off = b * channels * time_len + c * time_len + t;
                         let xv: f32 = x[off].as_();
-                        let wv: f32 = w[c].as_();
+                        let wv: f32 = (*wv_t).as_();
                         dst[off] = T::from_f32(xv * inv_rms * wv).unwrap_or(T::zero());
                     }
                 }
@@ -1786,6 +1788,7 @@ pub fn rms_norm_channel(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor>
 
 struct AddScaled;
 
+#[allow(clippy::too_many_arguments)]
 impl candle_core::CustomOp3 for AddScaled {
     fn name(&self) -> &'static str {
         "add_scaled"
@@ -2617,6 +2620,90 @@ mod tests {
             &out_v[..5],
             &ref_v[..5]
         );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_rms_norm_channel_vs_candle_cuda() {
+        use candle_core::Module;
+        // Compare our rms_norm_channel against candle's transpose+rms_norm+transpose
+        let dev = match cuda_device() {
+            Some(d) => d,
+            None => return,
+        };
+        // Test multiple channel counts that the VAE encoder uses
+        for (channels, time_len) in [(32, 1000), (64, 500), (128, 200), (2048, 10)] {
+            let n = channels * time_len;
+            let data: Vec<f32> = (0..n)
+                .map(|i| ((i as f32 * 7.13) % 5.0) - 2.5)
+                .collect();
+            let x = Tensor::new(data.as_slice(), &dev)
+                .unwrap()
+                .reshape((1, channels, time_len))
+                .unwrap()
+                .to_dtype(DType::BF16)
+                .unwrap();
+            let w_data: Vec<f32> = (0..channels)
+                .map(|i| 0.5 + (i as f32) * 0.01)
+                .collect();
+            let w = Tensor::new(w_data.as_slice(), &dev)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+
+            // Our kernel
+            let ours = rms_norm_channel(&x, &w, 1e-5).unwrap();
+            let ours_v: Vec<f32> = ours
+                .to_dtype(DType::F32)
+                .unwrap()
+                .to_device(&Device::Cpu)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1()
+                .unwrap();
+
+            // candle's approach: transpose → rms_norm → transpose
+            let norm = candle_nn::RmsNorm::new(w.clone(), 1e-5_f64);
+            let ref_out = norm
+                .forward(&x.transpose(1, 2).unwrap())
+                .unwrap()
+                .transpose(1, 2)
+                .unwrap();
+            let ref_v: Vec<f32> = ref_out
+                .to_dtype(DType::F32)
+                .unwrap()
+                .to_device(&Device::Cpu)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1()
+                .unwrap();
+
+            let nan_ours = ours_v.iter().filter(|v| v.is_nan()).count();
+            let nan_ref = ref_v.iter().filter(|v| v.is_nan()).count();
+            assert!(
+                nan_ours == 0,
+                "ch={channels} t={time_len}: {nan_ours} NaN in rms_norm_channel"
+            );
+            assert!(
+                nan_ref == 0,
+                "ch={channels} t={time_len}: {nan_ref} NaN in candle rms_norm"
+            );
+
+            // Check max absolute difference
+            let max_diff = ours_v
+                .iter()
+                .zip(ref_v.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0f32, f32::max);
+            assert!(
+                max_diff < 0.5,
+                "ch={channels} t={time_len}: max_diff={max_diff} (first 5: ours={:?} ref={:?})",
+                &ours_v[..5],
+                &ref_v[..5]
+            );
+        }
     }
 
     #[cfg(feature = "cuda")]

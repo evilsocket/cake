@@ -60,12 +60,13 @@ impl StreamingConvCache {
 /// A single decoder block with depthwise conv mixer + FFN.
 #[derive(Debug, Clone)]
 struct DecoderBlock {
-    norm: candle_nn::RmsNorm,
+    norm_weight: Tensor,
+    ffn_norm_weight: Tensor,
+    eps: f32,
     gamma: Tensor,
     /// Depthwise conv weight: (channels, 1, 7) — stored as (channels, 7) for manual impl
     mixer_weight: Tensor,
     mixer_bias: Tensor,
-    ffn_norm: candle_nn::RmsNorm,
     ffn_gamma: Tensor,
     ffn_linear1: candle_nn::Linear,
     ffn_linear2: candle_nn::Linear,
@@ -98,24 +99,25 @@ pub fn depthwise_conv1d_manual(x: &Tensor, weight: &Tensor, bias: &Tensor, kerne
 
 impl DecoderBlock {
     fn load(vb: VarBuilder, channels: usize, eps: f64) -> Result<Self> {
-        let norm = candle_nn::rms_norm(channels, eps, vb.pp("norm"))?;
+        let norm_weight = vb.pp("norm").get(channels, "weight")?;
         let gamma = vb.get(channels, "gamma")?;
 
         let conv_vb = vb.pp("mixer").pp("conv").pp("conv").pp("conv");
         let mixer_weight = conv_vb.get((channels, 1, 7), "weight")?.squeeze(1)?;
         let mixer_bias = conv_vb.get(channels, "bias")?;
 
-        let ffn_norm = candle_nn::rms_norm(channels, eps, vb.pp("ffn_norm"))?;
+        let ffn_norm_weight = vb.pp("ffn_norm").get(channels, "weight")?;
         let ffn_gamma = vb.get(channels, "ffn_gamma")?;
         let ffn_linear1 = candle_nn::linear(channels, channels * 4, vb.pp("ffn").pp("linear1"))?;
         let ffn_linear2 = candle_nn::linear(channels * 4, channels, vb.pp("ffn").pp("linear2"))?;
 
         Ok(Self {
-            norm,
+            norm_weight,
+            ffn_norm_weight,
+            eps: eps as f32,
             gamma,
             mixer_weight,
             mixer_bias,
-            ffn_norm,
             ffn_gamma,
             ffn_linear1,
             ffn_linear2,
@@ -123,36 +125,32 @@ impl DecoderBlock {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let residual = x;
-        let h = self.norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
-        let channels = h.dim(1)?;
+        use crate::utils::fused_ops;
+        let channels = x.dim(1)?;
+
+        let h = fused_ops::rms_norm_channel(x, &self.norm_weight, self.eps)?;
         let h = Tensor::cat(&[
             &Tensor::zeros((h.dim(0)?, channels, 6), h.dtype(), h.device())?,
             &h,
         ], 2)?;
-        let h = crate::utils::fused_ops::depthwise_conv1d_bias(
-            &h, &self.mixer_weight, &self.mixer_bias, 7, channels,
-        )?;
-        let gamma = self.gamma.unsqueeze(0)?.unsqueeze(2)?;
-        let x = (residual + h.broadcast_mul(&gamma)?)?;
+        let h = fused_ops::depthwise_conv1d_bias(&h, &self.mixer_weight, &self.mixer_bias, 7, channels)?;
+        let x = fused_ops::add_scaled(x, &h, &self.gamma)?;
 
-        let residual = &x;
-        let h = self.ffn_norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
+        let h = fused_ops::rms_norm_channel(&x, &self.ffn_norm_weight, self.eps)?;
         let h = h.transpose(1, 2)?;
         let h = self.ffn_linear1.forward(&h)?;
         let h = h.gelu()?;
         let h = self.ffn_linear2.forward(&h)?;
         let h = h.transpose(1, 2)?;
-        let ffn_gamma = self.ffn_gamma.unsqueeze(0)?.unsqueeze(2)?;
-        residual + h.broadcast_mul(&ffn_gamma)?
+        fused_ops::add_scaled(&x, &h, &self.ffn_gamma)
     }
 
     /// Forward with streaming cache: uses cached context instead of zero-padding.
     fn forward_cached(&self, x: &Tensor, cache: &mut StreamingConvCache) -> Result<Tensor> {
-        let residual = x;
-        let h = self.norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
-        let channels = h.dim(1)?;
+        use crate::utils::fused_ops;
+        let channels = x.dim(1)?;
 
+        let h = fused_ops::rms_norm_channel(x, &self.norm_weight, self.eps)?;
         let (slot, is_first) = cache.take_slot();
         let context = if is_first {
             Tensor::zeros((h.dim(0)?, channels, 6), h.dtype(), h.device())?
@@ -164,21 +162,16 @@ impl DecoderBlock {
         let start = plen.saturating_sub(6);
         cache.set(slot, padded.narrow(2, start, plen - start)?);
 
-        let h = crate::utils::fused_ops::depthwise_conv1d_bias(
-            &padded, &self.mixer_weight, &self.mixer_bias, 7, channels,
-        )?;
-        let gamma = self.gamma.unsqueeze(0)?.unsqueeze(2)?;
-        let x = (residual + h.broadcast_mul(&gamma)?)?;
+        let h = fused_ops::depthwise_conv1d_bias(&padded, &self.mixer_weight, &self.mixer_bias, 7, channels)?;
+        let x = fused_ops::add_scaled(x, &h, &self.gamma)?;
 
-        let residual = &x;
-        let h = self.ffn_norm.forward(&x.transpose(1, 2)?)?.transpose(1, 2)?;
+        let h = fused_ops::rms_norm_channel(&x, &self.ffn_norm_weight, self.eps)?;
         let h = h.transpose(1, 2)?;
         let h = self.ffn_linear1.forward(&h)?;
         let h = h.gelu()?;
         let h = self.ffn_linear2.forward(&h)?;
         let h = h.transpose(1, 2)?;
-        let ffn_gamma = self.ffn_gamma.unsqueeze(0)?.unsqueeze(2)?;
-        residual + h.broadcast_mul(&ffn_gamma)?
+        fused_ops::add_scaled(&x, &h, &self.ffn_gamma)
     }
 }
 

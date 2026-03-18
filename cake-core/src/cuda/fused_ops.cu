@@ -488,11 +488,15 @@ extern "C" __global__ void FN_NAME( \
     int lane_id = threadIdx.x % 32; \
     if (lane_id == 0) shared[warp_id] = sum2; \
     __syncthreads(); \
-    sum2 = (threadIdx.x < (block_size + 31) / 32) ? shared[lane_id] : 0.0f; \
-    for (int mask = 16; mask > 0; mask >>= 1) { \
-        sum2 += __shfl_xor_sync(0xffffffff, sum2, mask); \
+    if (warp_id == 0) { \
+        sum2 = (lane_id < (block_size + 31) / 32) ? shared[lane_id] : 0.0f; \
+        for (int mask = 16; mask > 0; mask >>= 1) { \
+            sum2 += __shfl_xor_sync(0xffffffff, sum2, mask); \
+        } \
+        shared[0] = sum2; \
     } \
-    float inv_rms = rsqrtf(sum2 / (float)channels + eps); \
+    __syncthreads(); \
+    float inv_rms = rsqrtf(shared[0] / (float)channels + eps); \
     /* Apply normalization: out[b,c,t] = x[b,c,t] * inv_rms * weight[c] */ \
     for (int c = threadIdx.x; c < channels; c += block_size) { \
         int off = b * channels * time_len + c * time_len + t; \
