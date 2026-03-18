@@ -59,6 +59,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
+          components: clippy
 
       - name: Cache cargo registry & build
         uses: actions/cache@v4
@@ -76,6 +77,18 @@ jobs:
       - name: Build cake-mobile (Android aarch64)
         run: cargo ndk -t aarch64-linux-android build -p cake-mobile
 
+      - name: Clippy (cake-core + cake-mobile, Android)
+        run: cargo ndk -t aarch64-linux-android clippy -p cake-core --lib -p cake-mobile -- -D warnings
+
+      - name: Compile tests (cake-core lib, Android)
+        run: cargo ndk -t aarch64-linux-android test -p cake-core --lib --no-run
+
+      - name: Compile tests (cake-core unit, Android)
+        run: cargo ndk -t aarch64-linux-android test -p cake-core --test unit --no-run
+
+      - name: Compile tests (cake-core protocol, Android)
+        run: cargo ndk -t aarch64-linux-android test -p cake-core --test protocol --no-run
+
   build-ios:
     name: Build (iOS arm64)
     runs-on: macos-latest
@@ -88,6 +101,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios
+          components: clippy
 
       - name: Cache cargo registry & build
         uses: actions/cache@v4
@@ -101,6 +115,18 @@ jobs:
 
       - name: Build cake-mobile (iOS arm64)
         run: cargo build --target=aarch64-apple-ios -p cake-mobile --features metal
+
+      - name: Clippy (cake-core + cake-mobile, iOS)
+        run: cargo clippy --target=aarch64-apple-ios -p cake-core --lib -p cake-mobile --features metal -- -D warnings
+
+      - name: Compile tests (cake-core lib, iOS)
+        run: cargo test --target=aarch64-apple-ios -p cake-core --lib --no-run
+
+      - name: Compile tests (cake-core unit, iOS)
+        run: cargo test --target=aarch64-apple-ios -p cake-core --test unit --no-run
+
+      - name: Compile tests (cake-core protocol, iOS)
+        run: cargo test --target=aarch64-apple-ios -p cake-core --test protocol --no-run
 
   clippy:
     name: Clippy
