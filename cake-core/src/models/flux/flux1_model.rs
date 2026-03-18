@@ -44,99 +44,25 @@ impl Config {
     }
 }
 
-// ── FP8-aware Linear ───────────────────────────────────────────────────────────
+// ── FP8-aware Linear (reused from shared utils) ──────────────────────────────
 
-/// Linear layer that stores weights in their native dtype (possibly F8E4M3)
-/// and dequantizes to F16 on first forward call, caching the result.
-#[derive(Debug)]
-pub struct Fp8Linear {
-    /// Original F8E4M3 weight (dropped after first dequant to save VRAM).
-    f8_weight: Option<Tensor>,
-    /// Cached F16 weight (populated on first forward call).
-    weight: std::sync::RwLock<Option<Tensor>>,
-    bias: Option<Tensor>,
+pub use crate::utils::fp8::Fp8Linear;
+
+/// Load an Fp8Linear from VarBuilder using get_unchecked (for native-dtype loading).
+fn flux_fp8_linear(_in_d: usize, _out_d: usize, vb: VarBuilder) -> Result<Fp8Linear> {
+    let weight = vb.get_unchecked("weight")?;
+    let bias = vb.get_unchecked("bias").ok();
+    Ok(Fp8Linear::new(weight, bias))
 }
 
-impl Clone for Fp8Linear {
-    fn clone(&self) -> Self {
-        Self {
-            f8_weight: self.f8_weight.clone(),
-            weight: std::sync::RwLock::new(self.weight.read().unwrap().clone()),
-            bias: self.bias.clone(),
-        }
-    }
-}
-
-impl Fp8Linear {
-    fn new(weight: Tensor, bias: Option<Tensor>) -> Self {
-        if weight.dtype() == DType::F8E4M3 {
-            Self {
-                f8_weight: Some(weight),
-                weight: std::sync::RwLock::new(None),
-                bias,
-            }
-        } else {
-            Self {
-                f8_weight: None,
-                weight: std::sync::RwLock::new(Some(weight)),
-                bias,
-            }
-        }
-    }
-
-    /// Public constructor for testing.
-    pub fn new_pub(weight: Tensor, bias: Option<Tensor>) -> Self {
-        Self::new(weight, bias)
-    }
-
-    fn get_weight(&self) -> Result<Tensor> {
-        // Non-F8 path: return stored weight directly
-        if let Some(w) = self.weight.read().unwrap().as_ref() {
-            return Ok(w.clone());
-        }
-        // F8 path: dequantize on-the-fly to F16 (fastest matmul dtype on Ampere)
-        let f8_w = self.f8_weight.as_ref().expect("no F8 weight and no cached weight");
-        crate::utils::fused_ops::f8e4m3_to_f16(f8_w)
-    }
-
-    #[allow(dead_code)]
-    fn compute_dtype(&self) -> DType {
-        if self.f8_weight.is_some() {
-            DType::F16 // F8 models use F16 compute
-        } else {
-            // Non-F8: use the stored weight's dtype
-            self.weight.read().unwrap().as_ref().map(|w| w.dtype()).unwrap_or(DType::F32)
-        }
-    }
-
-    /// Pre-dequantize F8→F16 and cache. Call once before inference loop.
-    pub fn warmup(&mut self) -> Result<()> {
-        let _ = self.get_weight()?;
-        // Drop the F8 weight to reclaim VRAM (we keep only the F16 cache)
-        self.f8_weight = None;
-        Ok(())
-    }
-
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let in_dtype = x.dtype();
-        let w = self.get_weight()?;
-        let compute = w.dtype();
-        let x = x.to_dtype(compute)?;
-        // Reshape to 2D for matmul (faster than broadcast_matmul for 3D inputs)
-        let dims = x.dims().to_vec();
-        let last = *dims.last().unwrap();
-        let batch: usize = dims[..dims.len() - 1].iter().product();
-        let x_2d = x.reshape((batch, last))?;
-        let y_2d = x_2d.matmul(&w.t()?)?;
-        let mut out_dims = dims[..dims.len() - 1].to_vec();
-        out_dims.push(w.dim(0)?);
-        let y = y_2d.reshape(out_dims)?;
-        let y = match &self.bias {
-            Some(b) => y.broadcast_add(&b.to_dtype(compute)?)?,
-            None => y,
-        };
-        y.to_dtype(in_dtype)
-    }
+fn flux_fp8_linear_b(_in_d: usize, _out_d: usize, bias: bool, vb: VarBuilder) -> Result<Fp8Linear> {
+    let weight = vb.get_unchecked("weight")?;
+    let bias = if bias {
+        Some(vb.get_unchecked("bias")?)
+    } else {
+        None
+    };
+    Ok(Fp8Linear::new(weight, bias))
 }
 
 #[cfg(test)]
@@ -277,23 +203,6 @@ mod tests {
     }
 }
 
-/// Load an Fp8Linear from VarBuilder (weights stay in native dtype).
-fn fp8_linear(_in_d: usize, _out_d: usize, vb: VarBuilder) -> Result<Fp8Linear> {
-    let weight = vb.get_unchecked("weight")?;
-    let bias = vb.get_unchecked("bias").ok();
-    Ok(Fp8Linear::new(weight, bias))
-}
-
-fn fp8_linear_b(_in_d: usize, _out_d: usize, bias: bool, vb: VarBuilder) -> Result<Fp8Linear> {
-    let weight = vb.get_unchecked("weight")?;
-    let bias = if bias {
-        Some(vb.get_unchecked("bias")?)
-    } else {
-        None
-    };
-    Ok(Fp8Linear::new(weight, bias))
-}
-
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 fn layer_norm(dim: usize, vb: VarBuilder) -> Result<LayerNorm> {
@@ -430,8 +339,8 @@ pub struct MlpEmbedder {
 
 impl MlpEmbedder {
     fn new(in_sz: usize, h_sz: usize, vb: VarBuilder) -> Result<Self> {
-        let in_layer = fp8_linear(in_sz, h_sz, vb.pp("in_layer"))?;
-        let out_layer = fp8_linear(h_sz, h_sz, vb.pp("out_layer"))?;
+        let in_layer = flux_fp8_linear(in_sz, h_sz, vb.pp("in_layer"))?;
+        let out_layer = flux_fp8_linear(h_sz, h_sz, vb.pp("out_layer"))?;
         Ok(Self {
             in_layer,
             out_layer,
@@ -492,7 +401,7 @@ struct Modulation1 {
 
 impl Modulation1 {
     fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
-        let lin = fp8_linear(dim, 3 * dim, vb.pp("lin"))?;
+        let lin = flux_fp8_linear(dim, 3 * dim, vb.pp("lin"))?;
         Ok(Self { lin })
     }
 
@@ -520,7 +429,7 @@ struct Modulation2 {
 
 impl Modulation2 {
     fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
-        let lin = fp8_linear(dim, 6 * dim, vb.pp("lin"))?;
+        let lin = flux_fp8_linear(dim, 6 * dim, vb.pp("lin"))?;
         Ok(Self { lin })
     }
 
@@ -560,9 +469,9 @@ pub struct SelfAttention {
 impl SelfAttention {
     fn new(dim: usize, num_heads: usize, qkv_bias: bool, vb: VarBuilder) -> Result<Self> {
         let head_dim = dim / num_heads;
-        let qkv = fp8_linear_b(dim, dim * 3, qkv_bias, vb.pp("qkv"))?;
+        let qkv = flux_fp8_linear_b(dim, dim * 3, qkv_bias, vb.pp("qkv"))?;
         let norm = QkNorm::new(head_dim, vb.pp("norm"))?;
-        let proj = fp8_linear(dim, dim, vb.pp("proj"))?;
+        let proj = flux_fp8_linear(dim, dim, vb.pp("proj"))?;
         Ok(Self {
             qkv,
             norm,
@@ -594,8 +503,8 @@ struct Mlp {
 
 impl Mlp {
     fn new(in_sz: usize, mlp_sz: usize, vb: VarBuilder) -> Result<Self> {
-        let lin1 = fp8_linear(in_sz, mlp_sz, vb.pp("0"))?;
-        let lin2 = fp8_linear(mlp_sz, in_sz, vb.pp("2"))?;
+        let lin1 = flux_fp8_linear(in_sz, mlp_sz, vb.pp("0"))?;
+        let lin2 = flux_fp8_linear(mlp_sz, in_sz, vb.pp("2"))?;
         Ok(Self { lin1, lin2 })
     }
 
@@ -714,8 +623,8 @@ impl SingleStreamBlock {
         let h_sz = cfg.hidden_size;
         let mlp_sz = (h_sz as f64 * cfg.mlp_ratio) as usize;
         let head_dim = h_sz / cfg.num_heads;
-        let linear1 = fp8_linear(h_sz, h_sz * 3 + mlp_sz, vb.pp("linear1"))?;
-        let linear2 = fp8_linear(h_sz + mlp_sz, h_sz, vb.pp("linear2"))?;
+        let linear1 = flux_fp8_linear(h_sz, h_sz * 3 + mlp_sz, vb.pp("linear1"))?;
+        let linear2 = flux_fp8_linear(h_sz + mlp_sz, h_sz, vb.pp("linear2"))?;
         let norm = QkNorm::new(head_dim, vb.pp("norm"))?;
         let pre_norm = layer_norm(h_sz, vb.pp("pre_norm"))?;
         let modulation = Modulation1::new(h_sz, vb.pp("modulation"))?;
@@ -763,8 +672,8 @@ pub struct LastLayer {
 impl LastLayer {
     fn new(h_sz: usize, p_sz: usize, out_c: usize, vb: VarBuilder) -> Result<Self> {
         let norm_final = layer_norm(h_sz, vb.pp("norm_final"))?;
-        let linear = fp8_linear(h_sz, p_sz * p_sz * out_c, vb.pp("linear"))?;
-        let ada_ln_modulation = fp8_linear(h_sz, 2 * h_sz, vb.pp("adaLN_modulation.1"))?;
+        let linear = flux_fp8_linear(h_sz, p_sz * p_sz * out_c, vb.pp("linear"))?;
+        let ada_ln_modulation = flux_fp8_linear(h_sz, 2 * h_sz, vb.pp("adaLN_modulation.1"))?;
         Ok(Self {
             norm_final,
             linear,
@@ -803,8 +712,8 @@ pub struct Flux1Transformer {
 
 impl Flux1Transformer {
     pub fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
-        let img_in = fp8_linear(cfg.in_channels, cfg.hidden_size, vb.pp("img_in"))?;
-        let txt_in = fp8_linear(cfg.context_in_dim, cfg.hidden_size, vb.pp("txt_in"))?;
+        let img_in = flux_fp8_linear(cfg.in_channels, cfg.hidden_size, vb.pp("img_in"))?;
+        let txt_in = flux_fp8_linear(cfg.context_in_dim, cfg.hidden_size, vb.pp("txt_in"))?;
         let mut double_blocks = Vec::with_capacity(cfg.depth);
         let vb_d = vb.pp("double_blocks");
         for idx in 0..cfg.depth {

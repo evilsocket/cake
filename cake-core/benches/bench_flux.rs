@@ -25,7 +25,7 @@ fn timestep_embedding(bencher: divan::Bencher, dim: usize) {
 fn fp8_linear_forward(bencher: divan::Bencher, out_dim: usize) {
     let in_dim = 3072;
     let weight = make_tensor(&[out_dim, in_dim], 100);
-    let linear = cake_core::models::flux::flux1_model::Fp8Linear::new_pub(weight, None);
+    let linear = cake_core::models::flux::flux1_model::Fp8Linear::new(weight, None);
     let x = make_tensor(&[1, 16, in_dim], 101);
     bencher.bench_local(|| linear.forward(&x).unwrap());
 }
@@ -74,7 +74,7 @@ fn fp8_linear_flux1_qkv(bencher: divan::Bencher, seq_len: usize) {
     let weight = make_tensor(&[9216, 3072], 300)
         .to_dtype(DType::F8E4M3)
         .unwrap();
-    let linear = cake_core::models::flux::flux1_model::Fp8Linear::new_pub(weight, None);
+    let linear = cake_core::models::flux::flux1_model::Fp8Linear::new(weight, None);
     let x = make_tensor(&[1, seq_len, 3072], 301).to_dtype(DType::F16).unwrap();
     bencher.bench_local(|| linear.forward(&x).unwrap());
 }
@@ -85,7 +85,7 @@ fn fp8_linear_flux1_mlp(bencher: divan::Bencher, seq_len: usize) {
     let weight = make_tensor(&[12288, 3072], 310)
         .to_dtype(DType::F8E4M3)
         .unwrap();
-    let linear = cake_core::models::flux::flux1_model::Fp8Linear::new_pub(weight, None);
+    let linear = cake_core::models::flux::flux1_model::Fp8Linear::new(weight, None);
     let x = make_tensor(&[1, seq_len, 3072], 311).to_dtype(DType::F16).unwrap();
     bencher.bench_local(|| linear.forward(&x).unwrap());
 }

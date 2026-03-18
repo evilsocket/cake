@@ -156,6 +156,129 @@ pub unsafe fn load_fp8_var_builder<'a>(
     Ok(VarBuilder::from_backend(backend, dtype, device.clone()))
 }
 
+// ─── Fp8Linear: reusable FP8-aware Linear layer ─────────────────────────────
+
+/// Linear layer that stores weights in their native dtype (possibly F8E4M3)
+/// and dequantizes to F16 on first forward call, caching the result.
+///
+/// Used by FLUX.1-dev and any future FP8 model that needs lazy per-layer dequant.
+#[derive(Debug)]
+pub struct Fp8Linear {
+    f8_weight: Option<candle_core::Tensor>,
+    weight: std::sync::RwLock<Option<candle_core::Tensor>>,
+    bias: Option<candle_core::Tensor>,
+}
+
+impl Clone for Fp8Linear {
+    fn clone(&self) -> Self {
+        Self {
+            f8_weight: self.f8_weight.clone(),
+            weight: std::sync::RwLock::new(self.weight.read().unwrap().clone()),
+            bias: self.bias.clone(),
+        }
+    }
+}
+
+impl Fp8Linear {
+    /// Create an Fp8Linear from a weight tensor and optional bias.
+    /// If the weight is F8E4M3, it's stored as-is and dequantized lazily.
+    pub fn new(weight: candle_core::Tensor, bias: Option<candle_core::Tensor>) -> Self {
+        if weight.dtype() == candle_core::DType::F8E4M3 {
+            Self {
+                f8_weight: Some(weight),
+                weight: std::sync::RwLock::new(None),
+                bias,
+            }
+        } else {
+            Self {
+                f8_weight: None,
+                weight: std::sync::RwLock::new(Some(weight)),
+                bias,
+            }
+        }
+    }
+
+    fn get_weight(&self) -> candle_core::Result<candle_core::Tensor> {
+        if let Some(w) = self.weight.read().unwrap().as_ref() {
+            return Ok(w.clone());
+        }
+        let f8_w = self
+            .f8_weight
+            .as_ref()
+            .expect("no F8 weight and no cached weight");
+        super::fused_ops::f8e4m3_to_f16(f8_w)
+    }
+
+    /// Pre-dequantize F8→F16 and cache. Call once before inference loop.
+    pub fn warmup(&mut self) -> candle_core::Result<()> {
+        let _ = self.get_weight()?;
+        self.f8_weight = None;
+        Ok(())
+    }
+
+    /// Forward pass: dequantizes weight if needed, computes matmul in weight dtype.
+    pub fn forward(&self, x: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor> {
+        let in_dtype = x.dtype();
+        let w = self.get_weight()?;
+        let compute = w.dtype();
+        let x = x.to_dtype(compute)?;
+        let dims = x.dims().to_vec();
+        let last = *dims.last().unwrap();
+        let batch: usize = dims[..dims.len() - 1].iter().product();
+        let x_2d = x.reshape((batch, last))?;
+        let y_2d = x_2d.matmul(&w.t()?)?;
+        let mut out_dims = dims[..dims.len() - 1].to_vec();
+        out_dims.push(w.dim(0)?);
+        let y = y_2d.reshape(out_dims)?;
+        let y = match &self.bias {
+            Some(b) => y.broadcast_add(&b.to_dtype(compute)?)?,
+            None => y,
+        };
+        y.to_dtype(in_dtype)
+    }
+}
+
+/// Create an Fp8Linear from a VarBuilder (no bias).
+pub fn fp8_linear(
+    in_features: usize,
+    out_features: usize,
+    vb: candle_nn::VarBuilder,
+) -> candle_core::Result<Fp8Linear> {
+    let weight = vb.get_unchecked_dtype("weight", candle_core::DType::F32)?;
+    if weight.dims().len() == 2 && weight.dim(0)? == out_features && weight.dim(1)? == in_features {
+        Ok(Fp8Linear::new(weight, None))
+    } else if weight.dims().len() == 2
+        && weight.dim(0)? == in_features
+        && weight.dim(1)? == out_features
+    {
+        Ok(Fp8Linear::new(weight.t()?, None))
+    } else {
+        Ok(Fp8Linear::new(weight, None))
+    }
+}
+
+/// Create an Fp8Linear from a VarBuilder (with bias).
+pub fn fp8_linear_b(
+    in_features: usize,
+    out_features: usize,
+    vb: candle_nn::VarBuilder,
+) -> candle_core::Result<Fp8Linear> {
+    let weight = vb.get_unchecked_dtype("weight", candle_core::DType::F32)?;
+    let bias = vb
+        .get_unchecked_dtype("bias", candle_core::DType::F32)
+        .ok();
+    if weight.dims().len() == 2 && weight.dim(0)? == out_features && weight.dim(1)? == in_features {
+        Ok(Fp8Linear::new(weight, bias))
+    } else if weight.dims().len() == 2
+        && weight.dim(0)? == in_features
+        && weight.dim(1)? == out_features
+    {
+        Ok(Fp8Linear::new(weight.t()?, bias))
+    } else {
+        Ok(Fp8Linear::new(weight, bias))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

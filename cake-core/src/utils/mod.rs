@@ -18,9 +18,117 @@ use candle_core::{
     DType, Device, Tensor,
 };
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 
 use candle_nn::VarBuilder;
+
+// ─── Quantization trait ─────────────────────────────────────────────────────
+
+/// A quantization strategy that can create a VarBuilder with appropriate
+/// dequantization and estimate in-memory VRAM from on-disk size.
+///
+/// Implementations: `NoQuantization`, `Fp8Quantization`, `GptqQuantization`.
+pub trait Quantization: Send + Sync {
+    /// Human-readable name for logging.
+    fn name(&self) -> &str;
+
+    /// Create a VarBuilder from safetensors files with this quantization.
+    ///
+    /// # Safety
+    /// Inherits the mmap safety requirements from candle's safetensors loading.
+    unsafe fn load_var_builder<'a>(
+        &self,
+        filenames: &[PathBuf],
+        dtype: DType,
+        device: &Device,
+    ) -> Result<VarBuilder<'a>>;
+
+    /// Estimate in-memory layer size given on-disk size and target dtype bytes.
+    /// Default: no expansion (on-disk size = in-memory size).
+    fn estimate_layer_vram(&self, on_disk_bytes: u64, _dtype_bytes: u64) -> u64 {
+        on_disk_bytes
+    }
+}
+
+/// No quantization — plain safetensors, loaded as-is.
+pub struct NoQuantization;
+
+impl Quantization for NoQuantization {
+    fn name(&self) -> &str {
+        "none"
+    }
+
+    unsafe fn load_var_builder<'a>(
+        &self,
+        filenames: &[PathBuf],
+        dtype: DType,
+        device: &Device,
+    ) -> Result<VarBuilder<'a>> {
+        VarBuilder::from_mmaped_safetensors(filenames, dtype, device)
+            .map_err(|e| anyhow!("can't create varbuilder: {e:?}"))
+    }
+}
+
+/// FP8 block-wise quantization — wraps `fp8::load_fp8_var_builder`.
+pub struct Fp8Quantization;
+
+impl Quantization for Fp8Quantization {
+    fn name(&self) -> &str {
+        "fp8"
+    }
+
+    unsafe fn load_var_builder<'a>(
+        &self,
+        filenames: &[PathBuf],
+        dtype: DType,
+        device: &Device,
+    ) -> Result<VarBuilder<'a>> {
+        fp8::load_fp8_var_builder(filenames, dtype, device)
+            .map_err(|e| anyhow!("can't create fp8 varbuilder: {e:?}"))
+    }
+
+    fn estimate_layer_vram(&self, on_disk_bytes: u64, dtype_bytes: u64) -> u64 {
+        // FP8 is 1 byte per element on disk, expands to dtype_bytes in memory
+        on_disk_bytes * dtype_bytes
+    }
+}
+
+/// GPTQ 4-bit quantization — wraps `gptq::load_gptq_var_builder`.
+pub struct GptqQuantization {
+    pub group_size: usize,
+}
+
+impl Quantization for GptqQuantization {
+    fn name(&self) -> &str {
+        "gptq"
+    }
+
+    unsafe fn load_var_builder<'a>(
+        &self,
+        filenames: &[PathBuf],
+        dtype: DType,
+        device: &Device,
+    ) -> Result<VarBuilder<'a>> {
+        gptq::load_gptq_var_builder(filenames, dtype, device, self.group_size)
+            .map_err(|e| anyhow!("can't create gptq varbuilder: {e:?}"))
+    }
+}
+
+/// Detect quantization strategy from a model's config.json.
+pub fn detect_quantization(config_path: &Path) -> Box<dyn Quantization> {
+    if fp8::is_fp8_quantized(config_path) {
+        log::info!("model uses FP8 quantization — weights will be dequantized at load time");
+        Box::new(Fp8Quantization)
+    } else if gptq::is_gptq_quantized(config_path) {
+        let gs = gptq::gptq_group_size(config_path);
+        log::info!("model uses GPTQ quantization (group_size={gs}) — weights will be dequantized at load time");
+        Box::new(GptqQuantization { group_size: gs })
+    } else {
+        Box::new(NoQuantization)
+    }
+}
+
+// ─── End quantization trait ──────────────────────────────────────────────────
 
 /// Returns the best available device at `ordinal` index (in case of multiple GPUs), or CPU if `force_cpu` is true.
 pub fn get_inference_device(force_cpu: bool, ordinal: usize) -> Result<Device> {
@@ -134,8 +242,7 @@ pub fn load_var_builder_from_index<'a>(
     tensor_index: PathBuf,
     dtype: DType,
     device: Device,
-    fp8: bool,
-    gptq_group_size: Option<usize>,
+    quant: &dyn Quantization,
 ) -> Result<VarBuilder<'a>> {
     let filenames: Vec<std::path::PathBuf> = if tensor_index.exists() {
         load_safetensors_paths_from_index(tensor_index)
@@ -146,23 +253,7 @@ pub fn load_var_builder_from_index<'a>(
     };
 
     prefetch_safetensors(&filenames)?;
-
-    if fp8 {
-        unsafe {
-            fp8::load_fp8_var_builder(&filenames, dtype, &device)
-                .map_err(|e| anyhow!("can't create fp8 varbuilder from tensors: {:?}", e))
-        }
-    } else if let Some(group_size) = gptq_group_size {
-        unsafe {
-            gptq::load_gptq_var_builder(&filenames, dtype, &device, group_size)
-                .map_err(|e| anyhow!("can't create gptq varbuilder from tensors: {:?}", e))
-        }
-    } else {
-        unsafe {
-            VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)
-                .map_err(|e| anyhow!("can't create varbuilder from tensors: {:?}", e))
-        }
-    }
+    unsafe { quant.load_var_builder(&filenames, dtype, &device) }
 }
 
 /// Create a VarBuilder that only loads safetensors shards needed for the given
@@ -173,17 +264,14 @@ pub fn load_var_builder_for_local_layers<'a>(
     dtype: DType,
     device: Device,
     worker_layers: &std::collections::HashSet<String>,
-    fp8: bool,
-    gptq_group_size: Option<usize>,
+    quant: &dyn Quantization,
 ) -> Result<VarBuilder<'a>> {
     if !tensor_index.exists() {
-        // Single safetensors file — can't filter, load all
-        return load_var_builder_from_index(tensor_index, dtype, device, fp8, gptq_group_size);
+        return load_var_builder_from_index(tensor_index, dtype, device, quant);
     }
 
     if worker_layers.is_empty() {
-        // No workers — load everything
-        return load_var_builder_from_index(tensor_index, dtype, device, fp8, gptq_group_size);
+        return load_var_builder_from_index(tensor_index, dtype, device, quant);
     }
 
     let parent_dir = tensor_index.parent().unwrap();
@@ -226,23 +314,7 @@ pub fn load_var_builder_for_local_layers<'a>(
     );
 
     prefetch_safetensors(&filenames)?;
-
-    if fp8 {
-        unsafe {
-            fp8::load_fp8_var_builder(&filenames, dtype, &device)
-                .map_err(|e| anyhow!("can't create fp8 varbuilder from tensors: {:?}", e))
-        }
-    } else if let Some(group_size) = gptq_group_size {
-        unsafe {
-            gptq::load_gptq_var_builder(&filenames, dtype, &device, group_size)
-                .map_err(|e| anyhow!("can't create gptq varbuilder from tensors: {:?}", e))
-        }
-    } else {
-        unsafe {
-            VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)
-                .map_err(|e| anyhow!("can't create varbuilder from tensors: {:?}", e))
-        }
-    }
+    unsafe { quant.load_var_builder(&filenames, dtype, &device) }
 }
 
 /// Create a VarBuilder that only loads safetensors shards containing tensors
@@ -253,11 +325,10 @@ pub fn load_var_builder_for_specific_layers<'a>(
     dtype: DType,
     device: Device,
     layer_prefixes: &[String],
-    fp8: bool,
-    gptq_group_size: Option<usize>,
+    quant: &dyn Quantization,
 ) -> Result<VarBuilder<'a>> {
     if !tensor_index.exists() || layer_prefixes.is_empty() {
-        return load_var_builder_from_index(tensor_index, dtype, device, fp8, gptq_group_size);
+        return load_var_builder_from_index(tensor_index, dtype, device, quant);
     }
 
     let parent_dir = tensor_index.parent().unwrap();
@@ -298,23 +369,7 @@ pub fn load_var_builder_for_specific_layers<'a>(
     );
 
     prefetch_safetensors(&filenames)?;
-
-    if fp8 {
-        unsafe {
-            fp8::load_fp8_var_builder(&filenames, dtype, &device)
-                .map_err(|e| anyhow!("can't create fp8 varbuilder from tensors: {:?}", e))
-        }
-    } else if let Some(group_size) = gptq_group_size {
-        unsafe {
-            gptq::load_gptq_var_builder(&filenames, dtype, &device, group_size)
-                .map_err(|e| anyhow!("can't create gptq varbuilder from tensors: {:?}", e))
-        }
-    } else {
-        unsafe {
-            VarBuilder::from_mmaped_safetensors(&filenames, dtype, &device)
-                .map_err(|e| anyhow!("can't create varbuilder from tensors: {:?}", e))
-        }
-    }
+    unsafe { quant.load_var_builder(&filenames, dtype, &device) }
 }
 
 /// Nasty hack to debug NaN in tensors.

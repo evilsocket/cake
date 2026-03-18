@@ -701,7 +701,7 @@ mod tests {
             cache: None,
             var_builder: None,
             text_model_arch: crate::TextModelArch::Llama,
-            fp8: false,
+            quant: Arc::new(crate::utils::NoQuantization),
             listener_override: Arc::new(Mutex::new(None)),
         }
     }

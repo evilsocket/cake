@@ -33,7 +33,7 @@ fn make_context(cfg: Config, vb: VarBuilder<'static>) -> Context {
         cache: Some(cache),
         var_builder: Some(vb),
         text_model_arch: TextModelArch::Auto,
-        fp8: false,
+        quant: Arc::new(cake_core::utils::NoQuantization),
         listener_override: Arc::new(Mutex::new(None)),
     }
 }

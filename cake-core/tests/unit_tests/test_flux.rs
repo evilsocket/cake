@@ -77,7 +77,7 @@ fn test_fp8_linear_forward_f32() {
     // 4→8 linear, F32 weights
     let weight = make_tensor(&[8, 4], 10);
     let bias = make_tensor(&[8], 11);
-    let linear = Fp8Linear::new_pub(weight, Some(bias));
+    let linear = Fp8Linear::new(weight, Some(bias));
 
     let x = make_tensor(&[2, 4], 12);
     let y = linear.forward(&x).unwrap();
@@ -89,7 +89,7 @@ fn test_fp8_linear_forward_f32() {
 fn test_fp8_linear_forward_3d() {
     use cake_core::models::flux::flux1_model::Fp8Linear;
     let weight = make_tensor(&[8, 4], 20);
-    let linear = Fp8Linear::new_pub(weight, None);
+    let linear = Fp8Linear::new(weight, None);
 
     let x = make_tensor(&[1, 3, 4], 21); // batch=1, seq=3, dim=4
     let y = linear.forward(&x).unwrap();
@@ -100,7 +100,7 @@ fn test_fp8_linear_forward_3d() {
 fn test_fp8_linear_no_bias() {
     use cake_core::models::flux::flux1_model::Fp8Linear;
     let weight = make_tensor(&[8, 4], 30);
-    let linear = Fp8Linear::new_pub(weight, None);
+    let linear = Fp8Linear::new(weight, None);
 
     let x = make_tensor(&[2, 4], 31);
     let y = linear.forward(&x).unwrap();

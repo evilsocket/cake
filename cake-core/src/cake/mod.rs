@@ -56,8 +56,8 @@ pub struct Context {
     pub var_builder: Option<VarBuilder<'static>>,
     /// Resolved text model architecture.
     pub text_model_arch: TextModelArch,
-    /// True if the model uses FP8 block-wise quantization.
-    pub fp8: bool,
+    /// Quantization strategy for weight loading.
+    pub quant: Arc<dyn utils::Quantization>,
     /// Pre-bound TCP listener from setup phase (taken once by Worker::new).
     pub listener_override: Arc<Mutex<Option<TcpListener>>>,
 }
@@ -158,7 +158,7 @@ impl Context {
         let mut cache: Option<Cache> = None;
         let mut var_builder: Option<VarBuilder> = None;
         let mut text_model_arch = args.text_model_arch;
-        let mut fp8 = false;
+        let mut quant: Arc<dyn utils::Quantization> = Arc::new(utils::NoQuantization);
 
         if args.model_type == ModelType::TextModel {
             // Check if the model path is a GGUF file
@@ -255,17 +255,7 @@ impl Context {
             };
 
             let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
-            fp8 = utils::fp8::is_fp8_quantized(&config_filename);
-            if fp8 {
-                log::info!("model uses FP8 quantization — weights will be dequantized at load time");
-            }
-            let gptq_group_size = if utils::gptq::is_gptq_quantized(&config_filename) {
-                let gs = utils::gptq::gptq_group_size(&config_filename);
-                log::info!("model uses GPTQ quantization (group_size={gs}) — weights will be dequantized at load time");
-                Some(gs)
-            } else {
-                None
-            };
+            quant = Arc::from(utils::detect_quantization(&config_filename));
             let is_master = matches!(args.mode, Mode::Master);
             let my_layers: Vec<String> = if !is_master {
                 topology.all_worker_layers().into_iter().collect()
@@ -274,44 +264,23 @@ impl Context {
             };
 
             var_builder = Some(if is_master {
-                // Master: exclude shards that only contain remote-worker tensors
                 let worker_layers = topology.all_worker_layers();
                 if worker_layers.is_empty() {
                     utils::load_var_builder_from_index(
-                        model_tensors_index,
-                        dtype,
-                        device.clone(),
-                        fp8,
-                        gptq_group_size,
+                        model_tensors_index, dtype, device.clone(), &*quant,
                     )?
                 } else {
                     utils::load_var_builder_for_local_layers(
-                        model_tensors_index,
-                        dtype,
-                        device.clone(),
-                        &worker_layers,
-                        fp8,
-                        gptq_group_size,
+                        model_tensors_index, dtype, device.clone(), &worker_layers, &*quant,
                     )?
                 }
             } else if !my_layers.is_empty() {
-                // Worker with known layers: only load shards containing our layers
                 utils::load_var_builder_for_specific_layers(
-                    model_tensors_index,
-                    dtype,
-                    device.clone(),
-                    &my_layers,
-                    fp8,
-                    gptq_group_size,
+                    model_tensors_index, dtype, device.clone(), &my_layers, &*quant,
                 )?
             } else {
-                // Worker without known layers: load everything
                 utils::load_var_builder_from_index(
-                    model_tensors_index,
-                    dtype,
-                    device.clone(),
-                    fp8,
-                    gptq_group_size,
+                    model_tensors_index, dtype, device.clone(), &*quant,
                 )?
             });
             cache = Some(Cache::new(true, dtype, &config_internal, &device)?);
@@ -329,7 +298,7 @@ impl Context {
             cache,
             var_builder,
             text_model_arch,
-            fp8,
+            quant,
             listener_override: Arc::new(Mutex::new(None)),
         })
     }
