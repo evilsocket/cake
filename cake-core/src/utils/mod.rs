@@ -10,6 +10,7 @@ pub mod hf;
 pub mod models;
 pub mod native_dtype_backend;
 pub mod split;
+pub mod wav;
 
 use std::path::{Path, PathBuf};
 

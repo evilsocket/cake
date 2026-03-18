@@ -367,24 +367,6 @@ pub fn upsample(samples: &[f32], source_rate: usize, target_rate: usize) -> Vec<
 }
 
 /// Save audio samples as WAV file (16-bit PCM).
-pub fn save_wav(samples: &[f32], path: &std::path::Path, sample_rate: u32) -> Result<()> {
-    use std::io::Write;
-    let data_size = (samples.len() * 2) as u32;
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(b"RIFF")?;
-    f.write_all(&(36 + data_size).to_le_bytes())?;
-    f.write_all(b"WAVEfmt ")?;
-    f.write_all(&16u32.to_le_bytes())?;
-    f.write_all(&1u16.to_le_bytes())?; // PCM
-    f.write_all(&1u16.to_le_bytes())?; // Mono
-    f.write_all(&sample_rate.to_le_bytes())?;
-    f.write_all(&(sample_rate * 2).to_le_bytes())?;
-    f.write_all(&2u16.to_le_bytes())?;
-    f.write_all(&16u16.to_le_bytes())?;
-    f.write_all(b"data")?;
-    f.write_all(&data_size.to_le_bytes())?;
-    for &s in samples {
-        f.write_all(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())?;
-    }
-    Ok(())
-}
+///
+/// Re-exported from [`crate::utils::wav::save_wav`].
+pub use crate::utils::wav::save_wav;

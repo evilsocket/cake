@@ -273,7 +273,12 @@ pub fn detect_cuda_version() -> Option<String> {
         .chain(std::iter::once(std::path::PathBuf::from("/usr/local/cuda")))
         .collect();
 
-    for base in &candidates {
+    detect_cuda_version_from_dirs(&candidates)
+}
+
+/// Search for CUDA version info in the given directories (testable inner function).
+fn detect_cuda_version_from_dirs(candidates: &[std::path::PathBuf]) -> Option<String> {
+    for base in candidates {
         // Try version.json first (modern CUDA 11+)
         let json_path = base.join("version.json");
         if let Ok(content) = std::fs::read_to_string(&json_path) {
@@ -1415,55 +1420,59 @@ mod tests {
     #[test]
     fn test_detect_cuda_version_from_version_json() {
         let dir = tempfile::tempdir().unwrap();
-        let json_path = dir.path().join("version.json");
         std::fs::write(
-            &json_path,
+            dir.path().join("version.json"),
             r#"{"cuda": {"name": "CUDA SDK", "version": "12.4.1"}}"#,
         )
         .unwrap();
-        std::env::set_var("CUDA_HOME", dir.path().as_os_str());
-        let result = detect_cuda_version();
-        std::env::remove_var("CUDA_HOME");
-        assert_eq!(result, Some("CUDA 12.4".to_string()));
+        let dirs = vec![dir.path().to_path_buf()];
+        assert_eq!(
+            detect_cuda_version_from_dirs(&dirs),
+            Some("CUDA 12.4".to_string())
+        );
     }
 
     #[test]
     fn test_detect_cuda_version_from_version_txt() {
         let dir = tempfile::tempdir().unwrap();
-        let txt_path = dir.path().join("version.txt");
-        std::fs::write(&txt_path, "CUDA Version 11.8.0\n").unwrap();
-        std::env::set_var("CUDA_HOME", dir.path().as_os_str());
-        let result = detect_cuda_version();
-        std::env::remove_var("CUDA_HOME");
-        assert_eq!(result, Some("CUDA 11.8".to_string()));
+        std::fs::write(dir.path().join("version.txt"), "CUDA Version 11.8.0\n").unwrap();
+        let dirs = vec![dir.path().to_path_buf()];
+        assert_eq!(
+            detect_cuda_version_from_dirs(&dirs),
+            Some("CUDA 11.8".to_string())
+        );
     }
 
     #[test]
     fn test_detect_cuda_version_missing_dir() {
-        std::env::set_var("CUDA_HOME", "/nonexistent/path/cuda-99.9");
-        // Also unset CUDA_PATH to avoid interference
-        let old_path = std::env::var("CUDA_PATH").ok();
-        std::env::remove_var("CUDA_PATH");
-        let result = detect_cuda_version();
-        std::env::remove_var("CUDA_HOME");
-        if let Some(p) = old_path {
-            std::env::set_var("CUDA_PATH", p);
-        }
-        // On a machine without /usr/local/cuda, this returns None.
-        // On a machine with it, it may return Some. We just verify no panic.
-        let _ = result;
+        let dirs = vec![std::path::PathBuf::from("/nonexistent/path/cuda-99.9")];
+        assert_eq!(detect_cuda_version_from_dirs(&dirs), None);
     }
 
     #[test]
     fn test_detect_cuda_version_malformed_json() {
         let dir = tempfile::tempdir().unwrap();
-        let json_path = dir.path().join("version.json");
-        std::fs::write(&json_path, "not valid json {{{").unwrap();
-        std::env::set_var("CUDA_HOME", dir.path().as_os_str());
-        let result = detect_cuda_version();
-        std::env::remove_var("CUDA_HOME");
-        // Should not panic, returns None (or falls through to /usr/local/cuda)
-        let _ = result;
+        std::fs::write(dir.path().join("version.json"), "not valid json {{{").unwrap();
+        let dirs = vec![dir.path().to_path_buf()];
+        // Should not panic, returns None
+        assert_eq!(detect_cuda_version_from_dirs(&dirs), None);
+    }
+
+    #[test]
+    fn test_detect_cuda_version_json_preferred_over_txt() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("version.json"),
+            r#"{"cuda": {"version": "12.6.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("version.txt"), "CUDA Version 11.0.0\n").unwrap();
+        let dirs = vec![dir.path().to_path_buf()];
+        // version.json should take priority
+        assert_eq!(
+            detect_cuda_version_from_dirs(&dirs),
+            Some("CUDA 12.6".to_string())
+        );
     }
 
     // ── get_broadcast_addresses ─────────────────────────────────

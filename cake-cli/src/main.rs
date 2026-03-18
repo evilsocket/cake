@@ -509,98 +509,11 @@ async fn run_vibevoice_1_5b(
 #[cfg(feature = "master")]
 #[cfg(feature = "vibevoice")]
 fn load_wav_mono_24k(path: &std::path::Path) -> Result<Vec<f32>> {
-    use std::io::Read;
-    let mut f = std::fs::File::open(path)?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf)?;
-
-    // Parse WAV header
-    if buf.len() < 44 || &buf[0..4] != b"RIFF" || &buf[8..12] != b"WAVE" {
-        anyhow::bail!("Not a valid WAV file");
-    }
-
-    // Find data chunk
-    let mut pos = 12;
-    let mut data_start = 0;
-    let mut data_size = 0u32;
-    let mut channels = 1u16;
-    let mut sample_rate = 24000u32;
-    let mut bits_per_sample = 16u16;
-
-    while pos + 8 <= buf.len() {
-        let chunk_id = &buf[pos..pos + 4];
-        let chunk_size = u32::from_le_bytes([buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7]]);
-        if chunk_id == b"fmt " {
-            channels = u16::from_le_bytes([buf[pos + 10], buf[pos + 11]]);
-            sample_rate = u32::from_le_bytes([buf[pos + 12], buf[pos + 13], buf[pos + 14], buf[pos + 15]]);
-            bits_per_sample = u16::from_le_bytes([buf[pos + 22], buf[pos + 23]]);
-        } else if chunk_id == b"data" {
-            data_start = pos + 8;
-            data_size = chunk_size;
-            break;
-        }
-        pos += 8 + chunk_size as usize;
-        if pos % 2 != 0 {
-            pos += 1; // WAV chunks are word-aligned
-        }
-    }
-
-    if data_start == 0 {
-        anyhow::bail!("No data chunk in WAV file");
-    }
-
-    // Convert to f32 samples
-    let mut samples = Vec::new();
-    let data = &buf[data_start..data_start + data_size as usize];
-    match bits_per_sample {
-        16 => {
-            for chunk in data.chunks(2) {
-                if chunk.len() == 2 {
-                    let s = i16::from_le_bytes([chunk[0], chunk[1]]);
-                    samples.push(s as f32 / 32768.0);
-                }
-            }
-        }
-        32 => {
-            for chunk in data.chunks(4) {
-                if chunk.len() == 4 {
-                    let s = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                    samples.push(s);
-                }
-            }
-        }
-        _ => anyhow::bail!("Unsupported bits_per_sample: {}", bits_per_sample),
-    }
-
-    // Mix to mono if stereo
-    if channels == 2 {
-        let mono: Vec<f32> = samples.chunks(2).map(|c| (c[0] + c.get(1).copied().unwrap_or(0.0)) / 2.0).collect();
-        samples = mono;
-    }
-
-    // Resample to 24kHz if needed (simple linear interpolation)
-    if sample_rate != 24000 {
-        let ratio = 24000.0 / sample_rate as f64;
-        let new_len = (samples.len() as f64 * ratio) as usize;
-        let mut resampled = Vec::with_capacity(new_len);
-        for i in 0..new_len {
-            let src_pos = i as f64 / ratio;
-            let idx = src_pos as usize;
-            let frac = (src_pos - idx as f64) as f32;
-            let s0 = samples.get(idx).copied().unwrap_or(0.0);
-            let s1 = samples.get(idx + 1).copied().unwrap_or(s0);
-            resampled.push(s0 + frac * (s1 - s0));
-        }
-        samples = resampled;
-    }
-
+    let samples = cake_core::utils::wav::load_wav_mono(path, 24000)?;
     println!(
-        "[WAV] Loaded {:.1}s audio ({} samples, {}ch, {}Hz, {}bit)",
+        "[WAV] Loaded {:.1}s audio ({} samples, 24kHz mono)",
         samples.len() as f64 / 24000.0,
         samples.len(),
-        channels,
-        sample_rate,
-        bits_per_sample
     );
     Ok(samples)
 }

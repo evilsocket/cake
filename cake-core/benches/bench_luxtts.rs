@@ -74,7 +74,7 @@ mod luxtts_benches {
         let x = Tensor::randn(0f32, 1.0, (1, 100, 512), &Device::Cpu).unwrap();
         let v = Tensor::randn(0f32, 1.0, (1, 100, 512), &Device::Cpu).unwrap();
         bencher.bench(|| {
-            cake_core::models::luxtts::euler_solver::EulerSolver::step(&x, &v, 0.25).unwrap()
+            cake_core::models::luxtts::euler_solver::EulerSolver::step(&x, &v, 0.25, 0.5, false).unwrap()
         });
     }
 }

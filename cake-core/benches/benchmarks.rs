@@ -16,6 +16,7 @@ mod bench_protocol;
 mod bench_discovery;
 mod bench_topology;
 mod bench_utils;
+mod bench_wav;
 mod bench_flux;
 mod bench_vibevoice;
 #[cfg(feature = "luxtts")]
