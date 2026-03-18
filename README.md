@@ -5,12 +5,6 @@
 [![Documentation](https://img.shields.io/badge/docs-blue)](https://github.com/evilsocket/cake/blob/main/docs/index.md)
 [![License](https://img.shields.io/badge/license-GPL3-brightgreen.svg?style=flat-square)](https://github.com/evilsocket/cake/blob/master/LICENSE.md)
 
-  <small>Join the project community on our server!</small>
-  <br/><br/>
-  <a href="https://discord.gg/https://discord.gg/btZpkp45gQ" target="_blank" title="Join our community!">
-    <img src="https://dcbadge.limes.pink/api/server/https://discord.gg/btZpkp45gQ"/>
-  </a>
-
 </div>
 
 Cake is a Rust framework for **multimodal distributed inference** based on [Candle](https://github.com/huggingface/candle). It shards models across a heterogeneous cluster of consumer devices — iOS, Android, macOS, Linux, Windows — to run workloads that wouldn't fit on a single GPU, effectively leveraging [planned obsolescence](https://en.wikipedia.org/wiki/Planned_obsolescence) to make AI more accessible and democratic.
@@ -51,12 +45,6 @@ cake master --model-type audio-model --model microsoft/VibeVoice-1.5B \
 ```
 
 Models are downloaded automatically from HuggingFace. For the full usage guide and API reference, [check the project documentation](docs/index.md).
-
-## Contributors
-
-<a href="https://github.com/evilsocket/cake/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=evilsocket/cake" alt="Cake project contributors" />
-</a>
 
 ## Star History
 
