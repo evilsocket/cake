@@ -132,11 +132,11 @@ async fn main() -> Result<()> {
             args.mode = Mode::Master;
 
             // Zero-config: discover workers, assign layers, push model data
-            if args.cluster_key.is_some() && args.topology.is_none() {
+            if let (Some(key), None) = (&args.cluster_key, &args.topology) {
                 let model_path = resolve_model_path(&args.model)?;
                 let timeout = Duration::from_secs(args.discovery_timeout);
                 let topology = cake::sharding::master_setup(
-                    args.cluster_key.as_ref().unwrap(),
+                    key,
                     &model_path,
                     timeout,
                     args.min_workers,
@@ -156,7 +156,7 @@ async fn main() -> Result<()> {
             args.mode = Mode::Worker;
 
             // Zero-config: wait for master assignment + model data
-            let listener_override = if args.cluster_key.is_some() && args.topology.is_none() {
+            let listener_override = if let (Some(key), None) = (&args.cluster_key, &args.topology) {
                 if args.name.is_none() {
                     args.name = Some("worker".to_string());
                 }
@@ -164,7 +164,7 @@ async fn main() -> Result<()> {
                 let cache_dir = cache_base_dir();
                 let (layers, model_path, listener) = cake::sharding::worker_setup(
                     worker_name,
-                    args.cluster_key.as_ref().unwrap(),
+                    key,
                     &args.address,
                     &cache_dir,
                 )
