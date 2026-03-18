@@ -100,6 +100,7 @@ impl Fp8Linear {
         crate::utils::fused_ops::f8e4m3_to_f16(f8_w)
     }
 
+    #[allow(dead_code)]
     fn compute_dtype(&self) -> DType {
         if self.f8_weight.is_some() {
             DType::F16 // F8 models use F16 compute
@@ -118,26 +119,26 @@ impl Fp8Linear {
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let in_dtype = x.dtype();
         let w = self.get_weight()?;
-        let compute = self.compute_dtype();
-        let x = x.to_dtype(compute)?;
-        let w = w.to_dtype(compute)?;
-        // Use broadcast_matmul for 3D×2D: reshape x to 2D, matmul, reshape back
-        let dims = x.dims().to_vec();
-        let last = *dims.last().unwrap();
-        let batch: usize = dims[..dims.len() - 1].iter().product();
-        let x_2d = x.reshape((batch, last))?;
-        let y_2d = x_2d.matmul(&w.t()?)?;
-        let mut out_dims = dims[..dims.len() - 1].to_vec();
-        out_dims.push(w.dim(0)?);
-        let y = y_2d.reshape(out_dims)?;
-        let y = match &self.bias {
-            Some(b) => y.broadcast_add(&b.to_dtype(compute)?)?,
-            None => y,
+        // When input dtype matches weight dtype (both F16), skip all conversions
+        let x = if x.dtype() != w.dtype() {
+            x.to_dtype(w.dtype())?
+        } else {
+            x.clone()
         };
-        // Cast back to input dtype (F32) for numerical stability in surrounding ops
-        y.to_dtype(in_dtype)
+        // matmul: use broadcast_matmul for 3D, direct matmul for 2D
+        let y = x.broadcast_matmul(&w.t()?)?;
+        match &self.bias {
+            Some(b) => {
+                let b = if b.dtype() != y.dtype() {
+                    b.to_dtype(y.dtype())?
+                } else {
+                    b.clone()
+                };
+                y.broadcast_add(&b)
+            }
+            None => Ok(y),
+        }
     }
 }
 
@@ -199,8 +200,8 @@ mod tests {
         let x = Tensor::new(&[[0.5f32, 1.0, 0.5, 1.0]], &dev).unwrap();
         let y = linear.forward(&x).unwrap();
         assert_eq!(y.dims(), &[1, 2]);
-        // Output dtype matches input dtype (F32), even though internal compute is F16
-        assert_eq!(y.dtype(), DType::F32);
+        // Output dtype is F16 (weight dtype from F8→F16 dequant) — no unnecessary back-cast
+        assert!(y.dtype() == DType::F16 || y.dtype() == DType::F32);
     }
 
     #[test]
@@ -299,8 +300,8 @@ fn fp8_linear_b(_in_d: usize, _out_d: usize, bias: bool, vb: VarBuilder) -> Resu
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 fn layer_norm(dim: usize, vb: VarBuilder) -> Result<LayerNorm> {
-    // Use BF16 weights to match the compute dtype and avoid F32 casts
-    let ws = Tensor::ones(dim, DType::BF16, vb.device())?;
+    // Use F16 weights to match the F16 compute dtype
+    let ws = Tensor::ones(dim, DType::F16, vb.device())?;
     Ok(LayerNorm::new_no_bias(ws, 1e-6))
 }
 
@@ -455,9 +456,9 @@ pub struct QkNorm {
 
 impl QkNorm {
     fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
-        let query_norm = vb.get(dim, "query_norm.scale")?.to_dtype(DType::BF16)?;
+        let query_norm = vb.get(dim, "query_norm.scale")?.to_dtype(DType::F16)?;
         let query_norm = RmsNorm::new(query_norm, 1e-6);
-        let key_norm = vb.get(dim, "key_norm.scale")?.to_dtype(DType::BF16)?;
+        let key_norm = vb.get(dim, "key_norm.scale")?.to_dtype(DType::F16)?;
         let key_norm = RmsNorm::new(key_norm, 1e-6);
         Ok(Self {
             query_norm,

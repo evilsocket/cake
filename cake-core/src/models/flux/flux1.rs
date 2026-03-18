@@ -269,9 +269,10 @@ impl ImageGenerator for Flux1Gen {
         info!("Starting denoising ({num_steps} steps, guidance={guidance_scale})...");
         let b_sz = img.dim(0)?;
 
-        // Use BF16 for denoising state — same exponent range as F32 (no NaN risk),
-        // eliminates hundreds of F32↔F16 casts per step in Fp8Linear.
-        let compute_dtype = DType::BF16;
+        // Use F16 for denoising state — matches Fp8Linear's F8→F16 dequant output,
+        // eliminating ALL dtype conversions inside Fp8Linear (BF16 caused 456 extra
+        // BF16↔F16 conversion kernels per step). FLUX.1 was trained in F16.
+        let compute_dtype = DType::F16;
         let guidance_tensor = Tensor::full(guidance_scale as f32, b_sz, &dev)?
             .to_dtype(compute_dtype)?;
         let img_ids = img_ids.to_dtype(compute_dtype)?;
@@ -280,25 +281,37 @@ impl ImageGenerator for Flux1Gen {
         let vec = vec.to_dtype(compute_dtype)?;
 
         let mut img = img.to_dtype(compute_dtype)?;
-        for window in schedule.windows(2) {
+
+        // Pre-compute all timestep and dt tensors (avoid per-step allocations)
+        let pre_t_vecs: Vec<Tensor> = schedule
+            .iter()
+            .map(|t| Tensor::full(*t as f32, b_sz, &dev).unwrap().to_dtype(compute_dtype).unwrap())
+            .collect();
+        let pre_dts: Vec<Tensor> = schedule
+            .windows(2)
+            .map(|w| Tensor::full((w[1] - w[0]) as f32, b_sz, &dev).unwrap().to_dtype(compute_dtype).unwrap())
+            .collect();
+
+        for (step_idx, window) in schedule.windows(2).enumerate() {
             let (t_curr, t_prev) = match window {
                 [a, b] => (a, b),
                 _ => continue,
             };
-            let t_vec = Tensor::full(*t_curr as f32, b_sz, &dev)?
-                .to_dtype(compute_dtype)?;
+            let t_step = std::time::Instant::now();
             let pred = transformer.forward(
                 &img,
                 &img_ids,
                 &txt,
                 &txt_ids,
-                &t_vec,
+                &pre_t_vecs[step_idx],
                 &vec,
                 Some(&guidance_tensor),
             )?;
-            let dt = Tensor::full((t_prev - t_curr) as f32, b_sz, &dev)?.to_dtype(compute_dtype)?;
-            img = (img + pred.broadcast_mul(&dt)?)?;
-            info!("  step: t={t_curr:.3}→{t_prev:.3}");
+            img = (img + pred.broadcast_mul(&pre_dts[step_idx])?)?;
+            // Force GPU sync for accurate per-step timing
+            dev.synchronize()?;
+            let step_ms = t_step.elapsed().as_secs_f64() * 1000.0;
+            info!("  step {}: t={t_curr:.3}→{t_prev:.3} ({step_ms:.0}ms)", step_idx + 1);
         }
 
         // ── 7. Unpack latents and move to CPU ────────────────────────────
