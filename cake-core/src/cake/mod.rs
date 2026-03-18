@@ -420,6 +420,7 @@ impl Context {
 
         // AudioModel workers need a VarBuilder and config to load transformer layers.
         // Parse config.json for the LM backbone and create VarBuilder from safetensors.
+        #[cfg(feature = "vibevoice")]
         if args.model_type == ModelType::AudioModel
             && matches!(args.mode, Mode::Worker)
             && var_builder.is_none()

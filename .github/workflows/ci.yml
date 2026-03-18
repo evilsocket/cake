@@ -52,6 +52,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      ANDROID_NDK_VERSION: r27c
     steps:
       - uses: actions/checkout@v4
 
@@ -60,6 +62,13 @@ jobs:
         with:
           targets: aarch64-linux-android
           components: clippy
+
+      - name: Set up Android NDK ${{ env.ANDROID_NDK_VERSION }}
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.ANDROID_NDK_VERSION }}
+          add-to-path: false
 
       - name: Cache cargo registry & build
         uses: actions/cache@v4
@@ -71,23 +80,41 @@ jobs:
           key: android-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: android-cargo-
 
+      - name: Cache cargo-ndk binary
+        id: cache-cargo-ndk
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-ndk
+          key: cargo-ndk-bin-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
       - name: Install cargo-ndk
+        if: steps.cache-cargo-ndk.outputs.cache-hit != 'true'
         run: cargo install cargo-ndk --locked
 
       - name: Build cake-mobile (Android aarch64)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: cargo ndk -t aarch64-linux-android build -p cake-mobile
 
       - name: Clippy (cake-core + cake-mobile, Android)
-        run: cargo ndk -t aarch64-linux-android clippy -p cake-core --lib -p cake-mobile -- -D warnings
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: cargo ndk -t aarch64-linux-android clippy -p cake-core --lib --no-default-features --features "llama,qwen2,qwen3_5" -p cake-mobile -- -D warnings
 
       - name: Compile tests (cake-core lib, Android)
-        run: cargo ndk -t aarch64-linux-android test -p cake-core --lib --no-run
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: cargo ndk -t aarch64-linux-android test -p cake-core --lib --no-default-features --features "llama,qwen2,qwen3_5" --no-run
 
       - name: Compile tests (cake-core unit, Android)
-        run: cargo ndk -t aarch64-linux-android test -p cake-core --test unit --no-run
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: cargo ndk -t aarch64-linux-android test -p cake-core --test unit --no-default-features --features "llama,qwen2,qwen3_5" --no-run
 
       - name: Compile tests (cake-core protocol, Android)
-        run: cargo ndk -t aarch64-linux-android test -p cake-core --test protocol --no-run
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: cargo ndk -t aarch64-linux-android test -p cake-core --test protocol --no-default-features --features "llama,qwen2,qwen3_5" --no-run
 
   build-ios:
     name: Build (iOS arm64)
@@ -117,16 +144,16 @@ jobs:
         run: cargo build --target=aarch64-apple-ios -p cake-mobile --features metal
 
       - name: Clippy (cake-core + cake-mobile, iOS)
-        run: cargo clippy --target=aarch64-apple-ios -p cake-core --lib -p cake-mobile --features metal -- -D warnings
+        run: cargo clippy --target=aarch64-apple-ios -p cake-core --lib --no-default-features --features "llama,qwen2,qwen3_5,metal" -p cake-mobile --features metal -- -D warnings
 
       - name: Compile tests (cake-core lib, iOS)
-        run: cargo test --target=aarch64-apple-ios -p cake-core --lib --no-run
+        run: cargo test --target=aarch64-apple-ios -p cake-core --lib --no-default-features --features "llama,qwen2,qwen3_5,metal" --no-run
 
       - name: Compile tests (cake-core unit, iOS)
-        run: cargo test --target=aarch64-apple-ios -p cake-core --test unit --no-run
+        run: cargo test --target=aarch64-apple-ios -p cake-core --test unit --no-default-features --features "llama,qwen2,qwen3_5,metal" --no-run
 
       - name: Compile tests (cake-core protocol, iOS)
-        run: cargo test --target=aarch64-apple-ios -p cake-core --test protocol --no-run
+        run: cargo test --target=aarch64-apple-ios -p cake-core --test protocol --no-default-features --features "llama,qwen2,qwen3_5,metal" --no-run
 
   clippy:
     name: Clippy
