@@ -111,6 +111,7 @@ fn get_cache_dir() -> std::path::PathBuf {
 // Logging
 // ---------------------------------------------------------------------------
 
+#[cfg(not(target_os = "android"))]
 static LOG_PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
 
 fn log_mobile(msg: &str) {
