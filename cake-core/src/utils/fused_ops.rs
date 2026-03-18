@@ -1805,6 +1805,177 @@ impl candle_core::CustomOp3 for DepthwiseConv1dBiasCtx {
     }
 }
 
+// ─── adaln_modulate: rms_norm(x,w,eps) * (1+scale) + shift ──────────
+
+struct AdaLnModulate {
+    eps: f32,
+    shift: Tensor,
+}
+
+#[allow(clippy::too_many_arguments)]
+impl candle_core::CustomOp3 for AdaLnModulate {
+    fn name(&self) -> &'static str {
+        "adaln_modulate"
+    }
+
+    fn cpu_fwd(
+        &self,
+        s_x: &CpuStorage,
+        l_x: &Layout,
+        s_w: &CpuStorage,
+        l_w: &Layout,
+        s_sc: &CpuStorage,
+        l_sc: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        fn inner<
+            T: candle_core::WithDType
+                + num_traits::Float
+                + num_traits::AsPrimitive<f32>
+                + num_traits::FromPrimitive,
+        >(
+            x: &[T], l_x: &Layout,
+            w: &[T], l_w: &Layout,
+            scale: &[T], l_sc: &Layout,
+            shift_t: &Tensor, eps: f32,
+        ) -> Result<(CpuStorage, Shape)> {
+            let x = match l_x.contiguous_offsets() {
+                Some((o1, o2)) => &x[o1..o2],
+                None => candle_core::bail!("adaln: x contiguous"),
+            };
+            let w = match l_w.contiguous_offsets() {
+                Some((o1, o2)) => &w[o1..o2],
+                None => candle_core::bail!("adaln: w contiguous"),
+            };
+            let scale = match l_sc.contiguous_offsets() {
+                Some((o1, o2)) => &scale[o1..o2],
+                None => candle_core::bail!("adaln: scale contiguous"),
+            };
+            let shift_v: Vec<f32> = shift_t.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1()?;
+            let dims = l_x.shape().dims();
+            let n_cols = dims[dims.len() - 1];
+            let el = l_x.shape().elem_count();
+            let n_rows = el / n_cols;
+            let mut dst = vec![T::zero(); el];
+            for r in 0..n_rows {
+                let off = r * n_cols;
+                let mut sum2 = 0f32;
+                for c in 0..n_cols {
+                    let v: f32 = x[off + c].as_();
+                    sum2 += v * v;
+                }
+                let inv_rms = 1.0f32 / (sum2 / n_cols as f32 + eps).sqrt();
+                for c in 0..n_cols {
+                    let xv: f32 = x[off + c].as_() * inv_rms;
+                    let wv: f32 = w[c].as_();
+                    let sv: f32 = scale[off + c].as_();
+                    let shv = shift_v[off + c];
+                    dst[off + c] = T::from_f32(xv * wv * (1.0 + sv) + shv).unwrap_or(T::zero());
+                }
+            }
+            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
+            Ok((storage, l_x.shape().clone()))
+        }
+
+        use CpuStorage as C;
+        match (s_x, s_w, s_sc) {
+            (C::BF16(x), C::BF16(w), C::BF16(s)) => inner(x, l_x, w, l_w, s, l_sc, &self.shift, self.eps),
+            (C::F16(x), C::F16(w), C::F16(s)) => inner(x, l_x, w, l_w, s, l_sc, &self.shift, self.eps),
+            (C::F32(x), C::F32(w), C::F32(s)) => inner(x, l_x, w, l_w, s, l_sc, &self.shift, self.eps),
+            (C::F64(x), C::F64(w), C::F64(s)) => inner(x, l_x, w, l_w, s, l_sc, &self.shift, self.eps),
+            _ => candle_core::bail!("adaln: unsupported dtype"),
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        s_x: &candle_core::CudaStorage,
+        l_x: &Layout,
+        s_w: &candle_core::CudaStorage,
+        l_w: &Layout,
+        s_sc: &candle_core::CudaStorage,
+        l_sc: &Layout,
+    ) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{
+            CudaSlice, DeviceRepr, LaunchConfig, PushKernelArg,
+        };
+        use candle_core::cuda_backend::{kernel_name, WrapErr};
+        use candle_core::{CudaDevice, WithDType};
+
+        let dims = l_x.shape().dims();
+        let n_cols = dims[dims.len() - 1];
+        let el = l_x.shape().elem_count();
+        let n_rows = el / n_cols;
+        let eps = self.eps;
+
+        let shift_sl = self.shift.storage_and_layout();
+        let (shift_storage, shift_layout) = (&*shift_sl.0, &shift_sl.1);
+
+        fn launch<T: DeviceRepr + WithDType>(
+            x: &CudaSlice<T>, l_x: &Layout,
+            w: &CudaSlice<T>, l_w: &Layout,
+            sc: &CudaSlice<T>, l_sc: &Layout,
+            sh: &CudaSlice<T>, l_sh: &Layout,
+            dev: &CudaDevice,
+            n_cols: i32, n_rows: usize, el: usize, eps: f32,
+        ) -> Result<CudaSlice<T>> {
+            let x = match l_x.contiguous_offsets() { Some((a,b)) => x.slice(a..b), None => candle_core::bail!("adaln: x") };
+            let w = match l_w.contiguous_offsets() { Some((a,b)) => w.slice(a..b), None => candle_core::bail!("adaln: w") };
+            let sc = match l_sc.contiguous_offsets() { Some((a,b)) => sc.slice(a..b), None => candle_core::bail!("adaln: sc") };
+            let sh = match l_sh.contiguous_offsets() { Some((a,b)) => sh.slice(a..b), None => candle_core::bail!("adaln: sh") };
+            let block_size: u32 = if n_cols < 1024 { 32 } else { 1024 };
+            let cfg = LaunchConfig { grid_dim: (n_rows as u32, 1, 1), block_dim: (block_size, 1, 1), shared_mem_bytes: 0 };
+            let func = dev.get_or_load_custom_func(&kernel_name::<T>("adaln_modulate"), "cake_fused_ops", FUSED_OPS_PTX)?;
+            let out = unsafe { dev.alloc::<T>(el)? };
+            let mut builder = func.builder();
+            builder.arg(&x); builder.arg(&w); builder.arg(&sc); builder.arg(&sh); builder.arg(&out);
+            candle_core::builder_arg!(builder, n_cols, block_size as i32, eps);
+            unsafe { builder.launch(cfg) }.w()?;
+            Ok(out)
+        }
+
+        use candle_core::backend::BackendStorage;
+        use candle_core::cuda_backend::CudaStorageSlice as S;
+        let dev = s_x.device();
+        let nc = n_cols as i32;
+
+        let sh_s = match shift_storage {
+            candle_core::Storage::Cuda(cs) => cs,
+            _ => candle_core::bail!("adaln: shift must be on CUDA"),
+        };
+
+        let slice = match (&s_x.slice, &s_w.slice, &s_sc.slice, &sh_s.slice) {
+            (S::BF16(x), S::BF16(w), S::BF16(sc), S::BF16(sh)) => S::BF16(launch(x, l_x, w, l_w, sc, l_sc, sh, shift_layout, dev, nc, n_rows, el, eps)?),
+            (S::F16(x), S::F16(w), S::F16(sc), S::F16(sh)) => S::F16(launch(x, l_x, w, l_w, sc, l_sc, sh, shift_layout, dev, nc, n_rows, el, eps)?),
+            (S::F32(x), S::F32(w), S::F32(sc), S::F32(sh)) => S::F32(launch(x, l_x, w, l_w, sc, l_sc, sh, shift_layout, dev, nc, n_rows, el, eps)?),
+            (S::F64(x), S::F64(w), S::F64(sc), S::F64(sh)) => S::F64(launch(x, l_x, w, l_w, sc, l_sc, sh, shift_layout, dev, nc, n_rows, el, eps)?),
+            _ => candle_core::bail!("adaln: unsupported dtype"),
+        };
+
+        Ok((candle_core::CudaStorage { slice, device: dev.clone() }, l_x.shape().clone()))
+    }
+}
+
+/// Fused AdaLN modulation: rms_norm(x, weight, eps) * (1 + scale) + shift.
+/// Replaces 4 kernel launches (rms_norm + add_1 + mul + add_shift) with 1.
+pub fn adaln_modulate(
+    x: &Tensor,
+    norm_weight: &Tensor,
+    scale: &Tensor,
+    shift: &Tensor,
+    eps: f32,
+) -> Result<Tensor> {
+    let x = x.contiguous()?;
+    let w = norm_weight.contiguous()?;
+    let sc = scale.contiguous()?;
+    let sh = shift.contiguous()?;
+    x.apply_op3_no_bwd(
+        &w,
+        &sc,
+        &AdaLnModulate { eps, shift: sh },
+    )
+}
+
 /// Fused depthwise conv1d with separate context + input (no cat needed).
 /// Replaces Tensor::zeros + Tensor::cat + depthwise_conv1d_bias (3 kernels → 1).
 /// ctx: (batch, channels, kernel_size-1), input: (batch, channels, time_len)

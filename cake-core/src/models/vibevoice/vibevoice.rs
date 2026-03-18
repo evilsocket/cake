@@ -101,17 +101,16 @@ impl VibeVoiceTTS {
         let tts_input_types = candle_nn::embedding(2, common_cfg.hidden_size, vb.pp("model").pp("tts_input_types"))?;
 
         info!("  Loading prediction head + VAE + connector...");
-        let prediction_head = PredictionHead::load(vb.pp("model").pp("prediction_head"), &config.diffusion_head_config)?;
+        let steps = diffusion_steps.unwrap_or(config.diffusion_head_config.ddpm_num_inference_steps);
+        info!("  DPM-Solver++: {steps} steps");
+        let scheduler = DpmSolverPP::new_cosine(config.diffusion_head_config.ddpm_num_steps, steps);
+        let prediction_head = PredictionHead::load(vb.pp("model").pp("prediction_head"), &config.diffusion_head_config, scheduler.timesteps())?;
         let vae_decoder = AcousticVaeDecoder::load(vb.pp("model").pp("acoustic_tokenizer").pp("decoder"), &config.acoustic_tokenizer_config)?;
         let connector = AcousticConnector::load(vb.pp("model").pp("acoustic_connector"), config.acoustic_vae_dim, config.decoder_config.hidden_size, config.decoder_config.rms_norm_eps)?;
         let eos_classifier = EosClassifier::load(vb.pp("tts_eos_classifier"))?;
 
         let speech_scaling_factor = vb.pp("model").get((), "speech_scaling_factor")?;
         let speech_bias_factor = vb.pp("model").get((), "speech_bias_factor")?;
-
-        let steps = diffusion_steps.unwrap_or(config.diffusion_head_config.ddpm_num_inference_steps);
-        info!("  DPM-Solver++: {steps} steps");
-        let scheduler = DpmSolverPP::new_cosine(config.diffusion_head_config.ddpm_num_steps, steps);
 
         info!("VibeVoice loaded!");
 

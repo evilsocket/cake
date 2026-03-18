@@ -66,32 +66,44 @@ impl FeedForward {
 /// Single diffusion block with AdaLN modulation.
 #[derive(Debug, Clone)]
 struct DiffusionBlock {
-    norm: candle_nn::RmsNorm,
+    norm_weight: Tensor,
+    eps: f32,
     ffn: FeedForward,
     ada_ln: Linear,
 }
 
 impl DiffusionBlock {
     fn load(vb: VarBuilder, hidden: usize, intermediate: usize, eps: f64) -> Result<Self> {
-        let norm = candle_nn::rms_norm(hidden, eps, vb.pp("norm"))?;
+        let norm_weight = vb.pp("norm").get(hidden, "weight")?;
         let ffn = FeedForward::load(vb.pp("ffn"), hidden, intermediate)?;
-        // adaLN produces 3 * hidden = (scale, shift, gate) for modulation
         let ada_ln = linear(hidden, 3 * hidden, vb.pp("adaLN_modulation").pp("1"))?;
-        Ok(Self { norm, ffn, ada_ln })
+        Ok(Self {
+            norm_weight,
+            eps: eps as f32,
+            ffn,
+            ada_ln,
+        })
     }
 
     fn forward(&self, x: &Tensor, cond: &Tensor) -> Result<Tensor> {
         let modulation = candle_nn::ops::silu(cond)
             .and_then(|c| self.ada_ln.forward(&c))?;
         let chunks = modulation.chunk(3, D::Minus1)?;
-        // Reference order: shift, scale, gate (NOT scale, shift, gate!)
         let (shift, scale, gate) = (&chunks[0], &chunks[1], &chunks[2]);
 
-        // AdaLN: modulate(norm(x), shift, scale) = norm(x) * (1 + scale) + shift
-        let h = self.norm.forward(x)?;
-        let h = h.broadcast_mul(&(scale + 1.0)?)?.broadcast_add(shift)?;
+        let h = crate::utils::fused_ops::adaln_modulate(x, &self.norm_weight, scale, shift, self.eps)?;
         let h = self.ffn.forward(&h)?;
-        // Gated residual: x + gate * ffn(modulated)
+        x + h.broadcast_mul(gate)?
+    }
+
+    /// Forward with pre-computed silu(cond).
+    fn forward_with_silu_cond(&self, x: &Tensor, silu_cond: &Tensor) -> Result<Tensor> {
+        let modulation = self.ada_ln.forward(silu_cond)?;
+        let chunks = modulation.chunk(3, D::Minus1)?;
+        let (shift, scale, gate) = (&chunks[0], &chunks[1], &chunks[2]);
+
+        let h = crate::utils::fused_ops::adaln_modulate(x, &self.norm_weight, scale, shift, self.eps)?;
+        let h = self.ffn.forward(&h)?;
         x + h.broadcast_mul(gate)?
     }
 }
@@ -99,7 +111,8 @@ impl DiffusionBlock {
 /// Final output layer with RMSNorm (no affine) + AdaLN + linear projection.
 #[derive(Debug, Clone)]
 struct FinalLayer {
-    norm: candle_nn::RmsNorm,
+    norm_weight: Tensor,
+    eps: f32,
     ada_ln: Linear,
     linear: Linear,
 }
@@ -107,12 +120,16 @@ struct FinalLayer {
 impl FinalLayer {
     fn load(vb: VarBuilder, hidden: usize, latent: usize, eps: f64) -> Result<Self> {
         // norm_final is RMSNorm with elementwise_affine=False — use weight=ones
-        let norm_w = Tensor::ones(hidden, candle_core::DType::F32, vb.device())?
+        let norm_weight = Tensor::ones(hidden, candle_core::DType::F32, vb.device())?
             .to_dtype(vb.dtype())?;
-        let norm = candle_nn::RmsNorm::new(norm_w, eps);
         let ada_ln = linear(hidden, 2 * hidden, vb.pp("adaLN_modulation").pp("1"))?;
         let linear_proj = linear(hidden, latent, vb.pp("linear"))?;
-        Ok(Self { norm, ada_ln, linear: linear_proj })
+        Ok(Self {
+            norm_weight,
+            eps: eps as f32,
+            ada_ln,
+            linear: linear_proj,
+        })
     }
 
     fn forward(&self, x: &Tensor, cond: &Tensor) -> Result<Tensor> {
@@ -120,9 +137,15 @@ impl FinalLayer {
             .and_then(|c| self.ada_ln.forward(&c))?;
         let chunks = modulation.chunk(2, D::Minus1)?;
         let (shift, scale) = (&chunks[0], &chunks[1]);
-        // Reference: modulate(self.norm_final(x), shift, scale)
-        let h = self.norm.forward(x)?;
-        let h = h.broadcast_mul(&(scale + 1.0)?)?.broadcast_add(shift)?;
+        let h = crate::utils::fused_ops::adaln_modulate(x, &self.norm_weight, scale, shift, self.eps)?;
+        self.linear.forward(&h)
+    }
+
+    fn forward_with_silu_cond(&self, x: &Tensor, silu_cond: &Tensor) -> Result<Tensor> {
+        let modulation = self.ada_ln.forward(silu_cond)?;
+        let chunks = modulation.chunk(2, D::Minus1)?;
+        let (shift, scale) = (&chunks[0], &chunks[1]);
+        let h = crate::utils::fused_ops::adaln_modulate(x, &self.norm_weight, scale, shift, self.eps)?;
         self.linear.forward(&h)
     }
 }
@@ -135,10 +158,16 @@ pub struct PredictionHead {
     cond_proj: Linear,
     layers: Vec<DiffusionBlock>,
     final_layer: FinalLayer,
+    /// Pre-computed timestep embeddings (one per inference step).
+    pre_t_embeddings: Vec<Tensor>,
 }
 
 impl PredictionHead {
-    pub fn load(vb: VarBuilder, cfg: &super::config::DiffusionHeadConfig) -> Result<Self> {
+    pub fn load(
+        vb: VarBuilder,
+        cfg: &super::config::DiffusionHeadConfig,
+        timesteps: &[usize],
+    ) -> Result<Self> {
         let h = cfg.hidden_size;
         let latent = cfg.latent_size;
         let intermediate = (h as f64 * cfg.head_ffn_ratio) as usize;
@@ -159,12 +188,26 @@ impl PredictionHead {
 
         let final_layer = FinalLayer::load(vb.pp("final_layer"), h, latent, cfg.rms_norm_eps)?;
 
+        // Pre-compute timestep embeddings for all inference steps (avoids ~12 kernels/step)
+        let pre_t_embeddings: Vec<Tensor> = timesteps
+            .iter()
+            .map(|&t| {
+                // The doubled timestep (batch=2 for CFG) — same value repeated
+                let t_tensor = Tensor::new(&[t as f32, t as f32], vb.device())
+                    .unwrap()
+                    .to_dtype(vb.dtype())
+                    .unwrap();
+                t_embedder.forward(&t_tensor).unwrap()
+            })
+            .collect();
+
         Ok(Self {
             t_embedder,
             noisy_images_proj,
             cond_proj,
             layers,
             final_layer,
+            pre_t_embeddings,
         })
     }
 
@@ -173,11 +216,9 @@ impl PredictionHead {
     /// t: (batch,) timestep scalars
     /// condition: (batch, hidden_size) LLM hidden states
     pub fn forward(&self, x: &Tensor, t: &Tensor, condition: &Tensor) -> Result<Tensor> {
-        // Reference: x = noisy_images_proj(x), NOT summed with condition
         let mut h = self.noisy_images_proj.forward(x)?;
         let t_emb = self.t_embedder.forward(t)?;
         let c_proj = self.cond_proj.forward(condition)?;
-        // c = projected_condition + timestep_embedding (used for AdaLN modulation)
         let c = (c_proj + t_emb)?;
 
         for layer in &self.layers {
@@ -185,6 +226,36 @@ impl PredictionHead {
         }
 
         self.final_layer.forward(&h, &c)
+    }
+
+    /// Project condition once per frame (constant across all diffusion steps).
+    /// Returns the projected condition to be reused.
+    pub fn project_condition(&self, condition: &Tensor) -> Result<Tensor> {
+        self.cond_proj.forward(condition)
+    }
+
+    /// Optimized forward using pre-computed timestep embedding and projected condition.
+    /// Caches silu(cond) across blocks (saves 4 silu kernels per step).
+    pub fn forward_fast(
+        &self,
+        x: &Tensor,
+        step_idx: usize,
+        cond_proj: &Tensor,
+    ) -> Result<Tensor> {
+        let mut h = self.noisy_images_proj.forward(x)?;
+
+        // Use pre-computed timestep embedding (saves ~12 kernel launches)
+        let t_emb = &self.pre_t_embeddings[step_idx];
+        let c = (cond_proj + t_emb)?;
+
+        // Compute silu(c) once, reuse across all blocks (saves 4 silu kernels)
+        let silu_c = candle_nn::ops::silu(&c)?;
+
+        for layer in &self.layers {
+            h = layer.forward_with_silu_cond(&h, &silu_c)?;
+        }
+
+        self.final_layer.forward_with_silu_cond(&h, &silu_c)
     }
 }
 
@@ -249,7 +320,8 @@ mod tests {
         };
 
         let vb = make_prediction_head_vb();
-        let head = PredictionHead::load(vb, &cfg).unwrap();
+        let sched = super::super::ddpm::DpmSolverPP::new_cosine(1000, 20);
+        let head = PredictionHead::load(vb, &cfg, sched.timesteps()).unwrap();
 
         let x = make_tensor(&[2, 8], 100);       // (batch=2, latent=8)
         let t = Tensor::new(&[0.5f32, 0.3], &Device::Cpu).unwrap(); // (batch=2,)

@@ -41,8 +41,7 @@ pub struct VibeVoice1_5B {
     speech_scaling_factor: Tensor,
     speech_bias_factor: Tensor,
 
-    // Pre-computed tensors for diffusion (avoid per-frame allocations)
-    pre_t_doubled: Vec<Tensor>,
+    // Pre-computed speech_diffusion embedding (reused every diffusion frame)
     speech_diff_embed: Tensor,
 
     config: VibeVoice1_5BConfig,
@@ -143,30 +142,19 @@ impl VibeVoice1_5B {
         )?;
 
         // Prediction head + scheduler
+        let steps = diffusion_steps.unwrap_or(config.diffusion_head_config.ddpm_num_inference_steps);
+        let scheduler =
+            DpmSolverPP::new_cosine(config.diffusion_head_config.ddpm_num_steps, steps);
         let prediction_head = PredictionHead::load(
             vb.pp("model").pp("prediction_head"),
             &config.diffusion_head_config,
+            scheduler.timesteps(),
         )?;
 
         let speech_scaling_factor = vb.pp("model").get((), "speech_scaling_factor")?;
         let speech_bias_factor = vb.pp("model").get((), "speech_bias_factor")?;
 
-        let steps = diffusion_steps.unwrap_or(config.diffusion_head_config.ddpm_num_inference_steps);
         info!("  DPM-Solver++: {steps} steps");
-        let scheduler =
-            DpmSolverPP::new_cosine(config.diffusion_head_config.ddpm_num_steps, steps);
-
-        // Pre-compute doubled timestep tensors for diffusion (avoid per-frame allocations)
-        let pre_t_doubled: Vec<Tensor> = scheduler
-            .timesteps()
-            .iter()
-            .map(|&t| {
-                Tensor::new(&[t as f32, t as f32], device)
-                    .unwrap()
-                    .to_dtype(dtype)
-                    .unwrap()
-            })
-            .collect();
 
         // Pre-compute speech_diffusion embedding (reused every diffusion frame)
         let diff_token = Tensor::new(&[SPEECH_DIFFUSION_ID], device)?.unsqueeze(0)?;
@@ -188,7 +176,6 @@ impl VibeVoice1_5B {
             scheduler,
             speech_scaling_factor,
             speech_bias_factor,
-            pre_t_doubled,
             speech_diff_embed,
             config,
             common_cfg,
@@ -255,7 +242,10 @@ impl VibeVoice1_5B {
         let vae_dim = self.config.acoustic_vae_dim;
         let num_steps = self.scheduler.timesteps().len();
 
+        // Pre-compute condition projection once (constant across all steps)
         let condition = Tensor::cat(&[pos_cond, neg_cond], 0)?;
+        let cond_proj = self.prediction_head.project_condition(&condition)?;
+
         let mut sample =
             Tensor::randn(0f32, 1., (1, vae_dim), &self.device)?.to_dtype(self.dtype)?;
         let mut x0_buffer: Vec<Tensor> = Vec::new();
@@ -264,9 +254,10 @@ impl VibeVoice1_5B {
         for step_idx in 0..num_steps {
             let doubled = Tensor::cat(&[&sample, &sample], 0)?;
 
+            // Use forward_fast: pre-computed t_emb + cached silu(cond) across blocks
             let v_pred = self
                 .prediction_head
-                .forward(&doubled, &self.pre_t_doubled[step_idx], &condition)?;
+                .forward_fast(&doubled, step_idx, &cond_proj)?;
 
             let cond_pred = v_pred.narrow(0, 0, 1)?;
             let uncond_pred = v_pred.narrow(0, 1, 1)?;

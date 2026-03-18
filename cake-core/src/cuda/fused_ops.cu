@@ -603,6 +603,64 @@ ADD_SCALED_OP(__half, add_scaled_f16)
 ADD_SCALED_OP(__nv_bfloat16, add_scaled_bf16)
 #endif
 
+// ─── adaln_modulate: rms_norm(x, w, eps) * (1+scale) + shift ────────
+// Fuses rms_norm + scale_add1 + mul + shift_add (4 kernels) into 1.
+// Used in diffusion blocks' AdaLN modulation.
+// x: (n_rows, n_cols), weight: (n_cols,), scale: (n_rows, n_cols), shift: (n_rows, n_cols)
+// out: (n_rows, n_cols) = rms_norm(x) * (1 + scale) + shift
+#define ADALN_MODULATE_OP(TYPENAME, FN_NAME) \
+extern "C" __global__ void FN_NAME( \
+    const TYPENAME *x, \
+    const TYPENAME *weight, \
+    const TYPENAME *scale, \
+    const TYPENAME *shift, \
+    TYPENAME *out, \
+    const int n_cols, \
+    const int block_size, \
+    const float eps \
+) { \
+    const int row = blockIdx.x; \
+    const int offset = row * n_cols; \
+    float sum2 = 0.0f; \
+    for (int col = threadIdx.x; col < n_cols; col += block_size) { \
+        float v = static_cast<float>(x[offset + col]); \
+        sum2 += v * v; \
+    } \
+    for (int mask = 16; mask > 0; mask >>= 1) { \
+        sum2 += __shfl_xor_sync(0xffffffff, sum2, mask); \
+    } \
+    __shared__ float shared[32]; \
+    int warp_id = threadIdx.x / 32; \
+    int lane_id = threadIdx.x % 32; \
+    if (lane_id == 0) shared[warp_id] = sum2; \
+    __syncthreads(); \
+    if (warp_id == 0) { \
+        sum2 = (lane_id < (block_size + 31) / 32) ? shared[lane_id] : 0.0f; \
+        for (int mask = 16; mask > 0; mask >>= 1) { \
+            sum2 += __shfl_xor_sync(0xffffffff, sum2, mask); \
+        } \
+        shared[0] = sum2; \
+    } \
+    __syncthreads(); \
+    float inv_rms = rsqrtf(shared[0] / (float)n_cols + eps); \
+    for (int col = threadIdx.x; col < n_cols; col += block_size) { \
+        float xv = static_cast<float>(x[offset + col]) * inv_rms; \
+        float wv = static_cast<float>(weight[col]); \
+        float sv = static_cast<float>(scale[offset + col]); \
+        float shv = static_cast<float>(shift[offset + col]); \
+        out[offset + col] = static_cast<TYPENAME>(xv * wv * (1.0f + sv) + shv); \
+    } \
+}
+
+ADALN_MODULATE_OP(float, adaln_modulate_f32)
+ADALN_MODULATE_OP(double, adaln_modulate_f64)
+#if __CUDA_ARCH__ >= 530
+ADALN_MODULATE_OP(__half, adaln_modulate_f16)
+#endif
+#if __CUDA_ARCH__ >= 800
+ADALN_MODULATE_OP(__nv_bfloat16, adaln_modulate_bf16)
+#endif
+
 SUB_MUL_OP(float, sub_mul_f32)
 SUB_MUL_OP(double, sub_mul_f64)
 #if __CUDA_ARCH__ >= 530
