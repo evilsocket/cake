@@ -495,6 +495,9 @@ fn get_broadcast_addresses() -> Vec<Ipv4Addr> {
     let mut addrs = Vec::new();
 
     // On Unix, use libc::getifaddrs to enumerate interfaces without spawning a subprocess.
+    // The broadcast address field differs by platform:
+    //   Linux:        ifa_ifu   (union of ifa_broadaddr / ifa_dstaddr)
+    //   macOS / iOS:  ifa_dstaddr
     #[cfg(unix)]
     {
         let mut ifaddrs_ptr: *mut libc::ifaddrs = std::ptr::null_mut();
@@ -506,13 +509,20 @@ fn get_broadcast_addresses() -> Vec<Ipv4Addr> {
                     let family = unsafe { (*ifa.ifa_addr).sa_family } as i32;
                     if family == libc::AF_INET
                         && (ifa.ifa_flags & libc::IFF_BROADCAST as libc::c_uint) != 0
-                        && !ifa.ifa_ifu.is_null()
                     {
-                        let brd_sa =
-                            unsafe { &*(ifa.ifa_ifu as *const libc::sockaddr_in) };
-                        let ip = Ipv4Addr::from(u32::from_be(brd_sa.sin_addr.s_addr));
-                        if !ip.is_loopback() && !addrs.contains(&ip) {
-                            addrs.push(ip);
+                        // Get the broadcast address pointer (platform-specific field name).
+                        #[cfg(any(target_os = "linux", target_os = "android"))]
+                        let brd_ptr = ifa.ifa_ifu;
+                        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+                        let brd_ptr = ifa.ifa_dstaddr;
+
+                        if !brd_ptr.is_null() {
+                            let brd_sa =
+                                unsafe { &*(brd_ptr as *const libc::sockaddr_in) };
+                            let ip = Ipv4Addr::from(u32::from_be(brd_sa.sin_addr.s_addr));
+                            if !ip.is_loopback() && !addrs.contains(&ip) {
+                                addrs.push(ip);
+                            }
                         }
                     }
                 }
