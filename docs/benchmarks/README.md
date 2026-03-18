@@ -8,7 +8,7 @@
 | Model | Modality | Reference | cake | Speedup | VRAM (ref) | VRAM (cake) |
 |-------|----------|-----------|------|---------|------------|-------------|
 | Qwen3.5-0.8B | Text (256 tok) | ollama 183.6 tok/s | **128.2 tok/s** | 0.70x | 2,248 MB | **1,906 MB** |
-| FLUX.1-dev FP8 | Image (768x1024) | n/a (gated) | **3.3 s/step** | — | — | 13,317 MB |
+| FLUX.1-dev FP8 | Image (768x1024) | n/a (gated) | **3.5 s/step** | — | — | 13,317 MB |
 | VibeVoice-1.5B | Voice (14s audio) | Python 27 ms/frame | **20 ms/frame** | **1.35x** | 5,978 MB | 6,565 MB |
 
 ## Qwen3.5-0.8B Text Generation
@@ -40,18 +40,40 @@
 
 | Metric | cake (FP8) |
 |--------|------------|
-| Total time | ~90s |
+| Total time | ~84s |
 | T5-XXL encoding | 28.0s |
 | Transformer loading | 9.0s |
-| Denoising (20 steps) | 66.0s |
-| Per-step time | 3.3s |
+| Denoising (20 steps) | 70.0s |
+| Per-step time | 3.5s |
 | VAE decode | 4.0s |
 | Peak VRAM | 13,317 MB |
 
+### Per-step breakdown (GPU-synced timing)
+
+| Component | Blocks | Notes |
+|-----------|--------|-------|
+| Double stream blocks | 19 | MMDiT: joint img+txt attention, separate MLPs |
+| Single stream blocks | 38 | Combined QKV + MLP in one linear |
+| F8→F16 on-the-fly dequant | 228/step | ~36GB bandwidth per step |
+| BF16↔F16 dtype conversions | 456/step | BF16 outer, F16 inner (fastest on Ampere) |
+| Compute per step | 43 TFLOPs | ~20% GPU utilization (batch=1) |
+
+### Optimization investigation
+
+| Approach | Result | Finding |
+|----------|--------|---------|
+| F16 outer compute (eliminate BF16↔F16 conversions) | Black image | F16 overflow in attention scores |
+| Direct F8→BF16 dequant (skip F16 intermediate) | 4.0s/step (+14%) | BF16 matmul slower than F16 on Ampere |
+| broadcast_matmul instead of 2D reshape | 4.1s/step (+17%) | cuBLAS batched GEMM less efficient |
+| Pre-computed timestep/dt tensors | ~0 change | GPU-bound, not launch-bound |
+| **BF16 outer + F16 inner (original)** | **3.5s/step** | **Already optimal for this hardware** |
+
 **Notes:**
 - Reference (diffusers) benchmark skipped — `black-forest-labs/FLUX.1-dev` is a gated repo requiring HuggingFace authentication. Cake uses the publicly available `Comfy-Org/flux1-dev` FP8 checkpoint.
-- FP8 weights kept on GPU (~8.6GB), dequantized to F16 on-the-fly per layer.
-- BF16 outer compute eliminates F32↔F16 round-trip casts (~7% speedup vs F32 outer).
+- FLUX.1-dev is **compute-bound** (unlike VibeVoice which was kernel-launch-bound). The bottleneck is 43 TFLOPs/step across 57 transformer blocks with on-the-fly F8→F16 dequantization.
+- FP8 weights kept on GPU (~8.6GB), dequantized to F16 on-the-fly per layer. Caching as F16 would need ~17GB — too much for 16GB GPU.
+- BF16 outer compute with F16 inner matmul is the optimal configuration: BF16 prevents overflow, F16 Tensor Cores are fastest on Ampere.
+- Further speedup requires fusing F8 dequant directly into matmul (custom CUTLASS kernel) or INT8 quantization with native cuBLAS support.
 - Fits on a 16GB GPU with room for activations — ComfyUI-comparable memory footprint.
 
 **Output:** [`cake_output.png`](flux1/cake_output.png)
@@ -103,5 +125,5 @@
 ## Key Takeaways
 
 1. **Text generation** is competitive — cake at F16 is ~70% of ollama's Q4 throughput, while using less VRAM. With quantization support, cake would likely match or exceed ollama.
-2. **Image generation** works on consumer hardware — FLUX.1-dev FP8 runs at 768x1024 on a 16GB laptop GPU with BF16 compute, matching ComfyUI memory footprint.
+2. **Image generation** works on consumer hardware — FLUX.1-dev FP8 at 3.5s/step (768x1024) on a 16GB laptop GPU. Compute-bound at 43 TFLOPs/step — optimal BF16/F16 mixed-precision pipeline already saturates Tensor Cores.
 3. **Voice synthesis** is 35% faster than Python — 20ms/frame vs Python's 27ms, achieved through 6 custom CUDA fused kernels that eliminate ~800 kernel launches per frame. Generates 13.7s of audio in 9.0s (~1.5x real-time).
