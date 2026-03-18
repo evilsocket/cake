@@ -22,7 +22,8 @@ High-quality 12B parameter flow-matching transformer. Runs in FP8 precision on a
 ```sh
 cake master --model-type image-model --image-model-arch flux1 \
   --sd-image-prompt "a photorealistic landscape at golden hour, dramatic clouds" \
-  --flux-height 768 --flux-width 1024
+  --flux-height 768 --flux-width 1024 \
+  --image-output landscape.png
 ```
 
 ### FLUX.2-klein-4B
@@ -43,8 +44,7 @@ cake master --model-type image-model --image-model-arch flux \
 | `--flux-width` | 1024 | Image width in pixels |
 | `--flux-steps` | 20 | Denoising steps (FLUX.2-klein uses 4) |
 | `--flux-guidance` | 3.5 | CFG guidance scale |
-
-Images are saved to the `images/` directory.
+| `--image-output` | `output.png` | Output file path (PNG) |
 
 ## Stable Diffusion
 
