@@ -62,6 +62,8 @@ pub enum TextModelArch {
     OLMo2,
     /// EXAONE 4.0 (3:1 local/global hybrid, QK-norm)
     EXAONE4,
+    /// LuxTTS text-to-speech (Zipformer + flow matching)
+    LuxTTS,
 }
 
 #[derive(Clone, Parser, Default, Debug)]
@@ -188,6 +190,23 @@ pub struct Args {
     /// Path to voice prompt (.safetensors) for TTS voice cloning.
     #[arg(long)]
     pub voice_prompt: Option<String>,
+
+    /// Path to reference audio WAV file for LuxTTS voice cloning (24kHz mono).
+    #[arg(long)]
+    pub tts_reference_audio: Option<String>,
+
+    /// Time shift parameter for LuxTTS flow matching (default: 1.0).
+    #[arg(long, default_value_t = 1.0)]
+    pub tts_t_shift: f32,
+
+    /// Speed factor for LuxTTS (default: 1.0, higher = faster speech).
+    #[arg(long, default_value_t = 1.0)]
+    pub tts_speed: f32,
+
+    /// Pre-computed IPA token IDs file for LuxTTS (space-separated integers).
+    /// Bypasses the built-in phonemizer when provided.
+    #[arg(long)]
+    pub tts_token_ids: Option<String>,
 }
 
 #[derive(Clone, clap::Args, Default, Debug)]

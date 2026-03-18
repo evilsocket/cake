@@ -37,6 +37,8 @@ pub mod qwen3_5_moe;
 #[cfg(feature = "flux")]
 pub mod flux;
 pub mod sd;
+#[cfg(feature = "luxtts")]
+pub mod luxtts;
 #[cfg(feature = "vibevoice")]
 pub mod vibevoice;
 

@@ -208,6 +208,12 @@ async fn run_master(ctx: Context) -> Result<()> {
         return run_master_audio(ctx).await;
     }
 
+    // LuxTTS: TTS model using TextModel dispatch for sharding
+    #[cfg(feature = "luxtts")]
+    if ctx.text_model_arch == TextModelArch::LuxTTS {
+        return run_master_luxtts(ctx).await;
+    }
+
     match ctx.text_model_arch {
         #[cfg(feature = "qwen2")]
         TextModelArch::Qwen2 => {
@@ -637,6 +643,51 @@ fn load_wav_mono_24k(path: &std::path::Path) -> Result<Vec<f32>> {
 }
 
 #[cfg(feature = "master")]
+#[cfg(feature = "luxtts")]
+async fn run_master_luxtts(mut ctx: Context) -> Result<()> {
+    use cake_core::models::luxtts;
+    use cake_core::models::Generator;
+
+    println!("[LuxTTS] Loading model from {}...", ctx.data_path.display());
+
+    let mut model = luxtts::LuxTTS::load(&mut ctx)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("failed to load LuxTTS model"))?;
+
+    let prompt = ctx.args.prompt.clone();
+    println!("[LuxTTS] Generating speech for: \"{}\"", prompt);
+
+    // Load reference audio if provided
+    let reference_audio = if let Some(ref ref_path) = ctx.args.tts_reference_audio {
+        println!("[LuxTTS] Loading reference audio: {}", ref_path);
+        Some(load_wav_mono_24k(std::path::Path::new(ref_path))?)
+    } else {
+        None
+    };
+
+    let samples: Vec<f32> = model
+        .generate_speech(
+            &prompt,
+            reference_audio.as_deref(),
+            ctx.args.tts_t_shift,
+            ctx.args.tts_cfg_scale,
+            ctx.args.tts_diffusion_steps.min(10), // LuxTTS uses 4 steps by default
+            ctx.args.tts_speed,
+        )
+        .await?;
+
+    let output_path = std::path::Path::new(&ctx.args.audio_output);
+    luxtts::save_wav(&samples, output_path, 48000)?;
+    println!(
+        "[LuxTTS] Audio saved to {} ({:.1}s, {} samples @ 48kHz)",
+        output_path.display(),
+        samples.len() as f64 / 48000.0,
+        samples.len()
+    );
+    Ok(())
+}
+
+#[cfg(feature = "master")]
 async fn run_master_image(ctx: Context) -> Result<()> {
     use cake_core::cake::Master;
 
@@ -751,6 +802,13 @@ async fn run_worker(ctx: &mut Context) -> Result<()> {
             #[cfg(feature = "exaone4")]
             TextModelArch::EXAONE4 => {
                 Worker::<cake_core::models::exaone4::EXAONE4>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(feature = "luxtts")]
+            TextModelArch::LuxTTS => {
+                Worker::<cake_core::models::luxtts::LuxTTS>::new(ctx)
                     .await?
                     .run()
                     .await

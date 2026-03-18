@@ -31,7 +31,7 @@ tokenizers = { version = "0.21", features = ["onig"] }
 tokio = { version = "1.38.0", features = ["full"] }
 
 [features]
-default = ["master", "llama", "qwen2", "qwen3_5", "qwen3", "qwen3_moe", "qwen3_5_moe", "phi4", "mistral", "gemma3", "falcon3", "olmo2", "exaone4", "flux", "vibevoice"]
+default = ["master", "llama", "qwen2", "qwen3_5", "qwen3", "qwen3_moe", "qwen3_5_moe", "phi4", "mistral", "gemma3", "falcon3", "olmo2", "exaone4", "flux", "vibevoice", "luxtts"]
 llama = ["cake-core/llama"]
 qwen2 = ["cake-core/qwen2"]
 qwen3_5 = ["cake-core/qwen3_5"]
@@ -46,6 +46,7 @@ olmo2 = ["cake-core/olmo2"]
 exaone4 = ["cake-core/exaone4"]
 flux = ["cake-core/flux"]
 vibevoice = ["cake-core/vibevoice"]
+luxtts = ["cake-core/luxtts"]
 cuda = ["cake-core/cuda"]
 metal = ["cake-core/metal"]
 master = ["cake-core/master"]

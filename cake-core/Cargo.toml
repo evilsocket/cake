@@ -48,6 +48,7 @@ sha2 = "0.10"
 hmac = "0.12"
 num-traits = "0.2"
 rand = "0.8"
+rustfft = { version = "6", optional = true }
 dirs = "5"
 hex = "0.4"
 tracing-chrome = "0.7.2"
@@ -55,7 +56,7 @@ tracing-subscriber = "0.3.18"
 base64 = "0.22.1"
 
 [features]
-default = ["master", "llama", "qwen2", "qwen3_5", "qwen3", "qwen3_moe", "qwen3_5_moe", "phi4", "mistral", "gemma3", "falcon3", "olmo2", "exaone4", "flux", "vibevoice"]
+default = ["master", "llama", "qwen2", "qwen3_5", "qwen3", "qwen3_moe", "qwen3_5_moe", "phi4", "mistral", "gemma3", "falcon3", "olmo2", "exaone4", "flux", "vibevoice", "luxtts"]
 
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:candle-flash-attn", "dep:bindgen_cuda"]
@@ -76,6 +77,7 @@ olmo2 = []
 exaone4 = []
 flux = []
 vibevoice = []
+luxtts = ["dep:rustfft"]
 
 [build-dependencies]
 bindgen_cuda = { version = "0.1.6", optional = true }

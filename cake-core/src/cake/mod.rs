@@ -101,6 +101,8 @@ pub(crate) fn arch_str_to_text_model_arch(arch: &str) -> TextModelArch {
         "OLMo2ForCausalLM" | "Olmo2ForCausalLM" => TextModelArch::OLMo2,
         #[cfg(feature = "exaone4")]
         "ExaoneForCausalLM" => TextModelArch::EXAONE4,
+        #[cfg(feature = "luxtts")]
+        "LuxTTSForTextToSpeech" => TextModelArch::LuxTTS,
         _ => TextModelArch::Llama,
     }
 }
@@ -244,6 +246,46 @@ impl Context {
                 #[cfg(feature = "exaone4")]
                 TextModelArch::EXAONE4 => {
                     crate::models::exaone4::EXAONE4Config::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "luxtts")]
+                TextModelArch::LuxTTS => {
+                    let luxtts_cfg = crate::models::luxtts::LuxTTSConfig::from_path(&config_filename)?;
+                    // Create a minimal common Config for the framework
+                    Config {
+                        hidden_size: luxtts_cfg.model.fm_decoder_dim,
+                        intermediate_size: luxtts_cfg.model.fm_decoder_feedforward_dim,
+                        vocab_size: luxtts_cfg.model.vocab_size,
+                        num_hidden_layers: luxtts_cfg.total_fm_layers(),
+                        num_attention_heads: luxtts_cfg.model.fm_decoder_num_heads,
+                        num_key_value_heads: luxtts_cfg.model.fm_decoder_num_heads,
+                        rms_norm_eps: 1e-5,
+                        rope_theta: 10000.0,
+                        bos_token_id: None,
+                        eos_token_id: None,
+                        rope_scaling: None,
+                        tie_word_embeddings: false,
+                        max_seq_len: 4096,
+                        use_qkv_bias: false,
+                        model_prefix: "fm_decoder".to_string(),
+                        head_dim: None,
+                        partial_rotary_factor: 1.0,
+                        linear_attn: None,
+                        residual_rms_norm: false,
+                        use_qk_norm: false,
+                        pre_reshape_qk_norm: false,
+                        sliding_window: None,
+                        fused_qkv_proj: false,
+                        fused_gate_up_proj: false,
+                        global_layers: vec![],
+                        use_gelu_mlp: false,
+                        embed_scale: None,
+                        moe_intermediate_size: None,
+                        num_experts: 0,
+                        num_experts_per_tok: 0,
+                        norm_topk_prob: false,
+                        shared_expert_intermediate_size: None,
+                        attn_output_gate: false,
+                    }
                 }
                 #[cfg(feature = "llama")]
                 TextModelArch::Llama => {
@@ -503,5 +545,11 @@ mod tests {
     #[cfg(feature = "exaone4")]
     fn arch_str_exaone4() {
         assert_eq!(arch_str_to_text_model_arch("ExaoneForCausalLM"), TextModelArch::EXAONE4);
+    }
+
+    #[test]
+    #[cfg(feature = "luxtts")]
+    fn arch_str_luxtts() {
+        assert_eq!(arch_str_to_text_model_arch("LuxTTSForTextToSpeech"), TextModelArch::LuxTTS);
     }
 }
