@@ -129,6 +129,25 @@ fn semantic_connector_1_5b_forward(bencher: divan::Bencher) {
     bencher.bench_local(|| conn.forward(&x).unwrap());
 }
 
+// ── StreamingConvCache ──────────────────────────────────────────────
+
+#[divan::bench]
+fn streaming_cache_take_set_cycle(bencher: divan::Bencher) {
+    let t = Tensor::zeros((1, 32, 6), DType::F32, &Device::Cpu).unwrap();
+    bencher.bench_local(|| {
+        let mut cache = cake_core::models::vibevoice::vae_decoder::StreamingConvCache::new(30);
+        for _ in 0..26 {
+            let (slot, _) = cache.take_slot();
+            cache.set(slot, t.clone());
+        }
+        cache.reset_counter();
+        for _ in 0..26 {
+            let (slot, _) = cache.take_slot();
+            cache.set(slot, t.clone());
+        }
+    });
+}
+
 // ── Prediction Head 1.5B (1536 hidden) ──────────────────────────────
 
 #[divan::bench(args = [1, 4])]

@@ -124,3 +124,13 @@ fn vae_resnet_block(bencher: divan::Bencher, spatial: usize) {
     let x = make_tensor(&[1, h, spatial, spatial], 204);
     bencher.bench_local(|| block.forward_pub(&x).unwrap());
 }
+
+// ── Timestep Embedding ──────────────────────────────────────────────
+
+#[divan::bench(args = [64, 128, 256])]
+fn flux1_timestep_embedding(bencher: divan::Bencher, dim: usize) {
+    let t = Tensor::new(&[0.5f32, 0.3], &Device::Cpu).unwrap();
+    bencher.bench_local(|| {
+        cake_core::models::flux::flux1_model::timestep_embedding(&t, dim, DType::F32).unwrap()
+    });
+}

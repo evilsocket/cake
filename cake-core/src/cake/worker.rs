@@ -617,19 +617,193 @@ mod tests {
 
     // --- detect_cuda_device_count (CPU-only fallback) ---
 
-    // When built without the `cuda` feature, detect_cuda_device_count returns 0.
-    // When built with `cuda` but no GPU present, it also returns 0.
-    // We can't assert an exact count, but we can verify it doesn't panic.
     #[test]
     fn detect_cuda_device_count_does_not_panic() {
-        // We need a concrete Generator type. Use SD since it's always available.
         use crate::models::sd::SD;
         let count = <crate::cake::Worker<SD>>::detect_cuda_device_count();
-        // Without cuda feature, this is always 0.
         #[cfg(not(feature = "cuda"))]
         assert_eq!(count, 0);
-        // With cuda feature, it's >= 0 (might be 0 if no GPU).
         #[cfg(feature = "cuda")]
         let _ = count;
+    }
+
+    // --- WorkerContext ---
+
+    #[test]
+    fn worker_context_to_info_returns_valid_fields() {
+        use crate::cake::Topology;
+        use std::sync::Arc;
+
+        let ctx = Context {
+            args: Default::default(),
+            dtype: DType::F16,
+            topology: Topology::new(),
+            data_path: std::path::PathBuf::from("/tmp"),
+            device: Device::Cpu,
+            config: None,
+            cache: None,
+            var_builder: None,
+            text_model_arch: crate::TextModelArch::Auto,
+            quant: Arc::new(crate::utils::NoQuantization),
+            listener_override: Arc::new(std::sync::Mutex::new(None)),
+        };
+
+        let wctx = WorkerContext::<crate::models::common::Transformer> {
+            device: Device::Cpu,
+            device_idx: 0,
+            dtype: DType::F16,
+            blocks: Arc::new(HashMap::new()),
+            layer_devices: Arc::new(HashMap::new()),
+            context: ctx,
+        };
+
+        let info = wctx.to_info(42);
+        assert_eq!(info.latency, 42);
+        assert_eq!(info.device, "cpu");
+        assert_eq!(info.device_idx, 0);
+        assert!(!info.version.is_empty());
+        assert!(!info.os.is_empty());
+        assert!(!info.arch.is_empty());
+    }
+
+    #[test]
+    fn worker_context_get_client_context_resets_cache() {
+        use crate::cake::Topology;
+        use crate::models::common::{Cache, Config};
+        use std::sync::Arc;
+
+        let cfg = Config {
+            hidden_size: 64,
+            intermediate_size: 128,
+            vocab_size: 100,
+            num_hidden_layers: 2,
+            num_attention_heads: 2,
+            num_key_value_heads: 2,
+            rms_norm_eps: 1e-5,
+            rope_theta: 10000.0,
+            max_seq_len: 128,
+            bos_token_id: None,
+            eos_token_id: None,
+            rope_scaling: None,
+            tie_word_embeddings: false,
+            use_qkv_bias: false,
+            model_prefix: "model".into(),
+            head_dim: None,
+            partial_rotary_factor: 1.0,
+            linear_attn: None,
+            residual_rms_norm: false,
+            use_qk_norm: false,
+            pre_reshape_qk_norm: false,
+            sliding_window: None,
+            fused_qkv_proj: false,
+            fused_gate_up_proj: false,
+            global_layers: vec![],
+            use_gelu_mlp: false,
+            embed_scale: None,
+            moe_intermediate_size: None,
+            num_experts: 0,
+            num_experts_per_tok: 0,
+            norm_topk_prob: false,
+            shared_expert_intermediate_size: None,
+            attn_output_gate: false,
+        };
+        let cache = Cache::new(true, DType::F32, &cfg, &Device::Cpu).unwrap();
+
+        let ctx = Context {
+            args: Default::default(),
+            dtype: DType::F32,
+            topology: Topology::new(),
+            data_path: std::path::PathBuf::from("/tmp"),
+            device: Device::Cpu,
+            config: Some(cfg),
+            cache: Some(cache),
+            var_builder: None,
+            text_model_arch: crate::TextModelArch::Auto,
+            quant: Arc::new(crate::utils::NoQuantization),
+            listener_override: Arc::new(std::sync::Mutex::new(None)),
+        };
+
+        let wctx = WorkerContext::<crate::models::common::Transformer> {
+            device: Device::Cpu,
+            device_idx: 0,
+            dtype: DType::F32,
+            blocks: Arc::new(HashMap::new()),
+            layer_devices: Arc::new(HashMap::new()),
+            context: ctx,
+        };
+
+        let client_ctx = wctx.get_client_context();
+        // New context should have a fresh cache (as_new clears KV entries)
+        assert!(client_ctx.context.cache.is_some());
+        // Device and dtype should be copied
+        assert_eq!(format!("{:?}", client_ctx.device), format!("{:?}", Device::Cpu));
+        assert_eq!(client_ctx.dtype, DType::F32);
+    }
+
+    // --- read_message_timed / write_message_timed ---
+
+    #[tokio::test]
+    async fn write_then_read_message_roundtrip() {
+        use crate::models::sd::SD;
+        use tokio::io::duplex;
+
+        let tensor = candle_core::Tensor::zeros((1, 4), DType::F32, &Device::Cpu).unwrap();
+        let msg = Message::single_op("test_layer", &tensor, 0, 0);
+
+        // Create in-memory duplex stream (server ↔ client)
+        let (mut server, mut client) = duplex(65536);
+
+        // Write from server side
+        let (write_dur, write_size) =
+            <Worker<SD>>::write_message_timed(&mut server, msg).await.unwrap();
+        assert!(write_size > 0);
+        assert!(write_dur.as_nanos() > 0);
+
+        // Read from client side
+        let (read_dur, read_size, read_msg) =
+            <Worker<SD>>::read_message_timed(&mut client).await.unwrap();
+        assert!(read_size > 0);
+        assert!(read_dur.as_nanos() > 0);
+
+        // Verify the message was correctly serialized/deserialized
+        match read_msg {
+            Message::SingleOp { layer_name, x, index_pos, block_idx } => {
+                assert_eq!(layer_name, "test_layer");
+                assert_eq!(index_pos, 0);
+                assert_eq!(block_idx, 0);
+                let t = x.to_tensor(&Device::Cpu).unwrap();
+                assert_eq!(t.dims(), &[1, 4]);
+            }
+            other => panic!("expected SingleOp, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn write_then_read_batch_message() {
+        use crate::models::sd::SD;
+        use tokio::io::duplex;
+
+        let tensor = candle_core::Tensor::ones((1, 8), DType::F32, &Device::Cpu).unwrap();
+        let batch = vec![
+            ("layer.0".to_string(), 0usize, 0usize),
+            ("layer.1".to_string(), 0, 1),
+        ];
+        let msg = Message::from_batch(&tensor, batch);
+
+        let (mut server, mut client) = duplex(65536);
+        <Worker<SD>>::write_message_timed(&mut server, msg).await.unwrap();
+
+        let (_dur, _size, read_msg) =
+            <Worker<SD>>::read_message_timed(&mut client).await.unwrap();
+        match read_msg {
+            Message::Batch { x, batch } => {
+                let t = x.to_tensor(&Device::Cpu).unwrap();
+                assert_eq!(t.dims(), &[1, 8]);
+                assert_eq!(batch.len(), 2);
+                assert_eq!(batch[0].0, "layer.0");
+                assert_eq!(batch[1].0, "layer.1");
+            }
+            other => panic!("expected Batch, got {:?}", other),
+        }
     }
 }

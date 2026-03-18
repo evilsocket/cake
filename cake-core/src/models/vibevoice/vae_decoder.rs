@@ -491,7 +491,7 @@ impl AcousticVaeDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{DType, Device};
+    use candle_core::{DType, Device, IndexOp};
 
     #[test]
     fn test_decoder_block_forward() {
@@ -525,5 +525,123 @@ mod tests {
         let x = mt(&[1, ch, 16], 10);
         let y = block.forward(&x).unwrap();
         assert_eq!(y.dims(), &[1, ch, 16]);
+    }
+
+    // --- StreamingConvCache ---
+
+    #[test]
+    fn test_streaming_cache_new() {
+        let cache = StreamingConvCache::new(10);
+        assert_eq!(cache.states.len(), 10);
+        assert!(cache.states.iter().all(|s| s.is_none()));
+    }
+
+    #[test]
+    fn test_streaming_cache_take_slot_sequential() {
+        let mut cache = StreamingConvCache::new(5);
+        for i in 0..5 {
+            let (idx, is_first) = cache.take_slot();
+            assert_eq!(idx, i);
+            assert!(is_first, "slot {i} should be first-use");
+        }
+    }
+
+    #[test]
+    fn test_streaming_cache_take_slot_after_set() {
+        let mut cache = StreamingConvCache::new(3);
+        let t = Tensor::zeros(4, DType::F32, &Device::Cpu).unwrap();
+        cache.set(0, t);
+
+        cache.reset_counter();
+        let (idx, is_first) = cache.take_slot();
+        assert_eq!(idx, 0);
+        assert!(!is_first, "slot 0 was set, should not be first-use");
+    }
+
+    #[test]
+    fn test_streaming_cache_set_and_get() {
+        let mut cache = StreamingConvCache::new(3);
+        let t = Tensor::ones((1, 4, 6), DType::F32, &Device::Cpu).unwrap();
+        cache.set(1, t.clone());
+
+        assert!(cache.get(0).is_none());
+        let got = cache.get(1).unwrap();
+        assert_eq!(got.dims(), &[1, 4, 6]);
+    }
+
+    #[test]
+    fn test_streaming_cache_auto_resize() {
+        let mut cache = StreamingConvCache::new(2);
+        let t = Tensor::zeros(1, DType::F32, &Device::Cpu).unwrap();
+        cache.set(5, t); // beyond initial capacity
+        assert!(cache.states.len() >= 6);
+        assert!(cache.get(5).is_some());
+    }
+
+    #[test]
+    fn test_streaming_cache_clear() {
+        let mut cache = StreamingConvCache::new(3);
+        let t = Tensor::zeros(1, DType::F32, &Device::Cpu).unwrap();
+        cache.set(0, t.clone());
+        cache.set(1, t.clone());
+        cache.set(2, t);
+        cache.clear();
+        assert!(cache.get(0).is_none());
+        assert!(cache.get(1).is_none());
+        assert!(cache.get(2).is_none());
+    }
+
+    #[test]
+    fn test_streaming_cache_reset_counter() {
+        let mut cache = StreamingConvCache::new(3);
+        cache.take_slot();
+        cache.take_slot();
+        assert_eq!(cache.counter, 2);
+        cache.reset_counter();
+        assert_eq!(cache.counter, 0);
+    }
+
+    // --- causal_pad / causal_trim ---
+
+    #[test]
+    fn test_causal_pad_zero() {
+        let x = Tensor::ones(&[1, 4, 10], DType::F32, &Device::Cpu).unwrap();
+        let padded = AcousticVaeDecoder::causal_pad(&x, 0).unwrap();
+        assert_eq!(padded.dims(), &[1, 4, 10]);
+    }
+
+    #[test]
+    fn test_causal_pad_nonzero() {
+        let x = Tensor::ones(&[1, 4, 10], DType::F32, &Device::Cpu).unwrap();
+        let padded = AcousticVaeDecoder::causal_pad(&x, 6).unwrap();
+        assert_eq!(padded.dims(), &[1, 4, 16]);
+        // First 6 values should be zero
+        let vals: Vec<f32> = padded.i((0, 0, ..6)).unwrap().to_vec1().unwrap();
+        assert!(vals.iter().all(|v| *v == 0.0));
+        // Last 10 values should be ones
+        let vals: Vec<f32> = padded.i((0, 0, 6..)).unwrap().to_vec1().unwrap();
+        assert!(vals.iter().all(|v| *v == 1.0));
+    }
+
+    #[test]
+    fn test_causal_trim_zero() {
+        let x = Tensor::ones(&[1, 4, 10], DType::F32, &Device::Cpu).unwrap();
+        let trimmed = AcousticVaeDecoder::causal_trim(&x, 0).unwrap();
+        assert_eq!(trimmed.dims(), &[1, 4, 10]);
+    }
+
+    #[test]
+    fn test_causal_trim_nonzero() {
+        let x = Tensor::ones(&[1, 4, 10], DType::F32, &Device::Cpu).unwrap();
+        let trimmed = AcousticVaeDecoder::causal_trim(&x, 3).unwrap();
+        assert_eq!(trimmed.dims(), &[1, 4, 7]);
+    }
+
+    #[test]
+    fn test_causal_trim_all() {
+        let x = Tensor::ones(&[1, 4, 5], DType::F32, &Device::Cpu).unwrap();
+        // Trim more than length — should return clone
+        let trimmed = AcousticVaeDecoder::causal_trim(&x, 10).unwrap();
+        assert_eq!(trimmed.dims(), &[1, 4, 5]);
     }
 }
