@@ -10,7 +10,7 @@ use crate::models::flux::flux_shardable::FluxShardable;
 use crate::models::flux::text_encoder::FluxTextEncoder;
 use crate::models::flux::transformer::FluxTransformerForwarder;
 use crate::models::flux::vae::FluxVAE;
-use crate::models::sd::util::unpack_tensors;
+use crate::models::sd::util::{pack_tensors, unpack_tensors};
 use crate::models::{Generator, ImageGenerator};
 use crate::ImageGenerationArgs;
 use anyhow::Result;
@@ -120,10 +120,17 @@ impl ImageGenerator for FluxGen {
             dtype: DType::F32,
             ..self.context.clone()
         };
-        let mut text_encoder = FluxTextEncoder::load(
-            FluxModelFile::TextEncoder.name().to_string(),
-            &enc_ctx,
-        )?;
+        let component_name = FluxModelFile::TextEncoder.name();
+        let mut text_encoder: Box<dyn Forwarder> =
+            if let Some((_node_name, node)) = self.context.topology.get_node_for_layer(component_name) {
+                info!("{component_name} → remote worker");
+                Box::new(crate::cake::Client::new(
+                    dev.clone(), &node.host, component_name,
+                    self.context.args.cluster_key.as_deref(),
+                ).await?)
+            } else {
+                FluxTextEncoder::load(component_name.to_string(), &enc_ctx)?
+            };
         let mut enc_ctx = enc_ctx;
         let enc_output = text_encoder
             .forward_mut(&token_tensor, real_len, 0, &mut enc_ctx)
@@ -139,10 +146,17 @@ impl ImageGenerator for FluxGen {
 
         // 3. Load transformer (now fits in VRAM)
         info!("Loading transformer...");
-        let transformer = FluxTransformerForwarder::load(
-            FluxModelFile::Transformer.name().to_string(),
-            &self.context,
-        )?;
+        let component_name = FluxModelFile::Transformer.name();
+        let mut transformer: Box<dyn Forwarder> =
+            if let Some((_node_name, node)) = self.context.topology.get_node_for_layer(component_name) {
+                info!("{component_name} → remote worker");
+                Box::new(crate::cake::Client::new(
+                    dev.clone(), &node.host, component_name,
+                    self.context.args.cluster_key.as_deref(),
+                ).await?)
+            } else {
+                FluxTransformerForwarder::load(component_name.to_string(), &self.context)?
+            };
 
         // Move text embeddings back to GPU
         // Note: FLUX.2-klein is distilled — no CFG needed (is_distilled=true)
@@ -250,9 +264,10 @@ impl ImageGenerator for FluxGen {
             let (t_curr, t_prev) = (window[0], window[1]);
             let t_vec = Tensor::full(t_curr as f32, 1, &dev)?;
 
-            let pred = transformer.forward_direct(
-                &img, &img_ids, &txt, &txt_ids, &t_vec,
-            ).map_err(|e| anyhow!("transformer: {e}"))?;
+            let pred = FluxTransformerForwarder::forward_unpacked(
+                &mut transformer, img.clone(), img_ids.clone(), txt.clone(),
+                txt_ids.clone(), t_vec, &mut self.context,
+            ).await.map_err(|e| anyhow!("transformer: {e}"))?;
 
             // Euler step: img = img + pred * (t_prev - t_curr)
             let pred = pred.to_dtype(img.dtype())?;
@@ -264,39 +279,24 @@ impl ImageGenerator for FluxGen {
         // Drop transformer to free VRAM for VAE
         drop(transformer);
 
-        // 7. BN denormalization on patchified latents: (b, seq, 128)
+        // 7. Load VAE (or connect to remote worker) and decode latents
         info!("Loading VAE and decoding latents...");
-        let vae_loaded = FluxVAE::load_model(
-            &self.context.device,
-            self.context.dtype,
-            &self.context.args.model,
-        )?;
-        // Access the BN stats from the loaded VAE for denormalization
-        let bn_mean = &vae_loaded.bn_running_mean;
-        let bn_var = &vae_loaded.bn_running_var;
-        let bn_eps = 0.0001_f64;
-        let bn_std = bn_var
-            .to_dtype(DType::F32)?
-            .broadcast_add(&Tensor::new(&[bn_eps as f32], bn_var.device())?)?
-            .sqrt()?;
-        // img: (b, seq, 128), bn_std/bn_mean: (128,) → broadcast as (1, 1, 128)
-        let img = img.to_dtype(DType::F32)?;
-        let img = img
-            .broadcast_mul(&bn_std.unsqueeze(0)?.unsqueeze(0)?)?
-            .broadcast_add(&bn_mean.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(0)?)?;
+        let component_name = FluxModelFile::Vae.name();
+        let mut vae: Box<dyn Forwarder> =
+            if let Some((_node_name, node)) = self.context.topology.get_node_for_layer(component_name) {
+                info!("{component_name} → remote worker");
+                Box::new(crate::cake::Client::new(
+                    dev.clone(), &node.host, component_name,
+                    self.context.args.cluster_key.as_deref(),
+                ).await?)
+            } else {
+                FluxVAE::load(component_name.to_string(), &self.context)?
+            };
 
-        // 8. Unpack + unpatchify: (b, h*w, 128) → (b, 128, h, w) → (b, 32, h*2, w*2)
-        let img = img
-            .reshape((1, h_half, w_half, 128))?           // (b, h, w, 128)
-            .permute((0, 3, 1, 2))?;                      // (b, 128, h, w)
-        let img = img
-            .reshape((1, 32, 2, 2, h_half, w_half))?      // (b, c, ph, pw, h, w)
-            .permute((0, 1, 4, 2, 5, 3))?                 // (b, c, h, ph, w, pw)
-            .reshape((1, 32, h_half * 2, w_half * 2))?;   // (b, 32, h*2, w*2)
-
-        // 9. VAE decode
-        let mut vae: Box<dyn Forwarder> = vae_loaded;
-        let decoded = FluxVAE::decode(&mut vae, img, &mut self.context).await?;
+        // Pack latent dimensions for VAE forward (BN denorm + unpatchify + decode happen inside)
+        let dims_tensor = Tensor::new(&[h_half as f32, w_half as f32], &dev)?;
+        let decode_input = pack_tensors(vec![dims_tensor, img], &dev)?;
+        let decoded = vae.forward_mut(&decode_input, 0, 0, &mut self.context).await?;
 
         // 9. Convert to RGB images
         let images = ((decoded / 2.)? + 0.5)?.to_device(&Device::Cpu)?;
