@@ -47,6 +47,61 @@ jobs:
       - name: Protocol tests
         run: cargo test -p cake-core --test protocol
 
+  build-android:
+    name: Build (Android aarch64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: android-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: android-cargo-
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - name: Build cake-mobile (Android aarch64)
+        run: cargo ndk -t aarch64-linux-android build -p cake-mobile
+
+  build-ios:
+    name: Build (iOS arm64)
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ios-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ios-cargo-
+
+      - name: Build cake-mobile (iOS arm64)
+        run: cargo build --target=aarch64-apple-ios -p cake-mobile --features metal
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
