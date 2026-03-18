@@ -3,6 +3,9 @@
 # `cake`
 
 [![Documentation](https://img.shields.io/badge/docs-blue)](https://github.com/evilsocket/cake/blob/main/docs/index.md)
+[![Release](https://img.shields.io/github/release/evilsocket/cake.svg?style=flat-square)](https://github.com/evilsocket/cake/releases/latest)
+[![Rust Report](https://rust-reportcard.xuri.me/badge/github.com/evilsocket/cake)](https://rust-reportcard.xuri.me/report/github.com/evilsocket/cake)
+[![CI](https://img.shields.io/github/actions/workflow/status/evilsocket/cake/ci.yml)](https://github.com/evilsocket/cake/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-GPL3-brightgreen.svg?style=flat-square)](https://github.com/evilsocket/cake/blob/master/LICENSE.md)
 
 </div>
