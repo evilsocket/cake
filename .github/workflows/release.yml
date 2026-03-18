@@ -1,0 +1,260 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+
+  # allows running this manually for testing
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: ""
+
+jobs:
+  create-release:
+    name: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get the release version from the tag
+        if: env.VERSION == ''
+        run: echo "VERSION=${{ github.ref_name }}" >> $GITHUB_ENV
+
+      - name: Show the version
+        run: |
+          echo "version is: $VERSION"
+
+      - name: Check that tag version and Cargo.toml version are the same
+        run: |
+          if ! grep -q "version = \"$VERSION\"" Cargo.toml; then
+            echo "version does not match Cargo.toml" >&2
+            exit 1
+          fi
+
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create $VERSION --draft --verify-tag --title $VERSION
+
+    outputs:
+      version: ${{ env.VERSION }}
+
+  build-cli:
+    name: cli / ${{ matrix.name }}
+    needs: [create-release]
+    runs-on: ${{ matrix.os }}
+    env:
+      CROSS_VERSION: v0.2.5
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64-cpu
+            os: ubuntu-latest
+            target: ""
+            features: ""
+            cuda: ""
+
+          - name: linux-x86_64-cuda-11.8
+            os: ubuntu-latest
+            target: ""
+            features: cuda
+            cuda: "11.8.0"
+
+          - name: linux-x86_64-cuda-12.4
+            os: ubuntu-latest
+            target: ""
+            features: cuda
+            cuda: "12.4.0"
+
+          - name: linux-aarch64-cpu
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            features: ""
+            cuda: ""
+
+          - name: macos-arm64-metal
+            os: macos-latest
+            target: ""
+            features: metal
+            cuda: ""
+
+          - name: macos-arm64-cpu
+            os: macos-latest
+            target: ""
+            features: ""
+            cuda: ""
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux' && matrix.target == ''
+        run: sudo apt-get update && sudo apt-get install -y lld
+
+      - name: Install CUDA toolkit
+        if: matrix.cuda != ''
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: ${{ matrix.cuda }}
+          method: network
+
+      - name: Build release binary (native, default features)
+        if: matrix.target == '' && matrix.features == ''
+        run: cargo build --verbose --release -p cake-cli
+
+      - name: Build release binary (native, extra features)
+        if: matrix.target == '' && matrix.features != ''
+        run: cargo build --verbose --release -p cake-cli --features "${{ matrix.features }}"
+
+      - name: Build release binary (cross)
+        if: matrix.target != ''
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross --rev "$CROSS_VERSION" --force
+          FEATURES="${{ matrix.features }}"
+          if [ -n "$FEATURES" ]; then
+            cross build --verbose --release -p cake-cli --target "${{ matrix.target }}" --features "$FEATURES"
+          else
+            cross build --verbose --release -p cake-cli --target "${{ matrix.target }}"
+          fi
+
+      - name: Set binary and archive name (native)
+        if: matrix.target == ''
+        shell: bash
+        run: |
+          echo "BIN=target/release/cake" >> $GITHUB_ENV
+          echo "ARCHIVE=cake-${{ needs.create-release.outputs.version }}-${{ matrix.name }}" >> $GITHUB_ENV
+
+      - name: Set binary and archive name (cross)
+        if: matrix.target != ''
+        shell: bash
+        run: |
+          echo "BIN=target/${{ matrix.target }}/release/cake" >> $GITHUB_ENV
+          echo "ARCHIVE=cake-${{ needs.create-release.outputs.version }}-${{ matrix.name }}" >> $GITHUB_ENV
+
+      - name: Show binary info
+        shell: bash
+        run: file "$BIN"
+
+      - name: Create archive
+        shell: bash
+        run: |
+          mkdir -p "$ARCHIVE"
+          cp "$BIN" "$ARCHIVE"/
+          cp README.md LICENSE "$ARCHIVE"/
+          ls -la "$ARCHIVE"
+
+      - name: Build tarball and checksum
+        shell: bash
+        run: |
+          tar czf "$ARCHIVE.tar.gz" "$ARCHIVE"
+          shasum -a 256 "$ARCHIVE.tar.gz" > "$ARCHIVE.tar.gz.sha256"
+          echo "ASSET=$ARCHIVE.tar.gz" >> $GITHUB_ENV
+          echo "ASSET_SUM=$ARCHIVE.tar.gz.sha256" >> $GITHUB_ENV
+
+      - name: Upload release archive
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          version="${{ needs.create-release.outputs.version }}"
+          gh release upload "$version" $ASSET $ASSET_SUM
+
+  build-mobile:
+    name: mobile / ${{ matrix.name }}
+    needs: [create-release]
+    runs-on: ${{ matrix.os }}
+    env:
+      CROSS_VERSION: v0.2.5
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: android-aarch64-cpu
+            os: ubuntu-latest
+            target: aarch64-linux-android
+            features: ""
+            artifact: libcake_mobile.so
+
+          - name: ios-arm64-metal
+            os: macos-latest
+            target: aarch64-apple-ios
+            features: metal
+            artifact: libcake_mobile.a
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Setup cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build mobile library (Android, cross)
+        if: contains(matrix.target, 'android')
+        run: |
+          cargo install cross --git https://github.com/cross-rs/cross --rev "$CROSS_VERSION" --force
+          cross build --verbose --release -p cake-mobile --target "${{ matrix.target }}"
+
+      - name: Build mobile library (iOS, native)
+        if: contains(matrix.target, 'ios')
+        run: |
+          FEATURES="${{ matrix.features }}"
+          if [ -n "$FEATURES" ]; then
+            cargo build --verbose --release -p cake-mobile --target "${{ matrix.target }}" --features "$FEATURES"
+          else
+            cargo build --verbose --release -p cake-mobile --target "${{ matrix.target }}"
+          fi
+
+      - name: Set artifact and archive name
+        shell: bash
+        run: |
+          echo "LIB=target/${{ matrix.target }}/release/${{ matrix.artifact }}" >> $GITHUB_ENV
+          echo "ARCHIVE=cake-mobile-${{ needs.create-release.outputs.version }}-${{ matrix.name }}" >> $GITHUB_ENV
+
+      - name: Show library info
+        shell: bash
+        run: file "$LIB"
+
+      - name: Create archive
+        shell: bash
+        run: |
+          mkdir -p "$ARCHIVE"
+          cp "$LIB" "$ARCHIVE"/
+          cp README.md LICENSE "$ARCHIVE"/
+          ls -la "$ARCHIVE"
+
+      - name: Build tarball and checksum
+        shell: bash
+        run: |
+          tar czf "$ARCHIVE.tar.gz" "$ARCHIVE"
+          shasum -a 256 "$ARCHIVE.tar.gz" > "$ARCHIVE.tar.gz.sha256"
+          echo "ASSET=$ARCHIVE.tar.gz" >> $GITHUB_ENV
+          echo "ASSET_SUM=$ARCHIVE.tar.gz.sha256" >> $GITHUB_ENV
+
+      - name: Upload release archive
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          version="${{ needs.create-release.outputs.version }}"
+          gh release upload "$version" $ASSET $ASSET_SUM
