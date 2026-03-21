@@ -7,7 +7,7 @@
 use candle_core::{DType, Device, Result, Tensor};
 
 use super::ComputeBackend;
-use super::fused_ops;
+use super::ops;
 
 /// CPU backend — uses candle CPU ops + rayon-parallelized fused kernels.
 #[derive(Debug)]
@@ -77,11 +77,11 @@ impl ComputeBackend for CpuBackend {
     }
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-        fused_ops::silu_mul(gate, up)
+        ops::silu_mul(gate, up)
     }
 
     fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
-        fused_ops::stable_softplus(x)
+        ops::stable_softplus(x)
     }
 
     fn rms_norm_gated(
@@ -91,7 +91,7 @@ impl ComputeBackend for CpuBackend {
         weight: &Tensor,
         eps: f32,
     ) -> Result<Tensor> {
-        fused_ops::rms_norm_gated(x, z, weight, eps)
+        ops::rms_norm_gated(x, z, weight, eps)
     }
 
     fn add_rms_norm(
@@ -101,7 +101,7 @@ impl ComputeBackend for CpuBackend {
         weight: &Tensor,
         eps: f32,
     ) -> Result<(Tensor, Tensor)> {
-        fused_ops::add_rms_norm(a, b, weight, eps)
+        ops::add_rms_norm(a, b, weight, eps)
     }
 
     fn depthwise_conv1d_silu(
@@ -111,7 +111,7 @@ impl ComputeBackend for CpuBackend {
         kernel_size: usize,
         channels: usize,
     ) -> Result<Tensor> {
-        fused_ops::depthwise_conv1d_silu(window, weight, kernel_size, channels)
+        ops::depthwise_conv1d_silu(window, weight, kernel_size, channels)
     }
 
     fn depthwise_conv1d_bias(
@@ -122,23 +122,23 @@ impl ComputeBackend for CpuBackend {
         kernel_size: usize,
         channels: usize,
     ) -> Result<Tensor> {
-        fused_ops::depthwise_conv1d_bias(padded_input, weight, bias, kernel_size, channels)
+        ops::depthwise_conv1d_bias(padded_input, weight, bias, kernel_size, channels)
     }
 
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        fused_ops::add3(a, b, c)
+        ops::add3(a, b, c)
     }
 
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
-        fused_ops::exp_mul(x, y)
+        ops::exp_mul(x, y)
     }
 
     fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        fused_ops::sub_mul(a, b, c)
+        ops::sub_mul(a, b, c)
     }
 
     fn rms_norm_channel(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        fused_ops::rms_norm_channel(x, weight, eps)
+        ops::rms_norm_channel(x, weight, eps)
     }
 
     fn depthwise_conv1d_bias_ctx(
@@ -150,11 +150,11 @@ impl ComputeBackend for CpuBackend {
         kernel_size: usize,
         channels: usize,
     ) -> Result<Tensor> {
-        fused_ops::depthwise_conv1d_bias_ctx(ctx, input, weight, bias, kernel_size, channels)
+        ops::depthwise_conv1d_bias_ctx(ctx, input, weight, bias, kernel_size, channels)
     }
 
     fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        fused_ops::add_scaled(a, b, c)
+        ops::add_scaled(a, b, c)
     }
 
     fn adaln_modulate(
@@ -165,19 +165,19 @@ impl ComputeBackend for CpuBackend {
         shift: &Tensor,
         eps: f32,
     ) -> Result<Tensor> {
-        fused_ops::adaln_modulate(x, norm_weight, scale, shift, eps)
+        ops::adaln_modulate(x, norm_weight, scale, shift, eps)
     }
 
     fn f8e4m3_to_f32(&self, x: &Tensor) -> Result<Tensor> {
-        fused_ops::f8e4m3_to_f32(x)
+        ops::f8e4m3_to_f32(x)
     }
 
     fn f8e4m3_to_f16(&self, x: &Tensor) -> Result<Tensor> {
-        fused_ops::f8e4m3_to_f16(x)
+        ops::f8e4m3_to_f16(x)
     }
 
     fn f8e4m3_to_bf16(&self, x: &Tensor) -> Result<Tensor> {
-        fused_ops::f8e4m3_to_bf16(x)
+        ops::f8e4m3_to_bf16(x)
     }
 }
 

@@ -206,7 +206,7 @@ impl Fp8Linear {
             .f8_weight
             .as_ref()
             .expect("no F8 weight and no cached weight");
-        super::fused_ops::f8e4m3_to_f16(f8_w)
+        crate::backends::ops::f8e4m3_to_f16(f8_w)
     }
 
     /// Pre-dequantize F8→F16 and cache. Call once before inference loop.

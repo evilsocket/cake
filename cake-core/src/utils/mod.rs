@@ -3,7 +3,6 @@
 pub mod fp8;
 #[cfg(feature = "flash-attn")]
 pub mod flash_attn;
-pub mod fused_ops;
 pub mod gguf;
 pub mod gptq;
 pub mod hf;
