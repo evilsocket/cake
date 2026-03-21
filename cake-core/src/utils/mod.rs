@@ -1,7 +1,7 @@
 //! Utility functions and abstractions.
 
 pub mod fp8;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "flash-attn")]
 pub mod flash_attn;
 pub mod fused_ops;
 pub mod gguf;

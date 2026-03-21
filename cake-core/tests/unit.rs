@@ -20,3 +20,7 @@ mod test_blocks;
 mod test_client_worker;
 #[path = "unit_tests/test_flux.rs"]
 mod test_flux;
+#[path = "unit_tests/test_gguf.rs"]
+mod test_gguf;
+#[path = "unit_tests/test_luxtts.rs"]
+mod test_luxtts;

@@ -263,7 +263,7 @@ fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Te
     // Flash Attention on CUDA — O(n) memory instead of O(n²).
     // Input tensors are F32 (outer loop precision), cast to F16 for flash_attn,
     // then output cast back to F32.
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "flash-attn")]
     if q.rank() == 4 && matches!(q.device(), candle_core::Device::Cuda(_)) {
         let q16 = q.to_dtype(DType::F16)?.transpose(1, 2)?.contiguous()?;
         let k16 = k.to_dtype(DType::F16)?.transpose(1, 2)?.contiguous()?;
@@ -272,12 +272,14 @@ fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Te
         return attn.transpose(1, 2)?.to_dtype(q.dtype());
     }
 
-    // CPU/Metal fallback (or rank != 4): manual SDPA
-    let q = q.flatten_to(batch_dims.len() - 1)?;
-    let k = k.flatten_to(batch_dims.len() - 1)?;
-    let v = v.flatten_to(batch_dims.len() - 1)?;
+    // CPU/Metal/CUDA-without-flash-attn fallback: manual SDPA in F32
+    let in_dtype = q.dtype();
+    let q = q.flatten_to(batch_dims.len() - 1)?.to_dtype(DType::F32)?;
+    let k = k.flatten_to(batch_dims.len() - 1)?.to_dtype(DType::F32)?;
+    let v = v.flatten_to(batch_dims.len() - 1)?.to_dtype(DType::F32)?;
     let attn_weights = (q.matmul(&k.t()?)? * scale_factor)?;
-    let attn_scores = candle_nn::ops::softmax_last_dim(&attn_weights)?.matmul(&v)?;
+    let attn_scores = candle_nn::ops::softmax_last_dim(&attn_weights)?.matmul(&v)?
+        .to_dtype(in_dtype)?;
     batch_dims.push(attn_scores.dim(D::Minus2)?);
     batch_dims.push(attn_scores.dim(D::Minus1)?);
     attn_scores.reshape(batch_dims)
@@ -811,7 +813,17 @@ impl Flux1Transformer {
         if img.rank() != 3 {
             candle_core::bail!("unexpected shape for img {:?}", img.shape())
         }
-        let dtype = img.dtype();
+        // pack_tensors converts everything to F32 for serialization;
+        // restore to BF16 for the compute path (Fp8Linear dequants match BF16).
+        let dtype = DType::BF16;
+        let img = &img.to_dtype(dtype)?;
+        let img_ids = &img_ids.to_dtype(dtype)?;
+        let txt = &txt.to_dtype(dtype)?;
+        let txt_ids = &txt_ids.to_dtype(dtype)?;
+        let timesteps = &timesteps.to_dtype(dtype)?;
+        let y = &y.to_dtype(dtype)?;
+        let guidance = guidance.map(|g| g.to_dtype(dtype)).transpose()?;
+        let guidance = guidance.as_ref();
         let pe = {
             let ids = Tensor::cat(&[txt_ids, img_ids], 1)?;
             ids.apply(&self.pe_embedder)?.to_dtype(dtype)?

@@ -126,7 +126,7 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe_cos: &Tensor, pe_sin: &Tenso
     let scale = 1.0 / (dim as f64).sqrt();
 
     // Flash Attention on CUDA — O(n) memory, faster for long sequences
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "flash-attn")]
     if q.rank() == 4 && matches!(q.device(), candle_core::Device::Cuda(_)) {
         // flash_attn needs F16 in (batch, seq, heads, head_dim) layout
         let q16 = q.to_dtype(DType::F16)?.transpose(1, 2)?.contiguous()?;

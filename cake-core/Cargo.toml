@@ -40,6 +40,8 @@ candle-core = { version = "0.9" }
 candle-nn = { version = "0.9" }
 candle-transformers = { version = "0.9" }
 candle-flash-attn = { version = "0.9", optional = true }
+candle-metal-kernels = { version = "0.9", optional = true }
+objc2-metal = { version = "0.3", optional = true }
 half = "2"
 image = "0.25.2"
 hf-hub = "0.5"
@@ -58,8 +60,9 @@ base64 = "0.22.1"
 [features]
 default = ["master", "llama", "qwen2", "qwen3_5", "qwen3", "qwen3_moe", "qwen3_5_moe", "phi4", "mistral", "gemma3", "falcon3", "olmo2", "exaone4", "flux", "vibevoice", "luxtts"]
 
-metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
-cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:candle-flash-attn", "dep:bindgen_cuda"]
+metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "dep:candle-metal-kernels", "dep:objc2-metal"]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:bindgen_cuda"]
+flash-attn = ["cuda", "dep:candle-flash-attn"]
 
 master = ["dep:actix-web", "dep:async-stream", "dep:uuid"]
 

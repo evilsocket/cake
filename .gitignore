@@ -89,3 +89,8 @@ flux-tests/target/
 /*.wav
 /*.png
 /.claude
+
+# Test outputs
+distributed_tests/
+voice.wav
+topology-*.yml

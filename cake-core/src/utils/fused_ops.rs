@@ -1,4 +1,4 @@
-//! Fused CUDA/CPU kernels for inference-critical operations.
+//! Fused CUDA/Metal/CPU kernels for inference-critical operations.
 //!
 //! Each fused op replaces 2-5 separate kernel launches with a single launch,
 //! saving ~4-7µs per launch on modern GPUs.
@@ -7,8 +7,96 @@
 //! - `silu_mul(gate, up)` → silu(gate) * up (MLP activation, saves 1 launch)
 //! - `stable_softplus(x)` → ln(1+exp(clamp(x))) clamped (GDN gates, saves 4 launches)
 //! - `rms_norm_gated(x, z, weight, eps)` → rms_norm(x,w) * silu(z) (GDN norm, saves 2 launches)
+//! - `depthwise_conv1d_silu(window, weight)` → dot(window, weight) + silu (GDN conv, saves 2 launches)
 
 use candle_core::{backend::BackendStorage as _, CpuStorage, Layout, Result, Shape, Tensor};
+
+// ─── Metal shader source (compiled at runtime via new_library_with_source) ──
+#[cfg(feature = "metal")]
+mod metal_shaders {
+    /// Metal Shading Language (MSL) kernels for fused ops.
+    /// Compiled once at first use and cached by the Metal pipeline.
+    pub const FUSED_OPS_MSL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+// ─── stable_softplus: ln(1 + exp(clamp(x, -inf, 88))) with max(x, result) ───
+kernel void stable_softplus_f32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    float x = input[idx];
+    float clamped = min(x, 88.0f);
+    float sp = log(exp(clamped) + 1.0f);
+    output[idx] = max(x, sp);
+}
+
+kernel void stable_softplus_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    float x = float(input[idx]);
+    float clamped = min(x, 88.0f);
+    float sp = log(exp(clamped) + 1.0f);
+    output[idx] = half(max(x, sp));
+}
+
+// ─── silu_mul: silu(gate) * up ───────────────────────────────────────────────
+kernel void silu_mul_f32(
+    device const float* gate [[buffer(0)]],
+    device const float* up [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    float g = gate[idx];
+    output[idx] = (g / (1.0f + exp(-g))) * up[idx];
+}
+
+kernel void silu_mul_f16(
+    device const half* gate [[buffer(0)]],
+    device const half* up [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    float g = float(gate[idx]);
+    output[idx] = half((g / (1.0f + exp(-g))) * float(up[idx]));
+}
+
+// ─── depthwise_conv1d_silu: dot(window, weight) per channel + silu ───────────
+// window: (batch, channels, kernel_size), weight: (channels, kernel_size)
+// output: (batch, channels) with silu activation
+kernel void depthwise_conv1d_silu_f32(
+    device const float* window [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& channels [[buffer(3)]],
+    constant uint& kernel_size [[buffer(4)]],
+    uint2 idx [[thread_position_in_grid]]  // (channel, batch)
+) {
+    uint b = idx.y;
+    uint c = idx.x;
+    if (c >= channels) return;
+    float sum = 0.0f;
+    uint win_offset = b * channels * kernel_size + c * kernel_size;
+    uint w_offset = c * kernel_size;
+    for (uint k = 0; k < kernel_size; k++) {
+        sum += window[win_offset + k] * weight[w_offset + k];
+    }
+    // silu activation
+    output[b * channels + c] = sum / (1.0f + exp(-sum));
+}
+"#;
+}
 
 // ─── PTX module (compiled from src/cuda/fused_ops.cu) ───────────────
 #[cfg(feature = "cuda")]
@@ -371,9 +459,46 @@ impl candle_core::CustomOp2 for SiluMul {
             l1.shape().clone(),
         ))
     }
+
+    #[cfg(feature = "metal")]
+    fn metal_fwd(
+        &self,
+        s1: &candle_core::MetalStorage,
+        l1: &Layout,
+        s2: &candle_core::MetalStorage,
+        l2: &Layout,
+    ) -> Result<(candle_core::MetalStorage, Shape)> {
+        use candle_core::DType;
+        let device = s1.device();
+        let el = l1.shape().elem_count();
+        let kernel_name = match s1.dtype() {
+            DType::F32 => "silu_mul_f32",
+            DType::F16 => "silu_mul_f16",
+            dt => candle_core::bail!("silu_mul metal: unsupported dtype {dt:?}"),
+        };
+        let lib = device.new_library_with_source(metal_shaders::FUSED_OPS_MSL, None)
+            .map_err(|e| candle_core::Error::Msg(format!("metal shader compile: {e}")))?;
+        let func = lib.get_function(kernel_name, None)
+            .map_err(|e| candle_core::Error::Msg(format!("metal get_function: {e}")))?;
+        let pipeline = device.new_compute_pipeline_state_with_function(&func)
+            .map_err(|e| candle_core::Error::Msg(format!("metal pipeline: {e}")))?;
+        let output = device.new_buffer(el, s1.dtype(), "silu_mul")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let off1 = l1.start_offset() * s1.dtype().size_in_bytes();
+        let off2 = l2.start_offset() * s2.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s1.buffer(), off1));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (s2.buffer(), off2));
+        candle_metal_kernels::utils::set_param(&encoder, 2, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 3, el as u32);
+        let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
+        let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
+        encoder.dispatch_threads(grid, group);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s1.dtype()), l1.shape().clone()))
+    }
 }
 
-/// Fused silu(gate) * up — replaces 2 kernel launches with 1.
+/// Fused silu(gate) * up — single kernel on CUDA and Metal.
 pub fn silu_mul(gate: &Tensor, up: &Tensor) -> Result<Tensor> {
     gate.apply_op2_no_bwd(up, &SiluMul)
 }
@@ -472,9 +597,46 @@ impl candle_core::CustomOp1 for StableSoftplus {
             l.shape().clone(),
         ))
     }
+
+    #[cfg(feature = "metal")]
+    fn metal_fwd(
+        &self,
+        s: &candle_core::MetalStorage,
+        l: &Layout,
+    ) -> Result<(candle_core::MetalStorage, Shape)> {
+        use candle_core::DType;
+        let device = s.device();
+        let el = l.shape().elem_count();
+        let kernel_name = match s.dtype() {
+            DType::F32 => "stable_softplus_f32",
+            DType::F16 => "stable_softplus_f16",
+            dt => candle_core::bail!("stable_softplus metal: unsupported dtype {dt:?}"),
+        };
+        let lib = device.new_library_with_source(metal_shaders::FUSED_OPS_MSL, None)
+            .map_err(|e| candle_core::Error::Msg(format!("metal shader compile: {e}")))?;
+        let func = lib.get_function(kernel_name, None)
+            .map_err(|e| candle_core::Error::Msg(format!("metal get_function: {e}")))?;
+        let pipeline = device.new_compute_pipeline_state_with_function(&func)
+            .map_err(|e| candle_core::Error::Msg(format!("metal pipeline: {e}")))?;
+        let output = device.new_buffer(el, s.dtype(), "stable_softplus")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let offset = l.start_offset() * s.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
+        let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
+        let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
+        encoder.dispatch_threads(grid, group);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s.dtype()), l.shape().clone()))
+    }
 }
 
-/// Fused stable softplus — replaces 5 kernel launches with 1.
+/// Fused stable softplus: ln(1 + exp(clamp(x, -inf, 88))) with max(x, result).
+///
+/// On CUDA: single fused kernel (1 dispatch).
+/// On Metal: single fused kernel via MSL shader (1 dispatch).
+/// On CPU: scalar implementation via CustomOp1.
 pub fn stable_softplus(x: &Tensor) -> Result<Tensor> {
     x.apply_op1_no_bwd(&StableSoftplus)
 }
@@ -661,8 +823,15 @@ impl candle_core::CustomOp3 for RmsNormGated {
     }
 }
 
-/// Fused rms_norm(x, weight) * silu(z) — replaces 3 kernel launches with 1.
+/// Fused rms_norm(x, weight) * silu(z) — replaces 3 kernel launches with 1 on CUDA.
+/// On Metal, uses candle's built-in ops (rms_norm + silu + mul).
 pub fn rms_norm_gated(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+    #[cfg(feature = "metal")]
+    if x.device().is_metal() {
+        let normed = candle_nn::ops::rms_norm(x, weight, eps)?;
+        let gate = candle_nn::ops::silu(z)?;
+        return normed.mul(&gate);
+    }
     x.apply_op3_no_bwd(z, weight, &RmsNormGated { eps })
 }
 
@@ -1461,12 +1630,22 @@ impl candle_core::CustomOp2 for DepthwiseConv1dSilu {
 /// Fused depthwise conv1d + silu — replaces 3 kernel launches with 1.
 /// window: (batch, channels, kernel_size), weight: (channels, kernel_size)
 /// Returns: (batch, channels)
+/// Fused depthwise conv1d + SiLU on a single token window.
+/// On Metal, falls back to broadcast_mul + sum + silu using candle built-in ops.
+/// Fused depthwise conv1d + SiLU on a single token window.
+/// On CUDA: single fused kernel. On Metal: candle built-in ops (3 dispatches).
 pub fn depthwise_conv1d_silu(
     window: &Tensor,
     weight: &Tensor,
     kernel_size: usize,
     channels: usize,
 ) -> Result<Tensor> {
+    #[cfg(feature = "metal")]
+    if window.device().is_metal() {
+        let w = weight.unsqueeze(0)?;
+        let dot = window.broadcast_mul(&w)?.sum(candle_core::D::Minus1)?;
+        return candle_nn::ops::silu(&dot);
+    }
     window.apply_op2_no_bwd(
         weight,
         &DepthwiseConv1dSilu {

@@ -7,6 +7,7 @@ use candle_core::{Result, Tensor};
 ///
 /// Input/output tensors are in (batch, heads, seq, head_dim) layout.
 /// Handles GQA natively — no repeat_kv needed.
+#[cfg(feature = "flash-attn")]
 pub fn flash_attention(
     q: &Tensor,
     k: &Tensor,

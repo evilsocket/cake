@@ -102,7 +102,7 @@ pub(crate) fn arch_str_to_text_model_arch(arch: &str) -> TextModelArch {
 impl Context {
     /// Create the context from the parsed command line arguments.
     pub fn from_args(mut args: Args) -> Result<Self> {
-        let dtype = parse_dtype_str(args.dtype.as_deref())?;
+        let mut dtype = parse_dtype_str(args.dtype.as_deref())?;
 
         let device = utils::get_inference_device(args.cpu, args.device)
             .map_err(|e| anyhow!("can't attach to device: {:?}", e))?;
@@ -442,6 +442,21 @@ impl Context {
                     })
                     .ok();
                 if let Some(ref cfg) = config_internal {
+                    // VibeVoice-1.5B uses BF16 — detect from decoder_config.torch_dtype
+                    // to match the master's dtype (avoids BF16 vs F16 mismatch).
+                    if let Ok(raw) = std::fs::read_to_string(&config_filename) {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
+                            let torch_dtype = json
+                                .get("decoder_config")
+                                .and_then(|d| d.get("torch_dtype"))
+                                .and_then(|v| v.as_str());
+                            if torch_dtype == Some("bfloat16") {
+                                log::info!("AudioModel worker: using BF16 dtype (from decoder_config.torch_dtype)");
+                                dtype = candle_core::DType::BF16;
+                            }
+                        }
+                    }
+
                     let model_tensors_index = data_path.join("model.safetensors.index.json");
                     quant = Arc::from(utils::detect_quantization(&config_filename));
                     let my_layers: Vec<String> = topology.all_worker_layers().into_iter().collect();

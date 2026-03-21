@@ -178,7 +178,7 @@ impl Qwen3_5FullAttention {
         #[allow(unused_labels)]
         let y = 'attn: {
             // Flash Attention on CUDA — fused kernel, native GQA (no repeat_kv needed)
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "flash-attn")]
             if matches!(q.device(), candle_core::Device::Cuda(_)) {
                 let scale = 1.0 / (self.head_dim as f32).sqrt();
                 break 'attn crate::utils::flash_attn::flash_attention(
