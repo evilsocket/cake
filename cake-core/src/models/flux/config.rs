@@ -131,7 +131,7 @@ pub fn flux2_klein_vae_config() -> candle_transformers::models::flux::autoencode
 pub enum Flux1ModelFile {
     /// Bundled checkpoint: transformer + CLIP + T5 + VAE
     Checkpoint,
-    /// CLIP tokenizer from openai/clip-vit-large-patch14
+    /// CLIP tokenizer from evilsocket/clip-vit-large-patch14
     ClipTokenizer,
     /// T5 tokenizer from google/t5-v1_1-xxl
     T5Tokenizer,
@@ -141,7 +141,7 @@ impl Flux1ModelFile {
     fn repo_and_file(&self) -> (&'static str, &'static str) {
         match self {
             Self::Checkpoint => ("evilsocket/flux1-dev", "flux1-dev-fp8.safetensors"),
-            Self::ClipTokenizer => ("openai/clip-vit-large-patch14", "tokenizer.json"),
+            Self::ClipTokenizer => ("evilsocket/clip-vit-large-patch14", "tokenizer.json"),
             Self::T5Tokenizer => ("google/t5-v1_1-xxl", "spiece.model"),
         }
     }

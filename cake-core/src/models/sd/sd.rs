@@ -46,7 +46,7 @@ impl ModelFile {
                             StableDiffusionVersion::Xl | StableDiffusionVersion::Turbo => {
                                 // This seems similar to the patch32 version except some very small
                                 // difference in the split regex.
-                                "openai/clip-vit-large-patch14"
+                                "evilsocket/clip-vit-large-patch14"
                             }
                         };
                         (tokenizer_repo, "tokenizer.json")

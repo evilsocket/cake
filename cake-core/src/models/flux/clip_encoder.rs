@@ -12,7 +12,7 @@ use candle_transformers::models::clip::text_model::{
 };
 use log::info;
 
-/// CLIP-L configuration matching openai/clip-vit-large-patch14.
+/// CLIP-L configuration matching evilsocket/clip-vit-large-patch14.
 fn clip_l_config() -> ClipTextConfig {
     ClipTextConfig {
         vocab_size: 49408,
