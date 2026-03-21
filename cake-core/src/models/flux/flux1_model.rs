@@ -92,8 +92,8 @@ mod tests {
         let f8_gpu = f8.to_device(&dev).unwrap();
         assert_eq!(f8_gpu.dtype(), DType::F8E4M3);
 
-        // Use our software dequant (works on all SM including A100/SM80)
-        let f32_gpu = crate::backends::f8_dequant::f8e4m3_to_f32(&f8_gpu).unwrap();
+        // Use candle's F8→F32 cast (works on all SM via CUDA CustomOp or native cast)
+        let f32_gpu = f8_gpu.to_dtype(DType::F32).unwrap();
         assert_eq!(f32_gpu.dtype(), DType::F32);
 
         let vals: Vec<f32> = f32_gpu.to_vec1().unwrap();

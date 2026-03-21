@@ -51,7 +51,7 @@ fn f8_to_f32_dequant(bencher: divan::Bencher, numel: usize) {
         .unwrap();
     bencher
         .counter(divan::counter::BytesCount::new(numel))
-        .bench_local(|| cake_core::backends::f8_dequant::f8e4m3_to_f32(&t).unwrap());
+        .bench_local(|| t.to_dtype(DType::F32).unwrap());
 }
 
 #[divan::bench(args = [1024*1024, 3072*3072, 3072*9216])]
@@ -63,7 +63,7 @@ fn f8_to_f16_dequant(bencher: divan::Bencher, numel: usize) {
         .unwrap();
     bencher
         .counter(divan::counter::BytesCount::new(numel))
-        .bench_local(|| cake_core::backends::f8_dequant::f8e4m3_to_f16(&t).unwrap());
+        .bench_local(|| t.to_dtype(DType::F32).unwrap().to_dtype(DType::F16).unwrap());
 }
 
 // ── Fp8Linear at FLUX.1 realistic sizes ──────────────────────────────

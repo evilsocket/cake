@@ -335,15 +335,22 @@ impl ComputeBackend for MetalBackend {
     // ── F8 dequantization ────────────────────────────────────────────
 
     fn f8e4m3_to_f32(&self, x: &Tensor) -> Result<Tensor> {
-        crate::backends::f8_dequant::f8e4m3_to_f32(x)
+        if x.dtype() != DType::F8E4M3 { return x.to_dtype(DType::F32); }
+        // Metal has no native F8 compute — dequant via CPU then transfer back
+        let dev = x.device().clone();
+        x.to_device(&Device::Cpu)?.to_dtype(DType::F32)?.to_device(&dev)
     }
 
     fn f8e4m3_to_f16(&self, x: &Tensor) -> Result<Tensor> {
-        crate::backends::f8_dequant::f8e4m3_to_f16(x)
+        if x.dtype() != DType::F8E4M3 { return x.to_dtype(DType::F16); }
+        let dev = x.device().clone();
+        x.to_device(&Device::Cpu)?.to_dtype(DType::F32)?.to_dtype(DType::F16)?.to_device(&dev)
     }
 
     fn f8e4m3_to_bf16(&self, x: &Tensor) -> Result<Tensor> {
-        crate::backends::f8_dequant::f8e4m3_to_bf16(x)
+        if x.dtype() != DType::F8E4M3 { return x.to_dtype(DType::BF16); }
+        let dev = x.device().clone();
+        x.to_device(&Device::Cpu)?.to_dtype(DType::F32)?.to_dtype(DType::BF16)?.to_device(&dev)
     }
 
     // ── Device control ───────────────────────────────────────────────

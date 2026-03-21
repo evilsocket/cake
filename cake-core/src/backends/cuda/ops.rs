@@ -1960,3 +1960,134 @@ impl candle_core::CustomOp3 for DepthwiseConv1dBiasCtx {
         ))
     }
 }
+
+// ─── F8E4M3 dequantization ──────────────────────────────────────────
+
+pub(super) struct F8E4M3ToF32;
+
+impl candle_core::CustomOp1 for F8E4M3ToF32 {
+    fn name(&self) -> &'static str { "f8e4m3_to_f32" }
+
+    fn cpu_fwd(&self, s: &CpuStorage, l: &Layout) -> Result<(CpuStorage, Shape)> {
+        let data = match s {
+            CpuStorage::F8E4M3(data) => data,
+            _ => candle_core::bail!("f8e4m3_to_f32: expected F8E4M3, got {:?}", s.dtype()),
+        };
+        let data = match l.contiguous_offsets() {
+            Some((o1, o2)) => &data[o1..o2],
+            None => candle_core::bail!("f8e4m3_to_f32: input must be contiguous"),
+        };
+        let dst: Vec<f32> = data.iter().map(|&b| {
+            let bits = b.to_bits();
+            let sign = (bits >> 7) & 1;
+            let exp = (bits >> 3) & 0xF;
+            let mant = bits & 0x7;
+            let result = if exp == 0 && mant == 0 { 0.0f32 }
+            else if exp == 0 { f32::from(mant) / 8.0 * 2.0f32.powi(-6) }
+            else if exp == 0xF && mant == 0x7 { f32::NAN }
+            else { (1.0 + f32::from(mant) / 8.0) * 2.0f32.powi(i32::from(exp) - 7) };
+            if sign == 1 { -result } else { result }
+        }).collect();
+        Ok((candle_core::WithDType::to_cpu_storage_owned(dst), l.shape().clone()))
+    }
+
+    fn cuda_fwd(&self, s: &candle_core::CudaStorage, l: &Layout) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle_core::cuda_backend::WrapErr;
+        let dev = s.device();
+        let src = match &s.slice {
+            candle_core::cuda_backend::CudaStorageSlice::F8E4M3(s) => s,
+            _ => candle_core::bail!("f8e4m3_to_f32: expected F8E4M3 storage"),
+        };
+        let src = match l.contiguous_offsets() {
+            Some((o1, o2)) => src.slice(o1..o2),
+            None => candle_core::bail!("f8e4m3_to_f32: input must be contiguous"),
+        };
+        let el = l.shape().elem_count();
+        let cfg = LaunchConfig::for_num_elems(el as u32);
+        let func = dev.get_or_load_custom_func("f8e4m3_to_f32", "cake_fused_ops", FUSED_OPS_PTX)?;
+        let out = unsafe { dev.alloc::<f32>(el)? };
+        let mut builder = func.builder();
+        builder.arg(&el); builder.arg(&src); builder.arg(&out);
+        unsafe { builder.launch(cfg) }.w()?;
+        Ok((candle_core::CudaStorage { slice: candle_core::cuda_backend::CudaStorageSlice::F32(out), device: dev.clone() }, l.shape().clone()))
+    }
+}
+
+pub(super) struct F8E4M3ToF16;
+
+impl candle_core::CustomOp1 for F8E4M3ToF16 {
+    fn name(&self) -> &'static str { "f8e4m3_to_f16" }
+
+    fn cpu_fwd(&self, s: &CpuStorage, l: &Layout) -> Result<(CpuStorage, Shape)> {
+        let (f32_storage, shape) = F8E4M3ToF32.cpu_fwd(s, l)?;
+        match f32_storage {
+            CpuStorage::F32(data) => {
+                let f16_data: Vec<half::f16> = data.iter().map(|&v| half::f16::from_f32(v)).collect();
+                Ok((CpuStorage::F16(f16_data), shape))
+            }
+            _ => candle_core::bail!("expected F32 from F8E4M3ToF32"),
+        }
+    }
+
+    fn cuda_fwd(&self, s: &candle_core::CudaStorage, l: &Layout) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle_core::cuda_backend::WrapErr;
+        let dev = s.device();
+        let src = match &s.slice {
+            candle_core::cuda_backend::CudaStorageSlice::F8E4M3(s) => s,
+            _ => candle_core::bail!("f8e4m3_to_f16: expected F8E4M3 storage"),
+        };
+        let src = match l.contiguous_offsets() {
+            Some((o1, o2)) => src.slice(o1..o2),
+            None => candle_core::bail!("f8e4m3_to_f16: input must be contiguous"),
+        };
+        let el = l.shape().elem_count();
+        let cfg = LaunchConfig::for_num_elems(el as u32);
+        let func = dev.get_or_load_custom_func("f8e4m3_to_f16", "cake_fused_ops", FUSED_OPS_PTX)?;
+        let out = unsafe { dev.alloc::<half::f16>(el)? };
+        let mut builder = func.builder();
+        builder.arg(&el); builder.arg(&src); builder.arg(&out);
+        unsafe { builder.launch(cfg) }.w()?;
+        Ok((candle_core::CudaStorage { slice: candle_core::cuda_backend::CudaStorageSlice::F16(out), device: dev.clone() }, l.shape().clone()))
+    }
+}
+
+pub(super) struct F8E4M3ToBF16;
+
+impl candle_core::CustomOp1 for F8E4M3ToBF16 {
+    fn name(&self) -> &'static str { "f8e4m3_to_bf16" }
+
+    fn cpu_fwd(&self, s: &CpuStorage, l: &Layout) -> Result<(CpuStorage, Shape)> {
+        let (f32_storage, shape) = F8E4M3ToF32.cpu_fwd(s, l)?;
+        match f32_storage {
+            CpuStorage::F32(data) => {
+                let bf16_data: Vec<half::bf16> = data.iter().map(|&v| half::bf16::from_f32(v)).collect();
+                Ok((CpuStorage::BF16(bf16_data), shape))
+            }
+            _ => candle_core::bail!("expected F32 from F8E4M3ToF32"),
+        }
+    }
+
+    fn cuda_fwd(&self, s: &candle_core::CudaStorage, l: &Layout) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
+        use candle_core::cuda_backend::WrapErr;
+        let dev = s.device();
+        let src = match &s.slice {
+            candle_core::cuda_backend::CudaStorageSlice::F8E4M3(s) => s,
+            _ => candle_core::bail!("f8e4m3_to_bf16: expected F8E4M3 storage"),
+        };
+        let src = match l.contiguous_offsets() {
+            Some((o1, o2)) => src.slice(o1..o2),
+            None => candle_core::bail!("f8e4m3_to_bf16: input must be contiguous"),
+        };
+        let el = l.shape().elem_count();
+        let cfg = LaunchConfig::for_num_elems(el as u32);
+        let func = dev.get_or_load_custom_func("f8e4m3_to_bf16", "cake_fused_ops", FUSED_OPS_PTX)?;
+        let out = unsafe { dev.alloc::<half::bf16>(el)? };
+        let mut builder = func.builder();
+        builder.arg(&el); builder.arg(&src); builder.arg(&out);
+        unsafe { builder.launch(cfg) }.w()?;
+        Ok((candle_core::CudaStorage { slice: candle_core::cuda_backend::CudaStorageSlice::BF16(out), device: dev.clone() }, l.shape().clone()))
+    }
+}

@@ -193,14 +193,14 @@ impl ComputeBackend for VulkanBackend {
     }
 
     fn f8e4m3_to_f32(&self, x: &Tensor) -> Result<Tensor> {
-        crate::backends::f8_dequant::f8e4m3_to_f32(x)
+        x.to_dtype(DType::F32)
     }
 
     fn f8e4m3_to_f16(&self, x: &Tensor) -> Result<Tensor> {
-        crate::backends::f8_dequant::f8e4m3_to_f16(x)
+        x.to_dtype(DType::F16)
     }
 
     fn f8e4m3_to_bf16(&self, x: &Tensor) -> Result<Tensor> {
-        crate::backends::f8_dequant::f8e4m3_to_bf16(x)
+        x.to_dtype(DType::BF16)
     }
 }

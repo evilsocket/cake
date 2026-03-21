@@ -149,15 +149,19 @@ impl ComputeBackend for CudaBackend {
     }
 
     fn f8e4m3_to_f32(&self, x: &Tensor) -> Result<Tensor> {
-        crate::backends::f8_dequant::f8e4m3_to_f32(x)
+        if x.dtype() != candle_core::DType::F8E4M3 { return x.to_dtype(candle_core::DType::F32); }
+        if let Ok(t) = x.to_dtype(candle_core::DType::F32) { return Ok(t); }
+        x.apply_op1_no_bwd(&ops::F8E4M3ToF32)
     }
 
     fn f8e4m3_to_f16(&self, x: &Tensor) -> Result<Tensor> {
-        crate::backends::f8_dequant::f8e4m3_to_f16(x)
+        if x.dtype() != candle_core::DType::F8E4M3 { return x.to_dtype(candle_core::DType::F16); }
+        x.apply_op1_no_bwd(&ops::F8E4M3ToF16)
     }
 
     fn f8e4m3_to_bf16(&self, x: &Tensor) -> Result<Tensor> {
-        crate::backends::f8_dequant::f8e4m3_to_bf16(x)
+        if x.dtype() != candle_core::DType::F8E4M3 { return x.to_dtype(candle_core::DType::BF16); }
+        x.apply_op1_no_bwd(&ops::F8E4M3ToBF16)
     }
 
     // synchronize() — default no-op is correct for CUDA
