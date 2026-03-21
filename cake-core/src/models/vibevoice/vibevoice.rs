@@ -361,7 +361,7 @@ impl VibeVoiceTTS {
                 neg_cond = neg_out.narrow(1, neg_out.dim(1)? - 1, 1)?.squeeze(1)?;
                 neg_tts_pos += 1;
 
-                #[allow(clippy::manual_is_multiple_of)]
+                #[allow(unknown_lints, clippy::manual_is_multiple_of)]
                 if audio_latents.len() % 10 == 0 {
                     info!("  {} frames...", audio_latents.len());
                 }
@@ -406,7 +406,7 @@ impl VibeVoiceTTS {
                     neg_cond = neg_out.narrow(1, neg_out.dim(1)? - 1, 1)?.squeeze(1)?;
                     neg_tts_pos += 1;
 
-                    #[allow(clippy::manual_is_multiple_of)]
+                    #[allow(unknown_lints, clippy::manual_is_multiple_of)]
                     if audio_latents.len() % 10 == 0 {
                         info!("  {} frames...", audio_latents.len());
                     }

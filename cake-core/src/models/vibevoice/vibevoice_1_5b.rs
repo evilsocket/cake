@@ -507,7 +507,7 @@ impl VibeVoice1_5B {
 
                 let t_total = frame_start.elapsed();
 
-                #[allow(clippy::manual_is_multiple_of)]
+                #[allow(unknown_lints, clippy::manual_is_multiple_of)]
                 if audio_chunks.len() % 10 == 0 || audio_chunks.len() <= 3 {
                     info!(
                         "  frame {} ({:.0}ms): neg_lm={:.1}ms diff={:.1}ms vae_dec={:.1}ms sem_enc={:.1}ms conn={:.1}ms",

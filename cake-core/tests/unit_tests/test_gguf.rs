@@ -64,7 +64,7 @@ fn test_gguf_name_mapping_mlp() {
 #[test]
 fn test_gguf_name_mapping_special_tensors() {
     // Embedding, head, and final norm have special mappings
-    let special = vec![
+    let special = [
         "token_embd.weight",
         "output.weight",
         "output_norm.weight",
