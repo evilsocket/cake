@@ -12,63 +12,8 @@ use candle_core::{backend::BackendStorage as _, CpuStorage, DType, Device, Layou
 
 use super::ComputeBackend;
 
-// ─── MSL shader source ──────────────────────────────────────────────
-const FUSED_OPS_MSL: &str = r#"
-#include <metal_stdlib>
-using namespace metal;
-
-// ─── stable_softplus: ln(1 + exp(clamp(x, -inf, 88))) with max(x, result) ───
-kernel void stable_softplus_f32(
-    device const float* input [[buffer(0)]],
-    device float* output [[buffer(1)]],
-    constant uint& count [[buffer(2)]],
-    uint idx [[thread_position_in_grid]]
-) {
-    if (idx >= count) return;
-    float x = input[idx];
-    float clamped = min(x, 88.0f);
-    float sp = log(exp(clamped) + 1.0f);
-    output[idx] = max(x, sp);
-}
-
-kernel void stable_softplus_f16(
-    device const half* input [[buffer(0)]],
-    device half* output [[buffer(1)]],
-    constant uint& count [[buffer(2)]],
-    uint idx [[thread_position_in_grid]]
-) {
-    if (idx >= count) return;
-    float x = float(input[idx]);
-    float clamped = min(x, 88.0f);
-    float sp = log(exp(clamped) + 1.0f);
-    output[idx] = half(max(x, sp));
-}
-
-// ─── silu_mul: silu(gate) * up ───────────────────────────────────────────────
-kernel void silu_mul_f32(
-    device const float* gate [[buffer(0)]],
-    device const float* up [[buffer(1)]],
-    device float* output [[buffer(2)]],
-    constant uint& count [[buffer(3)]],
-    uint idx [[thread_position_in_grid]]
-) {
-    if (idx >= count) return;
-    float g = gate[idx];
-    output[idx] = (g / (1.0f + exp(-g))) * up[idx];
-}
-
-kernel void silu_mul_f16(
-    device const half* gate [[buffer(0)]],
-    device const half* up [[buffer(1)]],
-    device half* output [[buffer(2)]],
-    constant uint& count [[buffer(3)]],
-    uint idx [[thread_position_in_grid]]
-) {
-    if (idx >= count) return;
-    float g = float(gate[idx]);
-    output[idx] = half((g / (1.0f + exp(-g))) * float(up[idx]));
-}
-"#;
+// ─── MSL shader source (loaded from metal.msl) ─────────────────────
+const FUSED_OPS_MSL: &str = include_str!("metal.msl");
 
 // ─── CustomOp structs for MSL-accelerated ops (2 total) ─────────────
 
