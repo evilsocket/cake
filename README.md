@@ -32,22 +32,32 @@ Cake is a **multimodal AI inference server** written in Rust that can run models
 ```sh
 cargo build --release --features cuda  # or: --features metal
 
-# Text generation
-cake master --model evilsocket/Qwen2.5-Coder-1.5B-Instruct --prompt "Hello!"
+# Download a model
+cake pull evilsocket/Qwen3-0.6B
 
-# API server + web UI
-cake master --model evilsocket/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080
+# Run a single prompt
+cake run evilsocket/Qwen3-0.6B "Explain quantum computing"
 
-# Image generation (FLUX.1-dev FP8, 1024x768)
-cake master --model-type image-model --image-model-arch flux1 \
-  --sd-image-prompt "a cyberpunk cityscape at night" --flux-height 768 --flux-width 1024
+# Start an API server + web UI
+cake serve evilsocket/Qwen3-0.6B
+
+# List locally available models
+cake list
+
+# Distributed inference (just add --cluster-key)
+cake worker --cluster-key mysecret                                   # on worker nodes
+cake run evilsocket/Qwen3-0.6B "Hello" --cluster-key mysecret       # on master
+
+# Image generation (FLUX.1-dev FP8)
+cake run evilsocket/flux1-dev --model-type image-model --image-model-arch flux1 \
+  --sd-image-prompt "a cyberpunk cityscape at night"
 
 # Voice synthesis (VibeVoice-1.5B with voice cloning)
-cake master --model-type audio-model --model evilsocket/VibeVoice-1.5B \
-  --voice-prompt voice.wav --prompt "Hello world, this is a test."
+cake run evilsocket/VibeVoice-1.5B --model-type audio-model \
+  --voice-prompt voice.wav "Hello world"
 ```
 
-Models are downloaded automatically from HuggingFace. For the full usage guide and API reference, [check the project documentation](docs/index.md).
+Models are downloaded automatically from HuggingFace on first use. For the full usage guide and API reference, [check the project documentation](docs/index.md).
 
 ## Star History
 
