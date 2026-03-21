@@ -1,6 +1,6 @@
 //! FLUX.1-dev image generation pipeline.
 //!
-//! Uses a single bundled FP8 checkpoint from Comfy-Org/flux1-dev containing
+//! Uses a single bundled FP8 checkpoint from evilsocket/flux1-dev containing
 //! transformer (F8E4M3), CLIP-L (F16), T5-XXL (F8E4M3), and VAE (F32).
 //! Components are loaded sequentially to fit in 16GB VRAM.
 

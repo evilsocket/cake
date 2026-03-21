@@ -34,7 +34,7 @@ enum Commands {
     },
     /// Download a model from HuggingFace Hub
     Download {
-        /// HuggingFace repo ID (e.g., Qwen/Qwen2.5-Coder-1.5B-Instruct)
+        /// HuggingFace repo ID (e.g., evilsocket/Qwen2.5-Coder-1.5B-Instruct)
         model: String,
     },
     /// List locally available models and their status

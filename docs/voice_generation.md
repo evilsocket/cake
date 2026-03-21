@@ -7,8 +7,8 @@ Cake supports text-to-speech synthesis with voice cloning.
 | Model | Parameters | VRAM | Speed | Architecture | Voice Ref |
 |-------|-----------|------|-------|-------------|-----------|
 | [LuxTTS](https://huggingface.co/YatharthS/LuxTTS) | ~123M | <1 GB | 150x realtime (GPU) | Zipformer + flow matching | .wav file (optional) |
-| [VibeVoice-1.5B](https://huggingface.co/microsoft/VibeVoice-1.5B) | ~3B (BF16) | ~7 GB | ~1x realtime | Qwen2.5 LM + diffusion | .wav file |
-| [VibeVoice-Realtime-0.5B](https://huggingface.co/microsoft/VibeVoice-Realtime-0.5B) | ~0.5B (F32) | ~3 GB | ~3x realtime | Qwen2.5 LM + diffusion | .safetensors preset |
+| [VibeVoice-1.5B](https://huggingface.co/evilsocket/VibeVoice-1.5B) | ~3B (BF16) | ~7 GB | ~1x realtime | Qwen2.5 LM + diffusion | .wav file |
+| [VibeVoice-Realtime-0.5B](https://huggingface.co/evilsocket/VibeVoice-Realtime-0.5B) | ~0.5B (F32) | ~3 GB | ~3x realtime | Qwen2.5 LM + diffusion | .safetensors preset |
 
 ## LuxTTS
 
@@ -152,7 +152,7 @@ The recommended model. Supports multi-speaker voice cloning from raw .wav files.
 ### Basic Usage
 
 ```sh
-cake master --model-type audio-model --model microsoft/VibeVoice-1.5B \
+cake master --model-type audio-model --model evilsocket/VibeVoice-1.5B \
   --voice-prompt voice_reference.wav \
   --prompt "Hello world, this is a test of the voice cloning system." \
   --audio-output output.wav
@@ -171,7 +171,7 @@ Pre-made voice presets are available in the [VibeVoice community repo](https://g
 wget https://raw.githubusercontent.com/vibevoice-community/VibeVoice/main/demo/voices/en-Alice_woman.wav
 
 # Use it
-cake master --model-type audio-model --model microsoft/VibeVoice-1.5B \
+cake master --model-type audio-model --model evilsocket/VibeVoice-1.5B \
   --voice-prompt en-Alice_woman.wav \
   --prompt "Your text here" --audio-output output.wav
 ```
@@ -205,7 +205,7 @@ A lightweight streaming variant optimized for real-time TTS. Uses a split LM arc
 ### Usage
 
 ```sh
-cake master --model-type audio-model --model microsoft/VibeVoice-Realtime-0.5B \
+cake master --model-type audio-model --model evilsocket/VibeVoice-Realtime-0.5B \
   --voice-prompt voice_preset.safetensors \
   --prompt "Hello world" --audio-output output.wav \
   --tts-cfg-scale 1.5
@@ -219,7 +219,7 @@ When running with `--api`, the audio endpoint is available at `/v1/audio/speech`
 
 ```sh
 # Start the API server
-cake master --model-type audio-model --model microsoft/VibeVoice-1.5B \
+cake master --model-type audio-model --model evilsocket/VibeVoice-1.5B \
   --voice-prompt voice_reference.wav --api 0.0.0.0:8080
 
 # Generate speech

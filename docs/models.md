@@ -5,19 +5,19 @@
 | Model | HuggingFace ID (example) | Feature Flag | Notes |
 |-------|--------------------------|-------------|-------|
 | LLaMA 3.x | `meta-llama/Llama-3.2-1B-Instruct` | `llama` (default) | Also covers SmolLM2 and DeepSeek-R1 distilled variants |
-| SmolLM2 | `HuggingFaceTB/SmolLM2-1.7B-Instruct` | `llama` (default) | LLaMA architecture, 135M-1.7B |
-| Qwen2 / Qwen2.5 | `Qwen/Qwen2.5-Coder-1.5B-Instruct` | `qwen2` (default) | |
-| Qwen3 (dense) | `Qwen/Qwen3-0.6B` | `qwen3` (default) | GQA + QK-norm, thinking mode via `/think` |
+| SmolLM2 | `evilsocket/SmolLM2-1.7B-Instruct` | `llama` (default) | LLaMA architecture, 135M-1.7B |
+| Qwen2 / Qwen2.5 | `evilsocket/Qwen2.5-Coder-1.5B-Instruct` | `qwen2` (default) | |
+| Qwen3 (dense) | `evilsocket/Qwen3-0.6B` | `qwen3` (default) | GQA + QK-norm, thinking mode via `/think` |
 | Qwen3 MoE | `Qwen/Qwen3-30B-A3B` | `qwen3_moe` (default) | Sparse MoE FFN, 128 experts / top-8 per token |
-| Qwen3.5 | `Qwen/Qwen3.5-0.8B` | `qwen3_5` (default) | Hybrid GDN linear + full attention |
+| Qwen3.5 | `evilsocket/Qwen3.5-0.8B` | `qwen3_5` (default) | Hybrid GDN linear + full attention |
 | Qwen3.5 MoE | `Qwen/Qwen3.5-35B-A3B-GPTQ-Int4` | `qwen3_5_moe` (default) | Hybrid GDN+full-attn + sparse MoE FFN, 256 experts / top-8; GPTQ-Int4 |
-| Phi-4-mini | `microsoft/Phi-4-mini-instruct` | `phi4` (default) | 3.8B, partial RoPE, 200K vocab |
+| Phi-4-mini | `evilsocket/Phi-4-mini-instruct` | `phi4` (default) | 3.8B, partial RoPE, 200K vocab |
 | Phi-4 | `microsoft/phi-4` | `phi4` (default) | 14B, same family as Phi-4-mini |
-| Mistral | `mistralai/Mistral-7B-Instruct-v0.3` | `mistral` (default) | Standard GQA, optional sliding window |
+| Mistral | `evilsocket/Mistral-7B-Instruct-v0.3` | `mistral` (default) | Standard GQA, optional sliding window |
 | Gemma 3 | `google/gemma-3-1b-it` | `gemma3` (default) | Interleaved local/global attention, GELU-tanh MLP |
-| Falcon3 | `tiiuae/Falcon3-1B-Instruct` | `falcon3` (default) | Standard GQA, Apache 2.0 |
+| Falcon3 | `evilsocket/Falcon3-1B-Instruct` | `falcon3` (default) | Standard GQA, Apache 2.0 |
 | OLMo 2 | `allenai/OLMo-2-1124-7B` | `olmo2` (default) | Post-norm, QK-norm, fully open weights+data |
-| EXAONE 4.0 | `LGAI-EXAONE/EXAONE-4.0-1.2B-Instruct` | `exaone4` (default) | 3:1 local/global hybrid, QK-norm |
+| EXAONE 4.0 | `evilsocket/EXAONE-4.0-1.2B` | `exaone4` (default) | 3:1 local/global hybrid, QK-norm |
 | DeepSeek-R1 (distilled) | `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` | `llama` (default) | LLaMA or Qwen2.5 base |
 
 ## Image Models
@@ -29,7 +29,7 @@
 | Stable Diffusion XL | (HF cache) | SD | ~7 GB | - |
 | SDXL Turbo | (HF cache) | SD | ~7 GB | - |
 | FLUX.2-klein-4B | `black-forest-labs/FLUX.2-klein-4B` | FLUX | ~8 GB | `flux` (default) |
-| FLUX.1-dev (FP8) | `Comfy-Org/flux1-dev` | FLUX | ~12 GB | `flux` (default) |
+| FLUX.1-dev (FP8) | `evilsocket/flux1-dev` | FLUX | ~12 GB | `flux` (default) |
 
 See [Image Generation](image_generation.md) for usage.
 
@@ -38,8 +38,8 @@ See [Image Generation](image_generation.md) for usage.
 | Model | HuggingFace ID | VRAM | Architecture | Feature Flag |
 |-------|---------------|------|-------------|-------------|
 | LuxTTS | `evilsocket/luxtts` ([original](https://huggingface.co/YatharthS/LuxTTS)) | <1 GB | Zipformer + flow matching | `luxtts` (default) |
-| VibeVoice-1.5B | `microsoft/VibeVoice-1.5B` | ~7 GB | Qwen2.5 LM + diffusion | `vibevoice` (default) |
-| VibeVoice-Realtime-0.5B | `microsoft/VibeVoice-Realtime-0.5B` | ~3 GB | Qwen2.5 LM + diffusion | `vibevoice` (default) |
+| VibeVoice-1.5B | `evilsocket/VibeVoice-1.5B` | ~7 GB | Qwen2.5 LM + diffusion | `vibevoice` (default) |
+| VibeVoice-Realtime-0.5B | `evilsocket/VibeVoice-Realtime-0.5B` | ~3 GB | Qwen2.5 LM + diffusion | `vibevoice` (default) |
 
 See [Voice Generation](voice_generation.md) for usage.
 

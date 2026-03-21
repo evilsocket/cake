@@ -27,22 +27,22 @@ cargo build --release --features metal
 # Workers first (on each machine):
 # bahamut:
 LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64 ./target/release/cake worker \
-  --model Qwen/Qwen3.5-0.8B --name bahamut \
+  --model evilsocket/Qwen3.5-0.8B --name bahamut \
   --topology topology-0.8B.yml --address 0.0.0.0:10128
 
 # stevie:
 ./target/release/cake worker \
-  --model Qwen/Qwen3.5-0.8B --name stevie \
+  --model evilsocket/Qwen3.5-0.8B --name stevie \
   --topology topology-0.8B.yml --address 0.0.0.0:10128
 
 # Master (blade, local):
 ./target/release/cake master \
-  --model Qwen/Qwen3.5-0.8B \
+  --model evilsocket/Qwen3.5-0.8B \
   --topology topology-0.8B.yml \
   --prompt "Explain quantum computing in simple terms"
 ```
 
-## Model: Qwen/Qwen3.5-0.8B
+## Model: evilsocket/Qwen3.5-0.8B
 
 - **Architecture**: Qwen3_5ForConditionalGeneration
 - **Layers**: 24 (48 GatedDeltaNet linear attn + 16 full attn... wait, 0.8B has 24 total)
@@ -94,11 +94,11 @@ ssh stevie.local "cd ~/Lab/cake && git pull && cargo build --release --features 
 ### Run experiment pattern
 ```bash
 # Start workers (background SSH sessions)
-ssh bahamut.local "cd ~/Lab/cake && LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64 ./target/release/cake worker --model Qwen/Qwen3.5-0.8B --name bahamut --topology topology-0.8B.yml --address 0.0.0.0:10128"
-ssh stevie.local "cd ~/Lab/cake && ./target/release/cake worker --model Qwen/Qwen3.5-0.8B --name stevie --topology topology-0.8B.yml --address 0.0.0.0:10128"
+ssh bahamut.local "cd ~/Lab/cake && LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64 ./target/release/cake worker --model evilsocket/Qwen3.5-0.8B --name bahamut --topology topology-0.8B.yml --address 0.0.0.0:10128"
+ssh stevie.local "cd ~/Lab/cake && ./target/release/cake worker --model evilsocket/Qwen3.5-0.8B --name stevie --topology topology-0.8B.yml --address 0.0.0.0:10128"
 
 # Run master (blade, local)
-./target/release/cake master --model Qwen/Qwen3.5-0.8B --topology topology-0.8B.yml --prompt "Explain quantum computing in simple terms"
+./target/release/cake master --model evilsocket/Qwen3.5-0.8B --topology topology-0.8B.yml --prompt "Explain quantum computing in simple terms"
 ```
 
 ## Testing

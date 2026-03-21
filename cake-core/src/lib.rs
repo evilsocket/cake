@@ -84,7 +84,7 @@ pub struct Args {
     /// Enable OpenAI compatible chat completion API.
     #[arg(long)]
     pub api: Option<String>,
-    /// Path to model directory, or HuggingFace repo ID (e.g., Qwen/Qwen2.5-Coder-1.5B-Instruct).
+    /// Path to model directory, or HuggingFace repo ID (e.g., evilsocket/Qwen2.5-Coder-1.5B-Instruct).
     #[arg(long, default_value = "./cake-data/Meta-Llama-3-8B/")]
     pub model: String,
     /// Topology file.

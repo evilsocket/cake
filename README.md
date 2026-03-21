@@ -33,17 +33,17 @@ Cake is a **multimodal AI inference server** written in Rust that can run models
 cargo build --release --features cuda  # or: --features metal
 
 # Text generation
-cake master --model Qwen/Qwen2.5-Coder-1.5B-Instruct --prompt "Hello!"
+cake master --model evilsocket/Qwen2.5-Coder-1.5B-Instruct --prompt "Hello!"
 
 # API server + web UI
-cake master --model Qwen/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080
+cake master --model evilsocket/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080
 
 # Image generation (FLUX.1-dev FP8, 1024x768)
 cake master --model-type image-model --image-model-arch flux1 \
   --sd-image-prompt "a cyberpunk cityscape at night" --flux-height 768 --flux-width 1024
 
 # Voice synthesis (VibeVoice-1.5B with voice cloning)
-cake master --model-type audio-model --model microsoft/VibeVoice-1.5B \
+cake master --model-type audio-model --model evilsocket/VibeVoice-1.5B \
   --voice-prompt voice.wav --prompt "Hello world, this is a test."
 ```
 

@@ -4,13 +4,13 @@ Cake exposes an OpenAI-compatible REST API when running with the `--api` flag. T
 
 ```sh
 # Text model
-cake master --model Qwen/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080
+cake master --model evilsocket/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080
 
 # Image model
 cake master --model-type image-model --image-model-arch flux1 --api 0.0.0.0:8080
 
 # Audio model
-cake master --model-type audio-model --model microsoft/VibeVoice-1.5B \
+cake master --model-type audio-model --model evilsocket/VibeVoice-1.5B \
   --voice-prompt voice.wav --api 0.0.0.0:8080
 ```
 
@@ -63,7 +63,7 @@ curl http://localhost:8080/v1/chat/completions \
   "id": "chatcmpl-abc123",
   "object": "chat.completion",
   "created": 1234567890,
-  "model": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+  "model": "evilsocket/Qwen2.5-Coder-1.5B-Instruct",
   "choices": [
     {
       "index": 0,
@@ -267,7 +267,7 @@ Returns the currently loaded model(s) in OpenAI-compatible format.
   "object": "list",
   "data": [
     {
-      "id": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+      "id": "evilsocket/Qwen2.5-Coder-1.5B-Instruct",
       "object": "model",
       "owned_by": "cake"
     }

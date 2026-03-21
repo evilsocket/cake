@@ -31,7 +31,7 @@ impl std::fmt::Display for ModelStatus {
 /// A discovered local model.
 #[derive(Debug, Clone)]
 pub struct LocalModel {
-    /// Human-readable model name (e.g. "Qwen/Qwen2.5-Coder-1.5B-Instruct").
+    /// Human-readable model name (e.g. "evilsocket/Qwen2.5-Coder-1.5B-Instruct").
     pub name: String,
     /// Absolute path to the model directory.
     pub path: PathBuf,
@@ -199,7 +199,7 @@ fn scan_hf_cache(hf_cache: &Path, models: &mut Vec<LocalModel>) -> Result<()> {
             continue;
         }
 
-        // Parse model name from dir: "models--Qwen--Qwen2.5-Coder-1.5B-Instruct" → "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+        // Parse model name from dir: "models--Qwen--Qwen2.5-Coder-1.5B-Instruct" → "evilsocket/Qwen2.5-Coder-1.5B-Instruct"
         let model_name = dir_name
             .strip_prefix("models--")
             .unwrap_or(&dir_name)
@@ -366,7 +366,7 @@ mod tests {
     fn read_model_name_from_config_name_or_path() {
         let tmp = tempfile::tempdir().unwrap();
         let config = serde_json::json!({
-            "_name_or_path": "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+            "_name_or_path": "evilsocket/Qwen2.5-Coder-1.5B-Instruct"
         });
         fs::write(
             tmp.path().join("config.json"),
@@ -374,7 +374,7 @@ mod tests {
         )
         .unwrap();
         let result = read_model_name_from_config(tmp.path());
-        assert_eq!(result, Some("Qwen/Qwen2.5-Coder-1.5B-Instruct".to_string()));
+        assert_eq!(result, Some("evilsocket/Qwen2.5-Coder-1.5B-Instruct".to_string()));
     }
 
     #[test]

@@ -124,7 +124,7 @@ pub fn flux2_klein_vae_config() -> candle_transformers::models::flux::autoencode
 
 /// FLUX.1-dev model component file resolution.
 ///
-/// Uses a single bundled checkpoint from Comfy-Org/flux1-dev (17.2GB)
+/// Uses a single bundled checkpoint from evilsocket/flux1-dev (17.2GB)
 /// that contains transformer + CLIP-L + T5-XXL + VAE.
 /// Tokenizers are downloaded separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,7 +140,7 @@ pub enum Flux1ModelFile {
 impl Flux1ModelFile {
     fn repo_and_file(&self) -> (&'static str, &'static str) {
         match self {
-            Self::Checkpoint => ("Comfy-Org/flux1-dev", "flux1-dev-fp8.safetensors"),
+            Self::Checkpoint => ("evilsocket/flux1-dev", "flux1-dev-fp8.safetensors"),
             Self::ClipTokenizer => ("openai/clip-vit-large-patch14", "tokenizer.json"),
             Self::T5Tokenizer => ("google/t5-v1_1-xxl", "spiece.model"),
         }

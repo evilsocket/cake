@@ -175,7 +175,7 @@ mod tests {
         let resp = ModelsResponse {
             object: "list".into(),
             data: vec![ModelObject {
-                id: "Qwen/Qwen3.5-0.8B".into(),
+                id: "evilsocket/Qwen3.5-0.8B".into(),
                 object: "model".into(),
                 owned_by: "cake".into(),
             }],

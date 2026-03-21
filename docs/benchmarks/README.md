@@ -71,7 +71,7 @@
 | **BF16 outer + F16 inner (original)** | **3.5s/step** | **Already optimal for this hardware** |
 
 **Notes:**
-- Reference (diffusers) benchmark skipped — `black-forest-labs/FLUX.1-dev` is a gated repo requiring HuggingFace authentication. Cake uses the publicly available `Comfy-Org/flux1-dev` FP8 checkpoint.
+- Reference (diffusers) benchmark skipped — `black-forest-labs/FLUX.1-dev` is a gated repo requiring HuggingFace authentication. Cake uses the publicly available `evilsocket/flux1-dev` FP8 checkpoint.
 - FLUX.1-dev is **compute-bound** (unlike VibeVoice which was kernel-launch-bound). The bottleneck is 43 TFLOPs/step across 57 transformer blocks with on-the-fly F8→F16 dequantization.
 - FP8 weights kept on GPU (~8.6GB), dequantized to F16 on-the-fly per layer. Caching as F16 would need ~17GB — too much for 16GB GPU.
 - BF16 outer compute with F16 inner matmul is the optimal configuration: BF16 prevents overflow, F16 Tensor Cores are fastest on Ampere.

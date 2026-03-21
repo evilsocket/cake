@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use hf_hub::api::sync::ApiBuilder;
 
-/// Returns true if the string looks like a HuggingFace repo ID (e.g., "Qwen/Qwen2.5-Coder-1.5B-Instruct").
+/// Returns true if the string looks like a HuggingFace repo ID (e.g., "evilsocket/Qwen2.5-Coder-1.5B-Instruct").
 pub fn looks_like_hf_repo(model: &str) -> bool {
     let parts: Vec<&str> = model.split('/').collect();
     parts.len() == 2
@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn looks_like_hf_repo_valid() {
-        assert!(looks_like_hf_repo("Qwen/Qwen2.5-Coder-1.5B-Instruct"));
+        assert!(looks_like_hf_repo("evilsocket/Qwen2.5-Coder-1.5B-Instruct"));
         assert!(looks_like_hf_repo("org/model"));
         assert!(looks_like_hf_repo("meta-llama/Llama-3-8B"));
     }
