@@ -58,3 +58,57 @@ fn cache_process_kv_windowed(bencher: divan::Bencher, seq_len: usize) {
         cache.process_kv_windowed(0, k.clone(), v.clone(), window).unwrap()
     });
 }
+
+#[divan::bench]
+fn cache_set_kv(bencher: divan::Bencher) {
+    let cfg = test_config();
+    let head_dim = cfg.hidden_size / cfg.num_attention_heads;
+    let k = make_tensor(&[1, cfg.num_key_value_heads, 1, head_dim], 30);
+    let v = make_tensor(&[1, cfg.num_key_value_heads, 1, head_dim], 31);
+    bencher.bench_local(move || {
+        let mut cache = make_cache(&cfg);
+        cache.set_kv(0, k.clone(), v.clone());
+    });
+}
+
+#[divan::bench]
+fn cache_recurrent_state_set_get(bencher: divan::Bencher) {
+    let cfg = test_config();
+    let state = make_tensor(&[1, 4, 16, 16], 40);
+    bencher.bench_local(move || {
+        let mut cache = make_cache(&cfg);
+        cache.set_recurrent_state(0, state.clone());
+        cache.get_recurrent_state(0).unwrap().clone()
+    });
+}
+
+#[divan::bench]
+fn cache_conv_state_set_get(bencher: divan::Bencher) {
+    let cfg = test_config();
+    let state = make_tensor(&[1, 64, 3], 50);
+    bencher.bench_local(move || {
+        let mut cache = make_cache(&cfg);
+        cache.set_conv_state(0, state.clone());
+        cache.get_conv_state(0).unwrap().clone()
+    });
+}
+
+#[divan::bench]
+fn cache_as_new(bencher: divan::Bencher) {
+    let cfg = test_config();
+    let cache = make_cache(&cfg);
+    bencher.bench_local(|| cache.as_new());
+}
+
+#[divan::bench]
+fn cache_clear(bencher: divan::Bencher) {
+    let cfg = test_config();
+    let head_dim = cfg.hidden_size / cfg.num_attention_heads;
+    let k = make_tensor(&[1, cfg.num_key_value_heads, 4, head_dim], 60);
+    let v = make_tensor(&[1, cfg.num_key_value_heads, 4, head_dim], 61);
+    bencher.bench_local(move || {
+        let mut cache = make_cache(&cfg);
+        cache.process_kv(0, k.clone(), v.clone()).unwrap();
+        cache.clear();
+    });
+}
