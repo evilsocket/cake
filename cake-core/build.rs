@@ -1,10 +1,10 @@
 fn main() {
     #[cfg(feature = "cuda")]
     {
-        println!("cargo::rerun-if-changed=src/cuda/fused_ops.cu");
+        println!("cargo::rerun-if-changed=src/backends/cuda/fused_ops.cu");
 
         let builder = bindgen_cuda::Builder::default()
-            .kernel_paths(vec!["src/cuda/fused_ops.cu"])
+            .kernel_paths(vec!["src/backends/cuda/fused_ops.cu"])
             .arg("--expt-relaxed-constexpr")
             .arg("-std=c++17")
             .arg("-O2");
