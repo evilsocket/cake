@@ -112,3 +112,60 @@ fn full_pipe_roundtrip(bencher: divan::Bencher) {
             })
         });
 }
+
+// ── Larger tensor benchmarks (realistic inference sizes) ──────
+
+#[divan::bench(args = [1024, 4096, 16384])]
+fn large_tensor_encode(bencher: divan::Bencher, size: usize) {
+    let t = make_f16_tensor(size);
+    let msg = Message::from_tensor(&t);
+    bencher
+        .counter(divan::counter::BytesCount::new(size * 2))
+        .bench_local(|| msg.to_bytes().unwrap());
+}
+
+#[divan::bench(args = [1024, 4096, 16384])]
+fn large_tensor_decode(bencher: divan::Bencher, size: usize) {
+    let t = make_f16_tensor(size);
+    let msg = Message::from_tensor(&t);
+    let bytes = msg.to_bytes().unwrap();
+    bencher
+        .counter(divan::counter::BytesCount::new(bytes.len()))
+        .bench_local(|| Message::from_bytes(&bytes).unwrap());
+}
+
+#[divan::bench(args = [3, 8, 14])]
+fn batch_layers_encode(bencher: divan::Bencher, num_layers: usize) {
+    let t = make_f16_tensor(1024);
+    let batch: Vec<(String, usize, usize)> = (0..num_layers)
+        .map(|i| (format!("model.layers.{i}"), i, i))
+        .collect();
+    let msg = Message::from_batch(&t, batch);
+    bencher
+        .counter(divan::counter::BytesCount::new(1024usize * 2))
+        .bench_local(|| msg.to_bytes().unwrap());
+}
+
+#[divan::bench]
+fn buf_reuse_pipe_roundtrip(bencher: divan::Bencher) {
+    let t = make_f16_tensor(4096);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut write_buf = Vec::with_capacity(64 * 1024);
+    let mut read_buf = Vec::with_capacity(64 * 1024);
+    bencher
+        .counter(divan::counter::BytesCount::new(4096usize * 2))
+        .bench_local(|| {
+            rt.block_on(async {
+                let (mut w, mut r) = tokio::io::duplex(128 * 1024);
+                Message::from_tensor(&t)
+                    .to_writer_buf(&mut w, &mut write_buf)
+                    .await
+                    .unwrap();
+                drop(w);
+                Message::from_reader_buf(&mut r, &mut read_buf).await.unwrap()
+            })
+        });
+}

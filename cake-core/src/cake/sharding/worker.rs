@@ -351,8 +351,8 @@ impl<G: Generator + 'static> Worker<G> {
         let mut avg_ops = 0;
         let mut avg_write = 0;
         let mut avg_read = 0;
-        let mut read_buf = Vec::new();
-        let mut write_buf = Vec::new();
+        let mut read_buf = Vec::with_capacity(64 * 1024);
+        let mut write_buf = Vec::with_capacity(64 * 1024);
 
         // keep reading messages
         while let Ok((read_time, read_size, op_message)) = {

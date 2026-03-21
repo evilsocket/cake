@@ -233,7 +233,7 @@ impl Message {
         // Reserve 8 bytes for the header (magic + length), then serialize the
         // message directly into `buf` via speedy's stream writer.  This avoids
         // the intermediate `Vec<u8>` that `write_to_vec_with_ctx` would create.
-        buf.clear();
+        buf.truncate(0); // preserve capacity across calls (clear() may deallocate)
         buf.extend_from_slice(&[0u8; 8]); // placeholder for header
         self.write_to_stream_with_ctx(BigEndian::default(), &mut *buf)?;
 
@@ -703,4 +703,123 @@ mod tests {
         let (_, m4) = Message::from_reader(&mut reader).await.unwrap();
         assert!(matches!(m4, Message::Goodbye));
     }
+
+    // ── to_writer_buf (hot path with buffer reuse) ──────────────
+
+    #[tokio::test]
+    async fn test_writer_buf_roundtrip() {
+        let (mut writer, mut reader) = tokio::io::duplex(64 * 1024);
+        let mut write_buf = Vec::new();
+        let mut read_buf = Vec::new();
+        let tensor = make_f16_tensor(&[1, 1024]);
+
+        Message::from_tensor(&tensor)
+            .to_writer_buf(&mut writer, &mut write_buf)
+            .await
+            .unwrap();
+        drop(writer);
+
+        let (_, decoded) = Message::from_reader_buf(&mut reader, &mut read_buf).await.unwrap();
+        assert!(matches!(decoded, Message::Tensor(_)));
+    }
+
+    #[tokio::test]
+    async fn test_writer_buf_preserves_capacity() {
+        let (mut writer, _reader) = tokio::io::duplex(64 * 1024);
+        let mut buf = Vec::new();
+        let tensor = make_f16_tensor(&[1, 512]);
+
+        // First write allocates
+        Message::from_tensor(&tensor)
+            .to_writer_buf(&mut writer, &mut buf)
+            .await
+            .unwrap();
+        let cap_after_first = buf.capacity();
+
+        // Second write should reuse the same allocation
+        Message::from_tensor(&tensor)
+            .to_writer_buf(&mut writer, &mut buf)
+            .await
+            .unwrap();
+        let cap_after_second = buf.capacity();
+
+        assert_eq!(cap_after_first, cap_after_second, "buffer should reuse capacity");
+    }
+
+    #[tokio::test]
+    async fn test_writer_buf_large_tensor() {
+        let (mut writer, mut reader) = tokio::io::duplex(512 * 1024);
+        let mut write_buf = Vec::new();
+        let mut read_buf = Vec::new();
+        // 1 × 16384 F16 = 32 KB tensor (realistic inference size)
+        let tensor = make_f16_tensor(&[1, 16384]);
+        let orig_bytes: Vec<u8> = tensor.data().to_vec();
+
+        Message::from_tensor(&tensor)
+            .to_writer_buf(&mut writer, &mut write_buf)
+            .await
+            .unwrap();
+        drop(writer);
+
+        let (_, decoded) = Message::from_reader_buf(&mut reader, &mut read_buf).await.unwrap();
+        match decoded {
+            Message::Tensor(raw) => {
+                assert_eq!(raw.data.len(), 16384 * 2);
+                let t = raw.to_tensor(&Device::Cpu).unwrap();
+                assert_eq!(t.data().to_vec(), orig_bytes);
+            }
+            other => panic!("expected Tensor, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_writer_buf_batch_many_layers() {
+        let (mut writer, mut reader) = tokio::io::duplex(64 * 1024);
+        let mut write_buf = Vec::new();
+        let mut read_buf = Vec::new();
+        let tensor = make_f16_tensor(&[1, 1024]);
+        let batch: Vec<(String, usize, usize)> = (0..12)
+            .map(|i| (format!("model.layers.{i}"), i, i))
+            .collect();
+        let msg = Message::from_batch(&tensor, batch);
+
+        msg.to_writer_buf(&mut writer, &mut write_buf).await.unwrap();
+        drop(writer);
+
+        let (_, decoded) = Message::from_reader_buf(&mut reader, &mut read_buf).await.unwrap();
+        match decoded {
+            Message::Batch { x, batch } => {
+                assert_eq!(batch.len(), 12);
+                assert_eq!(batch[11].0, "model.layers.11");
+                let t = x.to_tensor(&Device::Cpu).unwrap();
+                assert_eq!(t.shape().dims(), &[1, 1024]);
+            }
+            other => panic!("expected Batch, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_writer_buf_single_op_roundtrip() {
+        let (mut writer, mut reader) = tokio::io::duplex(64 * 1024);
+        let mut write_buf = Vec::new();
+        let mut read_buf = Vec::new();
+        let tensor = make_f16_tensor(&[1, 1024]);
+
+        Message::single_op("model.layers.5", &tensor, 42, 7)
+            .to_writer_buf(&mut writer, &mut write_buf)
+            .await
+            .unwrap();
+        drop(writer);
+
+        let (_, decoded) = Message::from_reader_buf(&mut reader, &mut read_buf).await.unwrap();
+        match decoded {
+            Message::SingleOp { layer_name, index_pos, block_idx, .. } => {
+                assert_eq!(layer_name, "model.layers.5");
+                assert_eq!(index_pos, 42);
+                assert_eq!(block_idx, 7);
+            }
+            other => panic!("expected SingleOp, got {:?}", other),
+        }
+    }
+
 }

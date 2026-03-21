@@ -45,8 +45,8 @@ impl Client {
             stream,
             layer_name,
             info: worker_info,
-            read_buf: Vec::new(),
-            write_buf: Vec::new(),
+            read_buf: Vec::with_capacity(64 * 1024), // 64 KB initial (typical tensor ~2-8 KB)
+            write_buf: Vec::with_capacity(64 * 1024),
         };
 
         // Authenticate if cluster key is set
@@ -66,7 +66,7 @@ impl Client {
 
     /// Send a Message to the worker and return a response.
     async fn request(&mut self, req: Message) -> Result<Message> {
-        req.to_writer(&mut self.stream)
+        req.to_writer_buf(&mut self.stream, &mut self.write_buf)
             .await
             .map_err(|e| anyhow!("error sending message {:?}: {}", req, e))?;
 
