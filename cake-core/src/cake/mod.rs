@@ -102,6 +102,7 @@ pub(crate) fn arch_str_to_text_model_arch(arch: &str) -> TextModelArch {
 impl Context {
     /// Create the context from the parsed command line arguments.
     pub fn from_args(mut args: Args) -> Result<Self> {
+        #[allow(unused_mut)] // mutated only with vibevoice feature
         let mut dtype = parse_dtype_str(args.dtype.as_deref())?;
 
         let device = utils::get_inference_device(args.cpu, args.device)
