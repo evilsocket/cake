@@ -8,66 +8,28 @@
 //! The `synchronize()` method flushes the command buffer and is called at strategic
 //! points during forward passes (see GatedDeltaNet, Qwen3_5FullAttention).
 
-use candle_core::{backend::BackendStorage as _, CpuStorage, DType, Device, Layout, Result, Shape, Tensor, D};
+use candle_core::{CpuStorage, DType, Device, Layout, Result, Shape, Tensor, D};
 
 use super::ComputeBackend;
 
 // ─── MSL shader source (loaded from metal.msl) ─────────────────────
 const FUSED_OPS_MSL: &str = include_str!("metal.msl");
 
-// ─── CustomOp structs for MSL-accelerated ops (2 total) ─────────────
+// ─── CustomOp structs for MSL-accelerated ops ───────────────────────
+//
+// CustomOp is candle's only API for accessing raw MetalStorage from a Tensor.
+// cpu_fwd is a required trait method but never called (this module is gated
+// by #[cfg(feature = "metal")] and all tensors are on Metal).
 
 struct MetalSiluMul;
 
 impl candle_core::CustomOp2 for MetalSiluMul {
-    fn name(&self) -> &'static str {
-        "metal_silu_mul"
+    fn name(&self) -> &'static str { "metal_silu_mul" }
+
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("MetalSiluMul: expected Metal device")
     }
 
-    fn cpu_fwd(
-        &self,
-        s1: &CpuStorage,
-        l1: &Layout,
-        s2: &CpuStorage,
-        l2: &Layout,
-    ) -> Result<(CpuStorage, Shape)> {
-        fn inner<T: candle_core::WithDType + num_traits::Float>(
-            gate: &[T],
-            l1: &Layout,
-            up: &[T],
-            l2: &Layout,
-        ) -> Result<(CpuStorage, Shape)> {
-            let gate = match l1.contiguous_offsets() {
-                Some((o1, o2)) => &gate[o1..o2],
-                None => candle_core::bail!("silu_mul: gate must be contiguous"),
-            };
-            let up = match l2.contiguous_offsets() {
-                Some((o1, o2)) => &up[o1..o2],
-                None => candle_core::bail!("silu_mul: up must be contiguous"),
-            };
-            let n = gate.len();
-            let dst: Vec<T> = (0..n)
-                .map(|i| {
-                    let x = gate[i];
-                    let y = up[i];
-                    x / (T::one() + (-x).exp()) * y
-                })
-                .collect();
-            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
-            Ok((storage, l1.shape().clone()))
-        }
-
-        use CpuStorage as C;
-        match (s1, s2) {
-            (C::BF16(a), C::BF16(b)) => inner(a, l1, b, l2),
-            (C::F16(a), C::F16(b)) => inner(a, l1, b, l2),
-            (C::F32(a), C::F32(b)) => inner(a, l1, b, l2),
-            (C::F64(a), C::F64(b)) => inner(a, l1, b, l2),
-            _ => candle_core::bail!("silu_mul: unsupported dtype {:?}", s1.dtype()),
-        }
-    }
-
-    #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
         s1: &candle_core::MetalStorage,
@@ -107,44 +69,12 @@ impl candle_core::CustomOp2 for MetalSiluMul {
 struct MetalStableSoftplus;
 
 impl candle_core::CustomOp1 for MetalStableSoftplus {
-    fn name(&self) -> &'static str {
-        "metal_stable_softplus"
+    fn name(&self) -> &'static str { "metal_stable_softplus" }
+
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("MetalStableSoftplus: expected Metal device")
     }
 
-    fn cpu_fwd(&self, s: &CpuStorage, l: &Layout) -> Result<(CpuStorage, Shape)> {
-        fn inner<T: candle_core::WithDType + num_traits::Float>(
-            src: &[T],
-            layout: &Layout,
-        ) -> Result<(CpuStorage, Shape)> {
-            let src = match layout.contiguous_offsets() {
-                Some((o1, o2)) => &src[o1..o2],
-                None => candle_core::bail!("stable_softplus: input must be contiguous"),
-            };
-            let t88 = T::from(88.0).unwrap();
-            let one = T::one();
-            let dst: Vec<T> = src
-                .iter()
-                .map(|&x| {
-                    let clamped = if x < t88 { x } else { t88 };
-                    let sp = (clamped.exp() + one).ln();
-                    if x > sp { x } else { sp }
-                })
-                .collect();
-            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
-            Ok((storage, layout.shape().clone()))
-        }
-
-        use CpuStorage as C;
-        match s {
-            C::BF16(s) => inner(s, l),
-            C::F16(s) => inner(s, l),
-            C::F32(s) => inner(s, l),
-            C::F64(s) => inner(s, l),
-            _ => candle_core::bail!("stable_softplus: unsupported dtype {:?}", s.dtype()),
-        }
-    }
-
-    #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
         s: &candle_core::MetalStorage,

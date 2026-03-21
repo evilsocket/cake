@@ -3,7 +3,7 @@
 //! This module is gated by `#[cfg(feature = "cuda")]` at the parent level,
 //! so individual methods do NOT carry cfg guards.
 
-use candle_core::{backend::BackendStorage as _, CpuStorage, Layout, Result, Shape, Tensor};
+use candle_core::{CpuStorage, Layout, Result, Shape, Tensor};
 
 mod ptx {
     include!(concat!(env!("OUT_DIR"), "/fused_ops_ptx.rs"));
@@ -21,54 +21,12 @@ impl candle_core::CustomOp2 for SiluMul {
 
     fn cpu_fwd(
         &self,
-        s1: &CpuStorage,
-        l1: &Layout,
-        s2: &CpuStorage,
-        l2: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        use candle_core::backend::BackendStorage;
-        use rayon::prelude::*;
-
-        fn inner<T: candle_core::WithDType + num_traits::Float>(
-            gate: &[T],
-            l1: &Layout,
-            up: &[T],
-            l2: &Layout,
-        ) -> Result<(CpuStorage, Shape)> {
-            let gate = match l1.contiguous_offsets() {
-                Some((o1, o2)) => &gate[o1..o2],
-                None => candle_core::bail!("silu_mul: gate must be contiguous"),
-            };
-            let up = match l2.contiguous_offsets() {
-                Some((o1, o2)) => &up[o1..o2],
-                None => candle_core::bail!("silu_mul: up must be contiguous"),
-            };
-            let n = gate.len();
-            let mut dst = vec![T::zero(); n];
-            const CHUNK: usize = 8192;
-            dst.par_chunks_mut(CHUNK)
-                .enumerate()
-                .for_each(|(chunk_idx, dst_chunk)| {
-                    let start = chunk_idx * CHUNK;
-                    for (i, d) in dst_chunk.iter_mut().enumerate() {
-                        let x = gate[start + i];
-                        let y = up[start + i];
-                        // silu(x) * y = x * sigmoid(x) * y
-                        *d = x / (T::one() + (-x).exp()) * y;
-                    }
-                });
-            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
-            Ok((storage, l1.shape().clone()))
-        }
-
-        use CpuStorage as C;
-        match (s1, s2) {
-            (C::BF16(a), C::BF16(b)) => inner(a, l1, b, l2),
-            (C::F16(a), C::F16(b)) => inner(a, l1, b, l2),
-            (C::F32(a), C::F32(b)) => inner(a, l1, b, l2),
-            (C::F64(a), C::F64(b)) => inner(a, l1, b, l2),
-            _ => candle_core::bail!("silu_mul: unsupported dtype {:?}", s1.dtype()),
-        }
+        candle_core::bail!("{}: expected CUDA device", self.name())
     }
 
     fn cuda_fwd(
@@ -142,37 +100,8 @@ impl candle_core::CustomOp1 for StableSoftplus {
         "stable_softplus"
     }
 
-    fn cpu_fwd(&self, s: &CpuStorage, l: &Layout) -> Result<(CpuStorage, Shape)> {
-        fn inner<T: candle_core::WithDType + num_traits::Float>(
-            src: &[T],
-            layout: &Layout,
-        ) -> Result<(CpuStorage, Shape)> {
-            let src = match layout.contiguous_offsets() {
-                Some((o1, o2)) => &src[o1..o2],
-                None => candle_core::bail!("stable_softplus: input must be contiguous"),
-            };
-            let t88 = T::from(88.0).unwrap();
-            let one = T::one();
-            let dst: Vec<T> = src
-                .iter()
-                .map(|&x| {
-                    let clamped = if x < t88 { x } else { t88 };
-                    let sp = (clamped.exp() + one).ln();
-                    if x > sp { x } else { sp }
-                })
-                .collect();
-            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
-            Ok((storage, layout.shape().clone()))
-        }
-
-        use CpuStorage as C;
-        match s {
-            C::BF16(s) => inner(s, l),
-            C::F16(s) => inner(s, l),
-            C::F32(s) => inner(s, l),
-            C::F64(s) => inner(s, l),
-            _ => candle_core::bail!("stable_softplus: unsupported dtype {:?}", s.dtype()),
-        }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("{}: expected CUDA device", self.name())
     }
 
     fn cuda_fwd(
@@ -239,51 +168,14 @@ impl candle_core::CustomOp3 for Add3 {
 
     fn cpu_fwd(
         &self,
-        s_a: &CpuStorage,
-        l_a: &Layout,
-        s_b: &CpuStorage,
-        l_b: &Layout,
-        s_c: &CpuStorage,
-        l_c: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        fn inner<T: candle_core::WithDType + num_traits::Float>(
-            a: &[T],
-            l_a: &Layout,
-            b: &[T],
-            l_b: &Layout,
-            c: &[T],
-            l_c: &Layout,
-        ) -> Result<(CpuStorage, Shape)> {
-            let a = match l_a.contiguous_offsets() {
-                Some((o1, o2)) => &a[o1..o2],
-                None => candle_core::bail!("add3: a must be contiguous"),
-            };
-            let b = match l_b.contiguous_offsets() {
-                Some((o1, o2)) => &b[o1..o2],
-                None => candle_core::bail!("add3: b must be contiguous"),
-            };
-            let c = match l_c.contiguous_offsets() {
-                Some((o1, o2)) => &c[o1..o2],
-                None => candle_core::bail!("add3: c must be contiguous"),
-            };
-            let dst: Vec<T> = a
-                .iter()
-                .zip(b)
-                .zip(c)
-                .map(|((&av, &bv), &cv)| av + bv + cv)
-                .collect();
-            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
-            Ok((storage, l_a.shape().clone()))
-        }
-
-        use CpuStorage as C;
-        match (s_a, s_b, s_c) {
-            (C::BF16(a), C::BF16(b), C::BF16(c)) => inner(a, l_a, b, l_b, c, l_c),
-            (C::F16(a), C::F16(b), C::F16(c)) => inner(a, l_a, b, l_b, c, l_c),
-            (C::F32(a), C::F32(b), C::F32(c)) => inner(a, l_a, b, l_b, c, l_c),
-            (C::F64(a), C::F64(b), C::F64(c)) => inner(a, l_a, b, l_b, c, l_c),
-            _ => candle_core::bail!("add3: unsupported dtype {:?}", s_a.dtype()),
-        }
+        candle_core::bail!("{}: expected CUDA device", self.name())
     }
 
     fn cuda_fwd(
@@ -382,38 +274,12 @@ impl candle_core::CustomOp2 for ExpMul {
 
     fn cpu_fwd(
         &self,
-        s1: &CpuStorage,
-        l1: &Layout,
-        s2: &CpuStorage,
-        l2: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        fn inner<T: candle_core::WithDType + num_traits::Float>(
-            x: &[T],
-            l1: &Layout,
-            y: &[T],
-            l2: &Layout,
-        ) -> Result<(CpuStorage, Shape)> {
-            let x = match l1.contiguous_offsets() {
-                Some((o1, o2)) => &x[o1..o2],
-                None => candle_core::bail!("exp_mul: x must be contiguous"),
-            };
-            let y = match l2.contiguous_offsets() {
-                Some((o1, o2)) => &y[o1..o2],
-                None => candle_core::bail!("exp_mul: y must be contiguous"),
-            };
-            let dst: Vec<T> = x.iter().zip(y).map(|(&a, &b)| a * b.exp()).collect();
-            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
-            Ok((storage, l1.shape().clone()))
-        }
-
-        use CpuStorage as C;
-        match (s1, s2) {
-            (C::BF16(a), C::BF16(b)) => inner(a, l1, b, l2),
-            (C::F16(a), C::F16(b)) => inner(a, l1, b, l2),
-            (C::F32(a), C::F32(b)) => inner(a, l1, b, l2),
-            (C::F64(a), C::F64(b)) => inner(a, l1, b, l2),
-            _ => candle_core::bail!("exp_mul: unsupported dtype {:?}", s1.dtype()),
-        }
+        candle_core::bail!("{}: expected CUDA device", self.name())
     }
 
     fn cuda_fwd(
@@ -489,51 +355,14 @@ impl candle_core::CustomOp3 for SubMul {
 
     fn cpu_fwd(
         &self,
-        s_a: &CpuStorage,
-        l_a: &Layout,
-        s_b: &CpuStorage,
-        l_b: &Layout,
-        s_c: &CpuStorage,
-        l_c: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        fn inner<T: candle_core::WithDType + num_traits::Float>(
-            a: &[T],
-            l_a: &Layout,
-            b: &[T],
-            l_b: &Layout,
-            c: &[T],
-            l_c: &Layout,
-        ) -> Result<(CpuStorage, Shape)> {
-            let a = match l_a.contiguous_offsets() {
-                Some((o1, o2)) => &a[o1..o2],
-                None => candle_core::bail!("sub_mul: a must be contiguous"),
-            };
-            let b = match l_b.contiguous_offsets() {
-                Some((o1, o2)) => &b[o1..o2],
-                None => candle_core::bail!("sub_mul: b must be contiguous"),
-            };
-            let c = match l_c.contiguous_offsets() {
-                Some((o1, o2)) => &c[o1..o2],
-                None => candle_core::bail!("sub_mul: c must be contiguous"),
-            };
-            let dst: Vec<T> = a
-                .iter()
-                .zip(b)
-                .zip(c)
-                .map(|((&av, &bv), &cv)| (av - bv) * cv)
-                .collect();
-            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
-            Ok((storage, l_a.shape().clone()))
-        }
-
-        use CpuStorage as C;
-        match (s_a, s_b, s_c) {
-            (C::BF16(a), C::BF16(b), C::BF16(c)) => inner(a, l_a, b, l_b, c, l_c),
-            (C::F16(a), C::F16(b), C::F16(c)) => inner(a, l_a, b, l_b, c, l_c),
-            (C::F32(a), C::F32(b), C::F32(c)) => inner(a, l_a, b, l_b, c, l_c),
-            (C::F64(a), C::F64(b), C::F64(c)) => inner(a, l_a, b, l_b, c, l_c),
-            _ => candle_core::bail!("sub_mul: unsupported dtype {:?}", s_a.dtype()),
-        }
+        candle_core::bail!("{}: expected CUDA device", self.name())
     }
 
     fn cuda_fwd(
@@ -633,53 +462,14 @@ impl candle_core::CustomOp3 for AddScaled {
 
     fn cpu_fwd(
         &self,
-        s_a: &CpuStorage,
-        l_a: &Layout,
-        s_b: &CpuStorage,
-        l_b: &Layout,
-        s_c: &CpuStorage,
-        l_c: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        fn inner<T: candle_core::WithDType + num_traits::Float>(
-            a: &[T],
-            l_a: &Layout,
-            b: &[T],
-            l_b: &Layout,
-            c: &[T],
-            l_c: &Layout,
-        ) -> Result<(CpuStorage, Shape)> {
-            let a = match l_a.contiguous_offsets() {
-                Some((o1, o2)) => &a[o1..o2],
-                None => candle_core::bail!("add_scaled: a must be contiguous"),
-            };
-            let b = match l_b.contiguous_offsets() {
-                Some((o1, o2)) => &b[o1..o2],
-                None => candle_core::bail!("add_scaled: b must be contiguous"),
-            };
-            let c = match l_c.contiguous_offsets() {
-                Some((o1, o2)) => &c[o1..o2],
-                None => candle_core::bail!("add_scaled: c must be contiguous"),
-            };
-            let dims = l_a.shape().dims();
-            let (channels, time_len) = (dims[1], dims[2]);
-            let numel = l_a.shape().elem_count();
-            let mut dst = vec![T::zero(); numel];
-            for (i, d) in dst.iter_mut().enumerate() {
-                let chan = (i / time_len) % channels;
-                *d = a[i] + b[i] * c[chan];
-            }
-            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
-            Ok((storage, l_a.shape().clone()))
-        }
-
-        use CpuStorage as C;
-        match (s_a, s_b, s_c) {
-            (C::BF16(a), C::BF16(b), C::BF16(c)) => inner(a, l_a, b, l_b, c, l_c),
-            (C::F16(a), C::F16(b), C::F16(c)) => inner(a, l_a, b, l_b, c, l_c),
-            (C::F32(a), C::F32(b), C::F32(c)) => inner(a, l_a, b, l_b, c, l_c),
-            (C::F64(a), C::F64(b), C::F64(c)) => inner(a, l_a, b, l_b, c, l_c),
-            _ => candle_core::bail!("add_scaled: unsupported dtype"),
-        }
+        candle_core::bail!("{}: expected CUDA device", self.name())
     }
 
     fn cuda_fwd(
@@ -772,75 +562,14 @@ impl candle_core::CustomOp3 for RmsNormGated {
 
     fn cpu_fwd(
         &self,
-        s_x: &CpuStorage,
-        l_x: &Layout,
-        s_z: &CpuStorage,
-        l_z: &Layout,
-        s_w: &CpuStorage,
-        l_w: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        use rayon::prelude::*;
-
-        fn inner<
-            T: candle_core::WithDType
-                + num_traits::Float
-                + num_traits::AsPrimitive<f32>
-                + num_traits::FromPrimitive,
-        >(
-            x: &[T],
-            l_x: &Layout,
-            z: &[T],
-            l_z: &Layout,
-            w: &[T],
-            l_w: &Layout,
-            eps: f32,
-        ) -> Result<(CpuStorage, Shape)> {
-            let x = match l_x.contiguous_offsets() {
-                Some((o1, o2)) => &x[o1..o2],
-                None => candle_core::bail!("rms_norm_gated: x must be contiguous"),
-            };
-            let z = match l_z.contiguous_offsets() {
-                Some((o1, o2)) => &z[o1..o2],
-                None => candle_core::bail!("rms_norm_gated: z must be contiguous"),
-            };
-            let w = match l_w.contiguous_offsets() {
-                Some((o1, o2)) => &w[o1..o2],
-                None => candle_core::bail!("rms_norm_gated: weight must be contiguous"),
-            };
-            let dims = l_x.shape().dims();
-            let n_cols = dims[dims.len() - 1];
-            let el = l_x.shape().elem_count();
-            let mut dst = vec![T::zero(); el];
-
-            dst.par_chunks_mut(n_cols)
-                .enumerate()
-                .for_each(|(row, dst_row)| {
-                    let x_row = &x[row * n_cols..(row + 1) * n_cols];
-                    let z_row = &z[row * n_cols..(row + 1) * n_cols];
-                    let sum2: f32 = x_row.iter().map(|v| { let f: f32 = v.as_(); f * f }).sum();
-                    let inv_rms = 1.0 / (sum2 / n_cols as f32 + eps).sqrt();
-                    for i in 0..n_cols {
-                        let xv: f32 = x_row[i].as_();
-                        let wv: f32 = w[i].as_();
-                        let zv: f32 = z_row[i].as_();
-                        let silu_z = zv / (1.0 + (-zv).exp());
-                        dst_row[i] = T::from_f32(xv * inv_rms * wv * silu_z)
-                            .unwrap_or_else(T::nan);
-                    }
-                });
-
-            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
-            Ok((storage, Shape::from_dims(dims)))
-        }
-
-        use CpuStorage as C;
-        match (s_x, s_z, s_w) {
-            (C::BF16(x), C::BF16(z), C::BF16(w)) => inner(x, l_x, z, l_z, w, l_w, self.eps),
-            (C::F16(x), C::F16(z), C::F16(w)) => inner(x, l_x, z, l_z, w, l_w, self.eps),
-            (C::F32(x), C::F32(z), C::F32(w)) => inner(x, l_x, z, l_z, w, l_w, self.eps),
-            (C::F64(x), C::F64(z), C::F64(w)) => inner(x, l_x, z, l_z, w, l_w, self.eps),
-            _ => candle_core::bail!("rms_norm_gated: unsupported dtype {:?}", s_x.dtype()),
-        }
+        candle_core::bail!("{}: expected CUDA device", self.name())
     }
 
     fn cuda_fwd(
@@ -954,93 +683,14 @@ impl candle_core::CustomOp3 for AddRmsNorm {
 
     fn cpu_fwd(
         &self,
-        s_a: &CpuStorage,
-        l_a: &Layout,
-        s_b: &CpuStorage,
-        l_b: &Layout,
-        s_w: &CpuStorage,
-        l_w: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        use rayon::prelude::*;
-
-        #[allow(clippy::too_many_arguments)]
-        fn inner<
-            T: candle_core::WithDType
-                + num_traits::Float
-                + num_traits::AsPrimitive<f32>
-                + num_traits::FromPrimitive,
-        >(
-            a: &[T],
-            l_a: &Layout,
-            b: &[T],
-            l_b: &Layout,
-            w: &[T],
-            l_w: &Layout,
-            eps: f32,
-            n_cols: usize,
-        ) -> Result<(CpuStorage, Shape)> {
-            let a = match l_a.contiguous_offsets() {
-                Some((o1, o2)) => &a[o1..o2],
-                None => candle_core::bail!("add_rms_norm: a must be contiguous"),
-            };
-            let b = match l_b.contiguous_offsets() {
-                Some((o1, o2)) => &b[o1..o2],
-                None => candle_core::bail!("add_rms_norm: b must be contiguous"),
-            };
-            let w = match l_w.contiguous_offsets() {
-                Some((o1, o2)) => &w[o1..o2],
-                None => candle_core::bail!("add_rms_norm: weight must be contiguous"),
-            };
-            let dims = l_a.shape().dims();
-            let el = l_a.shape().elem_count();
-            let n_rows = el / n_cols;
-            // Output: [sum, normed] concatenated on last dim
-            let out_cols = n_cols * 2;
-            let mut dst = vec![T::zero(); n_rows * out_cols];
-
-            dst.par_chunks_mut(out_cols)
-                .enumerate()
-                .for_each(|(row, dst_row)| {
-                    let a_row = &a[row * n_cols..(row + 1) * n_cols];
-                    let b_row = &b[row * n_cols..(row + 1) * n_cols];
-                    // Compute sum and sum of squares
-                    let mut sum2: f32 = 0.0;
-                    for i in 0..n_cols {
-                        let s: f32 = a_row[i].as_() + b_row[i].as_();
-                        dst_row[i] = T::from_f32(s).unwrap_or_else(T::nan);
-                        sum2 += s * s;
-                    }
-                    let inv_rms = 1.0 / (sum2 / n_cols as f32 + eps).sqrt();
-                    for i in 0..n_cols {
-                        let s: f32 = dst_row[i].as_();
-                        let wv: f32 = w[i].as_();
-                        dst_row[n_cols + i] =
-                            T::from_f32(s * inv_rms * wv).unwrap_or_else(T::nan);
-                    }
-                });
-
-            let mut out_dims = dims.to_vec();
-            *out_dims.last_mut().unwrap() = out_cols;
-            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
-            Ok((storage, Shape::from_dims(&out_dims)))
-        }
-
-        use CpuStorage as C;
-        match (s_a, s_b, s_w) {
-            (C::BF16(a), C::BF16(b), C::BF16(w)) => {
-                inner(a, l_a, b, l_b, w, l_w, self.eps, self.n_cols)
-            }
-            (C::F16(a), C::F16(b), C::F16(w)) => {
-                inner(a, l_a, b, l_b, w, l_w, self.eps, self.n_cols)
-            }
-            (C::F32(a), C::F32(b), C::F32(w)) => {
-                inner(a, l_a, b, l_b, w, l_w, self.eps, self.n_cols)
-            }
-            (C::F64(a), C::F64(b), C::F64(w)) => {
-                inner(a, l_a, b, l_b, w, l_w, self.eps, self.n_cols)
-            }
-            _ => candle_core::bail!("add_rms_norm: unsupported dtype {:?}", s_a.dtype()),
-        }
+        candle_core::bail!("{}: expected CUDA device", self.name())
     }
 
     fn cuda_fwd(
@@ -1159,62 +809,12 @@ impl candle_core::CustomOp2 for RmsNormChannel {
 
     fn cpu_fwd(
         &self,
-        s_x: &CpuStorage,
-        l_x: &Layout,
-        s_w: &CpuStorage,
-        l_w: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        fn inner<
-            T: candle_core::WithDType
-                + num_traits::Float
-                + num_traits::AsPrimitive<f32>
-                + num_traits::FromPrimitive,
-        >(
-            x: &[T],
-            l_x: &Layout,
-            w: &[T],
-            l_w: &Layout,
-            eps: f32,
-        ) -> Result<(CpuStorage, Shape)> {
-            let x = match l_x.contiguous_offsets() {
-                Some((o1, o2)) => &x[o1..o2],
-                None => candle_core::bail!("rms_norm_channel: x must be contiguous"),
-            };
-            let w = match l_w.contiguous_offsets() {
-                Some((o1, o2)) => &w[o1..o2],
-                None => candle_core::bail!("rms_norm_channel: weight must be contiguous"),
-            };
-            let dims = l_x.shape().dims();
-            let (batch, channels, time_len) = (dims[0], dims[1], dims[2]);
-            let mut dst = vec![T::zero(); batch * channels * time_len];
-            for b in 0..batch {
-                for t in 0..time_len {
-                    let mut sum2 = 0f32;
-                    for c in 0..channels {
-                        let v: f32 = x[b * channels * time_len + c * time_len + t].as_();
-                        sum2 += v * v;
-                    }
-                    let inv_rms = 1.0f32 / (sum2 / channels as f32 + eps).sqrt();
-                    for (c, wv_t) in w.iter().enumerate().take(channels) {
-                        let off = b * channels * time_len + c * time_len + t;
-                        let xv: f32 = x[off].as_();
-                        let wv: f32 = (*wv_t).as_();
-                        dst[off] = T::from_f32(xv * inv_rms * wv).unwrap_or(T::zero());
-                    }
-                }
-            }
-            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
-            Ok((storage, l_x.shape().clone()))
-        }
-
-        use CpuStorage as C;
-        match (s_x, s_w) {
-            (C::BF16(x), C::BF16(w)) => inner(x, l_x, w, l_w, self.eps),
-            (C::F16(x), C::F16(w)) => inner(x, l_x, w, l_w, self.eps),
-            (C::F32(x), C::F32(w)) => inner(x, l_x, w, l_w, self.eps),
-            (C::F64(x), C::F64(w)) => inner(x, l_x, w, l_w, self.eps),
-            _ => candle_core::bail!("rms_norm_channel: unsupported dtype"),
-        }
+        candle_core::bail!("{}: expected CUDA device", self.name())
     }
 
     fn cuda_fwd(
@@ -1313,70 +913,14 @@ impl candle_core::CustomOp3 for AdaLnModulate {
 
     fn cpu_fwd(
         &self,
-        s_x: &CpuStorage,
-        l_x: &Layout,
-        s_w: &CpuStorage,
-        l_w: &Layout,
-        s_sc: &CpuStorage,
-        l_sc: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        fn inner<
-            T: candle_core::WithDType
-                + num_traits::Float
-                + num_traits::AsPrimitive<f32>
-                + num_traits::FromPrimitive,
-        >(
-            x: &[T], l_x: &Layout,
-            w: &[T], l_w: &Layout,
-            scale: &[T], l_sc: &Layout,
-            shift_t: &Tensor, eps: f32,
-        ) -> Result<(CpuStorage, Shape)> {
-            let x = match l_x.contiguous_offsets() {
-                Some((o1, o2)) => &x[o1..o2],
-                None => candle_core::bail!("adaln: x contiguous"),
-            };
-            let w = match l_w.contiguous_offsets() {
-                Some((o1, o2)) => &w[o1..o2],
-                None => candle_core::bail!("adaln: w contiguous"),
-            };
-            let scale = match l_sc.contiguous_offsets() {
-                Some((o1, o2)) => &scale[o1..o2],
-                None => candle_core::bail!("adaln: scale contiguous"),
-            };
-            let shift_v: Vec<f32> = shift_t.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1()?;
-            let dims = l_x.shape().dims();
-            let n_cols = dims[dims.len() - 1];
-            let el = l_x.shape().elem_count();
-            let n_rows = el / n_cols;
-            let mut dst = vec![T::zero(); el];
-            for r in 0..n_rows {
-                let off = r * n_cols;
-                let mut sum2 = 0f32;
-                for c in 0..n_cols {
-                    let v: f32 = x[off + c].as_();
-                    sum2 += v * v;
-                }
-                let inv_rms = 1.0f32 / (sum2 / n_cols as f32 + eps).sqrt();
-                for c in 0..n_cols {
-                    let xv: f32 = x[off + c].as_() * inv_rms;
-                    let wv: f32 = w[c].as_();
-                    let sv: f32 = scale[off + c].as_();
-                    let shv = shift_v[off + c];
-                    dst[off + c] = T::from_f32(xv * wv * (1.0 + sv) + shv).unwrap_or(T::zero());
-                }
-            }
-            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
-            Ok((storage, l_x.shape().clone()))
-        }
-
-        use CpuStorage as C;
-        match (s_x, s_w, s_sc) {
-            (C::BF16(x), C::BF16(w), C::BF16(s)) => inner(x, l_x, w, l_w, s, l_sc, &self.shift, self.eps),
-            (C::F16(x), C::F16(w), C::F16(s)) => inner(x, l_x, w, l_w, s, l_sc, &self.shift, self.eps),
-            (C::F32(x), C::F32(w), C::F32(s)) => inner(x, l_x, w, l_w, s, l_sc, &self.shift, self.eps),
-            (C::F64(x), C::F64(w), C::F64(s)) => inner(x, l_x, w, l_w, s, l_sc, &self.shift, self.eps),
-            _ => candle_core::bail!("adaln: unsupported dtype"),
-        }
+        candle_core::bail!("{}: expected CUDA device", self.name())
     }
 
     fn cuda_fwd(
@@ -1462,57 +1006,12 @@ impl candle_core::CustomOp2 for DepthwiseConv1dSilu {
 
     fn cpu_fwd(
         &self,
-        s_w: &CpuStorage,
-        l_w: &Layout,
-        s_wt: &CpuStorage,
-        l_wt: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        fn inner<T: candle_core::WithDType + num_traits::Float>(
-            window: &[T],
-            l_w: &Layout,
-            weight: &[T],
-            l_wt: &Layout,
-            kernel_size: usize,
-            channels: usize,
-        ) -> Result<(CpuStorage, Shape)> {
-            let window = match l_w.contiguous_offsets() {
-                Some((o1, o2)) => &window[o1..o2],
-                None => candle_core::bail!("conv1d_silu: window must be contiguous"),
-            };
-            let weight = match l_wt.contiguous_offsets() {
-                Some((o1, o2)) => &weight[o1..o2],
-                None => candle_core::bail!("conv1d_silu: weight must be contiguous"),
-            };
-            let dims = l_w.shape().dims();
-            let batch = dims[0];
-            let numel = batch * channels;
-            let mut dst = vec![T::zero(); numel];
-            for b in 0..batch {
-                for c in 0..channels {
-                    let mut acc = T::zero();
-                    let w_off = b * channels * kernel_size + c * kernel_size;
-                    let wt_off = c * kernel_size;
-                    for k in 0..kernel_size {
-                        acc += window[w_off + k] * weight[wt_off + k];
-                    }
-                    // silu(acc) = acc * sigmoid(acc)
-                    let sig = T::one() / (T::one() + (-acc).exp());
-                    dst[b * channels + c] = acc * sig;
-                }
-            }
-            let out_shape = Shape::from_dims(&[batch, channels]);
-            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
-            Ok((storage, out_shape))
-        }
-
-        use CpuStorage as C;
-        match (s_w, s_wt) {
-            (C::BF16(w), C::BF16(wt)) => inner(w, l_w, wt, l_wt, self.kernel_size, self.channels),
-            (C::F16(w), C::F16(wt)) => inner(w, l_w, wt, l_wt, self.kernel_size, self.channels),
-            (C::F32(w), C::F32(wt)) => inner(w, l_w, wt, l_wt, self.kernel_size, self.channels),
-            (C::F64(w), C::F64(wt)) => inner(w, l_w, wt, l_wt, self.kernel_size, self.channels),
-            _ => candle_core::bail!("conv1d_silu: unsupported dtype {:?}", s_w.dtype()),
-        }
+        candle_core::bail!("{}: expected CUDA device", self.name())
     }
 
     fn cuda_fwd(
@@ -1607,76 +1106,14 @@ impl candle_core::CustomOp3 for DepthwiseConv1dBias {
 
     fn cpu_fwd(
         &self,
-        s_in: &CpuStorage,
-        l_in: &Layout,
-        s_wt: &CpuStorage,
-        l_wt: &Layout,
-        s_bi: &CpuStorage,
-        l_bi: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        fn inner<T: candle_core::WithDType + num_traits::Float>(
-            input: &[T],
-            l_in: &Layout,
-            weight: &[T],
-            l_wt: &Layout,
-            bias: &[T],
-            l_bi: &Layout,
-            kernel_size: usize,
-            channels: usize,
-        ) -> Result<(CpuStorage, Shape)> {
-            let input = match l_in.contiguous_offsets() {
-                Some((o1, o2)) => &input[o1..o2],
-                None => candle_core::bail!("conv1d_bias: input must be contiguous"),
-            };
-            let weight = match l_wt.contiguous_offsets() {
-                Some((o1, o2)) => &weight[o1..o2],
-                None => candle_core::bail!("conv1d_bias: weight must be contiguous"),
-            };
-            let bias = match l_bi.contiguous_offsets() {
-                Some((o1, o2)) => &bias[o1..o2],
-                None => candle_core::bail!("conv1d_bias: bias must be contiguous"),
-            };
-            let dims = l_in.shape().dims();
-            let batch = dims[0];
-            let input_len = dims[2];
-            let out_len = input_len - kernel_size + 1;
-            let numel = batch * channels * out_len;
-            let mut dst = vec![T::zero(); numel];
-            for b in 0..batch {
-                for c in 0..channels {
-                    for t in 0..out_len {
-                        let mut acc = T::zero();
-                        let in_off = (b * channels + c) * input_len + t;
-                        let wt_off = c * kernel_size;
-                        for k in 0..kernel_size {
-                            acc += input[in_off + k] * weight[wt_off + k];
-                        }
-                        acc += bias[c];
-                        dst[(b * channels + c) * out_len + t] = acc;
-                    }
-                }
-            }
-            let out_shape = Shape::from_dims(&[batch, channels, out_len]);
-            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
-            Ok((storage, out_shape))
-        }
-
-        use CpuStorage as C;
-        match (s_in, s_wt, s_bi) {
-            (C::BF16(i), C::BF16(w), C::BF16(b)) => {
-                inner(i, l_in, w, l_wt, b, l_bi, self.kernel_size, self.channels)
-            }
-            (C::F16(i), C::F16(w), C::F16(b)) => {
-                inner(i, l_in, w, l_wt, b, l_bi, self.kernel_size, self.channels)
-            }
-            (C::F32(i), C::F32(w), C::F32(b)) => {
-                inner(i, l_in, w, l_wt, b, l_bi, self.kernel_size, self.channels)
-            }
-            (C::F64(i), C::F64(w), C::F64(b)) => {
-                inner(i, l_in, w, l_wt, b, l_bi, self.kernel_size, self.channels)
-            }
-            _ => candle_core::bail!("conv1d_bias: unsupported dtype {:?}", s_in.dtype()),
-        }
+        candle_core::bail!("{}: expected CUDA device", self.name())
     }
 
     fn cuda_fwd(
@@ -1795,71 +1232,14 @@ impl candle_core::CustomOp3 for DepthwiseConv1dBiasCtx {
 
     fn cpu_fwd(
         &self,
-        s_ctx: &CpuStorage,
-        l_ctx: &Layout,
-        s_in: &CpuStorage,
-        l_in: &Layout,
-        s_wt: &CpuStorage,
-        l_wt: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
+        _: &CpuStorage,
+        _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        fn inner<T: candle_core::WithDType + num_traits::Float + num_traits::AsPrimitive<f32> + num_traits::FromPrimitive>(
-            ctx: &[T], l_ctx: &Layout,
-            input: &[T], l_in: &Layout,
-            weight: &[T], l_wt: &Layout,
-            bias_t: &Tensor,
-            kernel_size: usize, channels: usize,
-        ) -> Result<(CpuStorage, Shape)> {
-            let ctx = match l_ctx.contiguous_offsets() {
-                Some((o1, o2)) => &ctx[o1..o2],
-                None => candle_core::bail!("conv1d_bias_ctx: ctx must be contiguous"),
-            };
-            let input = match l_in.contiguous_offsets() {
-                Some((o1, o2)) => &input[o1..o2],
-                None => candle_core::bail!("conv1d_bias_ctx: input must be contiguous"),
-            };
-            let weight = match l_wt.contiguous_offsets() {
-                Some((o1, o2)) => &weight[o1..o2],
-                None => candle_core::bail!("conv1d_bias_ctx: weight must be contiguous"),
-            };
-            let bias_v: Vec<f32> = bias_t.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1()?;
-            let dims = l_in.shape().dims();
-            let (batch, time_len) = (dims[0], dims[2]);
-            let ctx_len = kernel_size - 1;
-            let numel = batch * channels * time_len;
-            let mut dst = vec![T::zero(); numel];
-            for b in 0..batch {
-                for c in 0..channels {
-                    for t in 0..time_len {
-                        let mut acc = 0f32;
-                        for k in 0..kernel_size {
-                            let pos = t + k;
-                            let v: f32 = if pos < ctx_len {
-                                num_traits::AsPrimitive::as_(ctx[(b * channels + c) * ctx_len + pos])
-                            } else {
-                                num_traits::AsPrimitive::as_(input[(b * channels + c) * time_len + (pos - ctx_len)])
-                            };
-                            let w: f32 = num_traits::AsPrimitive::as_(weight[c * kernel_size + k]);
-                            acc += v * w;
-                        }
-                        acc += bias_v[c];
-                        dst[(b * channels + c) * time_len + t] =
-                            num_traits::FromPrimitive::from_f32(acc).unwrap_or(T::zero());
-                    }
-                }
-            }
-            let out_shape = Shape::from_dims(&[batch, channels, time_len]);
-            let storage = candle_core::WithDType::to_cpu_storage_owned(dst);
-            Ok((storage, out_shape))
-        }
-
-        use CpuStorage as C;
-        match (s_ctx, s_in, s_wt) {
-            (C::BF16(c), C::BF16(i), C::BF16(w)) => inner(c, l_ctx, i, l_in, w, l_wt, &self.bias, self.kernel_size, self.channels),
-            (C::F16(c), C::F16(i), C::F16(w)) => inner(c, l_ctx, i, l_in, w, l_wt, &self.bias, self.kernel_size, self.channels),
-            (C::F32(c), C::F32(i), C::F32(w)) => inner(c, l_ctx, i, l_in, w, l_wt, &self.bias, self.kernel_size, self.channels),
-            (C::F64(c), C::F64(i), C::F64(w)) => inner(c, l_ctx, i, l_in, w, l_wt, &self.bias, self.kernel_size, self.channels),
-            _ => candle_core::bail!("conv1d_bias_ctx: unsupported dtype"),
-        }
+        candle_core::bail!("{}: expected CUDA device", self.name())
     }
 
     fn cuda_fwd(
@@ -1968,30 +1348,12 @@ pub(super) struct F8E4M3ToF32;
 impl candle_core::CustomOp1 for F8E4M3ToF32 {
     fn name(&self) -> &'static str { "f8e4m3_to_f32" }
 
-    fn cpu_fwd(&self, s: &CpuStorage, l: &Layout) -> Result<(CpuStorage, Shape)> {
-        let data = match s {
-            CpuStorage::F8E4M3(data) => data,
-            _ => candle_core::bail!("f8e4m3_to_f32: expected F8E4M3, got {:?}", s.dtype()),
-        };
-        let data = match l.contiguous_offsets() {
-            Some((o1, o2)) => &data[o1..o2],
-            None => candle_core::bail!("f8e4m3_to_f32: input must be contiguous"),
-        };
-        let dst: Vec<f32> = data.iter().map(|&b| {
-            let bits = b.to_bits();
-            let sign = (bits >> 7) & 1;
-            let exp = (bits >> 3) & 0xF;
-            let mant = bits & 0x7;
-            let result = if exp == 0 && mant == 0 { 0.0f32 }
-            else if exp == 0 { f32::from(mant) / 8.0 * 2.0f32.powi(-6) }
-            else if exp == 0xF && mant == 0x7 { f32::NAN }
-            else { (1.0 + f32::from(mant) / 8.0) * 2.0f32.powi(i32::from(exp) - 7) };
-            if sign == 1 { -result } else { result }
-        }).collect();
-        Ok((candle_core::WithDType::to_cpu_storage_owned(dst), l.shape().clone()))
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("{}: expected CUDA device", self.name())
     }
 
     fn cuda_fwd(&self, s: &candle_core::CudaStorage, l: &Layout) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::backend::BackendStorage;
         use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
         use candle_core::cuda_backend::WrapErr;
         let dev = s.device();
@@ -2019,18 +1381,12 @@ pub(super) struct F8E4M3ToF16;
 impl candle_core::CustomOp1 for F8E4M3ToF16 {
     fn name(&self) -> &'static str { "f8e4m3_to_f16" }
 
-    fn cpu_fwd(&self, s: &CpuStorage, l: &Layout) -> Result<(CpuStorage, Shape)> {
-        let (f32_storage, shape) = F8E4M3ToF32.cpu_fwd(s, l)?;
-        match f32_storage {
-            CpuStorage::F32(data) => {
-                let f16_data: Vec<half::f16> = data.iter().map(|&v| half::f16::from_f32(v)).collect();
-                Ok((CpuStorage::F16(f16_data), shape))
-            }
-            _ => candle_core::bail!("expected F32 from F8E4M3ToF32"),
-        }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("{}: expected CUDA device", self.name())
     }
 
     fn cuda_fwd(&self, s: &candle_core::CudaStorage, l: &Layout) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::backend::BackendStorage;
         use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
         use candle_core::cuda_backend::WrapErr;
         let dev = s.device();
@@ -2058,18 +1414,12 @@ pub(super) struct F8E4M3ToBF16;
 impl candle_core::CustomOp1 for F8E4M3ToBF16 {
     fn name(&self) -> &'static str { "f8e4m3_to_bf16" }
 
-    fn cpu_fwd(&self, s: &CpuStorage, l: &Layout) -> Result<(CpuStorage, Shape)> {
-        let (f32_storage, shape) = F8E4M3ToF32.cpu_fwd(s, l)?;
-        match f32_storage {
-            CpuStorage::F32(data) => {
-                let bf16_data: Vec<half::bf16> = data.iter().map(|&v| half::bf16::from_f32(v)).collect();
-                Ok((CpuStorage::BF16(bf16_data), shape))
-            }
-            _ => candle_core::bail!("expected F32 from F8E4M3ToF32"),
-        }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("{}: expected CUDA device", self.name())
     }
 
     fn cuda_fwd(&self, s: &candle_core::CudaStorage, l: &Layout) -> Result<(candle_core::CudaStorage, Shape)> {
+        use candle_core::backend::BackendStorage;
         use candle_core::cuda_backend::cudarc::driver::{LaunchConfig, PushKernelArg};
         use candle_core::cuda_backend::WrapErr;
         let dev = s.device();
