@@ -11,7 +11,7 @@ cake master --model evilsocket/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080
 To pre-download a model without running inference:
 
 ```sh
-cake download evilsocket/Qwen2.5-Coder-1.5B-Instruct
+cake pull evilsocket/Qwen2.5-Coder-1.5B-Instruct
 ```
 
 For gated models (like LLaMA 3), set the `HF_TOKEN` environment variable with your HuggingFace token.
@@ -35,7 +35,7 @@ cake master --model evilsocket/Qwen2.5-Coder-1.5B-Instruct --prompt "Why is the 
 List all models available locally (downloaded from HuggingFace or received from a master):
 
 ```sh
-cake models
+cake list
 ```
 
 This scans `~/.cache/huggingface/hub/` and `~/.cache/cake/` and shows each model's status (`complete` or `partial`), size, and source.

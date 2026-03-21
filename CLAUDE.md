@@ -36,7 +36,7 @@ LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64 ./target/release/cake worker \
   --topology topology-0.8B.yml --address 0.0.0.0:10128
 
 # Master (blade, local):
-./target/release/cake master \
+./target/release/cake run \
   --model evilsocket/Qwen3.5-0.8B \
   --topology topology-0.8B.yml \
   --prompt "Explain quantum computing in simple terms"
@@ -98,7 +98,7 @@ ssh bahamut.local "cd ~/Lab/cake && LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64 .
 ssh stevie.local "cd ~/Lab/cake && ./target/release/cake worker --model evilsocket/Qwen3.5-0.8B --name stevie --topology topology-0.8B.yml --address 0.0.0.0:10128"
 
 # Run master (blade, local)
-./target/release/cake master --model evilsocket/Qwen3.5-0.8B --topology topology-0.8B.yml --prompt "Explain quantum computing in simple terms"
+./target/release/cake run --model evilsocket/Qwen3.5-0.8B --topology topology-0.8B.yml --prompt "Explain quantum computing in simple terms"
 ```
 
 ## Testing

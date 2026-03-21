@@ -21,7 +21,7 @@ Original model: [`YatharthS/LuxTTS`](https://huggingface.co/YatharthS/LuxTTS) (P
 Pre-converted safetensors weights are available at [`evilsocket/luxtts`](https://huggingface.co/evilsocket/luxtts):
 
 ```sh
-cake download evilsocket/luxtts
+cake pull evilsocket/luxtts
 ```
 
 #### Converting from Original Weights
@@ -29,7 +29,7 @@ cake download evilsocket/luxtts
 If you prefer to convert from the original PyTorch weights ([`YatharthS/LuxTTS`](https://huggingface.co/YatharthS/LuxTTS)):
 
 ```sh
-cake download YatharthS/LuxTTS
+cake pull YatharthS/LuxTTS
 
 python scripts/convert_luxtts.py \
   --model-dir ~/.cache/huggingface/hub/models--YatharthS--LuxTTS/snapshots/*/  \

@@ -22,27 +22,44 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run as master node with OpenAI-compatible API
-    Master {
+    /// Run a model (single prompt or interactive chat)
+    Run {
+        /// Model name or HuggingFace repo (e.g., evilsocket/Qwen3-0.6B)
+        #[arg(id = "model_name")]
+        model: String,
+        /// Prompt text (omit for interactive mode)
+        #[arg(id = "prompt_text")]
+        prompt: Option<String>,
         #[command(flatten)]
         args: Args,
     },
-    /// Run as worker node
+    /// Start an OpenAI-compatible API server
+    Serve {
+        /// Model name or HuggingFace repo
+        #[arg(id = "model_name")]
+        model: String,
+        /// API bind address
+        #[arg(long = "api", default_value = "0.0.0.0:8080")]
+        address: String,
+        #[command(flatten)]
+        args: Args,
+    },
+    /// Start as a cluster worker node
     Worker {
         #[command(flatten)]
         args: Args,
     },
     /// Download a model from HuggingFace Hub
-    Download {
-        /// HuggingFace repo ID (e.g., evilsocket/Qwen2.5-Coder-1.5B-Instruct)
+    Pull {
+        /// HuggingFace repo ID (e.g., evilsocket/Qwen3-0.6B)
         model: String,
     },
-    /// List locally available models and their status
-    Models,
-    /// Interactive chat with the cluster
+    /// List locally available models
+    List,
+    /// Interactive chat with a running server
     Chat {
-        /// Master API endpoint
-        #[arg(long, default_value = "http://localhost:8086")]
+        /// Server URL
+        #[arg(long, default_value = "http://localhost:8080")]
         server: String,
     },
     /// Split a model into per-worker bundles
@@ -60,6 +77,22 @@ enum Commands {
         #[arg(long)]
         output: String,
     },
+    // ── Legacy aliases (hidden, backward compat) ──────────────────
+    /// [hidden] Legacy master mode (use 'run' or 'serve' instead)
+    #[command(hide = true)]
+    Master {
+        #[command(flatten)]
+        args: Args,
+    },
+    /// [hidden] Legacy download (use 'pull' instead)
+    #[command(hide = true)]
+    Download {
+        /// HuggingFace repo ID
+        model: String,
+    },
+    /// [hidden] Legacy models list (use 'list' instead)
+    #[command(hide = true)]
+    Models,
 }
 
 #[tokio::main]
@@ -78,13 +111,29 @@ async fn main() -> Result<()> {
         .init();
 
     match cli.command {
-        Commands::Models => {
+        // ── New subcommands ──────────────────────────────────────────
+
+        Commands::Run { model, prompt, mut args } => {
+            args.model = model;
+            if let Some(p) = prompt {
+                args.prompt = p;
+            }
+            args.mode = Mode::Master;
+            run_as_master(args).await
+        }
+        Commands::Serve { model, address, mut args } => {
+            args.model = model;
+            args.api = Some(address);
+            args.mode = Mode::Master;
+            run_as_master(args).await
+        }
+        Commands::List | Commands::Models => {
             let models = utils::models::list_models()?;
             if models.is_empty() {
                 println!("No models found.");
                 println!();
                 println!("Download a model with:");
-                println!("  cake download <org/model-name>");
+                println!("  cake pull <org/model-name>");
             } else {
                 println!(
                     "{:<50} {:<15} {:<15} SOURCE",
@@ -106,7 +155,7 @@ async fn main() -> Result<()> {
         Commands::Chat { server } => {
             chat::run(&server).await
         }
-        Commands::Download { model } => {
+        Commands::Pull { model } | Commands::Download { model } => {
             if utils::hf::looks_like_hf_repo(&model) {
                 let path = utils::hf::ensure_model_downloaded(&model)?;
                 println!("model downloaded to {}", path.display());
@@ -128,30 +177,14 @@ async fn main() -> Result<()> {
                 &std::path::PathBuf::from(&output),
             )
         }
+
+        // ── Legacy master (hidden, backward compat) ──────────────────
         Commands::Master { mut args } => {
             args.mode = Mode::Master;
-
-            // Zero-config: discover workers, assign layers, push model data
-            if let (Some(key), None) = (&args.cluster_key, &args.topology) {
-                let model_path = resolve_model_path(&args.model)?;
-                let timeout = Duration::from_secs(args.discovery_timeout);
-                let topology = cake::sharding::master_setup(
-                    key,
-                    &model_path,
-                    timeout,
-                    args.min_workers,
-                )
-                .await?;
-                args.topology_override = Some(topology);
-            }
-
-            let ctx = Context::from_args(args)?;
-            let ret = run_master(ctx).await;
-            if ret.is_err() {
-                println!();
-            }
-            ret
+            run_as_master(args).await
         }
+
+        // ── Worker (same for new and legacy) ─────────────────────────
         Commands::Worker { mut args } => {
             args.mode = Mode::Worker;
 
@@ -191,6 +224,31 @@ async fn main() -> Result<()> {
             ret
         }
     }
+}
+
+/// Shared master setup: zero-config discovery + dispatch.
+/// Used by `run`, `serve`, and legacy `master` subcommands.
+async fn run_as_master(mut args: Args) -> Result<()> {
+    // Zero-config: discover workers, assign layers, push model data
+    if let (Some(key), None) = (&args.cluster_key, &args.topology) {
+        let model_path = resolve_model_path(&args.model)?;
+        let timeout = Duration::from_secs(args.discovery_timeout);
+        let topology = cake::sharding::master_setup(
+            key,
+            &model_path,
+            timeout,
+            args.min_workers,
+        )
+        .await?;
+        args.topology_override = Some(topology);
+    }
+
+    let ctx = Context::from_args(args)?;
+    let ret = run_master(ctx).await;
+    if ret.is_err() {
+        println!();
+    }
+    ret
 }
 
 #[cfg(feature = "master")]
