@@ -7,6 +7,7 @@ use cake::Mode;
 use clap::{Parser, ValueEnum};
 use serde::Deserialize;
 
+pub mod backends;
 pub mod cake;
 pub mod models;
 pub mod utils;
