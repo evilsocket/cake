@@ -1,15 +1,23 @@
 //! Tests for Transformer::load_for_vibevoice and forward_with_cache.
 
+use std::sync::Arc;
+
 use candle_core::DType;
+
+use cake_core::backends::CpuBackend;
 
 use super::helpers::*;
 use cake_core::models::common::Transformer;
+
+fn cpu_backend() -> Arc<CpuBackend> {
+    Arc::new(CpuBackend::new())
+}
 
 #[test]
 fn test_load_for_vibevoice_succeeds() {
     let cfg = test_config();
     let vb = make_vb_transformer_block(&cfg);
-    let block = Transformer::load_for_vibevoice(vb, &cfg);
+    let block = Transformer::load_for_vibevoice(vb, &cfg, cpu_backend());
     assert!(block.is_ok(), "load_for_vibevoice should succeed");
 }
 
@@ -17,7 +25,7 @@ fn test_load_for_vibevoice_succeeds() {
 fn test_forward_with_cache_output_shape_prefill() {
     let cfg = test_config();
     let vb = make_vb_transformer_block(&cfg);
-    let block = Transformer::load_for_vibevoice(vb, &cfg).unwrap();
+    let block = Transformer::load_for_vibevoice(vb, &cfg, cpu_backend()).unwrap();
     let mut cache = make_cache(&cfg);
 
     let x = make_tensor(&[1, 4, 64], 50);
@@ -29,7 +37,7 @@ fn test_forward_with_cache_output_shape_prefill() {
 fn test_forward_with_cache_output_shape_generation() {
     let cfg = test_config();
     let vb = make_vb_transformer_block(&cfg);
-    let block = Transformer::load_for_vibevoice(vb, &cfg).unwrap();
+    let block = Transformer::load_for_vibevoice(vb, &cfg, cpu_backend()).unwrap();
     let mut cache = make_cache(&cfg);
 
     // Prefill
@@ -46,7 +54,7 @@ fn test_forward_with_cache_output_shape_generation() {
 fn test_forward_with_cache_output_is_nonzero() {
     let cfg = test_config();
     let vb = make_vb_transformer_block(&cfg);
-    let block = Transformer::load_for_vibevoice(vb, &cfg).unwrap();
+    let block = Transformer::load_for_vibevoice(vb, &cfg, cpu_backend()).unwrap();
     let mut cache = make_cache(&cfg);
 
     let x = make_tensor(&[1, 2, 64], 52);
@@ -60,7 +68,7 @@ fn test_forward_with_cache_output_is_nonzero() {
 fn test_forward_with_cache_output_differs_from_input() {
     let cfg = test_config();
     let vb = make_vb_transformer_block(&cfg);
-    let block = Transformer::load_for_vibevoice(vb, &cfg).unwrap();
+    let block = Transformer::load_for_vibevoice(vb, &cfg, cpu_backend()).unwrap();
     let mut cache = make_cache(&cfg);
 
     let x = make_tensor(&[1, 2, 64], 53);
@@ -79,7 +87,7 @@ fn test_forward_with_cache_output_differs_from_input() {
 fn test_forward_with_cache_preserves_dtype() {
     let cfg = test_config();
     let vb = make_vb_transformer_block(&cfg);
-    let block = Transformer::load_for_vibevoice(vb, &cfg).unwrap();
+    let block = Transformer::load_for_vibevoice(vb, &cfg, cpu_backend()).unwrap();
     let mut cache = make_cache(&cfg);
 
     let x = make_tensor(&[1, 1, 64], 54);

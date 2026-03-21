@@ -7,8 +7,12 @@
 //! Used by both acoustic tokenizer (vae_dim=64, Gaussian sampling)
 //! and semantic tokenizer (vae_dim=128, no sampling).
 
+use std::sync::Arc;
+
 use candle_core::{Module, Result, Tensor};
 use candle_nn::{Conv1d, Conv1dConfig, VarBuilder};
+
+use crate::backends::ComputeBackend;
 
 /// A single encoder block with depthwise conv mixer + FFN.
 /// Identical architecture to DecoderBlock in vae_decoder.rs.
@@ -23,10 +27,11 @@ struct EncoderBlock {
     ffn_gamma: Tensor,
     ffn_linear1: candle_nn::Linear,
     ffn_linear2: candle_nn::Linear,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl EncoderBlock {
-    fn load(vb: VarBuilder, channels: usize, eps: f64) -> Result<Self> {
+    fn load(vb: VarBuilder, channels: usize, eps: f64, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let norm_weight = vb.pp("norm").get(channels, "weight")?;
         let gamma = vb.get(channels, "gamma")?;
 
@@ -43,27 +48,27 @@ impl EncoderBlock {
             norm_weight, ffn_norm_weight, eps: eps as f32,
             gamma, mixer_weight, mixer_bias, ffn_gamma,
             ffn_linear1, ffn_linear2,
+            backend,
         })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        use crate::utils::fused_ops;
         let channels = x.dim(1)?;
 
-        let h = fused_ops::rms_norm_channel(x, &self.norm_weight, self.eps)?;
+        let h = self.backend.rms_norm_channel(x, &self.norm_weight, self.eps)?;
         let zeros = Tensor::zeros((h.dim(0)?, channels, 6), h.dtype(), h.device())?;
-        let h = fused_ops::depthwise_conv1d_bias_ctx(
+        let h = self.backend.depthwise_conv1d_bias_ctx(
             &zeros, &h, &self.mixer_weight, &self.mixer_bias, 7, channels,
         )?;
-        let x = fused_ops::add_scaled(x, &h, &self.gamma)?;
+        let x = self.backend.add_scaled(x, &h, &self.gamma)?;
 
-        let h = fused_ops::rms_norm_channel(&x, &self.ffn_norm_weight, self.eps)?;
+        let h = self.backend.rms_norm_channel(&x, &self.ffn_norm_weight, self.eps)?;
         let h = h.transpose(1, 2)?;
         let h = self.ffn_linear1.forward(&h)?;
         let h = h.gelu()?;
         let h = self.ffn_linear2.forward(&h)?;
         let h = h.transpose(1, 2)?;
-        fused_ops::add_scaled(&x, &h, &self.ffn_gamma)
+        self.backend.add_scaled(&x, &h, &self.ffn_gamma)
     }
 
     fn forward_cached(
@@ -71,10 +76,9 @@ impl EncoderBlock {
         x: &Tensor,
         cache: &mut super::vae_decoder::StreamingConvCache,
     ) -> Result<Tensor> {
-        use crate::utils::fused_ops;
         let channels = x.dim(1)?;
 
-        let h = fused_ops::rms_norm_channel(x, &self.norm_weight, self.eps)?;
+        let h = self.backend.rms_norm_channel(x, &self.norm_weight, self.eps)?;
         let (slot, is_first) = cache.take_slot();
         let context = if is_first {
             Tensor::zeros((h.dim(0)?, channels, 6), h.dtype(), h.device())?
@@ -93,18 +97,18 @@ impl EncoderBlock {
         }
 
         // Fused conv reads from [context, h] virtually — no cat allocation
-        let h = fused_ops::depthwise_conv1d_bias_ctx(
+        let h = self.backend.depthwise_conv1d_bias_ctx(
             &context, &h, &self.mixer_weight, &self.mixer_bias, 7, channels,
         )?;
-        let x = fused_ops::add_scaled(x, &h, &self.gamma)?;
+        let x = self.backend.add_scaled(x, &h, &self.gamma)?;
 
-        let h = fused_ops::rms_norm_channel(&x, &self.ffn_norm_weight, self.eps)?;
+        let h = self.backend.rms_norm_channel(&x, &self.ffn_norm_weight, self.eps)?;
         let h = h.transpose(1, 2)?;
         let h = self.ffn_linear1.forward(&h)?;
         let h = h.gelu()?;
         let h = self.ffn_linear2.forward(&h)?;
         let h = h.transpose(1, 2)?;
-        fused_ops::add_scaled(&x, &h, &self.ffn_gamma)
+        self.backend.add_scaled(&x, &h, &self.ffn_gamma)
     }
 }
 
@@ -115,10 +119,10 @@ struct EncoderStage {
 }
 
 impl EncoderStage {
-    fn load(vb: VarBuilder, channels: usize, num_blocks: usize, eps: f64) -> Result<Self> {
+    fn load(vb: VarBuilder, channels: usize, num_blocks: usize, eps: f64, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let mut blocks = Vec::with_capacity(num_blocks);
         for i in 0..num_blocks {
-            blocks.push(EncoderBlock::load(vb.pp(i), channels, eps)?);
+            blocks.push(EncoderBlock::load(vb.pp(i), channels, eps, backend.clone())?);
         }
         Ok(Self { blocks })
     }
@@ -164,8 +168,8 @@ pub struct TokenizerEncoder {
 }
 
 impl TokenizerEncoder {
-    pub fn load(vb: VarBuilder, cfg: &super::config::AcousticTokenizerConfig) -> Result<Self> {
-        Self::load_with_vae_dim(vb, cfg, cfg.vae_dim)
+    pub fn load(vb: VarBuilder, cfg: &super::config::AcousticTokenizerConfig, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
+        Self::load_with_vae_dim(vb, cfg, cfg.vae_dim, backend)
     }
 
     /// Load encoder with explicit vae_dim (for semantic tokenizer which has different dim).
@@ -173,6 +177,7 @@ impl TokenizerEncoder {
         vb: VarBuilder,
         cfg: &super::config::AcousticTokenizerConfig,
         vae_dim: usize,
+        backend: Arc<dyn ComputeBackend>,
     ) -> Result<Self> {
         let eps = cfg.layernorm_eps;
         let n_filters = cfg.encoder_n_filters;
@@ -235,7 +240,7 @@ impl TokenizerEncoder {
         let depths = Self::parse_depths(cfg, num_stages);
         let mut stages = Vec::with_capacity(num_stages);
         for i in 0..num_stages {
-            let stage = EncoderStage::load(vb.pp("stages").pp(i), channels[i], depths[i], eps)?;
+            let stage = EncoderStage::load(vb.pp("stages").pp(i), channels[i], depths[i], eps, backend.clone())?;
             stages.push(stage);
         }
 
@@ -428,7 +433,8 @@ mod tests {
         map.insert("ffn.linear2.bias".into(), mt(&[ch], 6));
 
         let vb = candle_nn::VarBuilder::from_tensors(map, DType::F32, &dev);
-        let block = EncoderBlock::load(vb, ch, 1e-5).unwrap();
+        let backend = crate::backends::create_backend(&dev);
+        let block = EncoderBlock::load(vb, ch, 1e-5, backend).unwrap();
 
         // Input: (batch=1, channels=32, seq=16)
         let x = mt(&[1, ch, 16], 10);
@@ -455,7 +461,8 @@ mod tests {
         map.insert("ffn.linear2.bias".into(), Tensor::zeros(ch, DType::F32, &dev).unwrap());
 
         let vb = candle_nn::VarBuilder::from_tensors(map, DType::F32, &dev);
-        let block = EncoderBlock::load(vb, ch, 1e-5).unwrap();
+        let backend = crate::backends::create_backend(&dev);
+        let block = EncoderBlock::load(vb, ch, 1e-5, backend).unwrap();
 
         let x = mt(&[1, ch, 8], 42);
         let y = block.forward(&x).unwrap();

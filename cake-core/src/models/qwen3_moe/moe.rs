@@ -10,9 +10,12 @@
 //!   3. top_k   = argsort(probs, desc)[:k] — select k best
 //!   4. weights = probs[top_k] / sum(probs[top_k])   — renormalise (norm_topk_prob=true)
 
+use std::sync::Arc;
+
 use candle_core::{DType, Result, Tensor, D};
 use candle_nn::{ops::softmax_last_dim, Linear, Module, VarBuilder};
 
+use crate::backends::ComputeBackend;
 use crate::models::common::Config;
 
 /// Sparse MoE FFN block.
@@ -29,10 +32,11 @@ pub struct SparseMoeMlp {
     num_experts: usize,
     num_experts_per_tok: usize,
     norm_topk_prob: bool,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl SparseMoeMlp {
-    pub fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {
+    pub fn load(vb: VarBuilder, cfg: &Config, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let h = cfg.hidden_size;
         let i = cfg.moe_intermediate_size.expect("moe_intermediate_size must be set");
         let n = cfg.num_experts;
@@ -70,6 +74,7 @@ impl SparseMoeMlp {
             num_experts: n,
             num_experts_per_tok: cfg.num_experts_per_tok,
             norm_topk_prob: cfg.norm_topk_prob,
+            backend,
         })
     }
 
@@ -156,7 +161,7 @@ impl SparseMoeMlp {
                 .matmul(&sel_up.t().map_err(|e| anyhow!("moe sel up.t -> {e}"))?)
                 .map_err(|e| anyhow!("moe batched up matmul -> {e}"))?;
 
-            let hidden = crate::utils::fused_ops::silu_mul(
+            let hidden = self.backend.silu_mul(
                 &gate_out.contiguous().map_err(|e| anyhow!("moe gate contig -> {e}"))?,
                 &up_out.contiguous().map_err(|e| anyhow!("moe up contig -> {e}"))?,
             )
@@ -257,7 +262,7 @@ impl SparseMoeMlp {
                 .matmul(&up.t().map_err(|e| anyhow!("moe up.t -> {e}"))?)
                 .map_err(|e| anyhow!("moe up matmul -> {e}"))?;
 
-            let hidden = crate::utils::fused_ops::silu_mul(
+            let hidden = self.backend.silu_mul(
                 &gate_out.contiguous().map_err(|e| anyhow!("moe gate contig -> {e}"))?,
                 &up_out.contiguous().map_err(|e| anyhow!("moe up contig -> {e}"))?,
             )

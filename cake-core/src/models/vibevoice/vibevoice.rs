@@ -95,7 +95,7 @@ impl VibeVoiceTTS {
                 ).await?));
             } else {
                 base_layers.push(Box::new(
-                    crate::models::common::Transformer::load_for_vibevoice(base_vb.pp("layers").pp(i), &common_cfg)?,
+                    crate::models::common::Transformer::load_for_vibevoice(base_vb.pp("layers").pp(i), &common_cfg, crate::backends::create_backend(device))?,
                 ));
             }
         }
@@ -116,7 +116,7 @@ impl VibeVoiceTTS {
                 ).await?));
             } else {
                 tts_layers.push(Box::new(
-                    crate::models::common::Transformer::load_for_vibevoice(tts_vb.pp("layers").pp(i), &common_cfg)?,
+                    crate::models::common::Transformer::load_for_vibevoice(tts_vb.pp("layers").pp(i), &common_cfg, crate::backends::create_backend(device))?,
                 ));
             }
         }
@@ -127,8 +127,9 @@ impl VibeVoiceTTS {
         let steps = diffusion_steps.unwrap_or(config.diffusion_head_config.ddpm_num_inference_steps);
         info!("  DPM-Solver++: {steps} steps");
         let scheduler = DpmSolverPP::new_cosine(config.diffusion_head_config.ddpm_num_steps, steps);
-        let prediction_head = PredictionHead::load(vb.pp("model").pp("prediction_head"), &config.diffusion_head_config, scheduler.timesteps())?;
-        let vae_decoder = AcousticVaeDecoder::load(vb.pp("model").pp("acoustic_tokenizer").pp("decoder"), &config.acoustic_tokenizer_config)?;
+        let backend = crate::backends::create_backend(device);
+        let prediction_head = PredictionHead::load(vb.pp("model").pp("prediction_head"), &config.diffusion_head_config, scheduler.timesteps(), backend.clone())?;
+        let vae_decoder = AcousticVaeDecoder::load(vb.pp("model").pp("acoustic_tokenizer").pp("decoder"), &config.acoustic_tokenizer_config, backend.clone())?;
         let connector = AcousticConnector::load(vb.pp("model").pp("acoustic_connector"), config.acoustic_vae_dim, config.decoder_config.hidden_size, config.decoder_config.rms_norm_eps)?;
         let eos_classifier = EosClassifier::load(vb.pp("tts_eos_classifier"))?;
 
@@ -156,6 +157,7 @@ impl VibeVoiceTTS {
                 text_model_arch: crate::TextModelArch::Auto,
                 quant: std::sync::Arc::new(crate::utils::NoQuantization),
                 listener_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                backend: crate::backends::create_backend(device),
             },
         })
     }

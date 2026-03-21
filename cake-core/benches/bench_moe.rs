@@ -29,7 +29,7 @@ fn qwen3_5_moe_config() -> Config {
 fn qwen3_moe_forward(bencher: divan::Bencher, seq_len: usize) {
     let cfg = moe_config();
     let vb = make_vb_moe(&cfg);
-    let moe = SparseMoeMlp::load(vb, &cfg).unwrap();
+    let moe = SparseMoeMlp::load(vb, &cfg, std::sync::Arc::new(cake_core::backends::CpuBackend::new())).unwrap();
     let x = make_tensor(&[1, seq_len, cfg.hidden_size], 100);
 
     bencher.bench_local(move || {
@@ -41,7 +41,7 @@ fn qwen3_moe_forward(bencher: divan::Bencher, seq_len: usize) {
 fn qwen3_5_moe_forward(bencher: divan::Bencher, seq_len: usize) {
     let cfg = qwen3_5_moe_config();
     let vb = make_vb_qwen3_5_moe(&cfg);
-    let moe = Qwen3_5MoeSparseMlp::load(vb, &cfg).unwrap();
+    let moe = Qwen3_5MoeSparseMlp::load(vb, &cfg, std::sync::Arc::new(cake_core::backends::CpuBackend::new())).unwrap();
     let x = make_tensor(&[1, seq_len, cfg.hidden_size], 200);
 
     bencher.bench_local(move || {

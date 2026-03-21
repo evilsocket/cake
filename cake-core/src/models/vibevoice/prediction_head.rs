@@ -4,8 +4,12 @@
 //! Takes noisy acoustic latents (64-dim) + LLM hidden states (896-dim) +
 //! timestep → predicts noise (v-prediction).
 
+use std::sync::Arc;
+
 use candle_core::{DType, Module, Result, Tensor, D};
 use candle_nn::{linear_no_bias as linear, Linear, VarBuilder};
+
+use crate::backends::ComputeBackend;
 
 /// Sinusoidal timestep embedding → MLP.
 #[derive(Debug, Clone)]
@@ -44,21 +48,22 @@ struct FeedForward {
     gate_proj: Linear,
     up_proj: Linear,
     down_proj: Linear,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl FeedForward {
-    fn load(vb: VarBuilder, hidden: usize, intermediate: usize) -> Result<Self> {
+    fn load(vb: VarBuilder, hidden: usize, intermediate: usize, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let gate_proj = linear(hidden, intermediate, vb.pp("gate_proj"))?;
         let up_proj = linear(hidden, intermediate, vb.pp("up_proj"))?;
         let down_proj = linear(intermediate, hidden, vb.pp("down_proj"))?;
-        Ok(Self { gate_proj, up_proj, down_proj })
+        Ok(Self { gate_proj, up_proj, down_proj, backend })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let gate = self.gate_proj.forward(x)?;
         let up = self.up_proj.forward(x)?;
         // Fused silu(gate) * up — 1 kernel instead of 2
-        let gated = crate::utils::fused_ops::silu_mul(&gate, &up)?;
+        let gated = self.backend.silu_mul(&gate, &up)?;
         self.down_proj.forward(&gated)
     }
 }
@@ -70,18 +75,20 @@ struct DiffusionBlock {
     eps: f32,
     ffn: FeedForward,
     ada_ln: Linear,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl DiffusionBlock {
-    fn load(vb: VarBuilder, hidden: usize, intermediate: usize, eps: f64) -> Result<Self> {
+    fn load(vb: VarBuilder, hidden: usize, intermediate: usize, eps: f64, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let norm_weight = vb.pp("norm").get(hidden, "weight")?;
-        let ffn = FeedForward::load(vb.pp("ffn"), hidden, intermediate)?;
+        let ffn = FeedForward::load(vb.pp("ffn"), hidden, intermediate, backend.clone())?;
         let ada_ln = linear(hidden, 3 * hidden, vb.pp("adaLN_modulation").pp("1"))?;
         Ok(Self {
             norm_weight,
             eps: eps as f32,
             ffn,
             ada_ln,
+            backend,
         })
     }
 
@@ -91,7 +98,7 @@ impl DiffusionBlock {
         let chunks = modulation.chunk(3, D::Minus1)?;
         let (shift, scale, gate) = (&chunks[0], &chunks[1], &chunks[2]);
 
-        let h = crate::utils::fused_ops::adaln_modulate(x, &self.norm_weight, scale, shift, self.eps)?;
+        let h = self.backend.adaln_modulate(x, &self.norm_weight, scale, shift, self.eps)?;
         let h = self.ffn.forward(&h)?;
         x + h.broadcast_mul(gate)?
     }
@@ -102,7 +109,7 @@ impl DiffusionBlock {
         let chunks = modulation.chunk(3, D::Minus1)?;
         let (shift, scale, gate) = (&chunks[0], &chunks[1], &chunks[2]);
 
-        let h = crate::utils::fused_ops::adaln_modulate(x, &self.norm_weight, scale, shift, self.eps)?;
+        let h = self.backend.adaln_modulate(x, &self.norm_weight, scale, shift, self.eps)?;
         let h = self.ffn.forward(&h)?;
         x + h.broadcast_mul(gate)?
     }
@@ -115,10 +122,11 @@ struct FinalLayer {
     eps: f32,
     ada_ln: Linear,
     linear: Linear,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl FinalLayer {
-    fn load(vb: VarBuilder, hidden: usize, latent: usize, eps: f64) -> Result<Self> {
+    fn load(vb: VarBuilder, hidden: usize, latent: usize, eps: f64, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         // norm_final is RMSNorm with elementwise_affine=False — use weight=ones
         let norm_weight = Tensor::ones(hidden, candle_core::DType::F32, vb.device())?
             .to_dtype(vb.dtype())?;
@@ -129,6 +137,7 @@ impl FinalLayer {
             eps: eps as f32,
             ada_ln,
             linear: linear_proj,
+            backend,
         })
     }
 
@@ -137,7 +146,7 @@ impl FinalLayer {
             .and_then(|c| self.ada_ln.forward(&c))?;
         let chunks = modulation.chunk(2, D::Minus1)?;
         let (shift, scale) = (&chunks[0], &chunks[1]);
-        let h = crate::utils::fused_ops::adaln_modulate(x, &self.norm_weight, scale, shift, self.eps)?;
+        let h = self.backend.adaln_modulate(x, &self.norm_weight, scale, shift, self.eps)?;
         self.linear.forward(&h)
     }
 
@@ -145,7 +154,7 @@ impl FinalLayer {
         let modulation = self.ada_ln.forward(silu_cond)?;
         let chunks = modulation.chunk(2, D::Minus1)?;
         let (shift, scale) = (&chunks[0], &chunks[1]);
-        let h = crate::utils::fused_ops::adaln_modulate(x, &self.norm_weight, scale, shift, self.eps)?;
+        let h = self.backend.adaln_modulate(x, &self.norm_weight, scale, shift, self.eps)?;
         self.linear.forward(&h)
     }
 }
@@ -167,6 +176,7 @@ impl PredictionHead {
         vb: VarBuilder,
         cfg: &super::config::DiffusionHeadConfig,
         timesteps: &[usize],
+        backend: Arc<dyn ComputeBackend>,
     ) -> Result<Self> {
         let h = cfg.hidden_size;
         let latent = cfg.latent_size;
@@ -183,10 +193,11 @@ impl PredictionHead {
                 h,
                 intermediate,
                 cfg.rms_norm_eps,
+                backend.clone(),
             )?);
         }
 
-        let final_layer = FinalLayer::load(vb.pp("final_layer"), h, latent, cfg.rms_norm_eps)?;
+        let final_layer = FinalLayer::load(vb.pp("final_layer"), h, latent, cfg.rms_norm_eps, backend)?;
 
         // Pre-compute timestep embeddings for all inference steps (avoids ~12 kernels/step)
         let pre_t_embeddings: Vec<Tensor> = timesteps
@@ -321,7 +332,8 @@ mod tests {
 
         let vb = make_prediction_head_vb();
         let sched = super::super::ddpm::DpmSolverPP::new_cosine(1000, 20);
-        let head = PredictionHead::load(vb, &cfg, sched.timesteps()).unwrap();
+        let backend = crate::backends::create_backend(&Device::Cpu);
+        let head = PredictionHead::load(vb, &cfg, sched.timesteps(), backend).unwrap();
 
         let x = make_tensor(&[2, 8], 100);       // (batch=2, latent=8)
         let t = Tensor::new(&[0.5f32, 0.3], &Device::Cpu).unwrap(); // (batch=2,)

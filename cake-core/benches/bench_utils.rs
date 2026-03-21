@@ -307,7 +307,7 @@ fn transformer_block_forward(bencher: divan::Bencher, seq_len: usize) {
     use cake_core::models::common::Transformer;
     let cfg = super::bench_helpers::test_config();
     let vb = super::bench_helpers::make_vb_transformer_block(&cfg);
-    let block = Transformer::load_for_vibevoice(vb, &cfg).unwrap();
+    let block = Transformer::load_for_vibevoice(vb, &cfg, std::sync::Arc::new(cake_core::backends::CpuBackend::new())).unwrap();
     let mut cache = super::bench_helpers::make_cache(&cfg);
     let x = super::bench_helpers::make_tensor(&[1, seq_len, cfg.hidden_size], 800);
     bencher.bench_local(|| block.forward_with_cache(&x, 0, 0, &mut cache).unwrap());

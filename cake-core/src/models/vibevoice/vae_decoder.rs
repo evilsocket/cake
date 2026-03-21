@@ -4,8 +4,12 @@
 //! Architecture: 7-stage Conv1d decoder with depthwise conv mixers,
 //! RMSNorm, FFN blocks, and ConvTranspose1d upsampling.
 
+use std::sync::Arc;
+
 use candle_core::{Module, Result, Tensor};
 use candle_nn::{Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, VarBuilder};
+
+use crate::backends::ComputeBackend;
 
 /// Streaming cache for Conv1d context between frames.
 ///
@@ -70,6 +74,7 @@ struct DecoderBlock {
     ffn_gamma: Tensor,
     ffn_linear1: candle_nn::Linear,
     ffn_linear2: candle_nn::Linear,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 /// Manual depthwise conv1d using broadcast_mul + sum.
@@ -98,7 +103,7 @@ pub fn depthwise_conv1d_manual(x: &Tensor, weight: &Tensor, bias: &Tensor, kerne
 }
 
 impl DecoderBlock {
-    fn load(vb: VarBuilder, channels: usize, eps: f64) -> Result<Self> {
+    fn load(vb: VarBuilder, channels: usize, eps: f64, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let norm_weight = vb.pp("norm").get(channels, "weight")?;
         let gamma = vb.get(channels, "gamma")?;
 
@@ -121,35 +126,34 @@ impl DecoderBlock {
             ffn_gamma,
             ffn_linear1,
             ffn_linear2,
+            backend,
         })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        use crate::utils::fused_ops;
         let channels = x.dim(1)?;
 
-        let h = fused_ops::rms_norm_channel(x, &self.norm_weight, self.eps)?;
+        let h = self.backend.rms_norm_channel(x, &self.norm_weight, self.eps)?;
         let zeros = Tensor::zeros((h.dim(0)?, channels, 6), h.dtype(), h.device())?;
-        let h = fused_ops::depthwise_conv1d_bias_ctx(
+        let h = self.backend.depthwise_conv1d_bias_ctx(
             &zeros, &h, &self.mixer_weight, &self.mixer_bias, 7, channels,
         )?;
-        let x = fused_ops::add_scaled(x, &h, &self.gamma)?;
+        let x = self.backend.add_scaled(x, &h, &self.gamma)?;
 
-        let h = fused_ops::rms_norm_channel(&x, &self.ffn_norm_weight, self.eps)?;
+        let h = self.backend.rms_norm_channel(&x, &self.ffn_norm_weight, self.eps)?;
         let h = h.transpose(1, 2)?;
         let h = self.ffn_linear1.forward(&h)?;
         let h = h.gelu()?;
         let h = self.ffn_linear2.forward(&h)?;
         let h = h.transpose(1, 2)?;
-        fused_ops::add_scaled(&x, &h, &self.ffn_gamma)
+        self.backend.add_scaled(&x, &h, &self.ffn_gamma)
     }
 
     /// Forward with streaming cache: uses cached context instead of zero-padding.
     fn forward_cached(&self, x: &Tensor, cache: &mut StreamingConvCache) -> Result<Tensor> {
-        use crate::utils::fused_ops;
         let channels = x.dim(1)?;
 
-        let h = fused_ops::rms_norm_channel(x, &self.norm_weight, self.eps)?;
+        let h = self.backend.rms_norm_channel(x, &self.norm_weight, self.eps)?;
         let (slot, is_first) = cache.take_slot();
         let context = if is_first {
             Tensor::zeros((h.dim(0)?, channels, 6), h.dtype(), h.device())?
@@ -169,18 +173,18 @@ impl DecoderBlock {
         }
 
         // Fused conv reads from [context, h] virtually — no cat allocation
-        let h = fused_ops::depthwise_conv1d_bias_ctx(
+        let h = self.backend.depthwise_conv1d_bias_ctx(
             &context, &h, &self.mixer_weight, &self.mixer_bias, 7, channels,
         )?;
-        let x = fused_ops::add_scaled(x, &h, &self.gamma)?;
+        let x = self.backend.add_scaled(x, &h, &self.gamma)?;
 
-        let h = fused_ops::rms_norm_channel(&x, &self.ffn_norm_weight, self.eps)?;
+        let h = self.backend.rms_norm_channel(&x, &self.ffn_norm_weight, self.eps)?;
         let h = h.transpose(1, 2)?;
         let h = self.ffn_linear1.forward(&h)?;
         let h = h.gelu()?;
         let h = self.ffn_linear2.forward(&h)?;
         let h = h.transpose(1, 2)?;
-        fused_ops::add_scaled(&x, &h, &self.ffn_gamma)
+        self.backend.add_scaled(&x, &h, &self.ffn_gamma)
     }
 }
 
@@ -191,10 +195,10 @@ struct DecoderStage {
 }
 
 impl DecoderStage {
-    fn load(vb: VarBuilder, channels: usize, num_blocks: usize, eps: f64) -> Result<Self> {
+    fn load(vb: VarBuilder, channels: usize, num_blocks: usize, eps: f64, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let mut blocks = Vec::with_capacity(num_blocks);
         for i in 0..num_blocks {
-            blocks.push(DecoderBlock::load(vb.pp(i), channels, eps)?);
+            blocks.push(DecoderBlock::load(vb.pp(i), channels, eps, backend.clone())?);
         }
         Ok(Self { blocks })
     }
@@ -243,7 +247,7 @@ pub struct AcousticVaeDecoder {
 }
 
 impl AcousticVaeDecoder {
-    pub fn load(vb: VarBuilder, cfg: &super::config::AcousticTokenizerConfig) -> Result<Self> {
+    pub fn load(vb: VarBuilder, cfg: &super::config::AcousticTokenizerConfig, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let eps = cfg.layernorm_eps;
         let n_filters = cfg.decoder_n_filters.unwrap_or(cfg.encoder_n_filters);
         let ratios = cfg.decoder_ratios.as_ref().unwrap_or(&cfg.encoder_ratios);
@@ -300,6 +304,7 @@ impl AcousticVaeDecoder {
                 channels[i],
                 depths[i],
                 eps,
+                backend.clone(),
             )?;
             stages.push(stage);
         }
@@ -519,7 +524,8 @@ mod tests {
         map.insert("ffn.linear2.bias".into(), mt(&[ch], 6));
 
         let vb = VarBuilder::from_tensors(map, DType::F32, &dev);
-        let block = DecoderBlock::load(vb, ch, 1e-5).unwrap();
+        let backend = crate::backends::create_backend(&dev);
+        let block = DecoderBlock::load(vb, ch, 1e-5, backend).unwrap();
 
         // Input: (batch=1, channels=32, seq=16)
         let x = mt(&[1, ch, 16], 10);

@@ -1,12 +1,19 @@
+use std::sync::Arc;
+
+use cake_core::backends::CpuBackend;
 use cake_core::models::common::MLP;
 
 use super::helpers::*;
+
+fn cpu_backend() -> Arc<CpuBackend> {
+    Arc::new(CpuBackend::new())
+}
 
 #[test]
 fn test_mlp_forward_shape() {
     let cfg = test_config();
     let vb = make_vb_mlp(&cfg);
-    let mlp = MLP::load(vb, &cfg).unwrap();
+    let mlp = MLP::load(vb, &cfg, cpu_backend()).unwrap();
     let x = make_tensor(&[1, 8, 64], 50);
     let y = mlp.forward(&x).unwrap();
     assert_eq!(y.dims(), &[1, 8, 64]);
@@ -16,7 +23,7 @@ fn test_mlp_forward_shape() {
 fn test_mlp_forward_nonzero() {
     let cfg = test_config();
     let vb = make_vb_mlp(&cfg);
-    let mlp = MLP::load(vb, &cfg).unwrap();
+    let mlp = MLP::load(vb, &cfg, cpu_backend()).unwrap();
     let x = make_tensor(&[1, 4, 64], 51);
     let y = mlp.forward(&x).unwrap();
     let vals: Vec<f32> = y.flatten_all().unwrap().to_vec1().unwrap();
@@ -30,8 +37,8 @@ fn test_mlp_gelu_differs_from_silu() {
     let cfg_gelu = test_config_with_gelu();
     let vb_silu = make_vb_mlp(&cfg_silu);
     let vb_gelu = make_vb_mlp(&cfg_gelu);
-    let mlp_silu = MLP::load(vb_silu, &cfg_silu).unwrap();
-    let mlp_gelu = MLP::load(vb_gelu, &cfg_gelu).unwrap();
+    let mlp_silu = MLP::load(vb_silu, &cfg_silu, cpu_backend()).unwrap();
+    let mlp_gelu = MLP::load(vb_gelu, &cfg_gelu, cpu_backend()).unwrap();
 
     let x = make_tensor(&[1, 4, 64], 52);
     let y_silu = mlp_silu.forward(&x).unwrap();
@@ -49,8 +56,8 @@ fn test_mlp_deterministic() {
     let cfg = test_config();
     let vb1 = make_vb_mlp(&cfg);
     let vb2 = make_vb_mlp(&cfg);
-    let mlp1 = MLP::load(vb1, &cfg).unwrap();
-    let mlp2 = MLP::load(vb2, &cfg).unwrap();
+    let mlp1 = MLP::load(vb1, &cfg, cpu_backend()).unwrap();
+    let mlp2 = MLP::load(vb2, &cfg, cpu_backend()).unwrap();
 
     let x = make_tensor(&[1, 4, 64], 53);
     let y1 = mlp1.forward(&x).unwrap();
@@ -65,7 +72,7 @@ fn test_mlp_deterministic() {
 fn test_mlp_single_token() {
     let cfg = test_config();
     let vb = make_vb_mlp(&cfg);
-    let mlp = MLP::load(vb, &cfg).unwrap();
+    let mlp = MLP::load(vb, &cfg, cpu_backend()).unwrap();
     let x = make_tensor(&[1, 1, 64], 54);
     let y = mlp.forward(&x).unwrap();
     assert_eq!(y.dims(), &[1, 1, 64]);

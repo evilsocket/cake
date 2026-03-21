@@ -74,10 +74,10 @@ impl Forwarder for Qwen3_5Block {
             cfg.hidden_size, cfg.rms_norm_eps, cfg.residual_rms_norm,
             vb.pp("post_attention_layernorm"),
         )?;
-        let mlp = MLP::load(vb.pp("mlp"), cfg)?;
+        let mlp = MLP::load(vb.pp("mlp"), cfg, ctx.backend.clone())?;
 
         if layer_type == "full_attention" {
-            let attn = Qwen3_5FullAttention::load(vb.pp("self_attn"), cfg)?;
+            let attn = Qwen3_5FullAttention::load(vb.pp("self_attn"), cfg, ctx.backend.clone())?;
             Ok(Box::new(Qwen3_5Block::Full {
                 name,
                 rms_1,
@@ -86,7 +86,7 @@ impl Forwarder for Qwen3_5Block {
                 mlp,
             }))
         } else {
-            let attn = GatedDeltaNet::load(vb.pp("linear_attn"), cfg)?;
+            let attn = GatedDeltaNet::load(vb.pp("linear_attn"), cfg, ctx.backend.clone())?;
             Ok(Box::new(Qwen3_5Block::Linear {
                 name,
                 rms_1,

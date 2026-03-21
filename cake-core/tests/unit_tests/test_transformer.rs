@@ -1,6 +1,14 @@
+use std::sync::Arc;
+
 use candle_core::Module;
 
+use cake_core::backends::CpuBackend;
+
 use super::helpers::*;
+
+fn cpu_backend() -> Arc<CpuBackend> {
+    Arc::new(CpuBackend::new())
+}
 
 // Transformer requires a full Context with var_builder, so we test the
 // composition of attention + mlp + norm at the component level instead.
@@ -13,7 +21,7 @@ fn test_transformer_components_compose() {
 
     // Load components with correct prefixes
     let attn = CausalSelfAttention::load(vb.pp("self_attn"), &cfg).unwrap();
-    let mlp = MLP::load(vb.pp("mlp"), &cfg).unwrap();
+    let mlp = MLP::load(vb.pp("mlp"), &cfg, cpu_backend()).unwrap();
 
     // Load norms
     let norm1_w = vb.pp("input_layernorm").get(64, "weight").unwrap();
@@ -54,7 +62,7 @@ fn test_transformer_residual_preserves_shape() {
     let cfg = test_config();
     let vb = make_vb_transformer_block(&cfg);
     let attn = CausalSelfAttention::load(vb.pp("self_attn"), &cfg).unwrap();
-    let mlp = MLP::load(vb.pp("mlp"), &cfg).unwrap();
+    let mlp = MLP::load(vb.pp("mlp"), &cfg, cpu_backend()).unwrap();
 
     let mut cache = make_cache(&cfg);
     let x = make_tensor(&[1, 1, 64], 71); // single token
@@ -74,7 +82,7 @@ fn test_transformer_with_qk_norm() {
     let cfg = test_config_with_qk_norm();
     let vb = make_vb_transformer_block(&cfg);
     let attn = CausalSelfAttention::load(vb.pp("self_attn"), &cfg).unwrap();
-    let mlp = MLP::load(vb.pp("mlp"), &cfg).unwrap();
+    let mlp = MLP::load(vb.pp("mlp"), &cfg, cpu_backend()).unwrap();
 
     let mut cache = make_cache(&cfg);
     let x = make_tensor(&[1, 4, 64], 72);

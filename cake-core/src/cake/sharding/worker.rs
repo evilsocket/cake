@@ -481,11 +481,10 @@ impl<G: Generator + 'static> Worker<G> {
                         .await
                     {
                         Ok(t) => {
-                            // Metal requires per-layer sync to prevent command buffer
-                            // accumulation which causes catastrophic performance degradation.
-                            if t.device().is_metal() {
-                                let _ = t.device().synchronize();
-                            }
+                            // Flush GPU command buffer after each layer forward pass.
+                            // No-op on CPU/CUDA; required on Metal to prevent command
+                            // buffer accumulation which causes catastrophic perf degradation.
+                            let _ = context.context.backend.synchronize();
                             t
                         }
                         Err(e) => {
@@ -647,6 +646,7 @@ mod tests {
             text_model_arch: crate::TextModelArch::Auto,
             quant: Arc::new(crate::utils::NoQuantization),
             listener_override: Arc::new(std::sync::Mutex::new(None)),
+            backend: Arc::new(crate::backends::CpuBackend::new()),
         };
 
         let wctx = WorkerContext::<crate::models::common::Transformer> {
@@ -722,6 +722,7 @@ mod tests {
             text_model_arch: crate::TextModelArch::Auto,
             quant: Arc::new(crate::utils::NoQuantization),
             listener_override: Arc::new(std::sync::Mutex::new(None)),
+            backend: Arc::new(crate::backends::CpuBackend::new()),
         };
 
         let wctx = WorkerContext::<crate::models::common::Transformer> {

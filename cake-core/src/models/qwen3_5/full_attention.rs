@@ -1,9 +1,12 @@
 //! Full (softmax) attention for Qwen3.5 with fused QKV projection,
 //! partial RoPE, Q/K norms, and output gating.
 
+use std::sync::Arc;
+
 use candle_core::{Result, Tensor, D};
 use candle_nn::{Linear, Module, RmsNorm, VarBuilder};
 
+use crate::backends::ComputeBackend;
 use crate::models::common::{Cache, Config};
 
 #[inline]
@@ -32,10 +35,12 @@ pub struct Qwen3_5FullAttention {
     // Split offsets for the fused projection
     q_size: usize,  // num_heads * head_dim * 2 (includes gate)
     kv_size: usize,  // num_kv_heads * head_dim
+
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl Qwen3_5FullAttention {
-    pub fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {
+    pub fn load(vb: VarBuilder, cfg: &Config, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let head_dim = cfg.head_dim.unwrap_or(cfg.hidden_size / cfg.num_attention_heads);
         let rotary_dim = (head_dim as f32 * cfg.partial_rotary_factor) as usize;
         let h_size = cfg.hidden_size;
@@ -72,6 +77,7 @@ impl Qwen3_5FullAttention {
             rotary_dim,
             q_size,
             kv_size,
+            backend,
         })
     }
 
@@ -116,15 +122,14 @@ impl Qwen3_5FullAttention {
         let (b_sz, seq_len, _hidden) = x.dims3().map_err(|e| anyhow!("dims3: {e}"))?;
         let hidden_size = self.num_attention_heads * self.head_dim;
 
-        // Metal requires periodic command buffer flushes (see linear_attention.rs).
-        let metal_sync = x.device().is_metal();
+        // Periodic GPU command buffer flushes (see linear_attention.rs).
 
         // Single fused QKV projection
         let qkv = self.qkv_proj.forward(x)
             .map_err(|e| anyhow!("qkv_proj: {e}"))?;
 
-        // Flush Metal commands after the big QKV matmul
-        if metal_sync { let _ = x.device().synchronize(); }
+        // Flush GPU commands after the big QKV matmul
+        let _ = self.backend.synchronize();
 
         // Split: Q (doubled for gating), K, V
         let q_out = qkv.narrow(D::Minus1, 0, self.q_size)
@@ -224,8 +229,8 @@ impl Qwen3_5FullAttention {
         // Final projection
         let y = self.o_proj.forward(&y).map_err(|e| anyhow!("o_proj: {e}"))?;
 
-        // Flush Metal commands after attention + out_proj
-        if metal_sync { let _ = x.device().synchronize(); }
+        // Flush GPU commands after attention + out_proj
+        let _ = self.backend.synchronize();
 
         Ok(y)
     }

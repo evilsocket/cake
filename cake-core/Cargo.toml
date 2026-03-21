@@ -42,6 +42,9 @@ candle-transformers = { version = "0.9" }
 candle-flash-attn = { version = "0.9", optional = true }
 candle-metal-kernels = { version = "0.9", optional = true }
 objc2-metal = { version = "0.3", optional = true }
+wgpu = { version = "24", optional = true }
+pollster = { version = "0.4", optional = true }
+bytemuck = { version = "1", optional = true, features = ["derive"] }
 half = "2"
 image = "0.25.2"
 hf-hub = "0.5"
@@ -65,6 +68,7 @@ default = ["master", "llama", "qwen2", "qwen3_5", "qwen3", "qwen3_moe", "qwen3_5
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "dep:candle-metal-kernels", "dep:objc2-metal"]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:bindgen_cuda"]
 flash-attn = ["cuda", "dep:candle-flash-attn"]
+vulkan = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 
 master = ["dep:actix-web", "dep:async-stream", "dep:uuid"]
 

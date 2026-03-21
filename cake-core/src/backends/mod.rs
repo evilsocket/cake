@@ -7,17 +7,32 @@
 //! Models call `ctx.backend().method()` instead of backend-specific code paths,
 //! making it trivial to add new GPU backends.
 
-use anyhow::Result;
-use candle_core::{Device, Tensor};
+use candle_core::{Device, Result, Tensor};
+use std::sync::Arc;
 
 mod cpu;
 pub use cpu::CpuBackend;
+
+#[cfg(feature = "cuda")]
+mod cuda;
+#[cfg(feature = "cuda")]
+pub use cuda::CudaBackend;
+
+#[cfg(feature = "metal")]
+mod metal;
+#[cfg(feature = "metal")]
+pub use self::metal::MetalBackend;
+
+#[cfg(feature = "vulkan")]
+mod vulkan;
+#[cfg(feature = "vulkan")]
+pub use vulkan::VulkanBackend;
 
 /// Abstraction over compute backends (CPU, CUDA, Metal, Vulkan).
 ///
 /// Each method has a CPU-based default via [`CpuBackend`]. GPU backends override
 /// specific methods for acceleration while falling back to CPU for unimplemented ops.
-pub trait ComputeBackend: Send + Sync {
+pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
     /// Human-readable backend name for logging.
     fn name(&self) -> &str;
 
@@ -61,7 +76,7 @@ pub trait ComputeBackend: Send + Sync {
     ) -> Result<Tensor>;
 
     /// `rms_norm(a + b, weight, eps)` — residual + norm fusion.
-    /// Returns `(normed, residual)` where `residual = a + b`.
+    /// Returns `(residual, normed)` where `residual = a + b`.
     fn add_rms_norm(
         &self,
         a: &Tensor,
@@ -70,7 +85,10 @@ pub trait ComputeBackend: Send + Sync {
         eps: f32,
     ) -> Result<(Tensor, Tensor)>;
 
-    // ── Fused convolutions (GDN) ─────────────────────────────────────
+    /// Channel-wise RMS normalization for (batch, channels, time) layout.
+    fn rms_norm_channel(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor>;
+
+    // ── Fused convolutions (GDN / VibeVoice) ──────────────────────────
 
     /// Depthwise conv1d + SiLU on a single token window.
     fn depthwise_conv1d_silu(
@@ -91,12 +109,24 @@ pub trait ComputeBackend: Send + Sync {
         channels: usize,
     ) -> Result<Tensor>;
 
+    /// Depthwise conv1d + bias with separate context tensor.
+    /// Virtually concatenates `[ctx, input]` without allocating the merged tensor.
+    fn depthwise_conv1d_bias_ctx(
+        &self,
+        ctx: &Tensor,
+        input: &Tensor,
+        weight: &Tensor,
+        bias: &Tensor,
+        kernel_size: usize,
+        channels: usize,
+    ) -> Result<Tensor>;
+
     // ── Elementwise fusions ──────────────────────────────────────────
 
     /// `a + b + c` — three-way element-wise add.
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor>;
 
-    /// `exp(x) * y`.
+    /// `x * exp(y)`.
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor>;
 
     /// `(a - b) * c`.
@@ -104,6 +134,18 @@ pub trait ComputeBackend: Send + Sync {
 
     /// `a + b * c` — scaled addition.
     fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor>;
+
+    // ── Adaptive LayerNorm (DiT) ──────────────────────────────────────
+
+    /// `rms_norm(x, norm_weight, eps) * (1 + scale) + shift` — AdaLN modulation.
+    fn adaln_modulate(
+        &self,
+        x: &Tensor,
+        norm_weight: &Tensor,
+        scale: &Tensor,
+        shift: &Tensor,
+        eps: f32,
+    ) -> Result<Tensor>;
 
     // ── F8 dequantization ────────────────────────────────────────────
 
@@ -126,14 +168,14 @@ pub trait ComputeBackend: Send + Sync {
 }
 
 /// Create the appropriate backend for the given device.
-pub fn create_backend(device: &Device) -> Box<dyn ComputeBackend> {
+pub fn create_backend(device: &Device) -> Arc<dyn ComputeBackend> {
     match device {
-        Device::Cpu => Box::new(CpuBackend::new()),
+        Device::Cpu => Arc::new(CpuBackend::new()),
         #[cfg(feature = "cuda")]
-        Device::Cuda(_) => Box::new(CpuBackend::with_device(device.clone())),
+        Device::Cuda(_) => Arc::new(CudaBackend::new(device.clone())),
         #[cfg(feature = "metal")]
-        Device::Metal(_) => Box::new(CpuBackend::with_device(device.clone())),
+        Device::Metal(_) => Arc::new(MetalBackend::new(device.clone())),
         #[allow(unreachable_patterns)]
-        _ => Box::new(CpuBackend::new()),
+        _ => Arc::new(CpuBackend::new()),
     }
 }

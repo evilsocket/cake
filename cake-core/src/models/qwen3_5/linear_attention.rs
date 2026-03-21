@@ -7,9 +7,12 @@
 //!   4. Recurrent update: S = S * exp(g) + outer(k, beta*(v - S^T k))
 //!   5. Output: o = S^T q, gated by sigmoid(z) via RMSNormGated
 
+use std::sync::Arc;
+
 use candle_core::{DType, Result, Tensor, D};
 use candle_nn::{Linear, Module, VarBuilder};
 
+use crate::backends::ComputeBackend;
 use crate::models::common::{Cache, Config};
 
 /// RMSNorm with multiplicative SiLU gating: rms_norm(x) * silu(z).
@@ -18,32 +21,27 @@ use crate::models::common::{Cache, Config};
 struct RmsNormGated {
     weight: Tensor,
     eps: f32,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl RmsNormGated {
-    fn load(size: usize, eps: f64, vb: VarBuilder) -> Result<Self> {
+    fn load(size: usize, eps: f64, vb: VarBuilder, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         // Store weight as F32 to match the recurrent step's F32 output.
         let weight = vb.get(size, "weight")?.to_dtype(DType::F32)?;
-        Ok(Self { weight, eps: eps as f32 })
+        Ok(Self { weight, eps: eps as f32, backend })
     }
 
     /// Apply gated RMS normalization: weight * rms_norm(x) * silu(z).
     /// Uses fused kernel (1 launch) instead of rms_norm + silu + mul (3 launches).
     fn forward(&self, x: &Tensor, z: &Tensor) -> Result<Tensor> {
         let z = z.to_dtype(x.dtype())?;
-        crate::utils::fused_ops::rms_norm_gated(
+        self.backend.rms_norm_gated(
             &x.contiguous()?,
             &z.contiguous()?,
             &self.weight,
             self.eps,
         )
     }
-}
-
-/// Numerically stable softplus: ln(1 + exp(x)).
-/// Uses fused CUDA kernel when available (1 kernel instead of 5).
-fn stable_softplus(x: &Tensor) -> Result<Tensor> {
-    crate::utils::fused_ops::stable_softplus(&x.contiguous()?)
 }
 
 /// Gated DeltaNet linear attention block with fused input projections.
@@ -75,10 +73,12 @@ pub struct GatedDeltaNet {
 
     // Split offsets for the fused projection output
     conv_dim: usize,
+
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl GatedDeltaNet {
-    pub fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {
+    pub fn load(vb: VarBuilder, cfg: &Config, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let la = cfg.linear_attn.as_ref().expect("no linear_attn config");
 
         let num_heads = la.num_value_heads;
@@ -140,7 +140,7 @@ impl GatedDeltaNet {
         )?;
         let l2_norm_eps = 1e-6f32 / key_head_dim as f32;
 
-        let norm = RmsNormGated::load(value_head_dim, cfg.rms_norm_eps, vb.pp("norm"))?;
+        let norm = RmsNormGated::load(value_head_dim, cfg.rms_norm_eps, vb.pp("norm"), backend.clone())?;
 
         Ok(Self {
             in_proj,
@@ -159,6 +159,7 @@ impl GatedDeltaNet {
             value_dim,
             conv_kernel_size: la.conv_kernel_dim,
             conv_dim,
+            backend,
         })
     }
 
@@ -176,7 +177,7 @@ impl GatedDeltaNet {
         // conv1d_weight: (channels, kernel_size)
         // full_window: (batch, channels, kernel_size)
         // Result: (batch, channels) -> unsqueeze to (batch, 1, channels)
-        let y = crate::utils::fused_ops::depthwise_conv1d_silu(
+        let y = self.backend.depthwise_conv1d_silu(
             &full_window.contiguous()?,
             &self.conv1d_weight,
             self.conv_kernel_size,
@@ -297,12 +298,11 @@ impl GatedDeltaNet {
         let (batch, seq_len, _hidden) = x.dims3().map_err(|e| anyhow!("dims3: {e}"))?;
         let model_dtype = x.dtype();
 
-        // Metal requires periodic command buffer flushes to prevent catastrophic
-        // slowdown from command accumulation. Each GDN layer dispatches ~40 Metal
-        // commands; without intermediate syncs, performance degrades by 50x+.
-        // Four sync points (after in_proj, after conv1d, after recurrent, after
-        // out_proj) keep each section under ~25 commands. Zero overhead on CUDA/CPU.
-        let metal_sync = x.device().is_metal();
+        // Periodic GPU command buffer flushes prevent catastrophic slowdown from
+        // command accumulation on Metal. Each GDN layer dispatches ~40 commands;
+        // without intermediate syncs, performance degrades by 50x+. Four sync points
+        // (after in_proj, after conv1d, after recurrent, after out_proj) keep each
+        // section under ~25 commands. No-op on CPU/CUDA.
 
         // Single fused projection: QKV + A + B + Z (with dt_bias absorbed into A bias)
         let proj = self.in_proj.forward(x)
@@ -313,8 +313,8 @@ impl GatedDeltaNet {
         let proj = proj.to_dtype(DType::F32)
             .map_err(|e| anyhow!("proj to_f32: {e}"))?;
 
-        // Flush Metal commands after the big in_proj matmul + dtype conversion
-        if metal_sync { let _ = x.device().synchronize(); }
+        // Flush GPU commands after the big in_proj matmul + dtype conversion
+        let _ = self.backend.synchronize();
 
         // Split fused output (all views on F32 tensor — zero cost)
         let mixed_qkv = proj.narrow(2, 0, self.conv_dim)
@@ -348,8 +348,8 @@ impl GatedDeltaNet {
                 .map_err(|e| anyhow!("conv1d_seq: {e}"))?
         };
 
-        // Flush Metal commands after conv1d operations
-        if metal_sync { let _ = x.device().synchronize(); }
+        // Flush GPU commands after conv1d operations
+        let _ = self.backend.synchronize();
 
         cache.set_conv_state(block_idx, new_conv_state);
 
@@ -393,7 +393,7 @@ impl GatedDeltaNet {
 
         // Compute gating parameters — a already includes dt_bias (absorbed into projection bias),
         // already F32 from bulk conversion. Saves 2 kernels (to_dtype + broadcast_add).
-        let softplus_a = stable_softplus(&a)?;
+        let softplus_a = self.backend.stable_softplus(&a.contiguous()?)?;
         let g = softplus_a.broadcast_mul(&self.neg_a_exp_f32)
             .map_err(|e| anyhow!("g compute: {e}"))?;
 
@@ -444,7 +444,7 @@ impl GatedDeltaNet {
         };
 
         // Flush Metal commands after conv+gates+recurrent (~20 operations)
-        if metal_sync { let _ = x.device().synchronize(); }
+        let _ = self.backend.synchronize();
 
         // Save updated state
         cache.set_recurrent_state(block_idx, state);
@@ -466,7 +466,7 @@ impl GatedDeltaNet {
             .map_err(|e| anyhow!("out_proj: {e}"))?;
 
         // Flush Metal commands after the conv+recurrent+norm+out_proj section
-        if metal_sync { let _ = x.device().synchronize(); }
+        let _ = self.backend.synchronize();
 
         Ok(output)
     }

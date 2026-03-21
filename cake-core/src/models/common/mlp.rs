@@ -1,5 +1,9 @@
+use std::sync::Arc;
+
 use candle_core::{Result, Tensor, D};
 use candle_nn::{Linear, Module, VarBuilder};
+
+use crate::backends::ComputeBackend;
 
 /// Multi-perceptron implementation with fused gate+up projection.
 #[allow(clippy::upper_case_acronyms)]
@@ -9,6 +13,7 @@ pub struct MLP {
     down_proj: Linear,
     intermediate_size: usize,
     use_gelu: bool,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl MLP {
@@ -20,13 +25,13 @@ impl MLP {
         let x = if self.use_gelu {
             (gate.gelu()? * up)?
         } else {
-            crate::utils::fused_ops::silu_mul(&gate.contiguous()?, &up.contiguous()?)?
+            self.backend.silu_mul(&gate.contiguous()?, &up.contiguous()?)?
         };
         self.down_proj.forward(&x)
     }
 
     /// Load this block from the VarBuilder given the specific configuration.
-    pub fn load(vb: VarBuilder, cfg: &super::Config) -> Result<Self> {
+    pub fn load(vb: VarBuilder, cfg: &super::Config, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let h_size = cfg.hidden_size;
         let i_size = cfg.intermediate_size;
 
@@ -49,6 +54,7 @@ impl MLP {
             down_proj,
             intermediate_size: i_size,
             use_gelu: cfg.use_gelu_mlp,
+            backend,
         })
     }
 }

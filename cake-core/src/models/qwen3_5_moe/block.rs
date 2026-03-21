@@ -82,10 +82,10 @@ impl Forwarder for Qwen3_5MoeBlock {
         let rms_1 = load_rms_norm(h, eps, cfg.residual_rms_norm, vb.pp("input_layernorm"))?;
         let rms_2 =
             load_rms_norm(h, eps, cfg.residual_rms_norm, vb.pp("post_attention_layernorm"))?;
-        let moe = Qwen3_5MoeSparseMlp::load(vb.pp("mlp"), cfg)?;
+        let moe = Qwen3_5MoeSparseMlp::load(vb.pp("mlp"), cfg, ctx.backend.clone())?;
 
         if layer_type == "full_attention" {
-            let attn = Qwen3_5FullAttention::load(vb.pp("self_attn"), cfg)?;
+            let attn = Qwen3_5FullAttention::load(vb.pp("self_attn"), cfg, ctx.backend.clone())?;
             Ok(Box::new(Qwen3_5MoeBlock::Full {
                 name,
                 rms_1,
@@ -94,7 +94,7 @@ impl Forwarder for Qwen3_5MoeBlock {
                 moe,
             }))
         } else {
-            let attn = GatedDeltaNet::load(vb.pp("linear_attn"), cfg)?;
+            let attn = GatedDeltaNet::load(vb.pp("linear_attn"), cfg, ctx.backend.clone())?;
             Ok(Box::new(Qwen3_5MoeBlock::Linear {
                 name,
                 rms_1,

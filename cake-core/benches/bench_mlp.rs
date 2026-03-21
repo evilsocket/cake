@@ -1,12 +1,19 @@
+use std::sync::Arc;
+
+use cake_core::backends::CpuBackend;
 use cake_core::models::common::MLP;
 
 use super::bench_helpers::*;
+
+fn cpu_backend() -> Arc<CpuBackend> {
+    Arc::new(CpuBackend::new())
+}
 
 #[divan::bench(args = [1, 8, 64])]
 fn mlp_silu(bencher: divan::Bencher, seq_len: usize) {
     let cfg = test_config();
     let vb = make_vb_mlp(&cfg);
-    let mlp = MLP::load(vb, &cfg).unwrap();
+    let mlp = MLP::load(vb, &cfg, cpu_backend()).unwrap();
     let x = make_tensor(&[1, seq_len, cfg.hidden_size], 100);
 
     bencher.bench_local(move || {
@@ -18,7 +25,7 @@ fn mlp_silu(bencher: divan::Bencher, seq_len: usize) {
 fn mlp_gelu(bencher: divan::Bencher, seq_len: usize) {
     let cfg = test_config_with_gelu();
     let vb = make_vb_mlp(&cfg);
-    let mlp = MLP::load(vb, &cfg).unwrap();
+    let mlp = MLP::load(vb, &cfg, cpu_backend()).unwrap();
     let x = make_tensor(&[1, seq_len, cfg.hidden_size], 200);
 
     bencher.bench_local(move || {
@@ -37,7 +44,7 @@ fn mlp_larger_hidden(bencher: divan::Bencher, hidden_size: usize) {
         ..test_config()
     };
     let vb = make_vb_mlp(&cfg);
-    let mlp = MLP::load(vb, &cfg).unwrap();
+    let mlp = MLP::load(vb, &cfg, cpu_backend()).unwrap();
     let x = make_tensor(&[1, 1, hidden_size], 300);
 
     bencher.bench_local(move || {

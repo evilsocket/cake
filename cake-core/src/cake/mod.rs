@@ -6,6 +6,7 @@ use std::{
 use tokio::net::TcpListener;
 
 use crate::{
+    backends::{self, ComputeBackend},
     models::common::{detect_text_model_arch, Cache, Config},
     utils, Args, ModelType, TextModelArch,
 };
@@ -52,6 +53,8 @@ pub struct Context {
     pub quant: Arc<dyn utils::Quantization>,
     /// Pre-bound TCP listener from setup phase (taken once by Worker::new).
     pub listener_override: Arc<Mutex<Option<TcpListener>>>,
+    /// Compute backend for fused operations (CPU, CUDA, Metal, Vulkan).
+    pub backend: Arc<dyn ComputeBackend>,
 }
 
 /// Parse a dtype string ("f16", "bf16", "f32") into a candle DType.
@@ -484,6 +487,8 @@ impl Context {
             }
         }
 
+        let backend = backends::create_backend(&device);
+
         Ok(Context {
             args,
             dtype,
@@ -496,6 +501,7 @@ impl Context {
             text_model_arch,
             quant,
             listener_override: Arc::new(Mutex::new(None)),
+            backend,
         })
     }
 }

@@ -1,7 +1,14 @@
+use std::sync::Arc;
+
+use cake_core::backends::CpuBackend;
 use cake_core::models::common::Config;
 use cake_core::models::qwen3_moe::moe::SparseMoeMlp;
 
 use super::helpers::*;
+
+fn cpu_backend() -> Arc<CpuBackend> {
+    Arc::new(CpuBackend::new())
+}
 
 fn moe_config() -> Config {
     Config {
@@ -49,7 +56,7 @@ fn make_vb_moe(cfg: &Config) -> candle_nn::VarBuilder<'static> {
 fn test_moe_forward_shape() {
     let cfg = moe_config();
     let vb = make_vb_moe(&cfg);
-    let moe = SparseMoeMlp::load(vb, &cfg).unwrap();
+    let moe = SparseMoeMlp::load(vb, &cfg, cpu_backend()).unwrap();
     let x = make_tensor(&[1, 4, 64], 80);
     let y = moe.forward(&x).unwrap();
     assert_eq!(y.dims(), &[1, 4, 64]);
@@ -59,7 +66,7 @@ fn test_moe_forward_shape() {
 fn test_moe_forward_nonzero() {
     let cfg = moe_config();
     let vb = make_vb_moe(&cfg);
-    let moe = SparseMoeMlp::load(vb, &cfg).unwrap();
+    let moe = SparseMoeMlp::load(vb, &cfg, cpu_backend()).unwrap();
     let x = make_tensor(&[1, 4, 64], 81);
     let y = moe.forward(&x).unwrap();
     let vals: Vec<f32> = y.flatten_all().unwrap().to_vec1().unwrap();
@@ -71,7 +78,7 @@ fn test_moe_forward_nonzero() {
 fn test_moe_single_token() {
     let cfg = moe_config();
     let vb = make_vb_moe(&cfg);
-    let moe = SparseMoeMlp::load(vb, &cfg).unwrap();
+    let moe = SparseMoeMlp::load(vb, &cfg, cpu_backend()).unwrap();
     let x = make_tensor(&[1, 1, 64], 82);
     let y = moe.forward(&x).unwrap();
     assert_eq!(y.dims(), &[1, 1, 64]);
@@ -82,8 +89,8 @@ fn test_moe_deterministic() {
     let cfg = moe_config();
     let vb1 = make_vb_moe(&cfg);
     let vb2 = make_vb_moe(&cfg);
-    let moe1 = SparseMoeMlp::load(vb1, &cfg).unwrap();
-    let moe2 = SparseMoeMlp::load(vb2, &cfg).unwrap();
+    let moe1 = SparseMoeMlp::load(vb1, &cfg, cpu_backend()).unwrap();
+    let moe2 = SparseMoeMlp::load(vb2, &cfg, cpu_backend()).unwrap();
     let x = make_tensor(&[1, 4, 64], 83);
     let y1 = moe1.forward(&x).unwrap();
     let y2 = moe2.forward(&x).unwrap();

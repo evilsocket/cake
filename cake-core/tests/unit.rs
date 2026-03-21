@@ -26,3 +26,5 @@ mod test_gguf;
 mod test_luxtts;
 #[path = "unit_tests/test_transformer_standalone.rs"]
 mod test_transformer_standalone;
+#[path = "unit_tests/test_backends.rs"]
+mod test_backends;

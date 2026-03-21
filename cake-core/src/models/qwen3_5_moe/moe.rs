@@ -17,9 +17,12 @@
 //!   top_k   = argsort(probs, desc)[:k]
 //!   weights = probs[top_k] / sum(probs[top_k])   (norm_topk_prob=true)
 
+use std::sync::Arc;
+
 use candle_core::{DType, Result, Tensor, D};
 use candle_nn::{linear_no_bias as linear, ops::softmax_last_dim, Linear, Module, VarBuilder};
 
+use crate::backends::ComputeBackend;
 use crate::models::common::Config;
 
 /// Sparse MoE FFN block with shared expert (Qwen3.5 MoE).
@@ -44,10 +47,11 @@ pub struct Qwen3_5MoeSparseMlp {
 
     num_experts: usize,
     num_experts_per_tok: usize,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl Qwen3_5MoeSparseMlp {
-    pub fn load(vb: VarBuilder, cfg: &Config) -> Result<Self> {
+    pub fn load(vb: VarBuilder, cfg: &Config, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let h = cfg.hidden_size;
         let i = cfg.moe_intermediate_size.expect("moe_intermediate_size required");
         let si = cfg.shared_expert_intermediate_size.expect("shared_expert_intermediate_size required");
@@ -91,6 +95,7 @@ impl Qwen3_5MoeSparseMlp {
             shared_expert_gate,
             num_experts: n,
             num_experts_per_tok: cfg.num_experts_per_tok,
+            backend,
         })
     }
 
@@ -111,7 +116,7 @@ impl Qwen3_5MoeSparseMlp {
                 .shared_up_proj
                 .forward(&x_flat)
                 .map_err(|e| anyhow!("shared up_proj: {e}"))?;
-            let hidden = crate::utils::fused_ops::silu_mul(
+            let hidden = self.backend.silu_mul(
                 &gate.contiguous().map_err(|e| anyhow!("shared gate contig: {e}"))?,
                 &up.contiguous().map_err(|e| anyhow!("shared up contig: {e}"))?,
             )
@@ -203,7 +208,7 @@ impl Qwen3_5MoeSparseMlp {
                 let up_out = self.experts_up[exp]
                     .forward(&x_flat)
                     .map_err(|e| anyhow!("expert up: {e}"))?;
-                let hidden = crate::utils::fused_ops::silu_mul(
+                let hidden = self.backend.silu_mul(
                     &gate_out.contiguous().map_err(|e| anyhow!("gate contig: {e}"))?,
                     &up_out.contiguous().map_err(|e| anyhow!("up contig: {e}"))?,
                 )
@@ -277,7 +282,7 @@ impl Qwen3_5MoeSparseMlp {
                 .forward(&selected)
                 .map_err(|e| anyhow!("expert up: {e}"))?; // (n_sel, i)
 
-            let hidden = crate::utils::fused_ops::silu_mul(
+            let hidden = self.backend.silu_mul(
                 &gate_out.contiguous().map_err(|e| anyhow!("gate contig: {e}"))?,
                 &up_out.contiguous().map_err(|e| anyhow!("up contig: {e}"))?,
             )
@@ -393,7 +398,7 @@ mod tests {
     fn test_forward_shape() {
         let cfg = test_config();
         let vb = make_vb();
-        let moe = Qwen3_5MoeSparseMlp::load(vb, &cfg).unwrap();
+        let moe = Qwen3_5MoeSparseMlp::load(vb, &cfg, Arc::new(crate::backends::CpuBackend::new())).unwrap();
         let x = make_tensor(&[1, 4, 64], 80);
         let y = moe.forward(&x).unwrap();
         assert_eq!(y.dims(), &[1, 4, 64]);
@@ -403,7 +408,7 @@ mod tests {
     fn test_forward_single_token() {
         let cfg = test_config();
         let vb = make_vb();
-        let moe = Qwen3_5MoeSparseMlp::load(vb, &cfg).unwrap();
+        let moe = Qwen3_5MoeSparseMlp::load(vb, &cfg, Arc::new(crate::backends::CpuBackend::new())).unwrap();
         let x = make_tensor(&[1, 1, 64], 81);
         let y = moe.forward(&x).unwrap();
         assert_eq!(y.dims(), &[1, 1, 64]);
@@ -413,7 +418,7 @@ mod tests {
     fn test_forward_nonzero() {
         let cfg = test_config();
         let vb = make_vb();
-        let moe = Qwen3_5MoeSparseMlp::load(vb, &cfg).unwrap();
+        let moe = Qwen3_5MoeSparseMlp::load(vb, &cfg, Arc::new(crate::backends::CpuBackend::new())).unwrap();
         let x = make_tensor(&[1, 4, 64], 82);
         let y = moe.forward(&x).unwrap();
         let vals: Vec<f32> = y.flatten_all().unwrap().to_vec1().unwrap();
@@ -425,8 +430,8 @@ mod tests {
         let cfg = test_config();
         let vb1 = make_vb();
         let vb2 = make_vb();
-        let moe1 = Qwen3_5MoeSparseMlp::load(vb1, &cfg).unwrap();
-        let moe2 = Qwen3_5MoeSparseMlp::load(vb2, &cfg).unwrap();
+        let moe1 = Qwen3_5MoeSparseMlp::load(vb1, &cfg, Arc::new(crate::backends::CpuBackend::new())).unwrap();
+        let moe2 = Qwen3_5MoeSparseMlp::load(vb2, &cfg, Arc::new(crate::backends::CpuBackend::new())).unwrap();
         let x = make_tensor(&[1, 4, 64], 83);
         let y1: Vec<f32> = moe1.forward(&x).unwrap().flatten_all().unwrap().to_vec1().unwrap();
         let y2: Vec<f32> = moe2.forward(&x).unwrap().flatten_all().unwrap().to_vec1().unwrap();

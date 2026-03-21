@@ -66,7 +66,7 @@ impl Forwarder for EXAONE4Block {
             sliding_window,
             use_rope,
         )?;
-        let mlp = MLP::load(vb.pp("mlp"), cfg)?;
+        let mlp = MLP::load(vb.pp("mlp"), cfg, ctx.backend.clone())?;
 
         let eps = cfg.rms_norm_eps;
         let h = cfg.hidden_size;

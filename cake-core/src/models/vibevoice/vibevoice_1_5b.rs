@@ -109,6 +109,7 @@ impl VibeVoice1_5B {
                     crate::models::common::Transformer::load_for_vibevoice(
                         lm_vb.pp("layers").pp(i),
                         &common_cfg,
+                        crate::backends::create_backend(device),
                     )?,
                 ));
             }
@@ -119,13 +120,16 @@ impl VibeVoice1_5B {
 
         // Acoustic tokenizer (encoder + decoder)
         info!("  Loading acoustic tokenizer...");
+        let backend = crate::backends::create_backend(device);
         let acoustic_encoder = TokenizerEncoder::load(
             vb.pp("model").pp("acoustic_tokenizer").pp("encoder"),
             &config.acoustic_tokenizer_config,
+            backend.clone(),
         )?;
         let acoustic_decoder = AcousticVaeDecoder::load(
             vb.pp("model").pp("acoustic_tokenizer").pp("decoder"),
             &config.acoustic_tokenizer_config,
+            backend.clone(),
         )?;
 
         // Semantic tokenizer (encoder only)
@@ -146,6 +150,7 @@ impl VibeVoice1_5B {
         let semantic_encoder = TokenizerEncoder::load(
             vb.pp("model").pp("semantic_tokenizer").pp("encoder"),
             &semantic_tok_cfg,
+            backend.clone(),
         )?;
 
         // Connectors
@@ -173,6 +178,7 @@ impl VibeVoice1_5B {
             vb.pp("model").pp("prediction_head"),
             &config.diffusion_head_config,
             scheduler.timesteps(),
+            backend,
         )?;
 
         let speech_scaling_factor = vb.pp("model").get((), "speech_scaling_factor")?;
@@ -217,6 +223,7 @@ impl VibeVoice1_5B {
                 text_model_arch: crate::TextModelArch::Auto,
                 quant: std::sync::Arc::new(crate::utils::NoQuantization),
                 listener_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
+                backend: crate::backends::create_backend(device),
             },
         })
     }
