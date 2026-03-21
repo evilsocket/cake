@@ -111,7 +111,7 @@ worker1:
 
 ```sh
 # Worker
-cake worker --model evilsocket/luxtts --name worker1 \
+cake run --model evilsocket/luxtts --name worker1 \
   --topology topology-luxtts.yml --address 0.0.0.0:10128
 
 # Master

@@ -8,10 +8,10 @@ The simplest way to set up a cluster. Start workers and a master with the same `
 
 ```sh
 # On any machine — start a worker (no model data or topology needed)
-cake worker --cluster-key mysecret --name gpu-server-1
+cake run --cluster-key mysecret --name gpu-server-1
 
 # On another machine
-cake worker --cluster-key mysecret --name macbook
+cake run --cluster-key mysecret --name macbook
 
 # On the master (has the model)
 cake serve /path/to/Meta-Llama-3-8B \
@@ -48,7 +48,7 @@ For full control over layer placement, use a topology file.
 Run a worker node:
 
 ```sh
-cake worker --model /path/to/Meta-Llama-3-8B \
+cake run --model /path/to/Meta-Llama-3-8B \
             --name worker0 \
             --topology topology.yml \
             --address 0.0.0.0:10128

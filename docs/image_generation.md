@@ -79,7 +79,7 @@ Start worker and master:
 
 ```sh
 # Worker
-cake worker --model /path/to/hf/cache \
+cake run --model /path/to/hf/cache \
   --name gpu_worker --model-type image-model \
   --topology topology.yml --address 0.0.0.0:10128
 

@@ -22,18 +22,22 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run a model (single prompt or interactive chat)
+    /// Run a model locally, as cluster master, or as cluster worker.
+    ///
+    /// With model: local inference or cluster master.
+    /// Without model + --cluster-key: cluster worker (waits for master).
     Run {
-        /// Model name or HuggingFace repo (e.g., evilsocket/Qwen3-0.6B)
+        /// Model name or HuggingFace repo (e.g., evilsocket/Qwen3-0.6B).
+        /// Omit with --cluster-key to start as a worker node.
         #[arg(id = "model_name")]
-        model: String,
+        model: Option<String>,
         /// Prompt text (omit for interactive mode)
         #[arg(id = "prompt_text")]
         prompt: Option<String>,
         #[command(flatten)]
         args: Args,
     },
-    /// Start an OpenAI-compatible API server
+    /// Start an OpenAI-compatible API server.
     Serve {
         /// Model name or HuggingFace repo
         #[arg(id = "model_name")]
@@ -41,11 +45,6 @@ enum Commands {
         /// API bind address
         #[arg(long = "api", default_value = "0.0.0.0:8080")]
         address: String,
-        #[command(flatten)]
-        args: Args,
-    },
-    /// Start as a cluster worker node
-    Worker {
         #[command(flatten)]
         args: Args,
     },
@@ -78,9 +77,16 @@ enum Commands {
         output: String,
     },
     // ── Legacy aliases (hidden, backward compat) ──────────────────
+    // ── Legacy aliases (hidden, backward compat) ──────────────────
     /// [hidden] Legacy master mode (use 'run' or 'serve' instead)
     #[command(hide = true)]
     Master {
+        #[command(flatten)]
+        args: Args,
+    },
+    /// [hidden] Legacy worker mode (use 'run --cluster-key' instead)
+    #[command(hide = true)]
+    Worker {
         #[command(flatten)]
         args: Args,
     },
@@ -114,12 +120,31 @@ async fn main() -> Result<()> {
         // ── New subcommands ──────────────────────────────────────────
 
         Commands::Run { model, prompt, mut args } => {
-            args.model = model;
-            if let Some(p) = prompt {
-                args.prompt = p;
+            match (model, args.cluster_key.is_some()) {
+                // No model + cluster key → worker mode
+                (None, true) => {
+                    args.mode = Mode::Worker;
+                    run_as_worker(args).await
+                }
+                // No model, no cluster key → error
+                (None, false) => {
+                    anyhow::bail!(
+                        "model is required. Usage:\n  \
+                         cake run <model> [prompt]           # local inference\n  \
+                         cake run <model> --cluster-key K    # distributed master\n  \
+                         cake run --cluster-key K            # distributed worker"
+                    );
+                }
+                // Model specified → master mode (local or distributed)
+                (Some(m), _) => {
+                    args.model = m;
+                    if let Some(p) = prompt {
+                        args.prompt = p;
+                    }
+                    args.mode = Mode::Master;
+                    run_as_master(args).await
+                }
             }
-            args.mode = Mode::Master;
-            run_as_master(args).await
         }
         Commands::Serve { model, address, mut args } => {
             args.model = model;
@@ -184,46 +209,51 @@ async fn main() -> Result<()> {
             run_as_master(args).await
         }
 
-        // ── Worker (same for new and legacy) ─────────────────────────
+        // ── Worker (legacy alias, hidden) ────────────────────────────
         Commands::Worker { mut args } => {
             args.mode = Mode::Worker;
-
-            // Zero-config: wait for master assignment + model data
-            let listener_override = if let (Some(key), None) = (&args.cluster_key, &args.topology) {
-                if args.name.is_none() {
-                    args.name = Some("worker".to_string());
-                }
-                let worker_name = args.name.as_deref().unwrap();
-                let cache_dir = cache_base_dir();
-                let (layers, model_path, listener) = cake::sharding::worker_setup(
-                    worker_name,
-                    key,
-                    &args.address,
-                    &cache_dir,
-                )
-                .await?;
-                args.model = model_path.to_string_lossy().to_string();
-                args.topology_override = Some(build_worker_topology(
-                    worker_name,
-                    &args.address,
-                    &layers,
-                ));
-                Some(listener)
-            } else {
-                None
-            };
-
-            let mut ctx = Context::from_args(args)?;
-            if let Some(listener) = listener_override {
-                *ctx.listener_override.lock().unwrap() = Some(listener);
-            }
-            let ret = run_worker(&mut ctx).await;
-            if ret.is_err() {
-                println!();
-            }
-            ret
+            run_as_worker(args).await
         }
     }
+}
+
+/// Worker setup: zero-config discovery or manual topology.
+/// Used by `run` (no model + cluster key) and legacy `worker` subcommand.
+async fn run_as_worker(mut args: Args) -> Result<()> {
+    // Zero-config: wait for master assignment + model data
+    let listener_override = if let (Some(key), None) = (&args.cluster_key, &args.topology) {
+        if args.name.is_none() {
+            args.name = Some("worker".to_string());
+        }
+        let worker_name = args.name.as_deref().unwrap();
+        let cache_dir = cache_base_dir();
+        let (layers, model_path, listener) = cake::sharding::worker_setup(
+            worker_name,
+            key,
+            &args.address,
+            &cache_dir,
+        )
+        .await?;
+        args.model = model_path.to_string_lossy().to_string();
+        args.topology_override = Some(build_worker_topology(
+            worker_name,
+            &args.address,
+            &layers,
+        ));
+        Some(listener)
+    } else {
+        None
+    };
+
+    let mut ctx = Context::from_args(args)?;
+    if let Some(listener) = listener_override {
+        *ctx.listener_override.lock().unwrap() = Some(listener);
+    }
+    let ret = run_worker(&mut ctx).await;
+    if ret.is_err() {
+        println!();
+    }
+    ret
 }
 
 /// Shared master setup: zero-config discovery + dispatch.

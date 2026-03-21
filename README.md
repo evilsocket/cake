@@ -45,7 +45,7 @@ cake serve evilsocket/Qwen3-0.6B
 cake list
 
 # Distributed inference (just add --cluster-key)
-cake worker --cluster-key mysecret                                   # on worker nodes
+cake run --cluster-key mysecret                                   # on worker nodes
 cake run evilsocket/Qwen3-0.6B "Hello" --cluster-key mysecret       # on master
 
 # Image generation (FLUX.1-dev FP8)
