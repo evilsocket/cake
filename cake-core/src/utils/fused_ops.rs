@@ -2701,6 +2701,167 @@ mod tests {
         assert_eq!(result.dims(), &[3]);
     }
 
+    // ── add_rms_norm shape and residual tests ──────────────────────
+
+    #[test]
+    fn test_add_rms_norm_shape_preservation_2d() {
+        let a = Tensor::new(&[[1.0f32, 2.0], [3.0, 4.0]], &Device::Cpu).unwrap();
+        let b = Tensor::new(&[[0.1f32, 0.2], [0.3, 0.4]], &Device::Cpu).unwrap();
+        let w = Tensor::ones(2, DType::F32, &Device::Cpu).unwrap();
+        let (residual, normed) = add_rms_norm(&a, &b, &w, 1e-6).unwrap();
+        assert_eq!(residual.dims(), &[2, 2]);
+        assert_eq!(normed.dims(), &[2, 2]);
+    }
+
+    #[test]
+    fn test_add_rms_norm_residual_is_sum() {
+        let a = Tensor::new(&[[1.0f32, 2.0, 3.0]], &Device::Cpu).unwrap();
+        let b = Tensor::new(&[[10.0f32, 20.0, 30.0]], &Device::Cpu).unwrap();
+        let w = Tensor::ones(3, DType::F32, &Device::Cpu).unwrap();
+        let (residual, _) = add_rms_norm(&a, &b, &w, 1e-6).unwrap();
+        let vals: Vec<f32> = residual.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(approx_eq(&vals, &[11.0, 22.0, 33.0], 1e-5));
+    }
+
+    // ── add3 tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_add3_correctness() {
+        let a = Tensor::new(&[1.0f32, 2.0, 3.0, 4.0], &Device::Cpu).unwrap();
+        let b = Tensor::new(&[10.0f32, 20.0, 30.0, 40.0], &Device::Cpu).unwrap();
+        let c = Tensor::new(&[100.0f32, 200.0, 300.0, 400.0], &Device::Cpu).unwrap();
+        let result: Vec<f32> = add3(&a, &b, &c).unwrap().to_vec1().unwrap();
+        assert!(approx_eq(&result, &[111.0, 222.0, 333.0, 444.0], 1e-5));
+    }
+
+    #[test]
+    fn test_add3_2d_shape() {
+        let a = Tensor::new(&[[1.0f32, 2.0], [3.0, 4.0]], &Device::Cpu).unwrap();
+        let b = Tensor::new(&[[0.1f32, 0.2], [0.3, 0.4]], &Device::Cpu).unwrap();
+        let c = Tensor::new(&[[0.01f32, 0.02], [0.03, 0.04]], &Device::Cpu).unwrap();
+        let result = add3(&a, &b, &c).unwrap();
+        assert_eq!(result.dims(), &[2, 2]);
+        let vals: Vec<f32> = result.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(approx_eq(&vals, &[1.11, 2.22, 3.33, 4.44], 1e-4));
+    }
+
+    // ── exp_mul tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_exp_mul_zero_exponent() {
+        // exp(0) = 1, so x * exp(0) = x
+        let x = Tensor::new(&[1.0f32, 2.0, 3.0], &Device::Cpu).unwrap();
+        let y = Tensor::zeros(3, DType::F32, &Device::Cpu).unwrap();
+        let result: Vec<f32> = exp_mul(&x, &y).unwrap().to_vec1().unwrap();
+        assert!(approx_eq(&result, &[1.0, 2.0, 3.0], 1e-6));
+    }
+
+    // ── sub_mul tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_sub_mul_zero_diff() {
+        let a = Tensor::new(&[1.0f32, 2.0], &Device::Cpu).unwrap();
+        let b = Tensor::new(&[1.0f32, 2.0], &Device::Cpu).unwrap();
+        let c = Tensor::new(&[999.0f32, 999.0], &Device::Cpu).unwrap();
+        let result: Vec<f32> = sub_mul(&a, &b, &c).unwrap().to_vec1().unwrap();
+        assert!(approx_eq(&result, &[0.0, 0.0], 1e-6));
+    }
+
+    // ── add_scaled tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_add_scaled_cpu_correctness() {
+        // a: (1, 2, 3), b: (1, 2, 3), c: (2,)
+        let a = Tensor::new(&[1f32, 2., 3., 4., 5., 6.], &Device::Cpu)
+            .unwrap()
+            .reshape((1, 2, 3))
+            .unwrap();
+        let b = Tensor::new(&[0.1f32, 0.2, 0.3, 0.4, 0.5, 0.6], &Device::Cpu)
+            .unwrap()
+            .reshape((1, 2, 3))
+            .unwrap();
+        let c = Tensor::new(&[10.0f32, 20.0], &Device::Cpu).unwrap();
+
+        let out = add_scaled(&a, &b, &c).unwrap();
+        assert_eq!(out.dims(), &[1, 2, 3]);
+        let vals: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        // chan0 (scale=10): [1+0.1*10, 2+0.2*10, 3+0.3*10] = [2, 4, 6]
+        // chan1 (scale=20): [4+0.4*20, 5+0.5*20, 6+0.6*20] = [12, 15, 18]
+        assert!(approx_eq(&vals, &[2.0, 4.0, 6.0, 12.0, 15.0, 18.0], 1e-5));
+    }
+
+    // ── depthwise_conv1d_bias tests ─────────────────────────────────
+
+    #[test]
+    fn test_depthwise_conv1d_bias_cpu() {
+        // batch=1, channels=2, input_len=4, kernel_size=3 → out_len=2
+        let input = Tensor::new(
+            &[[[1.0f32, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]],
+            &Device::Cpu,
+        )
+        .unwrap();
+        let weight = Tensor::new(
+            &[[1.0f32, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            &Device::Cpu,
+        )
+        .unwrap();
+        let bias = Tensor::new(&[10.0f32, 20.0], &Device::Cpu).unwrap();
+
+        let out = depthwise_conv1d_bias(&input, &weight, &bias, 3, 2).unwrap();
+        assert_eq!(out.dims(), &[1, 2, 2]);
+        let vals: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        // chan0, w=[1,0,0]: pos0=1*1+0+0+10=11, pos1=1*2+0+0+10=12
+        // chan1, w=[0,0,1]: pos0=0+0+7*1+20=27, pos1=0+0+8*1+20=28
+        assert!(approx_eq(&vals, &[11.0, 12.0, 27.0, 28.0], 1e-5));
+    }
+
+    #[test]
+    fn test_depthwise_conv1d_bias_shape() {
+        // batch=2, channels=3, input_len=6, kernel_size=2 → out_len=5
+        let input = Tensor::zeros((2, 3, 6), DType::F32, &Device::Cpu).unwrap();
+        let weight = Tensor::ones((3, 2), DType::F32, &Device::Cpu).unwrap();
+        let bias = Tensor::zeros(3, DType::F32, &Device::Cpu).unwrap();
+        let out = depthwise_conv1d_bias(&input, &weight, &bias, 2, 3).unwrap();
+        assert_eq!(out.dims(), &[2, 3, 5]);
+    }
+
+    // ── rms_norm_channel additional tests ───────────────────────────
+
+    #[test]
+    fn test_rms_norm_channel_with_nonunit_weight() {
+        // (1, 2, 3) with weight=[2, 0.5]
+        let x = Tensor::new(&[1f32, 1., 1., 2., 2., 2.], &Device::Cpu)
+            .unwrap()
+            .reshape((1, 2, 3))
+            .unwrap();
+        let w = Tensor::new(&[2.0f32, 0.5], &Device::Cpu).unwrap();
+        let out = rms_norm_channel(&x, &w, 1e-5).unwrap();
+        assert_eq!(out.dims(), &[1, 2, 3]);
+        let vals: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(vals.iter().all(|v| v.is_finite()), "all values should be finite");
+        assert!(vals.iter().any(|v| *v != 0.0), "output should be non-zero");
+    }
+
+    // ── depthwise_conv1d_silu additional tests ──────────────────────
+
+    #[test]
+    fn test_depthwise_conv1d_silu_batch2() {
+        // batch=2, channels=2, kernel_size=2
+        let window = Tensor::new(
+            &[
+                [[1.0f32, 2.0], [3.0, 4.0]],
+                [[0.5, -0.5], [-1.0, 1.0]],
+            ],
+            &Device::Cpu,
+        )
+        .unwrap();
+        let weight = Tensor::new(&[[1.0f32, 1.0], [0.5, 0.5]], &Device::Cpu).unwrap();
+        let result = depthwise_conv1d_silu(&window, &weight, 2, 2).unwrap();
+        assert_eq!(result.dims(), &[2, 2]);
+        let vals: Vec<f32> = result.flatten_all().unwrap().to_vec1().unwrap();
+        assert!(vals.iter().all(|v| v.is_finite()));
+    }
+
     // ── CUDA tests ───────────────────────────────────────────────────
 
     #[cfg(feature = "cuda")]

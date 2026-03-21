@@ -117,3 +117,139 @@ pub unsafe fn load_native_dtype_var_builder<'a>(
     let backend: Box<dyn SimpleBackend> = Box::new(NativeDtypeBackend { inner });
     Ok(VarBuilder::from_backend(backend, dtype, device.clone()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::{DType, Device, Tensor};
+    use std::collections::HashMap;
+
+    /// Helper: write tensors to a temp .safetensors file, return path.
+    fn write_safetensors(
+        tensors: &HashMap<String, Tensor>,
+        dir: &std::path::Path,
+    ) -> std::path::PathBuf {
+        let path = dir.join("test.safetensors");
+        candle_core::safetensors::save(tensors, &path).unwrap();
+        path
+    }
+
+    #[test]
+    fn test_non_f8_tensor_cast_to_f32() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tensors = HashMap::new();
+        // Store as F32 (non-F8)
+        let t = Tensor::new(&[1.0f32, 2.0, 3.0], &Device::Cpu).unwrap();
+        tensors.insert("my_weight".to_string(), t);
+        let path = write_safetensors(&tensors, dir.path());
+
+        let vb = unsafe {
+            load_native_dtype_var_builder(
+                &[path],
+                DType::F32,
+                &Device::Cpu,
+            )
+            .unwrap()
+        };
+        let loaded = vb.get_unchecked_dtype("my_weight", DType::F32).unwrap();
+        assert_eq!(loaded.dtype(), DType::F32);
+        let vals: Vec<f32> = loaded.to_vec1().unwrap();
+        assert_eq!(vals, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn test_bf16_tensor_cast_to_f32() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tensors = HashMap::new();
+        // Store as BF16
+        let t = Tensor::new(&[1.0f32, 2.0, 3.0], &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        tensors.insert("bf16_weight".to_string(), t);
+        let path = write_safetensors(&tensors, dir.path());
+
+        let vb = unsafe {
+            load_native_dtype_var_builder(
+                &[path],
+                DType::F32,
+                &Device::Cpu,
+            )
+            .unwrap()
+        };
+        let loaded = vb
+            .get_unchecked_dtype("bf16_weight", DType::F32)
+            .unwrap();
+        // Non-F8 tensors are cast to F32
+        assert_eq!(loaded.dtype(), DType::F32);
+        let vals: Vec<f32> = loaded.to_vec1().unwrap();
+        assert!((vals[0] - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_contains_tensor_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "exists".to_string(),
+            Tensor::zeros(4, DType::F32, &Device::Cpu).unwrap(),
+        );
+        let path = write_safetensors(&tensors, dir.path());
+
+        let vb = unsafe {
+            load_native_dtype_var_builder(&[path], DType::F32, &Device::Cpu).unwrap()
+        };
+        assert!(vb.contains_tensor("exists"));
+    }
+
+    #[test]
+    fn test_contains_tensor_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "exists".to_string(),
+            Tensor::zeros(4, DType::F32, &Device::Cpu).unwrap(),
+        );
+        let path = write_safetensors(&tensors, dir.path());
+
+        let vb = unsafe {
+            load_native_dtype_var_builder(&[path], DType::F32, &Device::Cpu).unwrap()
+        };
+        assert!(!vb.contains_tensor("does_not_exist"));
+    }
+
+    #[test]
+    fn test_get_shape_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "w".to_string(),
+            Tensor::zeros((3, 4), DType::F32, &Device::Cpu).unwrap(),
+        );
+        let path = write_safetensors(&tensors, dir.path());
+
+        let vb = unsafe {
+            load_native_dtype_var_builder(&[path], DType::F32, &Device::Cpu).unwrap()
+        };
+        // Request wrong shape
+        let result = vb.get((5, 4), "w");
+        assert!(result.is_err(), "expected shape mismatch error");
+    }
+
+    #[test]
+    fn test_get_correct_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut tensors = HashMap::new();
+        tensors.insert(
+            "w".to_string(),
+            Tensor::ones((3, 4), DType::F32, &Device::Cpu).unwrap(),
+        );
+        let path = write_safetensors(&tensors, dir.path());
+
+        let vb = unsafe {
+            load_native_dtype_var_builder(&[path], DType::F32, &Device::Cpu).unwrap()
+        };
+        let loaded = vb.get((3, 4), "w").unwrap();
+        assert_eq!(loaded.dims(), &[3, 4]);
+    }
+}

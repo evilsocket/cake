@@ -24,3 +24,5 @@ mod test_flux;
 mod test_gguf;
 #[path = "unit_tests/test_luxtts.rs"]
 mod test_luxtts;
+#[path = "unit_tests/test_transformer_standalone.rs"]
+mod test_transformer_standalone;

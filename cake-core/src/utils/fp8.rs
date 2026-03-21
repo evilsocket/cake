@@ -329,4 +329,115 @@ mod tests {
         std::fs::write(&config_path2, r#"{"hidden_size": 4096}"#).unwrap();
         assert!(!is_fp8_quantized(&config_path2));
     }
+
+    #[test]
+    fn test_fp8_linear_new_f32_weight_stored_in_weight() {
+        let w = Tensor::new(&[[1.0f32, 2.0], [3.0, 4.0]], &Device::Cpu).unwrap();
+        let lin = Fp8Linear::new(w, None);
+        // F32 weight should be in `weight`, not f8_weight
+        assert!(lin.f8_weight.is_none());
+        assert!(lin.weight.read().unwrap().is_some());
+    }
+
+    #[test]
+    fn test_fp8_linear_forward_preserves_dtype_f32() {
+        let w = Tensor::new(&[[1.0f32, 0.0], [0.0, 1.0]], &Device::Cpu).unwrap();
+        let lin = Fp8Linear::new(w, None);
+        let x = Tensor::new(&[[2.0f32, 3.0]], &Device::Cpu).unwrap();
+        let out = lin.forward(&x).unwrap();
+        assert_eq!(out.dtype(), DType::F32);
+        assert_eq!(out.dims(), &[1, 2]);
+    }
+
+    #[test]
+    fn test_fp8_linear_forward_with_bias() {
+        // Weight = identity, bias = [10, 20]
+        let w = Tensor::new(&[[1.0f32, 0.0], [0.0, 1.0]], &Device::Cpu).unwrap();
+        let b = Tensor::new(&[10.0f32, 20.0], &Device::Cpu).unwrap();
+        let lin = Fp8Linear::new(w, Some(b));
+        let x = Tensor::new(&[[1.0f32, 2.0]], &Device::Cpu).unwrap();
+        let out = lin.forward(&x).unwrap();
+        let vals: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        // [1*1+2*0+10, 1*0+2*1+20] = [11, 22]
+        assert!((vals[0] - 11.0).abs() < 1e-5);
+        assert!((vals[1] - 22.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_fp8_linear_warmup_caches_weight() {
+        let w = Tensor::new(&[[1.0f32, 2.0], [3.0, 4.0]], &Device::Cpu).unwrap();
+        let mut lin = Fp8Linear::new(w, None);
+        lin.warmup().unwrap();
+        // After warmup, f8_weight should be cleared (it was already None for F32)
+        assert!(lin.f8_weight.is_none());
+        // weight should still be available
+        assert!(lin.weight.read().unwrap().is_some());
+    }
+
+    #[test]
+    fn test_fp8_linear_helper_loads_from_vb() {
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
+        map.insert(
+            "weight".to_string(),
+            Tensor::new(&[[1.0f32, 2.0, 3.0], [4.0, 5.0, 6.0]], &Device::Cpu).unwrap(),
+        );
+        let vb = candle_nn::VarBuilder::from_tensors(map, DType::F32, &Device::Cpu);
+        let lin = fp8_linear(3, 2, vb).unwrap();
+        let x = Tensor::zeros((1, 3), DType::F32, &Device::Cpu).unwrap();
+        let out = lin.forward(&x).unwrap();
+        assert_eq!(out.dims(), &[1, 2]);
+    }
+
+    #[test]
+    fn test_fp8_linear_helper_transposes_if_needed() {
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
+        // Store weight as (in, out) instead of (out, in)
+        map.insert(
+            "weight".to_string(),
+            Tensor::new(&[[1.0f32, 2.0], [3.0, 4.0], [5.0, 6.0]], &Device::Cpu).unwrap(),
+        );
+        let vb = candle_nn::VarBuilder::from_tensors(map, DType::F32, &Device::Cpu);
+        // in=3, out=2; weight is (3,2) so needs transpose
+        let lin = fp8_linear(3, 2, vb).unwrap();
+        let x = Tensor::ones((1, 3), DType::F32, &Device::Cpu).unwrap();
+        let out = lin.forward(&x).unwrap();
+        assert_eq!(out.dims(), &[1, 2]);
+    }
+
+    #[test]
+    fn test_fp8_linear_b_loads_weight_and_bias() {
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
+        map.insert(
+            "weight".to_string(),
+            Tensor::new(&[[1.0f32, 0.0], [0.0, 1.0]], &Device::Cpu).unwrap(),
+        );
+        map.insert(
+            "bias".to_string(),
+            Tensor::new(&[5.0f32, 10.0], &Device::Cpu).unwrap(),
+        );
+        let vb = candle_nn::VarBuilder::from_tensors(map, DType::F32, &Device::Cpu);
+        let lin = fp8_linear_b(2, 2, vb).unwrap();
+        let x = Tensor::new(&[[1.0f32, 2.0]], &Device::Cpu).unwrap();
+        let out = lin.forward(&x).unwrap();
+        let vals: Vec<f32> = out.flatten_all().unwrap().to_vec1().unwrap();
+        assert!((vals[0] - 6.0).abs() < 1e-5);
+        assert!((vals[1] - 12.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_fp8_linear_b_no_bias_in_vb() {
+        use std::collections::HashMap;
+        let mut map = HashMap::new();
+        map.insert(
+            "weight".to_string(),
+            Tensor::new(&[[1.0f32, 0.0], [0.0, 1.0]], &Device::Cpu).unwrap(),
+        );
+        // No bias tensor
+        let vb = candle_nn::VarBuilder::from_tensors(map, DType::F32, &Device::Cpu);
+        let lin = fp8_linear_b(2, 2, vb).unwrap();
+        assert!(lin.bias.is_none());
+    }
 }
