@@ -12,6 +12,7 @@
 | macOS | x86_64 | - | Supported |
 | macOS | aarch64 | - | Supported |
 | macOS | aarch64 | Metal | Supported |
+| GNU/Linux | x86_64 | Vulkan | Supported |
 | Android | arm, arm64, x86_64 | - | Supported |
 | Android | arm, arm64, x86_64 | CUDA | [Untested](https://docs.nvidia.com/gameworks/content/technologies/mobile/cuda_android_main.htm) |
 | iOS / iPadOS | aarch64 | - | Supported |
@@ -46,6 +47,12 @@ version supported by your driver to avoid library version mismatches:
 
 ```sh
 CUDA_HOME=/usr/local/cuda-12.4 cargo build --release --features cuda
+```
+
+**Vulkan (Steam Deck, AMD/Intel GPUs):**
+
+```sh
+cargo build --release --features vulkan
 ```
 
 **CUDA on Windows:**
@@ -86,6 +93,21 @@ make mobile_ios
 `make mobile_ios` builds the Rust static library (`libcake_mobile.a` with Metal), compiles the KMP shared framework via Gradle, and copies it into the Xcode project. Metal acceleration is enabled on A13+ / M-series devices; older devices fall back to CPU automatically.
 
 ## Feature Flags
+
+### Backend Features
+
+By default, inference runs on CPU. Enable GPU acceleration with:
+
+| Feature | Backend | Platforms |
+|---------|---------|-----------|
+| `cuda` | NVIDIA CUDA (PTX kernels + flash-attn) | Linux, Windows |
+| `metal` | Apple Metal (MSL shaders + fused SDPA) | macOS, iOS |
+| `vulkan` | Vulkan via wgpu | Linux, Windows, Steam Deck |
+| `flash-attn` | Flash Attention 2 (implies `cuda`) | Linux, Windows |
+
+Multiple backends can be compiled together — the runtime auto-selects based on available hardware.
+
+### Model Features
 
 By default, all text model architectures are compiled in. To build only for specific models:
 

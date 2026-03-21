@@ -22,7 +22,7 @@ Cake is a **multimodal AI inference server** written in Rust that can run models
 
 - **Multi Modal** — [Text generation](docs/models.md), [image generation](docs/image_generation.md) (Stable Diffusion, FLUX), and [voice synthesis](docs/voice_generation.md) (VibeVoice TTS with voice cloning).
 - **Multi Model** — [15 text model families](docs/models.md), 6 image model variants, and 2 TTS models. Architecture auto-detected from HuggingFace checkpoints.
-- **Multi Platform** — CUDA, Metal, and CPU backends across [Linux, macOS, Windows, iOS, and Android](docs/install.md).
+- **Multi Platform** — CUDA, Metal, Vulkan, and CPU backends across [Linux, macOS, Windows, iOS, and Android](docs/install.md).
 - **Multi Node** — Shard transformer blocks across devices with [zero-config mDNS clustering](docs/clustering.md) or manual topology. Also runs entirely on a single machine.
 - **OpenAI-Compatible API** — REST API with streaming, plus a [built-in web UI and TUI chat client](docs/usage.md#web-ui).
 - **Docker** — [Container builds](docs/docker.md) for Linux/NVIDIA with docker-compose cluster support.
@@ -32,9 +32,10 @@ Cake is a **multimodal AI inference server** written in Rust that can run models
 ### Build
 
 ```sh
-cargo build --release --features cuda  # Linux (NVIDIA)
-cargo build --release --features metal # macOS (Apple Silicon)
-cargo build --release                  # CPU only
+cargo build --release --features cuda   # Linux (NVIDIA)
+cargo build --release --features metal  # macOS (Apple Silicon)
+cargo build --release --features vulkan # Linux (AMD/Intel/Steam Deck)
+cargo build --release                   # CPU only
 ```
 
 ### Models

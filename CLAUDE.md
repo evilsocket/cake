@@ -19,6 +19,9 @@ CUDA_HOME=/usr/local/cuda-12.4 LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64 cargo 
 
 # stevie.local (Metal)
 cargo build --release --features metal
+
+# Vulkan (Steam Deck, AMD GPUs, any Vulkan 1.3+ device)
+cargo build --release --features vulkan
 ```
 
 ## Run Commands (Qwen3.5-0.8B cluster)
@@ -102,7 +105,7 @@ ssh stevie.local "cd ~/Lab/cake && ./target/release/cake run --model evilsocket/
 
 ## Testing
 
-### Unit Tests (735+ tests, <3s)
+### Unit Tests (765+ tests, <3s)
 
 All tests run offline — no model downloads, no GPU, no network servers required.
 
@@ -144,12 +147,13 @@ DIVAN_SAMPLE_COUNT=1 cargo bench -p cake-core
 ```
 
 Benchmarks use divan and are in `cake-core/benches/`. They share helpers with unit tests
-and run on CPU with small dimensions (hidden=64) for fast iteration. ~100 benchmarks covering:
+and run on CPU with small dimensions (hidden=64) for fast iteration. ~130 benchmarks covering:
 attention, MLP, GatedDeltaNet, MoE, FLUX (timestep embed, pos embed, Fp8Linear, VAE ResnetBlock),
 full blocks, cache, serialization, protocol (tensor encode/decode, model data transfer with
-zstd compression and CRC32 checksums), auth, discovery, topology, quantization, fused ops
-(add3, add_rms_norm, add_scaled, depthwise_conv1d, rms_norm_channel), Fp8Linear forward,
-transformer block forward, native dtype backend, and SD utilities.
+zstd compression and CRC32 checksums), auth, discovery, topology, quantization, backend ops
+(silu_mul, stable_softplus, rms_norm_gated, add3, add_rms_norm, add_scaled, depthwise_conv1d,
+rms_norm_channel — CPU and GPU variants), Fp8Linear forward, transformer block forward,
+native dtype backend, and SD utilities.
 
 ### Rules
 

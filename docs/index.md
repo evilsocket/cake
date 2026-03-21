@@ -2,7 +2,7 @@
 
 Cake is a Rust framework for multimodal distributed inference. It shards models across consumer devices — iOS, Android, macOS, Linux, Windows — to run workloads that wouldn't fit on a single GPU.
 
-Built on [Candle](https://github.com/huggingface/candle) with support for CUDA, Metal, and CPU backends.
+Built on [Candle](https://github.com/huggingface/candle) with support for CUDA, Metal, Vulkan, and CPU backends.
 
 ## Table of Contents
 
