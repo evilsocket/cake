@@ -29,35 +29,67 @@ Cake is a **multimodal AI inference server** written in Rust that can run models
 
 ## Quick Start
 
+### Build
+
 ```sh
-cargo build --release --features cuda  # or: --features metal
+cargo build --release --features cuda  # Linux (NVIDIA)
+cargo build --release --features metal # macOS (Apple Silicon)
+cargo build --release                  # CPU only
+```
 
-# Download a model
-cake pull evilsocket/Qwen3-0.6B
+### Models
 
-# Run a single prompt
-cake run evilsocket/Qwen3-0.6B "Explain quantum computing"
+Download models from HuggingFace with `cake pull`. Models are stored in the standard HuggingFace cache directory (`~/.cache/huggingface/hub/`) and are shared with any other tools that use the same cache (transformers, huggingface-cli, etc.).
+
+```sh
+cake pull evilsocket/Qwen3-0.6B             # text model (600M params)
+cake pull evilsocket/flux1-dev               # image model (FLUX.1-dev FP8)
+cake pull evilsocket/VibeVoice-1.5B          # voice synthesis model
+
+cake list                                    # show all locally available models
+```
+
+Models are also downloaded automatically on first use if not already cached.
+
+### Single Node
+
+Run any model locally on a single machine — architecture is auto-detected from the model's `config.json`:
+
+```sh
+# Text generation
+cake run evilsocket/Qwen3-0.6B "Explain quantum computing in simple terms"
 
 # Start an API server + web UI
 cake serve evilsocket/Qwen3-0.6B
-
-# List locally available models
-cake list
-
-# Distributed inference (just add --cluster-key)
-cake run --cluster-key mysecret                                   # on worker nodes
-cake run evilsocket/Qwen3-0.6B "Hello" --cluster-key mysecret       # on master
 
 # Image generation (FLUX.1-dev FP8)
 cake run evilsocket/flux1-dev --model-type image-model --image-model-arch flux1 \
   --sd-image-prompt "a cyberpunk cityscape at night"
 
-# Voice synthesis (VibeVoice-1.5B with voice cloning)
+# Voice synthesis with voice cloning
 cake run evilsocket/VibeVoice-1.5B --model-type audio-model \
   --voice-prompt voice.wav "Hello world"
 ```
 
-Models are downloaded automatically from HuggingFace on first use. For the full usage guide and API reference, [check the project documentation](docs/index.md).
+### Distributed
+
+Shard a model across multiple machines using `--cluster-key`. Workers don't need the model data — the master automatically streams the required tensor weights over the network (compressed with zstd, verified with CRC32 checksums). Workers cache received data locally for subsequent runs.
+
+```sh
+# Start workers on any machines (no model needed)
+cake run --cluster-key mysecret --name gpu-server-1    # machine A
+cake run --cluster-key mysecret --name macbook          # machine B
+
+# Run inference from the master (has the model)
+cake run evilsocket/Qwen3-0.6B "Hello" --cluster-key mysecret
+
+# Or start an API server as the master
+cake serve evilsocket/Qwen3-0.6B --cluster-key mysecret
+```
+
+The master discovers workers via mDNS, assigns layers proportionally to each device's VRAM/compute, and pushes only the required weight shards. See the [clustering documentation](docs/clustering.md) for manual topology files and advanced configuration.
+
+For the full usage guide and API reference, [check the project documentation](docs/index.md).
 
 ## Star History
 
