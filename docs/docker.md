@@ -22,7 +22,7 @@ Load the entire model in a single container (no cluster):
 docker run --rm --gpus all \
   -v /path/to/model:/model:ro \
   -p 8080:8080 \
-  cake master --model /model --api 0.0.0.0:8080
+  cake serve /model
 ```
 
 ## Multi-Worker Cluster

@@ -1,17 +1,17 @@
 # REST API
 
-Cake exposes an OpenAI-compatible REST API when running with the `--api` flag. The same server handles text chat, image generation, and audio/TTS — only endpoints for the loaded model type return results; all others return `404` with a JSON error.
+Cake exposes an OpenAI-compatible REST API when using `cake serve`. The same server handles text chat, image generation, and audio/TTS — only endpoints for the loaded model type return results; all others return `404` with a JSON error.
 
 ```sh
 # Text model
-cake master --model evilsocket/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080
+cake serve evilsocket/Qwen2.5-Coder-1.5B-Instruct
 
 # Image model
-cake master --model-type image-model --image-model-arch flux1 --api 0.0.0.0:8080
+cake serve evilsocket/flux1-dev --model-type image-model --image-model-arch flux1
 
 # Audio model
-cake master --model-type audio-model --model evilsocket/VibeVoice-1.5B \
-  --voice-prompt voice.wav --api 0.0.0.0:8080
+cake serve evilsocket/VibeVoice-1.5B --model-type audio-model \
+  --voice-prompt voice.wav
 ```
 
 ## Endpoints

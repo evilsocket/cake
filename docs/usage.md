@@ -5,7 +5,7 @@
 You can pass a HuggingFace repo ID as the `--model` argument and Cake will download the model automatically (with progress bars). Files are cached in `~/.cache/huggingface/hub/` — subsequent runs skip the download.
 
 ```sh
-cake master --model evilsocket/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080
+cake serve evilsocket/Qwen2.5-Coder-1.5B-Instruct
 ```
 
 To pre-download a model without running inference:
@@ -19,7 +19,7 @@ For gated models (like LLaMA 3), set the `HF_TOKEN` environment variable with yo
 You can also pass a local path to a model directory:
 
 ```sh
-cake master --model /path/to/Meta-Llama-3-8B --api 0.0.0.0:8080
+cake serve /path/to/Meta-Llama-3-8B
 ```
 
 ## Single Prompt
@@ -27,7 +27,7 @@ cake master --model /path/to/Meta-Llama-3-8B --api 0.0.0.0:8080
 To quickly test a model with a single prompt (no API server):
 
 ```sh
-cake master --model evilsocket/Qwen2.5-Coder-1.5B-Instruct --prompt "Why is the sky blue?"
+cake run evilsocket/Qwen2.5-Coder-1.5B-Instruct --prompt "Why is the sky blue?"
 ```
 
 ## Listing Local Models
@@ -42,10 +42,10 @@ This scans `~/.cache/huggingface/hub/` and `~/.cache/cake/` and shows each model
 
 ## Web UI
 
-When running with the `--api` flag, Cake serves a web interface with two tabs:
+When using `cake serve`, Cake serves a web interface with two tabs:
 
 ```sh
-cake master --model evilsocket/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080
+cake serve evilsocket/Qwen2.5-Coder-1.5B-Instruct
 ```
 
 Open `http://localhost:8080` in your browser.
@@ -57,7 +57,7 @@ Open `http://localhost:8080` in your browser.
 To protect the web UI with basic auth:
 
 ```sh
-cake master --model evilsocket/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080 --ui-auth user:pass
+cake serve evilsocket/Qwen2.5-Coder-1.5B-Instruct --ui-auth user:pass
 ```
 
 ## TUI Chat
@@ -85,7 +85,7 @@ The Chat tab shows streaming responses with tokens/second stats. The Cluster tab
 Cake exposes an OpenAI-compatible REST API when running with `--api`, supporting chat completion, audio/TTS, and image generation. All endpoints are served from the same server; only the loaded model type produces results — others return `404`.
 
 ```sh
-cake master --model evilsocket/Qwen2.5-Coder-1.5B-Instruct --api 0.0.0.0:8080
+cake serve evilsocket/Qwen2.5-Coder-1.5B-Instruct
 ```
 
 Quick example:

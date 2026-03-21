@@ -57,7 +57,7 @@ print(' '.join(str(i) for i in ids))
 " > token_ids.txt
 
 # Generate audio using pre-computed tokens
-cake master --model evilsocket/luxtts \
+cake run evilsocket/luxtts \
   --prompt "Hello world" \
   --tts-token-ids token_ids.txt \
   --tts-speed 0.16 \
@@ -69,7 +69,7 @@ cake master --model evilsocket/luxtts \
 ### Basic Usage (built-in tokenizer)
 
 ```sh
-cake master --model evilsocket/luxtts \
+cake run evilsocket/luxtts \
   --prompt "Hello world, this is a test." \
   --audio-output output.wav \
   --tts-speed 0.16 \
@@ -82,7 +82,7 @@ cake master --model evilsocket/luxtts \
 Provide a 24kHz mono WAV reference audio for voice cloning:
 
 ```sh
-cake master --model evilsocket/luxtts \
+cake run evilsocket/luxtts \
   --prompt "Hello world" \
   --tts-reference-audio voice_sample.wav \
   --audio-output output.wav \
@@ -115,7 +115,7 @@ cake worker --model evilsocket/luxtts --name worker1 \
   --topology topology-luxtts.yml --address 0.0.0.0:10128
 
 # Master
-cake master --model evilsocket/luxtts --topology topology-luxtts.yml \
+cake run evilsocket/luxtts --topology topology-luxtts.yml \
   --prompt "Hello world" --audio-output output.wav \
   --tts-speed 0.16 --tts-diffusion-steps 4 --dtype f32
 ```
@@ -152,7 +152,7 @@ The recommended model. Supports multi-speaker voice cloning from raw .wav files.
 ### Basic Usage
 
 ```sh
-cake master --model-type audio-model --model evilsocket/VibeVoice-1.5B \
+cake run evilsocket/VibeVoice-1.5B --model-type audio-model \
   --voice-prompt voice_reference.wav \
   --prompt "Hello world, this is a test of the voice cloning system." \
   --audio-output output.wav
@@ -171,7 +171,7 @@ Pre-made voice presets are available in the [VibeVoice community repo](https://g
 wget https://raw.githubusercontent.com/vibevoice-community/VibeVoice/main/demo/voices/en-Alice_woman.wav
 
 # Use it
-cake master --model-type audio-model --model evilsocket/VibeVoice-1.5B \
+cake run evilsocket/VibeVoice-1.5B --model-type audio-model \
   --voice-prompt en-Alice_woman.wav \
   --prompt "Your text here" --audio-output output.wav
 ```
@@ -205,7 +205,7 @@ A lightweight streaming variant optimized for real-time TTS. Uses a split LM arc
 ### Usage
 
 ```sh
-cake master --model-type audio-model --model evilsocket/VibeVoice-Realtime-0.5B \
+cake run evilsocket/VibeVoice-Realtime-0.5B --model-type audio-model \
   --voice-prompt voice_preset.safetensors \
   --prompt "Hello world" --audio-output output.wav \
   --tts-cfg-scale 1.5
@@ -215,12 +215,12 @@ Voice presets for the 0.5B model are `.safetensors` files containing pre-compute
 
 ## API Endpoint
 
-When running with `--api`, the audio endpoint is available at `/v1/audio/speech`:
+When using `cake serve`, the audio endpoint is available at `/v1/audio/speech`:
 
 ```sh
 # Start the API server
-cake master --model-type audio-model --model evilsocket/VibeVoice-1.5B \
-  --voice-prompt voice_reference.wav --api 0.0.0.0:8080
+cake serve evilsocket/VibeVoice-1.5B --model-type audio-model \
+  --voice-prompt voice_reference.wav
 
 # Generate speech
 curl http://localhost:8080/v1/audio/speech \

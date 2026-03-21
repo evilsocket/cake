@@ -14,9 +14,8 @@ cake worker --cluster-key mysecret --name gpu-server-1
 cake worker --cluster-key mysecret --name macbook
 
 # On the master (has the model)
-cake master --model /path/to/Meta-Llama-3-8B \
-            --cluster-key mysecret \
-            --api 0.0.0.0:8080
+cake serve /path/to/Meta-Llama-3-8B \
+            --cluster-key mysecret
 ```
 
 The cluster key can also be set via the `CAKE_CLUSTER_KEY` environment variable.
@@ -58,15 +57,14 @@ cake worker --model /path/to/Meta-Llama-3-8B \
 Run a master node with an OpenAI-compatible REST API:
 
 ```sh
-cake master --model /path/to/Meta-Llama-3-8B \
-            --api 0.0.0.0:8080 \
+cake serve /path/to/Meta-Llama-3-8B \
             --topology topology.yml
 ```
 
 You can also omit the topology file to load the entire model in a single instance:
 
 ```sh
-cake master --model /path/to/Meta-Llama-3-8B --api 0.0.0.0:8080
+cake serve /path/to/Meta-Llama-3-8B
 ```
 
 ### Topology file format

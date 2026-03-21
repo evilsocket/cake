@@ -20,7 +20,7 @@ Cake supports image generation with Stable Diffusion and FLUX models.
 High-quality 12B parameter flow-matching transformer. Runs in FP8 precision on a single GPU with 16GB+ VRAM. Models are downloaded automatically from HuggingFace.
 
 ```sh
-cake master --model-type image-model --image-model-arch flux1 \
+cake run evilsocket/flux1-dev --model-type image-model --image-model-arch flux1 \
   --sd-image-prompt "a photorealistic landscape at golden hour, dramatic clouds" \
   --flux-height 768 --flux-width 1024 \
   --image-output landscape.png
@@ -31,7 +31,7 @@ cake master --model-type image-model --image-model-arch flux1 \
 Faster 4B variant, 4 denoising steps, best at 512x512:
 
 ```sh
-cake master --model-type image-model --image-model-arch flux \
+cake run black-forest-labs/FLUX.2-klein-4B --model-type image-model --image-model-arch flux \
   --model black-forest-labs/FLUX.2-klein-4B \
   --sd-image-prompt "a fluffy orange cat sitting on a wooden table"
 ```
@@ -51,7 +51,7 @@ cake master --model-type image-model --image-model-arch flux \
 ### Single Node
 
 ```sh
-cake master --model-type image-model \
+cake run evilsocket/flux1-dev --model-type image-model \
   --sd-image-prompt "An old man sitting on the chair at seaside" \
   --sd-version xl --sd-num-samples 1 --sd-image-seed 2439383
 ```
@@ -84,8 +84,8 @@ cake worker --model /path/to/hf/cache \
   --topology topology.yml --address 0.0.0.0:10128
 
 # Master with API
-cake master --model /path/to/hf/cache \
-  --api 0.0.0.0:8080 --model-type image-model --topology topology.yml
+cake serve /path/to/hf/cache \
+  --model-type image-model --topology topology.yml
 ```
 
 ### API Endpoints

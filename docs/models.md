@@ -48,20 +48,20 @@ See [Voice Generation](voice_generation.md) for usage.
 Text model architecture is auto-detected from `config.json` in the model directory. You can also set it explicitly:
 
 ```sh
-cake master --model /path/to/model --text-model-arch auto|llama|qwen2|qwen3|qwen3-moe|qwen3-5|qwen3-5moe|phi4|mistral|gemma3|falcon3|ol-mo2|exaone4
+cake run /path/to/model --text-model-arch auto|llama|qwen2|qwen3|qwen3-moe|qwen3-5|qwen3-5moe|phi4|mistral|gemma3|falcon3|ol-mo2|exaone4
 ```
 
 Image and voice model types are selected with `--model-type`:
 
 ```sh
-cake master --model-type image-model --image-model-arch sd|flux|flux1
-cake master --model-type audio-model  # VibeVoice (auto-detects 1.5B vs 0.5B)
+cake run evilsocket/flux1-dev --model-type image-model --image-model-arch sd|flux|flux1
+cake run evilsocket/VibeVoice-1.5B --model-type audio-model  # VibeVoice (auto-detects 1.5B vs 0.5B)
 ```
 
 LuxTTS is detected automatically from its `config.json` architecture string and uses the text model dispatch path (enabling distributed inference):
 
 ```sh
-cake master --model evilsocket/luxtts --prompt "Hello world" --audio-output output.wav
+cake run evilsocket/luxtts --prompt "Hello world" --audio-output output.wav
 ```
 
 ## Model Notes
