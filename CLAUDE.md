@@ -36,16 +36,15 @@ LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64 ./target/release/cake worker \
   --topology topology-0.8B.yml --address 0.0.0.0:10128
 
 # Master (blade, local):
-./target/release/cake run \
-  --model evilsocket/Qwen3.5-0.8B \
-  --topology topology-0.8B.yml \
-  --prompt "Explain quantum computing in simple terms"
+./target/release/cake run evilsocket/Qwen3.5-0.8B \
+  "Explain quantum computing in simple terms" \
+  --topology topology-0.8B.yml
 ```
 
 ## Model: evilsocket/Qwen3.5-0.8B
 
 - **Architecture**: Qwen3_5ForConditionalGeneration
-- **Layers**: 24 (48 GatedDeltaNet linear attn + 16 full attn... wait, 0.8B has 24 total)
+- **Layers**: 24 (18 GatedDeltaNet linear attn + 6 full attn)
 - **Hidden size**: 1024
 - **Layer prefix**: `model.language_model.layers.{N}`
 - **Location**: HuggingFace cache on all 3 machines (`~/.cache/huggingface/hub/models--Qwen--Qwen3.5-0.8B/`)
@@ -98,12 +97,12 @@ ssh bahamut.local "cd ~/Lab/cake && LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64 .
 ssh stevie.local "cd ~/Lab/cake && ./target/release/cake worker --model evilsocket/Qwen3.5-0.8B --name stevie --topology topology-0.8B.yml --address 0.0.0.0:10128"
 
 # Run master (blade, local)
-./target/release/cake run --model evilsocket/Qwen3.5-0.8B --topology topology-0.8B.yml --prompt "Explain quantum computing in simple terms"
+./target/release/cake run evilsocket/Qwen3.5-0.8B "Explain quantum computing in simple terms" --topology topology-0.8B.yml
 ```
 
 ## Testing
 
-### Unit Tests (500 tests, <3s)
+### Unit Tests (735+ tests, <3s)
 
 All tests run offline — no model downloads, no GPU, no network servers required.
 
@@ -145,10 +144,12 @@ DIVAN_SAMPLE_COUNT=1 cargo bench -p cake-core
 ```
 
 Benchmarks use divan and are in `cake-core/benches/`. They share helpers with unit tests
-and run on CPU with small dimensions (hidden=64) for fast iteration. ~55 benchmarks covering:
+and run on CPU with small dimensions (hidden=64) for fast iteration. ~100 benchmarks covering:
 attention, MLP, GatedDeltaNet, MoE, FLUX (timestep embed, pos embed, Fp8Linear, VAE ResnetBlock),
-full blocks, cache, serialization, protocol, auth,
-discovery, topology, quantization, and SD utilities.
+full blocks, cache, serialization, protocol (tensor encode/decode, model data transfer with
+zstd compression and CRC32 checksums), auth, discovery, topology, quantization, fused ops
+(add3, add_rms_norm, add_scaled, depthwise_conv1d, rms_norm_channel), Fp8Linear forward,
+transformer block forward, native dtype backend, and SD utilities.
 
 ### Rules
 
