@@ -1,15 +1,14 @@
-//! CPU compute backend — delegates to existing fused_ops functions.
+//! CPU compute backend — pure candle tensor operations, no CustomOp, no ops/ module.
 //!
 //! This is the default backend. All operations use candle's CPU tensor ops
 //! with rayon parallelization where beneficial. GPU backends override specific
 //! methods for acceleration.
 
-use candle_core::{DType, Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor, D};
 
 use super::ComputeBackend;
-use super::ops;
 
-/// CPU backend — uses candle CPU ops + rayon-parallelized fused kernels.
+/// CPU backend — uses candle CPU ops directly.
 #[derive(Debug)]
 pub struct CpuBackend {
     device: Device,
@@ -77,11 +76,16 @@ impl ComputeBackend for CpuBackend {
     }
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-        ops::silu_mul(gate, up)
+        (candle_nn::ops::silu(&gate.contiguous()?)? * up.contiguous()?)?
+            .contiguous()
     }
 
     fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
-        ops::stable_softplus(x)
+        // ln(1 + exp(clamp(x, -inf, 88))) with max(x, result)
+        let t88 = Tensor::full(88.0f32, x.shape(), x.device())?.to_dtype(x.dtype())?;
+        let clamped = x.minimum(&t88)?;
+        let sp = (clamped.exp()? + 1.0)?.log()?;
+        x.maximum(&sp)
     }
 
     fn rms_norm_gated(
@@ -91,7 +95,9 @@ impl ComputeBackend for CpuBackend {
         weight: &Tensor,
         eps: f32,
     ) -> Result<Tensor> {
-        ops::rms_norm_gated(x, z, weight, eps)
+        let n = candle_nn::ops::rms_norm(&x.contiguous()?, weight, eps)?;
+        (n * candle_nn::ops::silu(&z.contiguous()?.to_dtype(x.dtype())?)?)?
+            .contiguous()
     }
 
     fn add_rms_norm(
@@ -101,17 +107,32 @@ impl ComputeBackend for CpuBackend {
         weight: &Tensor,
         eps: f32,
     ) -> Result<(Tensor, Tensor)> {
-        ops::add_rms_norm(a, b, weight, eps)
+        let res = (a + b)?;
+        let normed = candle_nn::ops::rms_norm(&res.contiguous()?, weight, eps)?;
+        Ok((res, normed))
+    }
+
+    fn rms_norm_channel(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+        // x is (batch, channels, time) — rms_norm expects norm over last dim
+        // Transpose to (batch, time, channels), norm, transpose back
+        x.transpose(1, 2)?
+            .contiguous()
+            .and_then(|t| candle_nn::ops::rms_norm(&t, weight, eps))?
+            .transpose(1, 2)?
+            .contiguous()
     }
 
     fn depthwise_conv1d_silu(
         &self,
         window: &Tensor,
         weight: &Tensor,
-        kernel_size: usize,
-        channels: usize,
+        _kernel_size: usize,
+        _channels: usize,
     ) -> Result<Tensor> {
-        ops::depthwise_conv1d_silu(window, weight, kernel_size, channels)
+        // window: (batch, channels, kernel_size), weight: (channels, kernel_size)
+        let w = weight.unsqueeze(0)?;
+        let conv = window.broadcast_mul(&w)?.sum(D::Minus1)?;
+        candle_nn::ops::silu(&conv)
     }
 
     fn depthwise_conv1d_bias(
@@ -120,25 +141,28 @@ impl ComputeBackend for CpuBackend {
         weight: &Tensor,
         bias: &Tensor,
         kernel_size: usize,
-        channels: usize,
+        _channels: usize,
     ) -> Result<Tensor> {
-        ops::depthwise_conv1d_bias(padded_input, weight, bias, kernel_size, channels)
-    }
+        // padded_input: (batch, channels, padded_time)
+        // weight: (channels, kernel_size)
+        // bias: (channels,)
+        // output: (batch, channels, output_time) where output_time = padded_time - kernel_size + 1
+        let padded_time = padded_input.dim(2)?;
+        let output_time = padded_time - kernel_size + 1;
 
-    fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ops::add3(a, b, c)
-    }
-
-    fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
-        ops::exp_mul(x, y)
-    }
-
-    fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ops::sub_mul(a, b, c)
-    }
-
-    fn rms_norm_channel(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        ops::rms_norm_channel(x, weight, eps)
+        let mut slices = Vec::with_capacity(output_time);
+        for t in 0..output_time {
+            // Extract window: (batch, channels, kernel_size)
+            let window = padded_input.narrow(2, t, kernel_size)?;
+            // Elementwise multiply with weight (broadcast over batch), sum over kernel dim
+            let w = weight.unsqueeze(0)?;
+            let conv_t = window.broadcast_mul(&w)?.sum(D::Minus1)?;
+            // Add bias: (channels,) broadcast over (batch, channels)
+            let conv_t = conv_t.broadcast_add(bias)?;
+            // Unsqueeze to (batch, channels, 1) for concatenation
+            slices.push(conv_t.unsqueeze(2)?);
+        }
+        Tensor::cat(&slices, 2)
     }
 
     fn depthwise_conv1d_bias_ctx(
@@ -150,11 +174,28 @@ impl ComputeBackend for CpuBackend {
         kernel_size: usize,
         channels: usize,
     ) -> Result<Tensor> {
-        ops::depthwise_conv1d_bias_ctx(ctx, input, weight, bias, kernel_size, channels)
+        // Concatenate [ctx, input] along time dimension, then run conv
+        let combined = Tensor::cat(&[ctx, input], 2)?;
+        self.depthwise_conv1d_bias(&combined, weight, bias, kernel_size, channels)
+    }
+
+    fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
+        ((a + b)? + c)?.contiguous()
+    }
+
+    fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
+        (x * y.exp()?)?.contiguous()
+    }
+
+    fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
+        ((a - b)? * c)?.contiguous()
     }
 
     fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ops::add_scaled(a, b, c)
+        // a + b * c where c is (channels,), b is (batch, channels, time)
+        // Reshape c to (1, channels, 1) for broadcast
+        (a + b.broadcast_mul(&c.unsqueeze(0)?.unsqueeze(2)?)?)?
+            .contiguous()
     }
 
     fn adaln_modulate(
@@ -165,19 +206,21 @@ impl ComputeBackend for CpuBackend {
         shift: &Tensor,
         eps: f32,
     ) -> Result<Tensor> {
-        ops::adaln_modulate(x, norm_weight, scale, shift, eps)
+        // rms_norm(x) * (1 + scale) + shift
+        let n = candle_nn::ops::rms_norm(&x.contiguous()?, norm_weight, eps)?;
+        (n.broadcast_mul(&(scale + 1.0)?)? + shift)?.contiguous()
     }
 
     fn f8e4m3_to_f32(&self, x: &Tensor) -> Result<Tensor> {
-        ops::f8e4m3_to_f32(x)
+        x.to_dtype(DType::F32)
     }
 
     fn f8e4m3_to_f16(&self, x: &Tensor) -> Result<Tensor> {
-        ops::f8e4m3_to_f16(x)
+        x.to_dtype(DType::F16)
     }
 
     fn f8e4m3_to_bf16(&self, x: &Tensor) -> Result<Tensor> {
-        ops::f8e4m3_to_bf16(x)
+        x.to_dtype(DType::BF16)
     }
 }
 

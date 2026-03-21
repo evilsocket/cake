@@ -3,22 +3,17 @@
 //! Provides GPU compute on Vulkan-capable devices (Steam Deck, AMD GPUs, etc.)
 //! without requiring vendor-specific toolchains (CUDA, Metal).
 //!
-//! Current implementation delegates all tensor operations to candle CPU ops
-//! (identical to [`CpuBackend`]). The wgpu device and queue are initialized
-//! at construction time, ready for future WGSL compute shader dispatch.
+//! Tensor data lives in candle CPU tensors. The wgpu device and queue are
+//! initialized at construction time for future WGSL compute shader dispatch.
 //!
 //! **Target**: Steam Deck (AMD Van Gogh APU, RDNA 2, Vulkan 1.3, 16GB unified RAM).
 //! On unified memory architectures, CPU↔GPU copies are near-free.
 
-use candle_core::{Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor, D};
 
 use super::ComputeBackend;
-use super::ops;
 
-/// Vulkan backend — wgpu-based GPU compute with CPU fallback.
-///
-/// Tensor data lives in candle CPU tensors. Compute-intensive operations
-/// will be offloaded to Vulkan via wgpu compute shaders in future iterations.
+/// Vulkan backend — wgpu-based GPU compute with CPU tensor fallback.
 pub struct VulkanBackend {
     device: Device,
     #[allow(dead_code)]
@@ -37,7 +32,6 @@ impl std::fmt::Debug for VulkanBackend {
 
 impl VulkanBackend {
     /// Create a Vulkan backend, initializing the wgpu device on the default adapter.
-    /// Falls back to any available backend if Vulkan is not available.
     pub fn new() -> std::result::Result<Self, String> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
@@ -70,7 +64,7 @@ impl VulkanBackend {
         .map_err(|e| format!("failed to create wgpu device: {e}"))?;
 
         Ok(Self {
-            device: Device::Cpu, // tensors live on CPU; wgpu handles compute dispatch
+            device: Device::Cpu,
             gpu_device,
             gpu_queue,
         })
@@ -86,10 +80,6 @@ impl ComputeBackend for VulkanBackend {
         &self.device
     }
 
-    // All operations delegate to CPU fused_ops. Future iterations will
-    // dispatch compute-intensive ops (matmul, attention, elementwise) to
-    // wgpu compute shaders via the gpu_device/gpu_queue.
-
     fn attention(
         &self,
         q: &Tensor,
@@ -98,9 +88,9 @@ impl ComputeBackend for VulkanBackend {
         scale: f32,
         causal: bool,
     ) -> Result<Tensor> {
-        let q = q.to_dtype(candle_core::DType::F32)?;
-        let k = k.to_dtype(candle_core::DType::F32)?;
-        let v = v.to_dtype(candle_core::DType::F32)?;
+        let q = q.to_dtype(DType::F32)?;
+        let k = k.to_dtype(DType::F32)?;
+        let v = v.to_dtype(DType::F32)?;
         let attn = q.matmul(&k.t()?)?;
         let attn = (attn * scale as f64)?;
         let attn = if causal {
@@ -125,68 +115,92 @@ impl ComputeBackend for VulkanBackend {
     }
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-        ops::silu_mul(gate, up)
+        (candle_nn::ops::silu(&gate.contiguous()?)? * up.contiguous()?)?.contiguous()
     }
 
     fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
-        ops::stable_softplus(x)
+        let t88 = Tensor::full(88.0f32, x.shape(), x.device())?.to_dtype(x.dtype())?;
+        let clamped = x.minimum(&t88)?;
+        let sp = (clamped.exp()? + 1.0)?.log()?;
+        x.maximum(&sp)
     }
 
     fn rms_norm_gated(&self, x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        ops::rms_norm_gated(x, z, weight, eps)
+        let n = candle_nn::ops::rms_norm(&x.contiguous()?, weight, eps)?;
+        (n * candle_nn::ops::silu(&z.contiguous()?.to_dtype(x.dtype())?)?)?
+            .contiguous()
     }
 
     fn add_rms_norm(&self, a: &Tensor, b: &Tensor, weight: &Tensor, eps: f32) -> Result<(Tensor, Tensor)> {
-        ops::add_rms_norm(a, b, weight, eps)
+        let res = (a + b)?;
+        let normed = candle_nn::ops::rms_norm(&res.contiguous()?, weight, eps)?;
+        Ok((res, normed))
     }
 
     fn rms_norm_channel(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        ops::rms_norm_channel(x, weight, eps)
+        x.transpose(1, 2)?
+            .contiguous()
+            .and_then(|t| candle_nn::ops::rms_norm(&t, weight, eps))?
+            .transpose(1, 2)?
+            .contiguous()
     }
 
-    fn depthwise_conv1d_silu(&self, window: &Tensor, weight: &Tensor, kernel_size: usize, channels: usize) -> Result<Tensor> {
-        ops::depthwise_conv1d_silu(window, weight, kernel_size, channels)
+    fn depthwise_conv1d_silu(&self, window: &Tensor, weight: &Tensor, _kernel_size: usize, _channels: usize) -> Result<Tensor> {
+        let w = weight.unsqueeze(0)?;
+        let conv = window.broadcast_mul(&w)?.sum(D::Minus1)?;
+        candle_nn::ops::silu(&conv)
     }
 
-    fn depthwise_conv1d_bias(&self, padded_input: &Tensor, weight: &Tensor, bias: &Tensor, kernel_size: usize, channels: usize) -> Result<Tensor> {
-        ops::depthwise_conv1d_bias(padded_input, weight, bias, kernel_size, channels)
+    fn depthwise_conv1d_bias(&self, padded_input: &Tensor, weight: &Tensor, bias: &Tensor, kernel_size: usize, _channels: usize) -> Result<Tensor> {
+        let padded_time = padded_input.dim(2)?;
+        let output_time = padded_time - kernel_size + 1;
+        let mut slices = Vec::with_capacity(output_time);
+        for t in 0..output_time {
+            let window = padded_input.narrow(2, t, kernel_size)?;
+            let w = weight.unsqueeze(0)?;
+            let conv_t = window.broadcast_mul(&w)?.sum(D::Minus1)?;
+            let conv_t = conv_t.broadcast_add(bias)?;
+            slices.push(conv_t.unsqueeze(2)?);
+        }
+        Tensor::cat(&slices, 2)
     }
 
     fn depthwise_conv1d_bias_ctx(&self, ctx: &Tensor, input: &Tensor, weight: &Tensor, bias: &Tensor, kernel_size: usize, channels: usize) -> Result<Tensor> {
-        ops::depthwise_conv1d_bias_ctx(ctx, input, weight, bias, kernel_size, channels)
+        let combined = Tensor::cat(&[ctx, input], 2)?;
+        self.depthwise_conv1d_bias(&combined, weight, bias, kernel_size, channels)
     }
 
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ops::add3(a, b, c)
+        ((a + b)? + c)?.contiguous()
     }
 
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
-        ops::exp_mul(x, y)
+        (x * y.exp()?)?.contiguous()
     }
 
     fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ops::sub_mul(a, b, c)
+        ((a - b)? * c)?.contiguous()
     }
 
     fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ops::add_scaled(a, b, c)
+        (a + b.broadcast_mul(&c.unsqueeze(0)?.unsqueeze(2)?)?)?
+            .contiguous()
     }
 
     fn adaln_modulate(&self, x: &Tensor, norm_weight: &Tensor, scale: &Tensor, shift: &Tensor, eps: f32) -> Result<Tensor> {
-        ops::adaln_modulate(x, norm_weight, scale, shift, eps)
+        let n = candle_nn::ops::rms_norm(&x.contiguous()?, norm_weight, eps)?;
+        (n.broadcast_mul(&(scale + 1.0)?)? + shift)?.contiguous()
     }
 
     fn f8e4m3_to_f32(&self, x: &Tensor) -> Result<Tensor> {
-        ops::f8e4m3_to_f32(x)
+        crate::backends::f8_dequant::f8e4m3_to_f32(x)
     }
 
     fn f8e4m3_to_f16(&self, x: &Tensor) -> Result<Tensor> {
-        ops::f8e4m3_to_f16(x)
+        crate::backends::f8_dequant::f8e4m3_to_f16(x)
     }
 
     fn f8e4m3_to_bf16(&self, x: &Tensor) -> Result<Tensor> {
-        ops::f8e4m3_to_bf16(x)
+        crate::backends::f8_dequant::f8e4m3_to_bf16(x)
     }
-
-    // synchronize() — default no-op is correct (CPU tensors, no GPU command buffer)
 }

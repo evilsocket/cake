@@ -31,7 +31,7 @@ impl NativeDtypeBackend {
             if ndim <= 1 {
                 // Small tensors (norms, scales, biases): dequantize to F32 on CPU
                 // using our software dequant (works on all GPU architectures).
-                crate::backends::ops::f8e4m3_to_f32(&tensor)?.to_device(dev)
+                crate::backends::f8_dequant::f8e4m3_to_f32(&tensor)?.to_device(dev)
             } else {
                 // Large tensors (weights, 2D+): keep as F8E4M3 on GPU (~1 byte/param).
                 // Fp8Linear casts to F32 per-forward-call (~60MB temporary per layer).

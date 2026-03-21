@@ -2,6 +2,13 @@
 
 use candle_core::{backend::BackendStorage as _, CpuStorage, Layout, Result, Shape, Tensor};
 
+#[cfg(feature = "cuda")]
+mod ptx {
+    include!(concat!(env!("OUT_DIR"), "/fused_ops_ptx.rs"));
+}
+#[cfg(feature = "cuda")]
+const FUSED_OPS_PTX: &str = ptx::FUSED_OPS;
+
 /// Dequantize F8E4M3 tensor to F32.
 /// Uses our custom CUDA kernel on GPU (works on SM80/A100 where candle lacks native F8 support).
 /// Falls back to CPU dequantization on non-CUDA devices.
@@ -93,7 +100,7 @@ impl candle_core::CustomOp1 for F8E4M3ToBF16 {
         let el = l.shape().elem_count();
         let cfg = LaunchConfig::for_num_elems(el as u32);
         let func =
-            dev.get_or_load_custom_func("f8e4m3_to_bf16", "cake_fused_ops", super::FUSED_OPS_PTX)?;
+            dev.get_or_load_custom_func("f8e4m3_to_bf16", "cake_fused_ops", FUSED_OPS_PTX)?;
         let out = unsafe { dev.alloc::<half::bf16>(el)? };
         let mut builder = func.builder();
         builder.arg(&el);
@@ -151,7 +158,7 @@ impl candle_core::CustomOp1 for F8E4M3ToF16 {
         let el = l.shape().elem_count();
         let cfg = LaunchConfig::for_num_elems(el as u32);
         let func =
-            dev.get_or_load_custom_func("f8e4m3_to_f16", "cake_fused_ops", super::FUSED_OPS_PTX)?;
+            dev.get_or_load_custom_func("f8e4m3_to_f16", "cake_fused_ops", FUSED_OPS_PTX)?;
         // half::f16 is used by CudaStorageSlice::F16
         let out = unsafe { dev.alloc::<half::f16>(el)? };
         let mut builder = func.builder();
@@ -230,7 +237,7 @@ impl candle_core::CustomOp1 for F8E4M3ToF32 {
         let el = l.shape().elem_count();
         let cfg = LaunchConfig::for_num_elems(el as u32);
         let func =
-            dev.get_or_load_custom_func("f8e4m3_to_f32", "cake_fused_ops", super::FUSED_OPS_PTX)?;
+            dev.get_or_load_custom_func("f8e4m3_to_f32", "cake_fused_ops", FUSED_OPS_PTX)?;
         let out = unsafe { dev.alloc::<f32>(el)? };
         let mut builder = func.builder();
         builder.arg(&el);

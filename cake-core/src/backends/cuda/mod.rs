@@ -1,15 +1,16 @@
-//! CUDA compute backend.
+//! CUDA compute backend with fused PTX kernels.
 //!
-//! Delegates fused operations to candle's CUDA CustomOp dispatch (PTX kernels)
-//! via the existing `fused_ops` infrastructure. GPU synchronization is a no-op
-//! on CUDA since each kernel launch implicitly orders on the default stream.
+//! All fused operations dispatch to custom CUDA kernels compiled from
+//! `fused_ops.cu` via PTX. GPU synchronization is a no-op on CUDA since
+//! each kernel launch implicitly orders on the default stream.
 
-use candle_core::{Device, Result, Tensor};
+mod ops;
+
+use candle_core::{Device, Result, Tensor, D};
 
 use super::ComputeBackend;
-use super::ops;
 
-/// CUDA backend — uses candle CUDA CustomOp kernels for fused operations.
+/// CUDA backend — uses custom PTX kernels for fused operations.
 #[derive(Debug)]
 pub struct CudaBackend {
     device: Device,
@@ -38,13 +39,11 @@ impl ComputeBackend for CudaBackend {
         scale: f32,
         causal: bool,
     ) -> Result<Tensor> {
-        // Flash Attention on CUDA for F16/BF16 — fused kernel, native GQA
         #[cfg(feature = "flash-attn")]
         if matches!(q.dtype(), candle_core::DType::F16 | candle_core::DType::BF16) {
             return crate::utils::flash_attn::flash_attention(q, k, v, scale, causal);
         }
 
-        // Fallback: manual SDPA in F32
         let q = q.to_dtype(candle_core::DType::F32)?;
         let k = k.to_dtype(candle_core::DType::F32)?;
         let v = v.to_dtype(candle_core::DType::F32)?;
@@ -72,67 +71,93 @@ impl ComputeBackend for CudaBackend {
     }
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-        ops::silu_mul(gate, up)
+        gate.apply_op2_no_bwd(up, &ops::SiluMul)
     }
 
     fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
-        ops::stable_softplus(x)
+        x.apply_op1_no_bwd(&ops::StableSoftplus)
     }
 
     fn rms_norm_gated(&self, x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        ops::rms_norm_gated(x, z, weight, eps)
+        let x = x.contiguous()?;
+        let z = z.contiguous()?.to_dtype(x.dtype())?;
+        let w = weight.contiguous()?;
+        x.apply_op3_no_bwd(&z, &w, &ops::RmsNormGated { eps })
     }
 
     fn add_rms_norm(&self, a: &Tensor, b: &Tensor, weight: &Tensor, eps: f32) -> Result<(Tensor, Tensor)> {
-        ops::add_rms_norm(a, b, weight, eps)
+        let n_cols = *a.dims().last().unwrap();
+        let a = a.contiguous()?;
+        let b = b.contiguous()?;
+        let w = weight.contiguous()?;
+        let combined = a.apply_op3_no_bwd(&b, &w, &ops::AddRmsNorm { eps, n_cols })?;
+        let residual = combined.narrow(D::Minus1, 0, n_cols)?.contiguous()?;
+        let normed = combined.narrow(D::Minus1, n_cols, n_cols)?.contiguous()?;
+        Ok((residual, normed))
     }
 
     fn rms_norm_channel(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        ops::rms_norm_channel(x, weight, eps)
+        let x = x.contiguous()?;
+        let w = weight.contiguous()?;
+        x.apply_op2_no_bwd(&w, &ops::RmsNormChannel { eps })
     }
 
     fn depthwise_conv1d_silu(&self, window: &Tensor, weight: &Tensor, kernel_size: usize, channels: usize) -> Result<Tensor> {
-        ops::depthwise_conv1d_silu(window, weight, kernel_size, channels)
+        window.apply_op2_no_bwd(weight, &ops::DepthwiseConv1dSilu { kernel_size, channels })
     }
 
     fn depthwise_conv1d_bias(&self, padded_input: &Tensor, weight: &Tensor, bias: &Tensor, kernel_size: usize, channels: usize) -> Result<Tensor> {
-        ops::depthwise_conv1d_bias(padded_input, weight, bias, kernel_size, channels)
+        let input = padded_input.contiguous()?;
+        let w = weight.contiguous()?;
+        let b = bias.contiguous()?;
+        input.apply_op3_no_bwd(&w, &b, &ops::DepthwiseConv1dBias { kernel_size, channels })
     }
 
     fn depthwise_conv1d_bias_ctx(&self, ctx: &Tensor, input: &Tensor, weight: &Tensor, bias: &Tensor, kernel_size: usize, channels: usize) -> Result<Tensor> {
-        ops::depthwise_conv1d_bias_ctx(ctx, input, weight, bias, kernel_size, channels)
+        let ctx = ctx.contiguous()?;
+        let inp = input.contiguous()?;
+        let w = weight.contiguous()?;
+        let b = bias.contiguous()?;
+        ctx.apply_op3_no_bwd(&inp, &w, &ops::DepthwiseConv1dBiasCtx { kernel_size, channels, bias: b })
     }
 
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ops::add3(a, b, c)
+        a.apply_op3_no_bwd(b, c, &ops::Add3)
     }
 
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
-        ops::exp_mul(x, y)
+        x.apply_op2_no_bwd(y, &ops::ExpMul)
     }
 
     fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ops::sub_mul(a, b, c)
+        a.apply_op3_no_bwd(b, c, &ops::SubMul)
     }
 
     fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ops::add_scaled(a, b, c)
+        let a = a.contiguous()?;
+        let b = b.contiguous()?;
+        let c = c.contiguous()?;
+        a.apply_op3_no_bwd(&b, &c, &ops::AddScaled)
     }
 
     fn adaln_modulate(&self, x: &Tensor, norm_weight: &Tensor, scale: &Tensor, shift: &Tensor, eps: f32) -> Result<Tensor> {
-        ops::adaln_modulate(x, norm_weight, scale, shift, eps)
+        let x = x.contiguous()?;
+        let w = norm_weight.contiguous()?;
+        let sc = scale.contiguous()?;
+        let sh = shift.contiguous()?;
+        x.apply_op3_no_bwd(&w, &sc, &ops::AdaLnModulate { eps, shift: sh })
     }
 
     fn f8e4m3_to_f32(&self, x: &Tensor) -> Result<Tensor> {
-        ops::f8e4m3_to_f32(x)
+        crate::backends::f8_dequant::f8e4m3_to_f32(x)
     }
 
     fn f8e4m3_to_f16(&self, x: &Tensor) -> Result<Tensor> {
-        ops::f8e4m3_to_f16(x)
+        crate::backends::f8_dequant::f8e4m3_to_f16(x)
     }
 
     fn f8e4m3_to_bf16(&self, x: &Tensor) -> Result<Tensor> {
-        ops::f8e4m3_to_bf16(x)
+        crate::backends::f8_dequant::f8e4m3_to_bf16(x)
     }
 
     // synchronize() — default no-op is correct for CUDA

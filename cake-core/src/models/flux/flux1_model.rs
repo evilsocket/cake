@@ -93,7 +93,7 @@ mod tests {
         assert_eq!(f8_gpu.dtype(), DType::F8E4M3);
 
         // Use our software dequant (works on all SM including A100/SM80)
-        let f32_gpu = crate::backends::ops::f8e4m3_to_f32(&f8_gpu).unwrap();
+        let f32_gpu = crate::backends::f8_dequant::f8e4m3_to_f32(&f8_gpu).unwrap();
         assert_eq!(f32_gpu.dtype(), DType::F32);
 
         let vals: Vec<f32> = f32_gpu.to_vec1().unwrap();
