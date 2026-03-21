@@ -1,5 +1,6 @@
 use cake_core::cake::{Message, WorkerInfo};
 use candle_core::DType;
+use divan::counter::BytesCount;
 
 fn make_f16_tensor(size: usize) -> candle_core::Tensor {
     super::bench_helpers::make_tensor(&[1, size], 60)
@@ -168,4 +169,65 @@ fn buf_reuse_pipe_roundtrip(bencher: divan::Bencher) {
                 Message::from_reader_buf(&mut r, &mut read_buf).await.unwrap()
             })
         });
+}
+
+// ── Model data transfer benchmarks ───────────────────────────────
+
+#[divan::bench(args = [1024, 65536, 1048576])]
+fn zstd_compress_chunk(bencher: divan::Bencher, size: usize) {
+    // Simulate safetensors data (pseudo-random F16 weights)
+    let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    bencher
+        .counter(BytesCount::new(size))
+        .bench_local(|| zstd::encode_all(data.as_slice(), 1).unwrap());
+}
+
+#[divan::bench(args = [1024, 65536, 1048576])]
+fn zstd_decompress_chunk(bencher: divan::Bencher, size: usize) {
+    let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    let compressed = zstd::encode_all(data.as_slice(), 1).unwrap();
+    bencher
+        .counter(BytesCount::new(compressed.len()))
+        .bench_local(|| zstd::decode_all(compressed.as_slice()).unwrap());
+}
+
+#[divan::bench(args = [1024, 65536, 1048576])]
+fn crc32_checksum(bencher: divan::Bencher, size: usize) {
+    let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    bencher
+        .counter(BytesCount::new(size))
+        .bench_local(|| crc32fast::hash(&data));
+}
+
+#[divan::bench]
+fn model_data_chunk_roundtrip_compressed() {
+    let data: Vec<u8> = (0..16384).map(|i| (i % 251) as u8).collect();
+    let compressed = zstd::encode_all(data.as_slice(), 1).unwrap();
+    let checksum = crc32fast::hash(&compressed);
+    let msg = Message::ModelDataChunk {
+        filename: "model.safetensors".into(),
+        offset: 0,
+        total_size: 1_000_000,
+        compressed: true,
+        checksum,
+        data: compressed,
+    };
+    let bytes = msg.to_bytes().unwrap();
+    let _decoded = Message::from_bytes(&bytes).unwrap();
+}
+
+#[divan::bench]
+fn model_data_chunk_roundtrip_uncompressed() {
+    let data: Vec<u8> = (0..16384).map(|i| (i % 251) as u8).collect();
+    let checksum = crc32fast::hash(&data);
+    let msg = Message::ModelDataChunk {
+        filename: "model.safetensors".into(),
+        offset: 0,
+        total_size: 1_000_000,
+        compressed: false,
+        checksum,
+        data,
+    };
+    let bytes = msg.to_bytes().unwrap();
+    let _decoded = Message::from_bytes(&bytes).unwrap();
 }

@@ -547,7 +547,9 @@ async fn push_model_data(
         }
     }
 
-    // Stream each file
+    // Stream each file using chunked reads (constant 128MB memory, not full file)
+    let mut read_buf = vec![0u8; MODEL_DATA_CHUNK_SIZE];
+
     for file_path in &files_to_send {
         let filename = file_path
             .file_name()
@@ -555,19 +557,29 @@ async fn push_model_data(
             .to_string_lossy()
             .to_string();
 
-        // Use filtered index if this is the index file
-        let file_data = if filename == "model.safetensors.index.json" {
+        // Use filtered index if this is the index file (small, keep in-memory)
+        let is_index = filename == "model.safetensors.index.json";
+        let small_data = if is_index {
             if let Some(ref data) = filtered_index {
-                data.clone()
+                Some(data.clone())
             } else {
-                std::fs::read(file_path)
-                    .map_err(|e| anyhow!("failed to read {}: {}", file_path.display(), e))?
+                Some(
+                    std::fs::read(file_path)
+                        .map_err(|e| anyhow!("failed to read {}: {}", file_path.display(), e))?,
+                )
             }
         } else {
-            std::fs::read(file_path)
-                .map_err(|e| anyhow!("failed to read {}: {}", file_path.display(), e))?
+            None
         };
-        let total_size = file_data.len() as u64;
+
+        let total_size = if let Some(ref data) = small_data {
+            data.len() as u64
+        } else {
+            std::fs::metadata(file_path)
+                .map_err(|e| anyhow!("failed to stat {}: {}", file_path.display(), e))?
+                .len()
+        };
+
         let file_start = Instant::now();
         let mut offset: u64 = 0;
 
@@ -578,15 +590,52 @@ async fn push_model_data(
             human_bytes::human_bytes(total_size as f64)
         );
 
-        for chunk in file_data.chunks(MODEL_DATA_CHUNK_SIZE) {
+        // Open file handle for streaming (large files only)
+        let mut file_handle = if small_data.is_none() {
+            Some(
+                std::fs::File::open(file_path)
+                    .map_err(|e| anyhow!("failed to open {}: {}", file_path.display(), e))?,
+            )
+        } else {
+            None
+        };
+
+        while offset < total_size {
+            let to_read = ((total_size - offset) as usize).min(MODEL_DATA_CHUNK_SIZE);
+            let raw_chunk = if let Some(ref data) = small_data {
+                // Small files (config, tokenizer, index): already in memory
+                data[offset as usize..offset as usize + to_read].to_vec()
+            } else {
+                // Large files (safetensors): stream from disk
+                use std::io::Read;
+                let fh = file_handle.as_mut().unwrap();
+                fh.read_exact(&mut read_buf[..to_read])
+                    .map_err(|e| anyhow!("read error at offset {offset}: {e}"))?;
+                read_buf[..to_read].to_vec()
+            };
+
+            // Compress with zstd level 1 (only if it saves space)
+            let compressed_data = zstd::encode_all(raw_chunk.as_slice(), 1)
+                .unwrap_or_else(|_| raw_chunk.clone());
+            let (data, is_compressed) = if compressed_data.len() < raw_chunk.len() {
+                (compressed_data, true)
+            } else {
+                (raw_chunk, false)
+            };
+
+            // CRC32 checksum of wire data (after compression)
+            let checksum = crc32fast::hash(&data);
+
             let msg = Message::ModelDataChunk {
                 filename: filename.clone(),
                 offset,
                 total_size,
-                data: chunk.to_vec(),
+                compressed: is_compressed,
+                checksum,
+                data,
             };
             msg.to_writer(stream).await?;
-            offset += chunk.len() as u64;
+            offset += to_read as u64;
 
             // Log progress for large files
             if total_size > MODEL_DATA_CHUNK_SIZE as u64 {
@@ -849,8 +898,26 @@ async fn receive_model_data(
                 filename,
                 offset,
                 total_size,
+                compressed,
+                checksum,
                 data,
             } => {
+                // Verify CRC32 checksum before writing
+                let actual_crc = crc32fast::hash(&data);
+                if actual_crc != checksum {
+                    return Err(anyhow!(
+                        "checksum mismatch for {} at offset {}: expected {:#x}, got {:#x}",
+                        filename, offset, checksum, actual_crc
+                    ));
+                }
+
+                // Decompress if compressed
+                let data = if compressed {
+                    zstd::decode_all(data.as_slice())
+                        .map_err(|e| anyhow!("zstd decompress failed for {} at offset {}: {}", filename, offset, e))?
+                } else {
+                    data
+                };
                 // Open new file if needed
                 let file = if let Some((ref name, ref mut file, _, _)) = current_file {
                     if name == &filename {

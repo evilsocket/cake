@@ -55,6 +55,8 @@ dirs = "5"
 hex = "0.4"
 tracing-chrome = "0.7.2"
 tracing-subscriber = "0.3.18"
+zstd = "0.13"
+crc32fast = "1"
 base64 = "0.22.1"
 
 [features]

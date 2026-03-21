@@ -135,10 +135,20 @@ pub enum Message {
         filename: String,
         offset: u64,
         total_size: u64,
+        /// Whether `data` is zstd-compressed.
+        compressed: bool,
+        /// CRC32 checksum of `data` (after compression if compressed).
+        checksum: u32,
         data: Vec<u8>,
     },
     /// All model files have been sent.
     ModelDataDone,
+    /// Worker requests resumption from a partial transfer.
+    ModelDataResume {
+        filename: String,
+        /// Byte offset to resume from (worker's current file size).
+        offset: u64,
+    },
     /// Worker has loaded all assigned layers and is ready for inference.
     WorkerReady,
     /// Worker encountered an error during inference.
@@ -620,23 +630,81 @@ mod tests {
     #[test]
     fn test_message_model_data_chunk_roundtrip() {
         let data = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x42];
+        let checksum = crc32fast::hash(&data);
         let msg = Message::ModelDataChunk {
             filename: "model-00001-of-00003.safetensors".into(),
             offset: 1024,
             total_size: 4_000_000_000,
+            compressed: false,
+            checksum,
             data: data.clone(),
         };
         let bytes = msg.to_bytes().unwrap();
         let decoded = Message::from_bytes(&bytes).unwrap();
         match decoded {
-            Message::ModelDataChunk { filename, offset, total_size, data: d } => {
+            Message::ModelDataChunk { filename, offset, total_size, compressed, checksum: cs, data: d } => {
                 assert_eq!(filename, "model-00001-of-00003.safetensors");
                 assert_eq!(offset, 1024);
                 assert_eq!(total_size, 4_000_000_000);
+                assert!(!compressed);
+                assert_eq!(cs, checksum);
                 assert_eq!(d, data);
             }
             other => panic!("expected ModelDataChunk, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_message_model_data_chunk_compressed_roundtrip() {
+        let data = vec![0x42; 1000]; // compressible data
+        let compressed_data = zstd::encode_all(data.as_slice(), 1).unwrap();
+        let checksum = crc32fast::hash(&compressed_data);
+        let msg = Message::ModelDataChunk {
+            filename: "shard.safetensors".into(),
+            offset: 0,
+            total_size: 5000,
+            compressed: true,
+            checksum,
+            data: compressed_data.clone(),
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        match decoded {
+            Message::ModelDataChunk { compressed, checksum: cs, data: d, .. } => {
+                assert!(compressed);
+                assert_eq!(cs, checksum);
+                // Verify decompression works
+                let decompressed = zstd::decode_all(d.as_slice()).unwrap();
+                assert_eq!(decompressed, data);
+            }
+            other => panic!("expected ModelDataChunk, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_message_model_data_resume_roundtrip() {
+        let msg = Message::ModelDataResume {
+            filename: "model-00002-of-00003.safetensors".into(),
+            offset: 256 * 1024 * 1024,
+        };
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = Message::from_bytes(&bytes).unwrap();
+        match decoded {
+            Message::ModelDataResume { filename, offset } => {
+                assert_eq!(filename, "model-00002-of-00003.safetensors");
+                assert_eq!(offset, 256 * 1024 * 1024);
+            }
+            other => panic!("expected ModelDataResume, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_crc32_detects_corruption() {
+        let data = vec![1, 2, 3, 4, 5];
+        let checksum = crc32fast::hash(&data);
+        let mut corrupted = data.clone();
+        corrupted[2] = 99;
+        assert_ne!(crc32fast::hash(&corrupted), checksum);
     }
 
     // ── Message::WorkerReady round-trip ──────────────────────────
