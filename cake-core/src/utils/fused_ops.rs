@@ -126,9 +126,18 @@ pub fn f8e4m3_to_f32(x: &Tensor) -> Result<Tensor> {
 
 /// Dequantize F8E4M3 tensor to BF16.
 /// Direct F8→BF16 avoids F16 intermediate when using BF16 compute.
+/// On Metal: dequant via CPU then transfer.
 pub fn f8e4m3_to_bf16(x: &Tensor) -> Result<Tensor> {
     if x.dtype() != candle_core::DType::F8E4M3 {
         return x.to_dtype(candle_core::DType::BF16);
+    }
+    #[cfg(feature = "metal")]
+    if x.device().is_metal() {
+        let dev = x.device().clone();
+        return x.to_device(&candle_core::Device::Cpu)?
+            .to_dtype(candle_core::DType::F32)?
+            .to_dtype(candle_core::DType::BF16)?
+            .to_device(&dev);
     }
     x.apply_op1_no_bwd(&F8E4M3ToBF16)
 }
@@ -193,9 +202,18 @@ impl candle_core::CustomOp1 for F8E4M3ToBF16 {
 
 /// Dequantize F8E4M3 tensor to F16.
 /// Uses our custom CUDA kernel. F16 matmul is 2x faster than F32 on A100.
+/// On Metal: dequant via CPU then transfer (Metal has no native F8 compute).
 pub fn f8e4m3_to_f16(x: &Tensor) -> Result<Tensor> {
     if x.dtype() != candle_core::DType::F8E4M3 {
         return x.to_dtype(candle_core::DType::F16);
+    }
+    #[cfg(feature = "metal")]
+    if x.device().is_metal() {
+        let dev = x.device().clone();
+        return x.to_device(&candle_core::Device::Cpu)?
+            .to_dtype(candle_core::DType::F32)?  // F8→F32 on CPU
+            .to_dtype(candle_core::DType::F16)?   // F32→F16
+            .to_device(&dev);                     // back to Metal
     }
     x.apply_op1_no_bwd(&F8E4M3ToF16)
 }
@@ -2860,6 +2878,52 @@ mod tests {
         assert_eq!(result.dims(), &[2, 2]);
         let vals: Vec<f32> = result.flatten_all().unwrap().to_vec1().unwrap();
         assert!(vals.iter().all(|v| v.is_finite()));
+    }
+
+    // ── F8E4M3 dequantization tests ────────────────────────────────
+
+    #[test]
+    fn test_f8e4m3_to_f32_cpu() {
+        let f32_orig = Tensor::new(&[0.5f32, 1.0, -0.25, 2.0], &Device::Cpu).unwrap();
+        let f8 = f32_orig.to_dtype(candle_core::DType::F8E4M3).unwrap();
+        let result = f8e4m3_to_f32(&f8).unwrap();
+        assert_eq!(result.dtype(), candle_core::DType::F32);
+        assert_eq!(result.dims(), &[4]);
+        let vals: Vec<f32> = result.to_vec1().unwrap();
+        assert!((vals[0] - 0.5).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_f8e4m3_to_f16_cpu() {
+        let f32_orig = Tensor::new(&[0.5f32, 1.0, -0.25], &Device::Cpu).unwrap();
+        let f8 = f32_orig.to_dtype(candle_core::DType::F8E4M3).unwrap();
+        let result = f8e4m3_to_f16(&f8).unwrap();
+        assert_eq!(result.dtype(), candle_core::DType::F16);
+        assert_eq!(result.dims(), &[3]);
+    }
+
+    #[test]
+    fn test_f8e4m3_to_bf16_cpu() {
+        let f32_orig = Tensor::new(&[0.5f32, 1.0, -0.25], &Device::Cpu).unwrap();
+        let f8 = f32_orig.to_dtype(candle_core::DType::F8E4M3).unwrap();
+        let result = f8e4m3_to_bf16(&f8).unwrap();
+        assert_eq!(result.dtype(), candle_core::DType::BF16);
+        assert_eq!(result.dims(), &[3]);
+    }
+
+    #[test]
+    fn test_f8e4m3_to_f16_passthrough_non_f8() {
+        // Non-F8 input should just convert dtype
+        let f32_tensor = Tensor::new(&[1.0f32, 2.0], &Device::Cpu).unwrap();
+        let result = f8e4m3_to_f16(&f32_tensor).unwrap();
+        assert_eq!(result.dtype(), candle_core::DType::F16);
+    }
+
+    #[test]
+    fn test_f8e4m3_to_bf16_passthrough_non_f8() {
+        let f32_tensor = Tensor::new(&[1.0f32, 2.0], &Device::Cpu).unwrap();
+        let result = f8e4m3_to_bf16(&f32_tensor).unwrap();
+        assert_eq!(result.dtype(), candle_core::DType::BF16);
     }
 
     // ── CUDA tests ───────────────────────────────────────────────────
