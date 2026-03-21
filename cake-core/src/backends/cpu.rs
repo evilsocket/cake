@@ -7,7 +7,7 @@
 use candle_core::{DType, Device, Result, Tensor};
 
 use super::ComputeBackend;
-use crate::utils::fused_ops;
+use super::fused_ops;
 
 /// CPU backend — uses candle CPU ops + rayon-parallelized fused kernels.
 #[derive(Debug)]

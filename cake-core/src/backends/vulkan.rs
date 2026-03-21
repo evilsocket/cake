@@ -13,7 +13,7 @@
 use candle_core::{Device, Result, Tensor};
 
 use super::ComputeBackend;
-use crate::utils::fused_ops;
+use super::fused_ops;
 
 /// Vulkan backend — wgpu-based GPU compute with CPU fallback.
 ///

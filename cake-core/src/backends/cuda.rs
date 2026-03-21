@@ -7,7 +7,7 @@
 use candle_core::{Device, Result, Tensor};
 
 use super::ComputeBackend;
-use crate::utils::fused_ops;
+use super::fused_ops;
 
 /// CUDA backend — uses candle CUDA CustomOp kernels for fused operations.
 #[derive(Debug)]

@@ -10,6 +10,8 @@
 use candle_core::{Device, Result, Tensor};
 use std::sync::Arc;
 
+pub mod fused_ops;
+
 mod cpu;
 pub use cpu::CpuBackend;
 
