@@ -233,19 +233,19 @@ impl ComputeBackend for MetalBackend {
     // ── Elementwise (candle tensor ops) ──────────────────────────────
 
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        Ok(((a + b)? + c)?)
+        ((a + b)? + c)?.contiguous()
     }
 
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
-        Ok((x * y.exp()?)?)
+        (x * y.exp()?)?.contiguous()
     }
 
     fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        Ok(((a - b)? * c)?)
+        ((a - b)? * c)?.contiguous()
     }
 
     fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        Ok((a + b.broadcast_mul(&c.unsqueeze(0)?.unsqueeze(2)?)?)?)
+        (a + b.broadcast_mul(&c.unsqueeze(0)?.unsqueeze(2)?)?)?.contiguous()
     }
 
     // ── AdaLN (candle tensor ops) ────────────────────────────────────
@@ -259,7 +259,7 @@ impl ComputeBackend for MetalBackend {
         eps: f32,
     ) -> Result<Tensor> {
         let n = candle_nn::ops::rms_norm(&x.contiguous()?, norm_weight, eps)?;
-        Ok((n.broadcast_mul(&(scale + 1.0)?)? + shift)?)
+        (n.broadcast_mul(&(scale + 1.0)?)? + shift)?.contiguous()
     }
 
     // ── F8 dequantization ────────────────────────────────────────────
