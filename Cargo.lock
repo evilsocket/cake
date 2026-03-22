@@ -750,6 +750,7 @@ dependencies = [
  "image",
  "lazy_static",
  "libc",
+ "libloading 0.8.5",
  "log",
  "memmap2",
  "memory-stats",

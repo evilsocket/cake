@@ -75,30 +75,7 @@ enum Commands {
         /// Output folder
         #[arg(long)]
         output: String,
-    },
-    // ── Legacy aliases (hidden, backward compat) ──────────────────
-    // ── Legacy aliases (hidden, backward compat) ──────────────────
-    /// [hidden] Legacy master mode (use 'run' or 'serve' instead)
-    #[command(hide = true)]
-    Master {
-        #[command(flatten)]
-        args: Args,
-    },
-    /// [hidden] Legacy worker mode (use 'run --cluster-key' instead)
-    #[command(hide = true)]
-    Worker {
-        #[command(flatten)]
-        args: Args,
-    },
-    /// [hidden] Legacy download (use 'pull' instead)
-    #[command(hide = true)]
-    Download {
-        /// HuggingFace repo ID
-        model: String,
-    },
-    /// [hidden] Legacy models list (use 'list' instead)
-    #[command(hide = true)]
-    Models,
+    }
 }
 
 #[tokio::main]
@@ -117,8 +94,6 @@ async fn main() -> Result<()> {
         .init();
 
     match cli.command {
-        // ── New subcommands ──────────────────────────────────────────
-
         Commands::Run { model, prompt, mut args } => {
             match (model, args.cluster_key.is_some()) {
                 // No model + cluster key → worker mode
@@ -152,7 +127,7 @@ async fn main() -> Result<()> {
             args.mode = Mode::Master;
             run_as_master(args).await
         }
-        Commands::List | Commands::Models => {
+        Commands::List => {
             let models = utils::models::list_models()?;
             if models.is_empty() {
                 println!("No models found.");
@@ -180,7 +155,7 @@ async fn main() -> Result<()> {
         Commands::Chat { server } => {
             chat::run(&server).await
         }
-        Commands::Pull { model } | Commands::Download { model } => {
+        Commands::Pull { model } => {
             if utils::hf::looks_like_hf_repo(&model) {
                 let path = utils::hf::ensure_model_downloaded(&model)?;
                 println!("model downloaded to {}", path.display());
@@ -202,23 +177,11 @@ async fn main() -> Result<()> {
                 &std::path::PathBuf::from(&output),
             )
         }
-
-        // ── Legacy master (hidden, backward compat) ──────────────────
-        Commands::Master { mut args } => {
-            args.mode = Mode::Master;
-            run_as_master(args).await
-        }
-
-        // ── Worker (legacy alias, hidden) ────────────────────────────
-        Commands::Worker { mut args } => {
-            args.mode = Mode::Worker;
-            run_as_worker(args).await
-        }
     }
 }
 
 /// Worker setup: zero-config discovery or manual topology.
-/// Used by `run` (no model + cluster key) and legacy `worker` subcommand.
+/// Used by `run` (no model + cluster key) subcommand.
 async fn run_as_worker(mut args: Args) -> Result<()> {
     // Zero-config: wait for master assignment + model data
     let listener_override = if let (Some(key), None) = (&args.cluster_key, &args.topology) {
@@ -257,7 +220,7 @@ async fn run_as_worker(mut args: Args) -> Result<()> {
 }
 
 /// Shared master setup: zero-config discovery + dispatch.
-/// Used by `run`, `serve`, and legacy `master` subcommands.
+/// Used by `run` and `serve` subcommands.
 async fn run_as_master(mut args: Args) -> Result<()> {
     // Zero-config: discover workers, assign layers, push model data
     if let (Some(key), None) = (&args.cluster_key, &args.topology) {
