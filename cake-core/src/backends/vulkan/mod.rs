@@ -481,7 +481,47 @@ impl VulkanBackend {
 
     // ── GPU matmul: C[M,N] = A[M,K] × B[K,N] ──────────────────────
 
-    fn gpu_matmul(
+    /// GPU GEMV: y[N] = x[K] × W[K,N]  — optimized for M=1.
+    /// Each workgroup computes one output element via parallel dot product reduction.
+    fn gpu_gemv(
+        &self,
+        buf_x: &wgpu::Buffer,
+        buf_w: &wgpu::Buffer,
+        k: usize,
+        n: usize,
+    ) -> Vec<f32> {
+        let buf_y = self.alloc_output(n);
+        let buf_p = self.uniform(&[n as u32, k as u32, 0, 0]);
+
+        let pipeline = self.get_pipeline("gemv");
+        let bg = self.gpu.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buf_x.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: buf_w.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: buf_y.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: buf_p.as_entire_binding() },
+            ],
+        });
+
+        // One workgroup per output element, 256 threads per workgroup
+        let mut enc = self.gpu.create_command_encoder(&Default::default());
+        {
+            let mut p = enc.begin_compute_pass(&Default::default());
+            p.set_pipeline(&pipeline);
+            p.set_bind_group(0, &bg, &[]);
+            p.dispatch_workgroups(n as u32, 1, 1);
+        }
+        self.queue.submit(Some(enc.finish()));
+
+        let result = self.download(&buf_y, n);
+        self.release_output(buf_y);
+        result
+    }
+
+    /// GPU tiled GEMM: C[M,N] = A[M,K] × B[K,N]  — for M > 1.
+    fn gpu_gemm(
         &self,
         buf_a: &wgpu::Buffer,
         buf_b: &wgpu::Buffer,
@@ -497,22 +537,10 @@ impl VulkanBackend {
             label: None,
             layout: &pipeline.get_bind_group_layout(0),
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buf_a.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: buf_b.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buf_c.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: buf_p.as_entire_binding(),
-                },
+                wgpu::BindGroupEntry { binding: 0, resource: buf_a.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: buf_b.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: buf_c.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: buf_p.as_entire_binding() },
             ],
         });
 
@@ -530,6 +558,22 @@ impl VulkanBackend {
         let result = self.download(&buf_c, m * n);
         self.release_output(buf_c);
         result
+    }
+
+    /// Dispatch GEMV for M=1, GEMM for M>1.
+    fn gpu_matmul(
+        &self,
+        buf_a: &wgpu::Buffer,
+        buf_b: &wgpu::Buffer,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Vec<f32> {
+        if m == 1 {
+            self.gpu_gemv(buf_a, buf_b, k, n)
+        } else {
+            self.gpu_gemm(buf_a, buf_b, m, k, n)
+        }
     }
 
     /// Tensor matmul via GPU. Handles batched matmul by iterating batches.
@@ -695,13 +739,8 @@ impl ComputeBackend for VulkanBackend {
     // ── GPU matmul ───────────────────────────────────────────────────
 
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
-        // GPU matmul only wins for large matrices. For the small activations
-        // in token-by-token generation (M=1), CPU GEMM with AVX2 is faster
-        // than the GPU dispatch overhead.
-        let m = a.dims()[a.dims().len() - 2];
-        if m <= 4 {
-            return a.matmul(b); // CPU fast path for generation
-        }
+        // Always use GPU — GEMV shader is optimized for M=1 (generation),
+        // tiled GEMM for M>1 (prefill). Weight buffers are cached on GPU.
         let orig_dtype = a.dtype();
         let result = self.tensor_matmul(a, b)?;
         result.to_dtype(orig_dtype)
