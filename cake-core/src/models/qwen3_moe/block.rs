@@ -41,7 +41,28 @@ impl Forwarder for Qwen3MoeBlock {
         let cfg = ctx.config.as_ref().expect("No config specified");
 
         let attn = CausalSelfAttention::load(vb.pp("self_attn"), cfg, ctx.backend.clone())?;
-        let moe = SparseMoeMlp::load(vb.pp("mlp"), cfg, ctx.backend.clone())?;
+
+        let moe = if let Some(storage) = &ctx.tensor_storage {
+            // Expert offload: stream weights from disk via DiskProvider
+            let layer_prefix = format!("{name}.mlp");
+            let provider: std::sync::Arc<dyn crate::models::common::expert_provider::ExpertProvider> =
+                std::sync::Arc::new(crate::models::common::disk_expert_provider::DiskExpertProvider::new(
+                    storage.clone(),
+                    layer_prefix,
+                    cfg.num_experts,
+                    ctx.device.clone(),
+                    ctx.dtype,
+                ));
+            // Load router gate from VarBuilder (it's small, stays in RAM)
+            let gate_w = vb.pp("mlp").pp("gate").get((cfg.num_experts, cfg.hidden_size), "weight")?;
+            let gate = candle_nn::Linear::new(gate_w, None);
+            SparseMoeMlp::with_provider(
+                gate, provider, cfg.num_experts, cfg.num_experts_per_tok,
+                cfg.norm_topk_prob, ctx.backend.clone(),
+            )
+        } else {
+            SparseMoeMlp::load(vb.pp("mlp"), cfg, ctx.backend.clone())?
+        };
 
         let eps = cfg.rms_norm_eps;
         let h = cfg.hidden_size;

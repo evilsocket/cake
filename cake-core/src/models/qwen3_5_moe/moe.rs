@@ -100,6 +100,33 @@ impl Qwen3_5MoeSparseMlp {
         })
     }
 
+    /// Construct with a pre-built expert provider (for disk offloading).
+    /// Shared expert + router are loaded from VarBuilder (stay in RAM).
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_provider(
+        gate: Linear,
+        expert_provider: SharedExpertProvider,
+        shared_gate_proj: Linear,
+        shared_up_proj: Linear,
+        shared_down_proj: Linear,
+        shared_expert_gate: Linear,
+        num_experts: usize,
+        num_experts_per_tok: usize,
+        backend: Arc<dyn ComputeBackend>,
+    ) -> Self {
+        Self {
+            gate,
+            expert_provider,
+            shared_gate_proj,
+            shared_up_proj,
+            shared_down_proj,
+            shared_expert_gate,
+            num_experts,
+            num_experts_per_tok,
+            backend,
+        }
+    }
+
     pub fn forward(&self, x: &Tensor) -> anyhow::Result<Tensor> {
         let (b, s, h) = x.dims3().map_err(|e| anyhow!("moe dims3: {e}"))?;
         let n_tok = b * s;

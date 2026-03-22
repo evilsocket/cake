@@ -82,7 +82,31 @@ impl Forwarder for Qwen3_5MoeBlock {
         let rms_1 = load_rms_norm(h, eps, cfg.residual_rms_norm, vb.pp("input_layernorm"))?;
         let rms_2 =
             load_rms_norm(h, eps, cfg.residual_rms_norm, vb.pp("post_attention_layernorm"))?;
-        let moe = Qwen3_5MoeSparseMlp::load(vb.pp("mlp"), cfg, ctx.backend.clone())?;
+        let moe = if let Some(storage) = &ctx.tensor_storage {
+            // Expert offload: stream routed expert weights from disk
+            use candle_nn::linear_no_bias as linear;
+            let layer_prefix = format!("{name}.mlp");
+            let provider: std::sync::Arc<dyn crate::models::common::expert_provider::ExpertProvider> =
+                std::sync::Arc::new(crate::models::common::disk_expert_provider::DiskExpertProvider::new(
+                    storage.clone(), layer_prefix, cfg.num_experts, ctx.device.clone(), ctx.dtype,
+                ));
+            let mlp_vb = vb.pp("mlp");
+            let gate_w = mlp_vb.pp("gate").get((cfg.num_experts, h), "weight")?;
+            let gate = candle_nn::Linear::new(gate_w, None);
+            let si = cfg.shared_expert_intermediate_size.expect("shared_expert_intermediate_size");
+            let se = mlp_vb.pp("shared_expert");
+            let shared_gate_proj = linear(h, si, se.pp("gate_proj"))?;
+            let shared_up_proj = linear(h, si, se.pp("up_proj"))?;
+            let shared_down_proj = linear(si, h, se.pp("down_proj"))?;
+            let seg_w = mlp_vb.pp("shared_expert_gate").get((1, h), "weight")?;
+            let shared_expert_gate = candle_nn::Linear::new(seg_w, None);
+            Qwen3_5MoeSparseMlp::with_provider(
+                gate, provider, shared_gate_proj, shared_up_proj, shared_down_proj,
+                shared_expert_gate, cfg.num_experts, cfg.num_experts_per_tok, ctx.backend.clone(),
+            )
+        } else {
+            Qwen3_5MoeSparseMlp::load(vb.pp("mlp"), cfg, ctx.backend.clone())?
+        };
 
         if layer_type == "full_attention" {
             let attn = Qwen3_5FullAttention::load(vb.pp("self_attn"), cfg, ctx.backend.clone())?;
