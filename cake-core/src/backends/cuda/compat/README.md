@@ -32,7 +32,7 @@ cargo build --features cuda || true
 Then apply the patches:
 
 ```sh
-./cuda-compat/patch.sh
+./cake-core/src/backends/cuda/compat/patch.sh
 ```
 
 Now build normally:

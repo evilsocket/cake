@@ -10,7 +10,7 @@
 #   - build.rs patched to conditionally include WMMA kernels
 #
 # Usage:
-#   ./cuda-compat/patch.sh
+#   ./cake-core/src/backends/cuda/compat/patch.sh
 #
 # Run this before `cargo build --features cuda` on pre-Volta GPUs.
 

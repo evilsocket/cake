@@ -65,10 +65,10 @@ cargo build --release --features cuda
 
 ### Pre-Volta NVIDIA GPUs
 
-For Pascal, Maxwell, or other GPUs with compute capability < 7.0, the upstream `candle-kernels` crate requires patches. See [`cuda-compat/`](../cuda-compat/) for a one-command fix:
+For Pascal, Maxwell, or other GPUs with compute capability < 7.0, the upstream `candle-kernels` crate requires patches. See [`cake-core/src/backends/cuda/compat/`](../cake-core/src/backends/cuda/compat/) for a one-command fix:
 
 ```sh
-./cuda-compat/patch.sh
+./cake-core/src/backends/cuda/compat/patch.sh
 cargo build --release --features cuda
 ```
 
