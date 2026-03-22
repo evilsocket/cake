@@ -66,7 +66,9 @@ impl VulkanBackend {
     // ── GPU dispatch helpers ─────────────────────────────────────────
 
     /// Run a 2-input WGSL shader: output[i] = f(a[i], b[i])
+    /// Computes in F32, then casts back to the original dtype.
     fn dispatch_binary(&self, a: &Tensor, b: &Tensor, entry: &str) -> Result<Tensor> {
+        let orig_dtype = a.dtype();
         let a = a.to_dtype(DType::F32)?.contiguous()?;
         let b = b.to_dtype(DType::F32)?.contiguous()?;
         let a_data: Vec<f32> = a.flatten_all()?.to_vec1()?;
@@ -112,11 +114,12 @@ impl VulkanBackend {
         self.queue.submit(Some(encoder.finish()));
 
         let result = self.read_buffer(&buf_out, count as usize);
-        Tensor::from_vec(result, a.shape(), &Device::Cpu)
+        Tensor::from_vec(result, a.shape(), &Device::Cpu)?.to_dtype(orig_dtype)
     }
 
     /// Run a 3-input WGSL shader: output[i] = f(a[i], b[i], c[i])
     fn dispatch_ternary(&self, a: &Tensor, b: &Tensor, c: &Tensor, entry: &str) -> Result<Tensor> {
+        let orig_dtype = a.dtype();
         let a = a.to_dtype(DType::F32)?.contiguous()?;
         let b = b.to_dtype(DType::F32)?.contiguous()?;
         let c = c.to_dtype(DType::F32)?.contiguous()?;
@@ -166,12 +169,13 @@ impl VulkanBackend {
         self.queue.submit(Some(encoder.finish()));
 
         let result = self.read_buffer(&buf_out, count as usize);
-        Tensor::from_vec(result, a.shape(), &Device::Cpu)
+        Tensor::from_vec(result, a.shape(), &Device::Cpu)?.to_dtype(orig_dtype)
     }
 
     /// Run a 1-input WGSL shader: output[i] = f(a[i])
     /// Uses the binary layout with a dummy second buffer.
     fn dispatch_unary(&self, x: &Tensor, entry: &str) -> Result<Tensor> {
+        let orig_dtype = x.dtype();
         let x = x.to_dtype(DType::F32)?.contiguous()?;
         let x_data: Vec<f32> = x.flatten_all()?.to_vec1()?;
         let count = x_data.len() as u32;
@@ -216,7 +220,7 @@ impl VulkanBackend {
         self.queue.submit(Some(encoder.finish()));
 
         let result = self.read_buffer(&buf_out, count as usize);
-        Tensor::from_vec(result, x.shape(), &Device::Cpu)
+        Tensor::from_vec(result, x.shape(), &Device::Cpu)?.to_dtype(orig_dtype)
     }
 
     fn create_storage_buffer(&self, data: &[f32]) -> wgpu::Buffer {
