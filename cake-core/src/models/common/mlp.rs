@@ -69,9 +69,11 @@ impl MLP {
             let up_w = vb.pp("up_proj").get((i_size, h_size), "weight")?;
             Tensor::cat(&[&gate_w, &up_w], 0)?
         };
+        let gate_up_w = backend.preprocess_linear_weight(&gate_up_w)?;
         let gate_up_proj = Linear::new(gate_up_w, None);
 
         let down_w = vb.pp("down_proj").get((h_size, i_size), "weight")?;
+        let down_w = backend.preprocess_linear_weight(&down_w)?;
         let down_proj = Linear::new(down_w, None);
 
         Ok(Self {

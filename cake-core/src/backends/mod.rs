@@ -171,6 +171,14 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
         a.matmul(b)
     }
 
+    /// Pre-process a linear weight for optimal matmul performance.
+    /// Called once at model load time. Backends can pre-convert dtype,
+    /// transpose, or upload to GPU. Returns the optimized weight.
+    /// Default: returns the weight as-is.
+    fn preprocess_linear_weight(&self, weight: &Tensor) -> Result<Tensor> {
+        Ok(weight.clone())
+    }
+
     // ── Device control ───────────────────────────────────────────────
 
     /// Flush GPU command buffer. No-op on CPU/CUDA, required on Metal

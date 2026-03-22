@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use candle_core::{DType, Result, Tensor, D};
-use candle_nn::{linear_no_bias, Linear, Module, RmsNorm, VarBuilder};
+use candle_nn::{Linear, Module, RmsNorm, VarBuilder};
 
 use crate::backends::ComputeBackend;
 use super::config::load_rms_norm;
@@ -109,12 +109,14 @@ impl CausalSelfAttention {
         let qkv_proj = if cfg.fused_qkv_proj {
             // Phi-3/4 style: weights already fused as a single 'qkv_proj' tensor.
             let w = vb.pp("qkv_proj").get((size_q + 2 * size_kv, size_in), "weight")?;
+            let w = backend.preprocess_linear_weight(&w)?;
             Linear::new(w, None)
         } else if cfg.use_qkv_bias {
             let q_w = vb.pp("q_proj").get((size_q, size_in), "weight")?;
             let k_w = vb.pp("k_proj").get((size_kv, size_in), "weight")?;
             let v_w = vb.pp("v_proj").get((size_kv, size_in), "weight")?;
             let fused_w = Tensor::cat(&[&q_w, &k_w, &v_w], 0)?;
+            let fused_w = backend.preprocess_linear_weight(&fused_w)?;
 
             let q_b = vb.pp("q_proj").get(size_q, "bias")?;
             let k_b = vb.pp("k_proj").get(size_kv, "bias")?;
@@ -127,10 +129,13 @@ impl CausalSelfAttention {
             let k_w = vb.pp("k_proj").get((size_kv, size_in), "weight")?;
             let v_w = vb.pp("v_proj").get((size_kv, size_in), "weight")?;
             let fused_w = Tensor::cat(&[&q_w, &k_w, &v_w], 0)?;
+            let fused_w = backend.preprocess_linear_weight(&fused_w)?;
             Linear::new(fused_w, None)
         };
 
-        let o_proj = linear_no_bias(size_q, size_in, vb.pp("o_proj"))?;
+        let o_w = vb.pp("o_proj").get((size_in, size_q), "weight")?;
+        let o_w = backend.preprocess_linear_weight(&o_w)?;
+        let o_proj = Linear::new(o_w, None);
 
         let (q_norm, k_norm) = if use_qk_norm {
             let eps = cfg.rms_norm_eps;
