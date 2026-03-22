@@ -43,7 +43,7 @@ candle-flash-attn = { version = "0.9", optional = true }
 candle-metal-kernels = { version = "0.9", optional = true }
 objc2-metal = { version = "0.3", optional = true }
 wgpu = { version = "24", optional = true }
-rocm-rs = { version = "0.5", optional = true, default-features = false }
+# rocm-rs removed — incompatible with ROCm 6.2. Using raw FFI instead.
 pollster = { version = "0.4", optional = true }
 bytemuck = { version = "1", optional = true, features = ["derive"] }
 half = "2"
@@ -70,7 +70,7 @@ metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal", "d
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:bindgen_cuda"]
 flash-attn = ["cuda", "dep:candle-flash-attn"]
 vulkan = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
-rocm = ["dep:rocm-rs"]
+rocm = []
 
 master = ["dep:actix-web", "dep:async-stream", "dep:uuid"]
 

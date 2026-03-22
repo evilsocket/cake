@@ -1,35 +1,99 @@
-//! ROCm compute backend via rocm-rs (HIP + rocBLAS).
+//! ROCm compute backend via raw HIP + rocBLAS FFI.
 //!
-//! Native AMD GPU acceleration using ROCm's HIP runtime and rocBLAS GEMM.
-//! Weight matrices are uploaded once to GPU memory and cached by `TensorId`.
-//! rocBLAS provides hand-tuned GEMM kernels for RDNA 2 (Steam Deck gfx1033).
+//! Native AMD GPU acceleration using HIP for memory management and rocBLAS
+//! for GEMM. Links against `libamdhip64.so` and `librocblas.so` at runtime.
 //!
 //! **Requires**: `hip-runtime-amd` and `rocblas` packages installed.
-//! **Steam Deck**: Set `HSA_OVERRIDE_GFX_VERSION=10.3.0` for gfx1033 → gfx1030 compat.
+//! **Steam Deck**: Set `HSA_OVERRIDE_GFX_VERSION=10.3.0` for gfx1033 compat.
+
+mod ffi;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use candle_core::{DType, Device, Result, Tensor, TensorId, D};
-use rocm_rs::hip::{self, DeviceMemory, Stream};
-use rocm_rs::rocblas::{self, Handle as RocblasHandle, Operation};
 
 use super::ComputeBackend;
 
-/// Cached GPU buffer for a tensor.
-struct GpuBuffer {
-    mem: DeviceMemory<f32>,
+/// GPU buffer wrapper — frees on drop.
+struct GpuBuf {
+    ptr: *mut std::ffi::c_void,
     count: usize,
 }
 
-/// ROCm backend with rocBLAS GEMM and persistent GPU weight buffers.
+impl GpuBuf {
+    fn new(count: usize) -> std::result::Result<Self, String> {
+        let mut ptr = std::ptr::null_mut();
+        let err = unsafe { ffi::hipMalloc(&mut ptr, count * 4) };
+        if err != 0 {
+            return Err(format!("hipMalloc failed: error {err}"));
+        }
+        Ok(Self { ptr, count })
+    }
+
+    fn upload(data: &[f32]) -> std::result::Result<Self, String> {
+        let buf = Self::new(data.len())?;
+        let err = unsafe {
+            ffi::hipMemcpy(
+                buf.ptr,
+                data.as_ptr() as *const std::ffi::c_void,
+                data.len() * 4,
+                ffi::HIP_MEMCPY_HOST_TO_DEVICE,
+            )
+        };
+        if err != 0 {
+            return Err(format!("hipMemcpy H2D failed: error {err}"));
+        }
+        Ok(buf)
+    }
+
+    fn download(&self) -> std::result::Result<Vec<f32>, String> {
+        let mut host = vec![0f32; self.count];
+        let err = unsafe {
+            ffi::hipMemcpy(
+                host.as_mut_ptr() as *mut std::ffi::c_void,
+                self.ptr,
+                self.count * 4,
+                ffi::HIP_MEMCPY_DEVICE_TO_HOST,
+            )
+        };
+        if err != 0 {
+            return Err(format!("hipMemcpy D2H failed: error {err}"));
+        }
+        Ok(host)
+    }
+
+    fn as_ptr(&self) -> *const f32 {
+        self.ptr as *const f32
+    }
+
+    fn as_mut_ptr(&self) -> *mut f32 {
+        self.ptr as *mut f32
+    }
+}
+
+impl Drop for GpuBuf {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe { ffi::hipFree(self.ptr) };
+        }
+    }
+}
+
+// GpuBuf is Send+Sync — GPU pointers are valid across threads after sync
+unsafe impl Send for GpuBuf {}
+unsafe impl Sync for GpuBuf {}
+
+/// ROCm backend with rocBLAS GEMM and cached GPU weight buffers.
 pub struct RocmBackend {
     device: Device,
-    stream: Stream,
-    blas: RocblasHandle,
-    /// Weight tensors cached on GPU by TensorId.
-    cache: Mutex<HashMap<TensorId, GpuBuffer>>,
+    blas: *mut std::ffi::c_void, // rocblas_handle
+    cache: Mutex<HashMap<TensorId, GpuBuf>>,
 }
+
+// rocblas_handle is thread-safe when not used concurrently (we hold Mutex)
+unsafe impl Send for RocmBackend {}
+unsafe impl Sync for RocmBackend {}
 
 impl std::fmt::Debug for RocmBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -37,119 +101,121 @@ impl std::fmt::Debug for RocmBackend {
     }
 }
 
+impl Drop for RocmBackend {
+    fn drop(&mut self) {
+        if !self.blas.is_null() {
+            unsafe { ffi::rocblas_destroy_handle(self.blas) };
+        }
+    }
+}
+
 impl RocmBackend {
     pub fn new() -> std::result::Result<Self, String> {
-        let dev = hip::Device::new(0).map_err(|e| format!("HIP device: {e}"))?;
-        dev.set_current().map_err(|e| format!("HIP set_current: {e}"))?;
-
-        let info = hip::memory::memory_info().map_err(|e| format!("HIP meminfo: {e}"))?;
-        log::info!(
-            "ROCm backend: device 0, {:.1} GiB free / {:.1} GiB total",
-            info.free as f64 / 1e9,
-            info.total as f64 / 1e9,
-        );
-
-        let stream = Stream::new().map_err(|e| format!("HIP stream: {e}"))?;
-        let blas = RocblasHandle::new().map_err(|e| format!("rocBLAS: {e}"))?;
-        blas.set_stream(&stream).map_err(|e| format!("rocBLAS set_stream: {e}"))?;
-
-        Ok(Self {
-            device: Device::Cpu, // candle tensors still on CPU
-            stream,
-            blas,
-            cache: Mutex::new(HashMap::new()),
-        })
-    }
-
-    // ── GPU buffer management ───────────────────────────────────────
-
-    /// Upload tensor data to GPU, caching by TensorId for weight reuse.
-    fn get_or_upload(&self, tensor: &Tensor) -> Result<(*const f32, usize)> {
-        let id = tensor.id();
-        let mut cache = self.cache.lock().unwrap();
-
-        if let Some(buf) = cache.get(&id) {
-            return Ok((buf.mem.as_ptr() as *const f32, buf.count));
+        // Initialize HIP
+        let err = unsafe { ffi::hipInit(0) };
+        if err != 0 {
+            return Err(format!("hipInit failed: error {err}"));
         }
 
-        let data = Self::to_f32_vec(tensor)?;
-        let count = data.len();
-        let mut mem = DeviceMemory::<f32>::new(count)
-            .map_err(|e| candle_core::Error::Msg(format!("HIP alloc: {e}")))?;
-        mem.copy_from_host(&data)
-            .map_err(|e| candle_core::Error::Msg(format!("HIP upload: {e}")))?;
+        let mut count = 0i32;
+        let err = unsafe { ffi::hipGetDeviceCount(&mut count) };
+        if err != 0 || count == 0 {
+            return Err("no HIP devices found".into());
+        }
 
-        let ptr = mem.as_ptr() as *const f32;
-        cache.insert(id, GpuBuffer { mem, count });
-        Ok((ptr, count))
-    }
+        let err = unsafe { ffi::hipSetDevice(0) };
+        if err != 0 {
+            return Err(format!("hipSetDevice(0) failed: error {err}"));
+        }
 
-    /// Allocate a temporary GPU output buffer.
-    fn alloc_output(&self, count: usize) -> Result<DeviceMemory<f32>> {
-        DeviceMemory::<f32>::new(count)
-            .map_err(|e| candle_core::Error::Msg(format!("HIP alloc: {e}")))
-    }
+        // Get device name
+        let mut name = [0u8; 256];
+        unsafe { ffi::hipDeviceGetName(name.as_mut_ptr() as *mut i8, 256, 0) };
+        let name = std::ffi::CStr::from_bytes_until_nul(&name)
+            .unwrap_or_default()
+            .to_string_lossy();
 
-    /// Download GPU buffer to host Vec<f32>.
-    fn download(mem: &DeviceMemory<f32>, count: usize) -> Result<Vec<f32>> {
-        let mut host = vec![0f32; count];
-        mem.copy_to_host(&mut host)
-            .map_err(|e| candle_core::Error::Msg(format!("HIP download: {e}")))?;
-        Ok(host)
+        // Get memory info
+        let mut free = 0usize;
+        let mut total = 0usize;
+        unsafe { ffi::hipMemGetInfo(&mut free, &mut total) };
+
+        log::info!(
+            "ROCm backend: {} ({:.1} GiB free / {:.1} GiB total)",
+            name,
+            free as f64 / 1e9,
+            total as f64 / 1e9,
+        );
+
+        // Create rocBLAS handle
+        let mut handle = std::ptr::null_mut();
+        let err = unsafe { ffi::rocblas_create_handle(&mut handle) };
+        if err != 0 {
+            return Err(format!("rocblas_create_handle failed: error {err}"));
+        }
+
+        Ok(Self {
+            device: Device::Cpu,
+            blas: handle,
+            cache: Mutex::new(HashMap::new()),
+        })
     }
 
     fn to_f32_vec(t: &Tensor) -> Result<Vec<f32>> {
         t.to_dtype(DType::F32)?.contiguous()?.flatten_all()?.to_vec1()
     }
 
-    // ── rocBLAS GEMM ────────────────────────────────────────────────
+    fn get_or_upload(&self, tensor: &Tensor) -> Result<*const f32> {
+        let id = tensor.id();
+        let mut cache = self.cache.lock().unwrap();
+        if let Some(buf) = cache.get(&id) {
+            return Ok(buf.as_ptr());
+        }
+        let data = Self::to_f32_vec(tensor)?;
+        let buf = GpuBuf::upload(&data)
+            .map_err(|e| candle_core::Error::Msg(e))?;
+        let ptr = buf.as_ptr();
+        cache.insert(id, buf);
+        Ok(ptr)
+    }
 
-    /// C = alpha * A(m×k) × B(k×n) + beta * C
-    /// A, B are already on GPU. Returns GPU output buffer.
-    fn rocblas_gemm(
-        &self,
-        a_ptr: *const f32,
-        b_ptr: *const f32,
-        m: usize,
-        k: usize,
-        n: usize,
-    ) -> Result<DeviceMemory<f32>> {
-        let mut c = self.alloc_output(m * n)?;
+    /// C = A(m×k) × B(k×n) using rocBLAS sgemm.
+    /// Row-major: compute C^T = B^T × A^T in column-major.
+    fn rocblas_gemm(&self, a: *const f32, b: *const f32, m: usize, k: usize, n: usize) -> Result<GpuBuf> {
+        let c = GpuBuf::new(m * n)
+            .map_err(|e| candle_core::Error::Msg(e))?;
         let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
 
-        // rocBLAS uses column-major. To compute row-major C = A × B,
-        // we compute C^T = B^T × A^T in column-major, which gives us
-        // C in row-major layout. So we swap A↔B and M↔N.
-        unsafe {
-            rocblas::level3::gemm::<f32>(
-                &self.blas,
-                Operation::None,  // B^T → no transpose (B is already row-major = col-major transposed)
-                Operation::None,  // A^T → no transpose
-                n as i32,         // rows of op(B^T) = cols of B = N
-                m as i32,         // cols of op(A^T) = rows of A = M
-                k as i32,         // shared dim
+        // Row-major trick: C = A×B  ⟺  C^T = B^T × A^T (column-major)
+        let err = unsafe {
+            ffi::rocblas_sgemm(
+                self.blas,
+                ffi::ROCBLAS_OPERATION_NONE, // B^T
+                ffi::ROCBLAS_OPERATION_NONE, // A^T
+                n as i32,  // rows of B^T = N
+                m as i32,  // cols of A^T = M
+                k as i32,
                 &alpha,
-                b_ptr,            // "A" in col-major = B in row-major
-                n as i32,         // lda = N (leading dim of B in col-major)
-                a_ptr,            // "B" in col-major = A in row-major
-                k as i32,         // ldb = K (leading dim of A in col-major)
+                b, n as i32,  // B with ldb=N
+                a, k as i32,  // A with lda=K
                 &beta,
-                c.as_ptr() as *mut f32,
-                n as i32,         // ldc = N
+                c.as_mut_ptr(), n as i32,  // C with ldc=N
             )
-            .map_err(|e| candle_core::Error::Msg(format!("rocblas_sgemm: {e}")))?;
+        };
+        if err != 0 {
+            return Err(candle_core::Error::Msg(format!("rocblas_sgemm failed: {err}")));
         }
 
-        // Synchronize to ensure GEMM completes before reading
-        self.stream
-            .synchronize()
-            .map_err(|e| candle_core::Error::Msg(format!("HIP sync: {e}")))?;
+        // Sync
+        let err = unsafe { ffi::hipDeviceSynchronize() };
+        if err != 0 {
+            return Err(candle_core::Error::Msg(format!("hipDeviceSynchronize: {err}")));
+        }
 
         Ok(c)
     }
 
-    /// Tensor matmul via rocBLAS. Handles batched dimensions.
     fn tensor_matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         let a = a.to_dtype(DType::F32)?.contiguous()?;
         let b = b.to_dtype(DType::F32)?.contiguous()?;
@@ -158,7 +224,6 @@ impl RocmBackend {
         let b_dims = b.dims();
         let rank_a = a_dims.len();
         let rank_b = b_dims.len();
-
         let m = a_dims[rank_a - 2];
         let k = a_dims[rank_a - 1];
         let n = b_dims[rank_b - 1];
@@ -168,43 +233,33 @@ impl RocmBackend {
         let batch = a_batch.max(b_batch);
 
         if batch <= 1 {
-            // Single batch: use cached buffers
-            let (a_ptr, _) = self.get_or_upload(&a)?;
-            let (b_ptr, _) = self.get_or_upload(&b)?;
-            let c_mem = self.rocblas_gemm(a_ptr, b_ptr, m, k, n)?;
-            let c_data = Self::download(&c_mem, m * n)?;
-
+            let a_ptr = self.get_or_upload(&a)?;
+            let b_ptr = self.get_or_upload(&b)?;
+            let c = self.rocblas_gemm(a_ptr, b_ptr, m, k, n)?;
+            let data = c.download().map_err(|e| candle_core::Error::Msg(e))?;
             let mut shape = a_dims[..rank_a - 2].to_vec();
             shape.push(m);
             shape.push(n);
-            return Tensor::from_vec(c_data, shape.as_slice(), &Device::Cpu);
+            return Tensor::from_vec(data, shape.as_slice(), &Device::Cpu);
         }
 
-        // Multi-batch: extract per-batch slices
+        // Multi-batch
         let a_data = Self::to_f32_vec(&a)?;
         let b_data = Self::to_f32_vec(&b)?;
         let mk = m * k;
         let kn = k * n;
         let mn = m * n;
-
         let mut out = Vec::with_capacity(batch * mn);
+
         for i in 0..batch {
             let a_off = if a_batch == 1 { 0 } else { i * mk };
             let b_off = if b_batch == 1 { 0 } else { i * kn };
-
-            let mut a_mem = self.alloc_output(mk)?;
-            let mut b_mem = self.alloc_output(kn)?;
-            a_mem.copy_from_host(&a_data[a_off..a_off + mk])
-                .map_err(|e| candle_core::Error::Msg(format!("HIP upload: {e}")))?;
-            b_mem.copy_from_host(&b_data[b_off..b_off + kn])
-                .map_err(|e| candle_core::Error::Msg(format!("HIP upload: {e}")))?;
-
-            let c_mem = self.rocblas_gemm(
-                a_mem.as_ptr() as *const f32,
-                b_mem.as_ptr() as *const f32,
-                m, k, n,
-            )?;
-            out.extend_from_slice(&Self::download(&c_mem, mn)?);
+            let a_buf = GpuBuf::upload(&a_data[a_off..a_off + mk])
+                .map_err(|e| candle_core::Error::Msg(e))?;
+            let b_buf = GpuBuf::upload(&b_data[b_off..b_off + kn])
+                .map_err(|e| candle_core::Error::Msg(e))?;
+            let c = self.rocblas_gemm(a_buf.as_ptr(), b_buf.as_ptr(), m, k, n)?;
+            out.extend_from_slice(&c.download().map_err(|e| candle_core::Error::Msg(e))?);
         }
 
         let mut shape = a_dims[..rank_a - 2].to_vec();
@@ -218,123 +273,73 @@ impl ComputeBackend for RocmBackend {
     fn name(&self) -> &str { "rocm" }
     fn device(&self) -> &Device { &self.device }
 
-    // ── rocBLAS-accelerated matmul ──────────────────────────────────
-
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         let m = a.dims()[a.dims().len() - 2];
-        // CPU fast path for tiny matmuls (generation M=1)
-        if m <= 4 {
-            return a.matmul(b);
-        }
-        let orig_dtype = a.dtype();
-        self.tensor_matmul(a, b)?.to_dtype(orig_dtype)
+        if m <= 4 { return a.matmul(b); }
+        let orig = a.dtype();
+        self.tensor_matmul(a, b)?.to_dtype(orig)
     }
 
-    // ── rocBLAS-accelerated attention ────────────────────────────────
-
     fn attention(&self, q: &Tensor, k: &Tensor, v: &Tensor, scale: f32, causal: bool) -> Result<Tensor> {
-        let orig_dtype = q.dtype();
+        let orig = q.dtype();
         let q = q.to_dtype(DType::F32)?;
         let k = k.to_dtype(DType::F32)?;
         let v = v.to_dtype(DType::F32)?;
-
-        // Q @ K^T via rocBLAS
         let attn = self.tensor_matmul(&q, &k.t()?)?;
         let attn = (attn * scale as f64)?;
-
         let attn = if causal {
-            let seq_len = q.dim(2)?;
-            let kv_len = k.dim(2)?;
-            let mut mask = vec![0u8; seq_len * kv_len];
-            for i in 0..seq_len {
-                let max_j = kv_len.saturating_sub(seq_len) + i;
-                for j in 0..=max_j.min(kv_len - 1) {
-                    mask[i * kv_len + j] = 1;
-                }
+            let sl = q.dim(2)?;
+            let kl = k.dim(2)?;
+            let mut mask = vec![0u8; sl * kl];
+            for i in 0..sl {
+                for j in 0..=kl.saturating_sub(sl) + i { if j < kl { mask[i * kl + j] = 1; } }
             }
-            let mask = Tensor::from_vec(mask, (1, 1, seq_len, kv_len), q.device())?;
+            let mask = Tensor::from_vec(mask, (1, 1, sl, kl), q.device())?;
             let neg_inf = Tensor::full(f32::NEG_INFINITY, attn.shape(), q.device())?;
             mask.broadcast_as(attn.shape())?.where_cond(&attn, &neg_inf)?
-        } else {
-            attn
-        };
-
+        } else { attn };
         let attn = candle_nn::ops::softmax_last_dim(&attn)?;
-
-        // attn @ V via rocBLAS
-        let out = self.tensor_matmul(&attn, &v)?;
-        out.to_dtype(orig_dtype)
+        self.tensor_matmul(&attn, &v)?.to_dtype(orig)
     }
 
-    // ── CPU tensor ops for non-matmul operations ────────────────────
-    // These are fast on CPU and don't benefit from GPU dispatch overhead.
-
-    fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-        (candle_nn::ops::silu(&gate.contiguous()?)? * up.contiguous()?)?.contiguous()
+    // CPU tensor ops for non-matmul operations
+    fn silu_mul(&self, g: &Tensor, u: &Tensor) -> Result<Tensor> {
+        (candle_nn::ops::silu(&g.contiguous()?)? * u.contiguous()?)?.contiguous()
     }
-
     fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
-        let t88 = Tensor::full(88.0f32, x.shape(), x.device())?.to_dtype(x.dtype())?;
-        let clamped = x.minimum(&t88)?;
-        let sp = (clamped.exp()? + 1.0)?.log()?;
-        x.maximum(&sp)
+        let t = Tensor::full(88f32, x.shape(), x.device())?.to_dtype(x.dtype())?;
+        x.maximum(&(x.minimum(&t)?.exp()? + 1.0)?.log()?)
     }
-
-    fn rms_norm_gated(&self, x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        let n = candle_nn::ops::rms_norm(&x.contiguous()?, weight, eps)?;
-        (n * candle_nn::ops::silu(&z.contiguous()?.to_dtype(x.dtype())?)?)?.contiguous()
+    fn rms_norm_gated(&self, x: &Tensor, z: &Tensor, w: &Tensor, eps: f32) -> Result<Tensor> {
+        (candle_nn::ops::rms_norm(&x.contiguous()?, w, eps)? * candle_nn::ops::silu(&z.contiguous()?.to_dtype(x.dtype())?)?)?.contiguous()
     }
-
-    fn add_rms_norm(&self, a: &Tensor, b: &Tensor, weight: &Tensor, eps: f32) -> Result<(Tensor, Tensor)> {
-        let res = (a + b)?;
-        let normed = candle_nn::ops::rms_norm(&res.contiguous()?, weight, eps)?;
-        Ok((res, normed))
+    fn add_rms_norm(&self, a: &Tensor, b: &Tensor, w: &Tensor, eps: f32) -> Result<(Tensor, Tensor)> {
+        let r = (a + b)?; Ok((r.clone(), candle_nn::ops::rms_norm(&r.contiguous()?, w, eps)?))
     }
-
-    fn rms_norm_channel(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        x.transpose(1, 2)?.contiguous()
-            .and_then(|t| candle_nn::ops::rms_norm(&t, weight, eps))?
-            .transpose(1, 2)?.contiguous()
+    fn rms_norm_channel(&self, x: &Tensor, w: &Tensor, eps: f32) -> Result<Tensor> {
+        x.transpose(1,2)?.contiguous().and_then(|t| candle_nn::ops::rms_norm(&t, w, eps))?.transpose(1,2)?.contiguous()
     }
-
-    fn depthwise_conv1d_silu(&self, window: &Tensor, weight: &Tensor, _ks: usize, _ch: usize) -> Result<Tensor> {
-        candle_nn::ops::silu(&window.broadcast_mul(&weight.unsqueeze(0)?)?.sum(D::Minus1)?)
+    fn depthwise_conv1d_silu(&self, win: &Tensor, w: &Tensor, _ks: usize, _ch: usize) -> Result<Tensor> {
+        candle_nn::ops::silu(&win.broadcast_mul(&w.unsqueeze(0)?)?.sum(D::Minus1)?)
     }
-
-    fn depthwise_conv1d_bias(&self, input: &Tensor, weight: &Tensor, bias: &Tensor, ks: usize, _ch: usize) -> Result<Tensor> {
-        let out_t = input.dim(2)? - ks + 1;
-        let mut slices = Vec::with_capacity(out_t);
-        for t in 0..out_t {
-            let w = input.narrow(2, t, ks)?.broadcast_mul(&weight.unsqueeze(0)?)?.sum(D::Minus1)?.broadcast_add(bias)?;
-            slices.push(w.unsqueeze(2)?);
-        }
-        Tensor::cat(&slices, 2)
+    fn depthwise_conv1d_bias(&self, inp: &Tensor, w: &Tensor, b: &Tensor, ks: usize, _ch: usize) -> Result<Tensor> {
+        let ot = inp.dim(2)? - ks + 1;
+        let mut s = Vec::with_capacity(ot);
+        for t in 0..ot { s.push(inp.narrow(2,t,ks)?.broadcast_mul(&w.unsqueeze(0)?)?.sum(D::Minus1)?.broadcast_add(b)?.unsqueeze(2)?); }
+        Tensor::cat(&s, 2)
     }
-
-    fn depthwise_conv1d_bias_ctx(&self, ctx: &Tensor, input: &Tensor, weight: &Tensor, bias: &Tensor, ks: usize, ch: usize) -> Result<Tensor> {
-        self.depthwise_conv1d_bias(&Tensor::cat(&[ctx, input], 2)?, weight, bias, ks, ch)
+    fn depthwise_conv1d_bias_ctx(&self, c: &Tensor, i: &Tensor, w: &Tensor, b: &Tensor, ks: usize, ch: usize) -> Result<Tensor> {
+        self.depthwise_conv1d_bias(&Tensor::cat(&[c, i], 2)?, w, b, ks, ch)
     }
-
-    fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ((a + b)? + c)?.contiguous()
-    }
-
-    fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
-        (x * y.exp()?)?.contiguous()
-    }
-
-    fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ((a - b)? * c)?.contiguous()
-    }
-
+    fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> { ((a+b)?+c)?.contiguous() }
+    fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> { (x * y.exp()?)?.contiguous() }
+    fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> { ((a-b)?*c)?.contiguous() }
     fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
         (a + b.broadcast_mul(&c.unsqueeze(0)?.unsqueeze(2)?)?)?.contiguous()
     }
-
-    fn adaln_modulate(&self, x: &Tensor, nw: &Tensor, scale: &Tensor, shift: &Tensor, eps: f32) -> Result<Tensor> {
-        (candle_nn::ops::rms_norm(&x.contiguous()?, nw, eps)?.broadcast_mul(&(scale + 1.0)?)? + shift)?.contiguous()
+    fn adaln_modulate(&self, x: &Tensor, nw: &Tensor, sc: &Tensor, sh: &Tensor, eps: f32) -> Result<Tensor> {
+        (candle_nn::ops::rms_norm(&x.contiguous()?, nw, eps)?.broadcast_mul(&(sc + 1.0)?)? + sh)?.contiguous()
     }
-
     fn f8e4m3_to_f32(&self, x: &Tensor) -> Result<Tensor> { x.to_dtype(DType::F32) }
     fn f8e4m3_to_f16(&self, x: &Tensor) -> Result<Tensor> { x.to_dtype(DType::F16) }
     fn f8e4m3_to_bf16(&self, x: &Tensor) -> Result<Tensor> { x.to_dtype(DType::BF16) }
