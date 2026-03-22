@@ -9,18 +9,18 @@ use cake_core::backends::{self, ComputeBackend, CpuBackend};
 // ── Factory tests ──────────────────────────────────────────────
 
 #[test]
-fn create_backend_cpu_returns_cpu_backend() {
+fn create_backend_cpu_returns_valid_backend() {
     let backend = backends::create_backend(&Device::Cpu);
-    assert_eq!(backend.name(), "cpu");
+    // With vulkan feature, may return "vulkan" instead of "cpu"
+    assert!(backend.name() == "cpu" || backend.name() == "vulkan");
     assert!(backend.device().is_cpu());
 }
 
 #[test]
 fn create_backend_returns_arc_dyn() {
-    // Verify the returned backend is usable as Arc<dyn ComputeBackend>
     let backend: Arc<dyn ComputeBackend> = backends::create_backend(&Device::Cpu);
     let _cloned = backend.clone();
-    assert_eq!(backend.name(), "cpu");
+    assert!(backend.name() == "cpu" || backend.name() == "vulkan");
 }
 
 // ── Trait object dispatch ──────────────────────────────────────
