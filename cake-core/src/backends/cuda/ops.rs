@@ -8,7 +8,7 @@ use candle_core::{CpuStorage, Layout, Result, Shape, Tensor};
 mod ptx {
     include!(concat!(env!("OUT_DIR"), "/fused_ops_ptx.rs"));
 }
-pub(super) const FUSED_OPS_PTX: &str = ptx::FUSED_OPS;
+pub(super) const FUSED_OPS_PTX: &str = ptx::OPS;
 
 // ─── SiluMul: silu(gate) * up ──────────────────────────────────────
 

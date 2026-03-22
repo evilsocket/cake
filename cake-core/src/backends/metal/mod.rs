@@ -12,8 +12,8 @@ use candle_core::{CpuStorage, DType, Device, Layout, Result, Shape, Tensor, D};
 
 use super::ComputeBackend;
 
-// ─── MSL shader source (loaded from metal.msl) ─────────────────────
-const FUSED_OPS_MSL: &str = include_str!("metal.msl");
+// ─── MSL shader source (loaded from ops.msl) ───────────────────────
+const FUSED_OPS_MSL: &str = include_str!("ops.msl");
 
 // ─── CustomOp structs for MSL-accelerated ops ───────────────────────
 //
