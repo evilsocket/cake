@@ -45,21 +45,24 @@ fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> Result<Tensor>
 
 impl CausalSelfAttention {
     /// Linear forward: x @ w^T + bias via backend matmul.
+    /// Handles dtype promotion when weights are pre-converted to F32.
     fn linear_forward(&self, x: &Tensor, linear: &Linear) -> Result<Tensor> {
         let w = linear.weight().t()?;
+        let x_matched = x.to_dtype(w.dtype())?;
         let x_dims = x.dims();
         let out = if x_dims.len() > 2 {
             let leading: usize = x_dims[..x_dims.len() - 1].iter().product();
             let inner = *x_dims.last().unwrap();
-            let x_2d = x.reshape((leading, inner))?;
+            let x_2d = x_matched.reshape((leading, inner))?;
             let out_2d = self.backend.matmul(&x_2d, &w)?;
             let out_dim = out_2d.dim(1)?;
             let mut out_shape = x_dims[..x_dims.len() - 1].to_vec();
             out_shape.push(out_dim);
             out_2d.reshape(out_shape.as_slice())?
         } else {
-            self.backend.matmul(x, &w)?
+            self.backend.matmul(&x_matched, &w)?
         };
+        let out = out.to_dtype(x.dtype())?;
         match linear.bias() {
             Some(b) => out.broadcast_add(b),
             None => Ok(out),
