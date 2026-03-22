@@ -694,28 +694,58 @@ impl ComputeBackend for VulkanBackend {
     // GPU dispatch overhead (~50µs) only pays off for tensors > 8K elements.
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-        self.dispatch_binary(gate, up, "silu_mul")
+        if gate.elem_count() > 8192 {
+            self.dispatch_binary(gate, up, "silu_mul")
+        } else {
+            (candle_nn::ops::silu(&gate.contiguous()?)? * up.contiguous()?)?.contiguous()
+        }
     }
 
     fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
-        self.dispatch_unary(x, "stable_softplus")
+        if x.elem_count() > 8192 {
+            self.dispatch_unary(x, "stable_softplus")
+        } else {
+            let t88 = Tensor::full(88.0f32, x.shape(), x.device())?.to_dtype(x.dtype())?;
+            let clamped = x.minimum(&t88)?;
+            let sp = (clamped.exp()? + 1.0)?.log()?;
+            x.maximum(&sp)
+        }
     }
 
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        self.dispatch_ternary(a, b, c, "add3")
+        if a.elem_count() > 8192 {
+            self.dispatch_ternary(a, b, c, "add3")
+        } else {
+            ((a + b)? + c)?.contiguous()
+        }
     }
 
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
-        self.dispatch_binary(x, y, "exp_mul")
+        if x.elem_count() > 8192 {
+            self.dispatch_binary(x, y, "exp_mul")
+        } else {
+            (x * y.exp()?)?.contiguous()
+        }
     }
 
     fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        self.dispatch_ternary(a, b, c, "sub_mul")
+        if a.elem_count() > 8192 {
+            self.dispatch_ternary(a, b, c, "sub_mul")
+        } else {
+            ((a - b)? * c)?.contiguous()
+        }
     }
 
     // ── GPU matmul ───────────────────────────────────────────────────
 
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
+        // GPU dispatch overhead (~175µs on Steam Deck) makes CPU faster for
+        // generation (M=1). GPU only beneficial for prefill (M>8) where the
+        // compute-to-overhead ratio justifies the dispatch cost.
+        let m = a.dims()[a.dims().len() - 2];
+        if m <= 8 {
+            return a.matmul(b);
+        }
         let orig_dtype = a.dtype();
         let result = self.tensor_matmul(a, b)?;
         result.to_dtype(orig_dtype)
