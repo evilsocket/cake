@@ -28,6 +28,11 @@ mod vulkan;
 #[cfg(feature = "vulkan")]
 pub use vulkan::VulkanBackend;
 
+#[cfg(feature = "rocm")]
+mod rocm;
+#[cfg(feature = "rocm")]
+pub use rocm::RocmBackend;
+
 /// Abstraction over compute backends (CPU, CUDA, Metal, Vulkan).
 ///
 /// Each method has a CPU-based default via [`CpuBackend`]. GPU backends override
@@ -183,7 +188,15 @@ pub fn create_backend(device: &Device) -> Arc<dyn ComputeBackend> {
         #[cfg(feature = "metal")]
         Device::Metal(_) => Arc::new(MetalBackend::new(device.clone())),
         _ => {
-            // No GPU device — try Vulkan (wgpu) for GPU compute on CPU tensors
+            // No GPU device — try ROCm first (native AMD), then Vulkan (wgpu)
+            #[cfg(feature = "rocm")]
+            match RocmBackend::new() {
+                Ok(r) => {
+                    log::info!("using ROCm backend (rocBLAS GEMM)");
+                    return Arc::new(r);
+                }
+                Err(e) => log::warn!("ROCm init failed ({e}), trying next backend"),
+            }
             #[cfg(feature = "vulkan")]
             match VulkanBackend::new() {
                 Ok(vk) => {
