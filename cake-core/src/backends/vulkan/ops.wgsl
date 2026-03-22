@@ -57,9 +57,9 @@ fn add3(@builtin(global_invocation_id) gid: vec3<u32>) {
 // ═══════════════════════════════════════════════════════════════════
 // GEMV: y[j] = sum_i(x[i] * W[i * N + j])  for x[1,K] × W[K,N] = y[1,N]
 //
-// Each workgroup computes one output element y[j].
-// 256 threads cooperatively reduce the K-length dot product.
-// Uses shared memory for the parallel reduction.
+// Each workgroup computes 4 output elements y[wg*4 .. wg*4+3].
+// 256 threads split into 4 groups of 64 (matching RDNA 2 wavefront).
+// Each group reduces the K-length dot product for one output column.
 // ═══════════════════════════════════════════════════════════════════
 
 struct GemvParams {
@@ -75,46 +75,51 @@ struct GemvParams {
 @group(0) @binding(3) var<uniform> gemv_params: GemvParams;
 
 const GEMV_WG: u32 = 256;
+const GEMV_COLS: u32 = 4;       // output columns per workgroup
+const GEMV_GROUP: u32 = 64;     // threads per column (= RDNA 2 wavefront)
 var<workgroup> gemv_shared: array<f32, 256>;
 
 @compute @workgroup_size(256)
 fn gemv(@builtin(global_invocation_id) gid: vec3<u32>,
         @builtin(local_invocation_id) lid: vec3<u32>,
         @builtin(workgroup_id) wid: vec3<u32>) {
-    let col = wid.x;           // which output element
-    let tid = lid.x;           // thread within workgroup
+    let tid = lid.x;
     let N = gemv_params.N;
     let K = gemv_params.K;
 
-    if (col >= N) { return; }
+    // Map tid to (column_index, lane_within_group)
+    let col_idx = tid / GEMV_GROUP;    // 0..3
+    let lane = tid % GEMV_GROUP;       // 0..63
+    let col = wid.x * GEMV_COLS + col_idx;
 
-    // Each thread accumulates a partial sum over a strided chunk of K
+    // Accumulate partial dot product
     var partial: f32 = 0.0;
-    var k = tid;
-    while (k < K) {
-        partial += gemv_x[k] * gemv_w[k * N + col];
-        k += GEMV_WG;
+    if (col < N) {
+        var k = lane;
+        while (k < K) {
+            partial += gemv_x[k] * gemv_w[k * N + col];
+            k += GEMV_GROUP;
+        }
     }
-    gemv_shared[tid] = partial;
+
+    // Store partial sum in shared memory
+    let shared_base = col_idx * GEMV_GROUP;
+    gemv_shared[shared_base + lane] = partial;
     workgroupBarrier();
 
-    // Parallel reduction in shared memory
-    if (tid < 128u) { gemv_shared[tid] += gemv_shared[tid + 128u]; }
+    // Parallel reduction within each 64-element group
+    if (lane < 32u) { gemv_shared[shared_base + lane] += gemv_shared[shared_base + lane + 32u]; }
     workgroupBarrier();
-    if (tid < 64u) { gemv_shared[tid] += gemv_shared[tid + 64u]; }
+    if (lane < 16u) { gemv_shared[shared_base + lane] += gemv_shared[shared_base + lane + 16u]; }
     workgroupBarrier();
-    if (tid < 32u) { gemv_shared[tid] += gemv_shared[tid + 32u]; }
+    if (lane < 8u) { gemv_shared[shared_base + lane] += gemv_shared[shared_base + lane + 8u]; }
     workgroupBarrier();
-    if (tid < 16u) { gemv_shared[tid] += gemv_shared[tid + 16u]; }
+    if (lane < 4u) { gemv_shared[shared_base + lane] += gemv_shared[shared_base + lane + 4u]; }
     workgroupBarrier();
-    if (tid < 8u) { gemv_shared[tid] += gemv_shared[tid + 8u]; }
+    if (lane < 2u) { gemv_shared[shared_base + lane] += gemv_shared[shared_base + lane + 2u]; }
     workgroupBarrier();
-    if (tid < 4u) { gemv_shared[tid] += gemv_shared[tid + 4u]; }
-    workgroupBarrier();
-    if (tid < 2u) { gemv_shared[tid] += gemv_shared[tid + 2u]; }
-    workgroupBarrier();
-    if (tid == 0u) {
-        gemv_y[col] = gemv_shared[0] + gemv_shared[1];
+    if (lane == 0u && col < N) {
+        gemv_y[col] = gemv_shared[shared_base] + gemv_shared[shared_base + 1u];
     }
 }
 
