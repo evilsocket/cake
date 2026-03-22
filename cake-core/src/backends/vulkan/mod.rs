@@ -694,60 +694,28 @@ impl ComputeBackend for VulkanBackend {
     // GPU dispatch overhead (~50µs) only pays off for tensors > 8K elements.
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-        if gate.elem_count() > 8192 {
-            self.dispatch_binary(gate, up, "silu_mul")
-        } else {
-            (candle_nn::ops::silu(&gate.contiguous()?)? * up.contiguous()?)?.contiguous()
-        }
+        self.dispatch_binary(gate, up, "silu_mul")
     }
 
     fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
-        if x.elem_count() > 8192 {
-            self.dispatch_unary(x, "stable_softplus")
-        } else {
-            let t88 = Tensor::full(88.0f32, x.shape(), x.device())?.to_dtype(x.dtype())?;
-            let clamped = x.minimum(&t88)?;
-            let sp = (clamped.exp()? + 1.0)?.log()?;
-            x.maximum(&sp)
-        }
+        self.dispatch_unary(x, "stable_softplus")
     }
 
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        if a.elem_count() > 8192 {
-            self.dispatch_ternary(a, b, c, "add3")
-        } else {
-            ((a + b)? + c)?.contiguous()
-        }
+        self.dispatch_ternary(a, b, c, "add3")
     }
 
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
-        if x.elem_count() > 8192 {
-            self.dispatch_binary(x, y, "exp_mul")
-        } else {
-            (x * y.exp()?)?.contiguous()
-        }
+        self.dispatch_binary(x, y, "exp_mul")
     }
 
     fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        if a.elem_count() > 8192 {
-            self.dispatch_ternary(a, b, c, "sub_mul")
-        } else {
-            ((a - b)? * c)?.contiguous()
-        }
+        self.dispatch_ternary(a, b, c, "sub_mul")
     }
 
     // ── GPU matmul ───────────────────────────────────────────────────
 
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
-        // GPU dispatch overhead (~50µs per call) means CPU is faster for
-        // small M with many calls. Use GPU for prefill (M>8) only.
-        // For generation (M=1), the ~168 dispatches/token at ~50µs each = ~8ms
-        // overhead, which is 7% of the 115ms/token budget — not worth it for
-        // the GEMV speedup on Van Gogh's small GPU.
-        let m = a.dims()[a.dims().len() - 2];
-        if m <= 8 {
-            return a.matmul(b);
-        }
         let orig_dtype = a.dtype();
         let result = self.tensor_matmul(a, b)?;
         result.to_dtype(orig_dtype)
