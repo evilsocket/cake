@@ -143,6 +143,37 @@ impl BufferPool {
     }
 }
 
+// ─── F32 weight cache ────────────────────────────────────────────────
+
+/// Caches F32 versions of weight tensors to avoid repeated F16→F32
+/// conversion during matmul. On CPU (Steam Deck APU), this conversion
+/// is a significant per-token cost since every GEMV re-reads weights.
+struct F32WeightCache {
+    tensors: HashMap<TensorId, Tensor>,
+}
+
+impl F32WeightCache {
+    fn new() -> Self {
+        Self {
+            tensors: HashMap::new(),
+        }
+    }
+
+    /// Return a cached F32 tensor or convert and cache it.
+    fn get_or_convert(&mut self, t: &Tensor) -> Tensor {
+        if t.dtype() == DType::F32 {
+            return t.clone();
+        }
+        let id = t.id();
+        if let Some(cached) = self.tensors.get(&id) {
+            return cached.clone();
+        }
+        let f32_t = t.to_dtype(DType::F32).unwrap().contiguous().unwrap();
+        self.tensors.insert(id, f32_t.clone());
+        f32_t
+    }
+}
+
 // ─── Vulkan backend ──────────────────────────────────────────────────
 
 /// Vulkan backend with cached pipelines, persistent GPU weight buffers, and
@@ -159,6 +190,8 @@ pub struct VulkanBackend {
     buffer_cache: Mutex<GpuBufferCache>,
     /// Pool of reusable output and staging buffers.
     buffer_pool: Mutex<BufferPool>,
+    /// CPU-side F32 weight cache to avoid repeated F16→F32 conversion.
+    f32_cache: Mutex<F32WeightCache>,
 }
 
 impl std::fmt::Debug for VulkanBackend {
@@ -209,6 +242,7 @@ impl VulkanBackend {
             module,
             buffer_cache: Mutex::new(GpuBufferCache::new()),
             buffer_pool: Mutex::new(BufferPool::new()),
+            f32_cache: Mutex::new(F32WeightCache::new()),
         })
     }
 
@@ -739,15 +773,22 @@ impl ComputeBackend for VulkanBackend {
     // ── GPU matmul ───────────────────────────────────────────────────
 
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
+        let orig_dtype = a.dtype();
+
+        // Cache F32 versions of weight tensors (stable TensorIds across passes).
+        // This avoids repeated F16→F32 conversion on every token, which is a
+        // significant cost on CPU-bound devices like Steam Deck.
+        let b_f32 = self.f32_cache.lock().unwrap().get_or_convert(b);
+        let a_f32 = a.to_dtype(DType::F32)?;
+
         // GPU dispatch overhead (~175µs on Steam Deck) makes CPU faster for
-        // generation (M=1). GPU only beneficial for prefill (M>8) where the
-        // compute-to-overhead ratio justifies the dispatch cost.
+        // generation (M=1). GPU only beneficial for prefill (M>8).
         let m = a.dims()[a.dims().len() - 2];
         if m <= 8 {
-            return a.matmul(b);
+            let result = a_f32.matmul(&b_f32)?;
+            return result.to_dtype(orig_dtype);
         }
-        let orig_dtype = a.dtype();
-        let result = self.tensor_matmul(a, b)?;
+        let result = self.tensor_matmul(&a_f32, &b_f32)?;
         result.to_dtype(orig_dtype)
     }
 
