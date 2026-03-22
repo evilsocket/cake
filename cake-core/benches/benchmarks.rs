@@ -21,3 +21,5 @@ mod bench_flux;
 mod bench_vibevoice;
 #[cfg(feature = "luxtts")]
 mod bench_luxtts;
+#[cfg(feature = "vulkan")]
+mod bench_vulkan;
