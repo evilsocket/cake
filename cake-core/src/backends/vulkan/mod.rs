@@ -668,6 +668,14 @@ impl ComputeBackend for VulkanBackend {
         self.dispatch_ternary(a, b, c, "sub_mul")
     }
 
+    // ── GPU matmul ───────────────────────────────────────────────────
+
+    fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
+        let orig_dtype = a.dtype();
+        let result = self.tensor_matmul(a, b)?;
+        result.to_dtype(orig_dtype)
+    }
+
     // ── CPU fallback for complex ops ────────────────────────────────
 
     fn rms_norm_gated(

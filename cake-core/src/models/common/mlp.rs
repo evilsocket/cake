@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use candle_core::{Result, Tensor, D};
-use candle_nn::{Linear, Module, VarBuilder};
+use candle_nn::{Linear, VarBuilder};
 
 use crate::backends::ComputeBackend;
 
@@ -17,9 +17,34 @@ pub struct MLP {
 }
 
 impl MLP {
+    /// Linear forward: x @ w^T + bias via backend matmul.
+    /// Handles broadcasting for batched inputs (3D x against 2D weight).
+    fn linear_forward(&self, x: &Tensor, linear: &Linear) -> Result<Tensor> {
+        let w = linear.weight().t()?;
+        // For batched input (batch, seq, hidden) × (hidden, out), reshape to 2D,
+        // matmul, then reshape back — avoids candle's 3D×2D shape mismatch.
+        let x_dims = x.dims();
+        let out = if x_dims.len() > 2 {
+            let leading: usize = x_dims[..x_dims.len() - 1].iter().product();
+            let inner = *x_dims.last().unwrap();
+            let x_2d = x.reshape((leading, inner))?;
+            let out_2d = self.backend.matmul(&x_2d, &w)?;
+            let out_dim = out_2d.dim(1)?;
+            let mut out_shape = x_dims[..x_dims.len() - 1].to_vec();
+            out_shape.push(out_dim);
+            out_2d.reshape(out_shape.as_slice())?
+        } else {
+            self.backend.matmul(x, &w)?
+        };
+        match linear.bias() {
+            Some(b) => out.broadcast_add(b),
+            None => Ok(out),
+        }
+    }
+
     /// Execute MLP(x).
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let fused = self.gate_up_proj.forward(x)?;
+        let fused = self.linear_forward(x, &self.gate_up_proj)?;
         let gate = fused.narrow(D::Minus1, 0, self.intermediate_size)?;
         let up = fused.narrow(D::Minus1, self.intermediate_size, self.intermediate_size)?;
         let x = if self.use_gelu {
@@ -27,7 +52,7 @@ impl MLP {
         } else {
             self.backend.silu_mul(&gate.contiguous()?, &up.contiguous()?)?
         };
-        self.down_proj.forward(&x)
+        self.linear_forward(&x, &self.down_proj)
     }
 
     /// Load this block from the VarBuilder given the specific configuration.

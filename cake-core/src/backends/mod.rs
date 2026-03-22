@@ -158,6 +158,14 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
     /// Dequantize F8E4M3 tensor to BF16.
     fn f8e4m3_to_bf16(&self, x: &Tensor) -> Result<Tensor>;
 
+    // ── Linear algebra ────────────────────────────────────────────────
+
+    /// Matrix multiplication. GPU backends override to use accelerated matmul.
+    /// Default: delegates to candle's CPU/CUDA/Metal matmul.
+    fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
+        a.matmul(b)
+    }
+
     // ── Device control ───────────────────────────────────────────────
 
     /// Flush GPU command buffer. No-op on CPU/CUDA, required on Metal
