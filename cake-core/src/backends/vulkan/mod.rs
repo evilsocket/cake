@@ -739,8 +739,15 @@ impl ComputeBackend for VulkanBackend {
     // ── GPU matmul ───────────────────────────────────────────────────
 
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
-        // Always use GPU — GEMV shader is optimized for M=1 (generation),
-        // tiled GEMM for M>1 (prefill). Weight buffers are cached on GPU.
+        // GPU dispatch overhead (~50µs per call) means CPU is faster for
+        // small M with many calls. Use GPU for prefill (M>8) only.
+        // For generation (M=1), the ~168 dispatches/token at ~50µs each = ~8ms
+        // overhead, which is 7% of the 115ms/token budget — not worth it for
+        // the GEMV speedup on Van Gogh's small GPU.
+        let m = a.dims()[a.dims().len() - 2];
+        if m <= 8 {
+            return a.matmul(b);
+        }
         let orig_dtype = a.dtype();
         let result = self.tensor_matmul(a, b)?;
         result.to_dtype(orig_dtype)
