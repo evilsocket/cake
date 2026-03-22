@@ -28,3 +28,7 @@ mod test_luxtts;
 mod test_transformer_standalone;
 #[path = "unit_tests/test_backends.rs"]
 mod test_backends;
+#[path = "unit_tests/test_expert_provider.rs"]
+mod test_expert_provider;
+#[path = "unit_tests/test_tensor_storage.rs"]
+mod test_tensor_storage;
