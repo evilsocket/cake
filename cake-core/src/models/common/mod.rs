@@ -3,6 +3,7 @@ mod attention;
 mod cache;
 pub mod chatml_history;
 mod config;
+pub mod disk_expert_provider;
 pub mod expert_provider;
 mod mlp;
 pub mod text_model;

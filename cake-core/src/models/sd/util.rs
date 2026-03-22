@@ -313,6 +313,7 @@ mod tests {
             text_model_arch: crate::TextModelArch::Llama,
             quant: Arc::new(crate::utils::NoQuantization),
             listener_override: Arc::new(Mutex::new(None)),
+            tensor_storage: None,
             backend: Arc::new(crate::backends::CpuBackend::new()),
         }
     }

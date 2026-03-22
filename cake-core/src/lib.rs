@@ -132,6 +132,12 @@ pub struct Args {
     #[arg(long, default_value_t = 10)]
     pub discovery_timeout: u64,
 
+    /// Offload expert weights to disk for MoE models larger than available RAM.
+    /// Expert weights are streamed from safetensors files on demand via pread().
+    /// Non-expert weights (attention, norms, embeddings) remain in RAM.
+    #[arg(long, default_value_t = false)]
+    pub expert_offload: bool,
+
     /// Stop discovery as soon as this many workers have been found (0 = wait full timeout).
     #[arg(long, default_value_t = 0)]
     pub min_workers: usize,

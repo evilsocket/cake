@@ -18,6 +18,7 @@ use anyhow::{bail, Result};
 use candle_core::DType;
 
 /// Raw tensor data read from storage.
+#[derive(Debug)]
 pub struct TensorData {
     /// Raw bytes in the tensor's native dtype layout.
     pub bytes: Vec<u8>,

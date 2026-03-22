@@ -55,6 +55,9 @@ pub struct Context {
     pub listener_override: Arc<Mutex<Option<TcpListener>>>,
     /// Compute backend for fused operations (CPU, CUDA, Metal, Vulkan).
     pub backend: Arc<dyn ComputeBackend>,
+    /// Tensor storage for expert offloading (pread from safetensors).
+    /// None when expert_offload is disabled.
+    pub tensor_storage: Option<Arc<dyn utils::tensor_storage::TensorStorageProvider>>,
 }
 
 /// Parse a dtype string ("f16", "bf16", "f32") into a candle DType.
@@ -489,6 +492,23 @@ impl Context {
 
         let backend = backends::create_backend(&device);
 
+        // Build tensor storage for expert offloading if requested
+        let tensor_storage: Option<Arc<dyn utils::tensor_storage::TensorStorageProvider>> =
+            if args.expert_offload && data_path.exists() {
+                match utils::tensor_storage::SafetensorsStorage::from_model_path(&data_path) {
+                    Ok(s) => {
+                        log::info!("expert offload: indexed safetensors for pread access");
+                        Some(Arc::new(s))
+                    }
+                    Err(e) => {
+                        log::warn!("expert offload: failed to index safetensors: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
         Ok(Context {
             args,
             dtype,
@@ -502,6 +522,7 @@ impl Context {
             quant,
             listener_override: Arc::new(Mutex::new(None)),
             backend,
+            tensor_storage,
         })
     }
 }
