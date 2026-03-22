@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use super::moe::SparseMoeMlp;
 
 /// A single Qwen3 MoE transformer layer.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Qwen3MoeBlock {
     name: String,
     input_layernorm: RmsNorm,

@@ -9,6 +9,7 @@ pub mod hf;
 pub mod models;
 pub mod native_dtype_backend;
 pub mod split;
+pub mod tensor_storage;
 pub mod wav;
 
 use std::path::{Path, PathBuf};

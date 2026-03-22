@@ -1,9 +1,7 @@
 //! Sparse MoE FFN for Qwen3.5 MoE.
 //!
-//! Per-expert weights are stored as individual linear layers:
-//!   mlp.experts.{j}.gate_proj.weight  (moe_intermediate_size, hidden_size)
-//!   mlp.experts.{j}.up_proj.weight    (moe_intermediate_size, hidden_size)
-//!   mlp.experts.{j}.down_proj.weight  (hidden_size, moe_intermediate_size)
+//! Per-expert weights are accessed via [`SharedExpertProvider`], which abstracts
+//! the storage strategy (RAM-resident, disk-streamed, etc.).
 //!
 //! When loaded from a GPTQ-Int4 model, the GPTQ backend transparently
 //! dequantizes each weight matrix (intercepting `*.weight` → `*.qweight`).
@@ -23,6 +21,7 @@ use candle_core::{DType, Result, Tensor, D};
 use candle_nn::{linear_no_bias as linear, ops::softmax_last_dim, Linear, Module, VarBuilder};
 
 use crate::backends::ComputeBackend;
+use crate::models::common::expert_provider::{IndividualResidentProvider, SharedExpertProvider};
 use crate::models::common::Config;
 
 /// Sparse MoE FFN block with shared expert (Qwen3.5 MoE).
@@ -30,12 +29,8 @@ use crate::models::common::Config;
 pub struct Qwen3_5MoeSparseMlp {
     /// Router: (num_experts, hidden_size)
     gate: Linear,
-    /// Per-expert gate projections (hidden_size → moe_intermediate_size)
-    experts_gate: Vec<Linear>,
-    /// Per-expert up projections (hidden_size → moe_intermediate_size)
-    experts_up: Vec<Linear>,
-    /// Per-expert down projections (moe_intermediate_size → hidden_size)
-    experts_down: Vec<Linear>,
+    /// Per-expert weights accessed via provider trait
+    expert_provider: SharedExpertProvider,
     /// Shared expert gate projection (hidden_size → shared_intermediate_size)
     shared_gate_proj: Linear,
     /// Shared expert up projection (hidden_size → shared_intermediate_size)
@@ -74,6 +69,14 @@ impl Qwen3_5MoeSparseMlp {
             experts_down.push(linear(i, h, evb.pp("down_proj"))?);
         }
 
+        // Wrap loaded weights in IndividualResidentProvider
+        let gate_weights: Vec<Tensor> = experts_gate.iter().map(|l| l.weight().clone()).collect();
+        let up_weights: Vec<Tensor> = experts_up.iter().map(|l| l.weight().clone()).collect();
+        let down_weights: Vec<Tensor> = experts_down.iter().map(|l| l.weight().clone()).collect();
+        let expert_provider: SharedExpertProvider = Arc::new(
+            IndividualResidentProvider::new(gate_weights, up_weights, down_weights),
+        );
+
         // Shared expert (standard SwiGLU MLP, not quantized)
         let se = vb.pp("shared_expert");
         let shared_gate_proj = linear(h, si, se.pp("gate_proj"))?;
@@ -86,9 +89,7 @@ impl Qwen3_5MoeSparseMlp {
 
         Ok(Self {
             gate,
-            experts_gate,
-            experts_up,
-            experts_down,
+            expert_provider,
             shared_gate_proj,
             shared_up_proj,
             shared_down_proj,
@@ -202,20 +203,22 @@ impl Qwen3_5MoeSparseMlp {
                 let exp = expert_indices[idx] as usize;
                 let w = expert_weights[idx];
 
-                let gate_out = self.experts_gate[exp]
-                    .forward(&x_flat)
-                    .map_err(|e| anyhow!("expert gate: {e}"))?;
-                let up_out = self.experts_up[exp]
-                    .forward(&x_flat)
-                    .map_err(|e| anyhow!("expert up: {e}"))?;
+                let ew = self.expert_provider.get_expert(exp)
+                    .map_err(|e| anyhow!("get_expert({exp}): {e}"))?;
+                let gate_out = x_flat.matmul(&ew.gate_proj.t()
+                    .map_err(|e| anyhow!("gate_proj t: {e}"))?)
+                    .map_err(|e| anyhow!("expert gate matmul: {e}"))?;
+                let up_out = x_flat.matmul(&ew.up_proj.t()
+                    .map_err(|e| anyhow!("up_proj t: {e}"))?)
+                    .map_err(|e| anyhow!("expert up matmul: {e}"))?;
                 let hidden = self.backend.silu_mul(
                     &gate_out.contiguous().map_err(|e| anyhow!("gate contig: {e}"))?,
                     &up_out.contiguous().map_err(|e| anyhow!("up contig: {e}"))?,
                 )
                 .map_err(|e| anyhow!("silu_mul: {e}"))?;
-                let expert_out = self.experts_down[exp]
-                    .forward(&hidden)
-                    .map_err(|e| anyhow!("expert down: {e}"))?;
+                let expert_out = hidden.matmul(&ew.down_proj.t()
+                    .map_err(|e| anyhow!("down_proj t: {e}"))?)
+                    .map_err(|e| anyhow!("expert down matmul: {e}"))?;
 
                 output = (output + (expert_out * w as f64)
                     .map_err(|e| anyhow!("scale: {e}"))?)
@@ -275,12 +278,14 @@ impl Qwen3_5MoeSparseMlp {
                 .index_select(&idx, 0)
                 .map_err(|e| anyhow!("index_select: {e}"))?; // (n_sel, h)
 
-            let gate_out = self.experts_gate[exp_idx]
-                .forward(&selected)
-                .map_err(|e| anyhow!("expert gate: {e}"))?; // (n_sel, i)
-            let up_out = self.experts_up[exp_idx]
-                .forward(&selected)
-                .map_err(|e| anyhow!("expert up: {e}"))?; // (n_sel, i)
+            let ew = self.expert_provider.get_expert(exp_idx)
+                .map_err(|e| anyhow!("get_expert({exp_idx}): {e}"))?;
+            let gate_out = selected.matmul(&ew.gate_proj.t()
+                .map_err(|e| anyhow!("gate_proj t: {e}"))?)
+                .map_err(|e| anyhow!("expert gate matmul: {e}"))?; // (n_sel, i)
+            let up_out = selected.matmul(&ew.up_proj.t()
+                .map_err(|e| anyhow!("up_proj t: {e}"))?)
+                .map_err(|e| anyhow!("expert up matmul: {e}"))?; // (n_sel, i)
 
             let hidden = self.backend.silu_mul(
                 &gate_out.contiguous().map_err(|e| anyhow!("gate contig: {e}"))?,
@@ -288,9 +293,9 @@ impl Qwen3_5MoeSparseMlp {
             )
             .map_err(|e| anyhow!("silu_mul: {e}"))?;
 
-            let expert_out = self.experts_down[exp_idx]
-                .forward(&hidden)
-                .map_err(|e| anyhow!("expert down: {e}"))?; // (n_sel, h)
+            let expert_out = hidden.matmul(&ew.down_proj.t()
+                .map_err(|e| anyhow!("down_proj t: {e}"))?)
+                .map_err(|e| anyhow!("expert down matmul: {e}"))?; // (n_sel, h)
 
             // Scale by routing weight
             let w_t = Tensor::new(weights.as_slice(), x_flat.device())
