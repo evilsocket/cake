@@ -170,12 +170,21 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
 /// Create the appropriate backend for the given device.
 pub fn create_backend(device: &Device) -> Arc<dyn ComputeBackend> {
     match device {
-        Device::Cpu => Arc::new(CpuBackend::new()),
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => Arc::new(CudaBackend::new(device.clone())),
         #[cfg(feature = "metal")]
         Device::Metal(_) => Arc::new(MetalBackend::new(device.clone())),
-        #[allow(unreachable_patterns)]
-        _ => Arc::new(CpuBackend::new()),
+        _ => {
+            // No GPU device — try Vulkan (wgpu) for GPU compute on CPU tensors
+            #[cfg(feature = "vulkan")]
+            match VulkanBackend::new() {
+                Ok(vk) => {
+                    log::info!("using Vulkan backend for GPU-accelerated ops");
+                    return Arc::new(vk);
+                }
+                Err(e) => log::warn!("Vulkan init failed ({e}), falling back to CPU"),
+            }
+            Arc::new(CpuBackend::new())
+        }
     }
 }
