@@ -750,13 +750,10 @@ impl ComputeBackend for VulkanBackend {
         result.to_dtype(orig_dtype)
     }
 
-    /// Pre-convert weight to F32 at load time to avoid repeated F16→F32
-    /// conversion during generation. Doubles memory but eliminates per-token
-    /// dtype conversion overhead. On Steam Deck (14GB RAM), a 1.4GB F16 model
-    /// becomes ~2.8GB F32 which fits comfortably.
-    fn preprocess_linear_weight(&self, weight: &Tensor) -> Result<Tensor> {
-        weight.to_dtype(DType::F32)
-    }
+    // preprocess_linear_weight: use default (no-op).
+    // Benchmarks show F32 weights are slower on Steam Deck due to 2x memory
+    // bandwidth — the CPU's F16 GEMM already converts activations (small) to
+    // F32 internally while reading weights in compact F16 format.
 
     // ── CPU fallback for complex ops ────────────────────────────────
 
