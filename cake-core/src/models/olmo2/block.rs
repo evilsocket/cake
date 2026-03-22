@@ -43,7 +43,7 @@ impl Forwarder for OLMo2Block {
             .pp(&name);
         let cfg = ctx.config.as_ref().expect("No config specified");
 
-        let attn = CausalSelfAttention::load(vb.pp("self_attn"), cfg)?;
+        let attn = CausalSelfAttention::load(vb.pp("self_attn"), cfg, ctx.backend.clone())?;
         let mlp = MLP::load(vb.pp("mlp"), cfg, ctx.backend.clone())?;
 
         let eps = cfg.rms_norm_eps;

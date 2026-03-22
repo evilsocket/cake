@@ -1,7 +1,10 @@
 //! Causal self attention implementation with fused QKV projection.
+use std::sync::Arc;
+
 use candle_core::{DType, Result, Tensor, D};
 use candle_nn::{linear_no_bias, Linear, Module, RmsNorm, VarBuilder};
 
+use crate::backends::ComputeBackend;
 use super::config::load_rms_norm;
 
 #[derive(Debug, Clone)]
@@ -26,6 +29,8 @@ pub struct CausalSelfAttention {
     sliding_window: Option<usize>,
     /// Whether to apply Rotary Position Embeddings. False for Gemma3 local layers.
     use_rope: bool,
+    /// Compute backend for routing matmuls through GPU-accelerated paths.
+    backend: Arc<dyn ComputeBackend>,
 }
 
 #[inline]
@@ -39,6 +44,28 @@ fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> Result<Tensor>
 }
 
 impl CausalSelfAttention {
+    /// Linear forward: x @ w^T + bias via backend matmul.
+    fn linear_forward(&self, x: &Tensor, linear: &Linear) -> Result<Tensor> {
+        let w = linear.weight().t()?;
+        let x_dims = x.dims();
+        let out = if x_dims.len() > 2 {
+            let leading: usize = x_dims[..x_dims.len() - 1].iter().product();
+            let inner = *x_dims.last().unwrap();
+            let x_2d = x.reshape((leading, inner))?;
+            let out_2d = self.backend.matmul(&x_2d, &w)?;
+            let out_dim = out_2d.dim(1)?;
+            let mut out_shape = x_dims[..x_dims.len() - 1].to_vec();
+            out_shape.push(out_dim);
+            out_2d.reshape(out_shape.as_slice())?
+        } else {
+            self.backend.matmul(x, &w)?
+        };
+        match linear.bias() {
+            Some(b) => out.broadcast_add(b),
+            None => Ok(out),
+        }
+    }
+
     fn apply_rotary_emb(
         &self,
         x: &Tensor,
@@ -60,8 +87,8 @@ impl CausalSelfAttention {
     }
 
     /// Standard load — derives all flags from `cfg`.
-    pub fn load(vb: VarBuilder, cfg: &super::Config) -> Result<Self> {
-        Self::load_custom(vb, cfg, cfg.use_qk_norm, cfg.sliding_window, true)
+    pub fn load(vb: VarBuilder, cfg: &super::Config, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
+        Self::load_custom(vb, cfg, cfg.use_qk_norm, cfg.sliding_window, true, backend)
     }
 
     /// Custom load with explicit per-layer options (used by Gemma3 for interleaved local/global).
@@ -71,6 +98,7 @@ impl CausalSelfAttention {
         use_qk_norm: bool,
         sliding_window: Option<usize>,
         use_rope: bool,
+        backend: Arc<dyn ComputeBackend>,
     ) -> Result<Self> {
         let size_in = cfg.hidden_size;
         let head_dim = cfg.head_dim.unwrap_or(cfg.hidden_size / cfg.num_attention_heads);
@@ -131,6 +159,7 @@ impl CausalSelfAttention {
             pre_reshape_qk_norm: cfg.pre_reshape_qk_norm,
             sliding_window,
             use_rope,
+            backend,
         })
     }
 
@@ -144,10 +173,9 @@ impl CausalSelfAttention {
     ) -> anyhow::Result<Tensor> {
         let (b_sz, seq_len, _hidden_size) = x.dims3().map_err(|e| anyhow!("x.dims3 -> {e}"))?;
 
-        // Single fused QKV projection
+        // Single fused QKV projection (routed through backend for GPU acceleration)
         let qkv = self
-            .qkv_proj
-            .forward(x)
+            .linear_forward(x, &self.qkv_proj)
             .map_err(|e| anyhow!("qkv.forward -> {e}"))?;
 
         let q = qkv
@@ -321,7 +349,7 @@ impl CausalSelfAttention {
         } else {
             y.transpose(1, 2)?.reshape(&[b_sz, seq_len, self.size_q])?
         };
-        let y = self.o_proj.forward(&y)?;
+        let y = self.linear_forward(&y, &self.o_proj)?;
 
         Ok(y)
     }

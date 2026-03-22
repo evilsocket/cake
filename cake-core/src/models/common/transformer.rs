@@ -25,7 +25,7 @@ impl Transformer {
         cfg: &super::Config,
         backend: std::sync::Arc<dyn crate::backends::ComputeBackend>,
     ) -> candle_core::Result<Self> {
-        let attn = super::CausalSelfAttention::load(vb.pp("self_attn"), cfg)?;
+        let attn = super::CausalSelfAttention::load(vb.pp("self_attn"), cfg, backend.clone())?;
         let mlp = super::MLP::load(vb.pp("mlp"), cfg, backend)?;
         let rms_1 = candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
         let rms_2 = candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("post_attention_layernorm"))?;
@@ -75,7 +75,7 @@ impl Forwarder for Transformer {
             .pp(&name);
         let cfg = ctx.config.as_ref().expect("No config specified");
 
-        let attn = super::CausalSelfAttention::load(vb.pp("self_attn"), cfg)?;
+        let attn = super::CausalSelfAttention::load(vb.pp("self_attn"), cfg, ctx.backend.clone())?;
         let mlp = super::MLP::load(vb.pp("mlp"), cfg, ctx.backend.clone())?;
         let rms_1 =
             candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;

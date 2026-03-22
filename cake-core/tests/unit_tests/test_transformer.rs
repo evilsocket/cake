@@ -20,7 +20,7 @@ fn test_transformer_components_compose() {
     let vb = make_vb_transformer_block(&cfg);
 
     // Load components with correct prefixes
-    let attn = CausalSelfAttention::load(vb.pp("self_attn"), &cfg).unwrap();
+    let attn = CausalSelfAttention::load(vb.pp("self_attn"), &cfg, cpu_backend()).unwrap();
     let mlp = MLP::load(vb.pp("mlp"), &cfg, cpu_backend()).unwrap();
 
     // Load norms
@@ -61,7 +61,7 @@ fn test_transformer_residual_preserves_shape() {
 
     let cfg = test_config();
     let vb = make_vb_transformer_block(&cfg);
-    let attn = CausalSelfAttention::load(vb.pp("self_attn"), &cfg).unwrap();
+    let attn = CausalSelfAttention::load(vb.pp("self_attn"), &cfg, cpu_backend()).unwrap();
     let mlp = MLP::load(vb.pp("mlp"), &cfg, cpu_backend()).unwrap();
 
     let mut cache = make_cache(&cfg);
@@ -81,7 +81,7 @@ fn test_transformer_with_qk_norm() {
 
     let cfg = test_config_with_qk_norm();
     let vb = make_vb_transformer_block(&cfg);
-    let attn = CausalSelfAttention::load(vb.pp("self_attn"), &cfg).unwrap();
+    let attn = CausalSelfAttention::load(vb.pp("self_attn"), &cfg, cpu_backend()).unwrap();
     let mlp = MLP::load(vb.pp("mlp"), &cfg, cpu_backend()).unwrap();
 
     let mut cache = make_cache(&cfg);

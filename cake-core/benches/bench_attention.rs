@@ -1,11 +1,17 @@
+use std::sync::Arc;
+use cake_core::backends::CpuBackend;
 use cake_core::models::common::{Cache, CausalSelfAttention, Config};
 use candle_core::{DType, Device};
 
 use super::bench_helpers::*;
 
+fn cpu_backend() -> Arc<CpuBackend> {
+    Arc::new(CpuBackend::new())
+}
+
 fn load_attn_and_cache(cfg: &Config) -> (CausalSelfAttention, Cache) {
     let vb = make_vb_attention(cfg);
-    let attn = CausalSelfAttention::load(vb, cfg).unwrap();
+    let attn = CausalSelfAttention::load(vb, cfg, cpu_backend()).unwrap();
     let cache = make_cache(cfg);
     (attn, cache)
 }
@@ -43,7 +49,7 @@ fn attention_generation_step(bencher: divan::Bencher, prefill_len: usize) {
 fn attention_with_qk_norm(bencher: divan::Bencher, seq_len: usize) {
     let cfg = test_config_with_qk_norm();
     let vb = make_vb_attention(&cfg);
-    let attn = CausalSelfAttention::load(vb, &cfg).unwrap();
+    let attn = CausalSelfAttention::load(vb, &cfg, cpu_backend()).unwrap();
     let x = make_tensor(&[1, seq_len, cfg.hidden_size], 200);
 
     bencher.bench_local(move || {
@@ -56,7 +62,7 @@ fn attention_with_qk_norm(bencher: divan::Bencher, seq_len: usize) {
 fn attention_sliding_window(bencher: divan::Bencher, seq_len: usize) {
     let cfg = test_config_with_sliding_window(16);
     let vb = make_vb_attention(&cfg);
-    let attn = CausalSelfAttention::load(vb, &cfg).unwrap();
+    let attn = CausalSelfAttention::load(vb, &cfg, cpu_backend()).unwrap();
     let x = make_tensor(&[1, seq_len, cfg.hidden_size], 300);
 
     bencher.bench_local(move || {

@@ -71,6 +71,7 @@ impl Forwarder for Gemma3Block {
             cfg.use_qk_norm,
             sliding_window,
             use_rope,
+            ctx.backend.clone(),
         )?;
         let mlp = MLP::load(vb.pp("mlp"), cfg, ctx.backend.clone())?;
 

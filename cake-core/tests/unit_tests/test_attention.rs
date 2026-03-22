@@ -1,12 +1,18 @@
+use std::sync::Arc;
+use cake_core::backends::CpuBackend;
 use cake_core::models::common::CausalSelfAttention;
 
 use super::helpers::*;
+
+fn cpu_backend() -> Arc<CpuBackend> {
+    Arc::new(CpuBackend::new())
+}
 
 #[test]
 fn test_attention_prefill_shape() {
     let cfg = test_config();
     let vb = make_vb_attention(&cfg);
-    let attn = CausalSelfAttention::load(vb, &cfg).unwrap();
+    let attn = CausalSelfAttention::load(vb, &cfg, cpu_backend()).unwrap();
     let mut cache = make_cache(&cfg);
     let x = make_tensor(&[1, 8, 64], 60);
     let y = attn.forward(&x, 0, 0, &mut cache).unwrap();
@@ -17,7 +23,7 @@ fn test_attention_prefill_shape() {
 fn test_attention_single_token_shape() {
     let cfg = test_config();
     let vb = make_vb_attention(&cfg);
-    let attn = CausalSelfAttention::load(vb, &cfg).unwrap();
+    let attn = CausalSelfAttention::load(vb, &cfg, cpu_backend()).unwrap();
     let mut cache = make_cache(&cfg);
 
     // Prefill 4 tokens first
@@ -35,8 +41,8 @@ fn test_attention_deterministic() {
     let cfg = test_config();
     let vb1 = make_vb_attention(&cfg);
     let vb2 = make_vb_attention(&cfg);
-    let attn1 = CausalSelfAttention::load(vb1, &cfg).unwrap();
-    let attn2 = CausalSelfAttention::load(vb2, &cfg).unwrap();
+    let attn1 = CausalSelfAttention::load(vb1, &cfg, cpu_backend()).unwrap();
+    let attn2 = CausalSelfAttention::load(vb2, &cfg, cpu_backend()).unwrap();
     let mut cache1 = make_cache(&cfg);
     let mut cache2 = make_cache(&cfg);
 
@@ -53,7 +59,7 @@ fn test_attention_deterministic() {
 fn test_attention_with_qk_norm() {
     let cfg = test_config_with_qk_norm();
     let vb = make_vb_attention(&cfg);
-    let attn = CausalSelfAttention::load(vb, &cfg).unwrap();
+    let attn = CausalSelfAttention::load(vb, &cfg, cpu_backend()).unwrap();
     let mut cache = make_cache(&cfg);
     let x = make_tensor(&[1, 4, 64], 64);
     let y = attn.forward(&x, 0, 0, &mut cache).unwrap();
@@ -70,6 +76,7 @@ fn test_attention_sliding_window() {
         false,
         Some(4),
         true,
+        cpu_backend(),
     )
     .unwrap();
     let mut cache = make_cache(&cfg);
@@ -85,7 +92,7 @@ fn test_attention_gqa() {
     // Default config already has 4 q heads, 2 kv heads (GQA 2:1)
     let cfg = test_config();
     let vb = make_vb_attention(&cfg);
-    let attn = CausalSelfAttention::load(vb, &cfg).unwrap();
+    let attn = CausalSelfAttention::load(vb, &cfg, cpu_backend()).unwrap();
     let mut cache = make_cache(&cfg);
     let x = make_tensor(&[1, 4, 64], 66);
     let y = attn.forward(&x, 0, 0, &mut cache).unwrap();
@@ -103,6 +110,7 @@ fn test_attention_no_rope() {
         false,
         None,
         false, // no RoPE
+        cpu_backend(),
     )
     .unwrap();
     let mut cache = make_cache(&cfg);
@@ -115,7 +123,7 @@ fn test_attention_no_rope() {
 fn test_attention_with_bias() {
     let cfg = test_config_with_bias();
     let vb = make_vb_attention(&cfg);
-    let attn = CausalSelfAttention::load(vb, &cfg).unwrap();
+    let attn = CausalSelfAttention::load(vb, &cfg, cpu_backend()).unwrap();
     let mut cache = make_cache(&cfg);
     let x = make_tensor(&[1, 4, 64], 68);
     let y = attn.forward(&x, 0, 0, &mut cache).unwrap();
@@ -126,7 +134,7 @@ fn test_attention_with_bias() {
 fn test_attention_nonzero_output() {
     let cfg = test_config();
     let vb = make_vb_attention(&cfg);
-    let attn = CausalSelfAttention::load(vb, &cfg).unwrap();
+    let attn = CausalSelfAttention::load(vb, &cfg, cpu_backend()).unwrap();
     let mut cache = make_cache(&cfg);
     let x = make_tensor(&[1, 4, 64], 69);
     let y = attn.forward(&x, 0, 0, &mut cache).unwrap();
