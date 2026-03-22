@@ -1,25 +1,23 @@
 //! Vulkan compute backend via wgpu.
 //!
-//! Provides GPU compute on Vulkan-capable devices (Steam Deck, AMD GPUs, etc.)
-//! without requiring vendor-specific toolchains (CUDA, Metal).
+//! Dispatches elementwise operations to Vulkan GPU via WGSL compute shaders.
+//! Complex ops (attention, normalization, convolution) fall back to candle CPU.
 //!
-//! Tensor data lives in candle CPU tensors. The wgpu device and queue are
-//! initialized at construction time for future WGSL compute shader dispatch.
-//!
+//! On unified memory architectures (Steam Deck), CPU↔GPU copies are near-free.
 //! **Target**: Steam Deck (AMD Van Gogh APU, RDNA 2, Vulkan 1.3, 16GB unified RAM).
-//! On unified memory architectures, CPU↔GPU copies are near-free.
 
 use candle_core::{DType, Device, Result, Tensor, D};
 
 use super::ComputeBackend;
 
-/// Vulkan backend — wgpu-based GPU compute with CPU tensor fallback.
+const WGSL_SOURCE: &str = include_str!("ops.wgsl");
+const WORKGROUP_SIZE: u32 = 256;
+
+/// Vulkan backend — wgpu compute shaders for elementwise ops, CPU fallback for the rest.
 pub struct VulkanBackend {
     device: Device,
-    #[allow(dead_code)]
-    gpu_device: wgpu::Device,
-    #[allow(dead_code)]
-    gpu_queue: wgpu::Queue,
+    gpu: wgpu::Device,
+    queue: wgpu::Queue,
 }
 
 impl std::fmt::Debug for VulkanBackend {
@@ -31,7 +29,6 @@ impl std::fmt::Debug for VulkanBackend {
 }
 
 impl VulkanBackend {
-    /// Create a Vulkan backend, initializing the wgpu device on the default adapter.
     pub fn new() -> std::result::Result<Self, String> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
@@ -45,14 +42,10 @@ impl VulkanBackend {
         }))
         .ok_or_else(|| "no Vulkan/GL adapter found".to_string())?;
 
-        let adapter_info = adapter.get_info();
-        log::info!(
-            "Vulkan backend: {} ({:?})",
-            adapter_info.name,
-            adapter_info.backend
-        );
+        let info = adapter.get_info();
+        log::info!("Vulkan backend: {} ({:?})", info.name, info.backend);
 
-        let (gpu_device, gpu_queue) = pollster::block_on(adapter.request_device(
+        let (gpu, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("cake-vulkan"),
                 required_features: wgpu::Features::empty(),
@@ -61,33 +54,250 @@ impl VulkanBackend {
             },
             None,
         ))
-        .map_err(|e| format!("failed to create wgpu device: {e}"))?;
+        .map_err(|e| format!("wgpu device: {e}"))?;
 
         Ok(Self {
             device: Device::Cpu,
-            gpu_device,
-            gpu_queue,
+            gpu,
+            queue,
         })
+    }
+
+    // ── GPU dispatch helpers ─────────────────────────────────────────
+
+    /// Run a 2-input WGSL shader: output[i] = f(a[i], b[i])
+    fn dispatch_binary(&self, a: &Tensor, b: &Tensor, entry: &str) -> Result<Tensor> {
+        let a = a.to_dtype(DType::F32)?.contiguous()?;
+        let b = b.to_dtype(DType::F32)?.contiguous()?;
+        let a_data: Vec<f32> = a.flatten_all()?.to_vec1()?;
+        let b_data: Vec<f32> = b.flatten_all()?.to_vec1()?;
+        let count = a_data.len() as u32;
+
+        let buf_a = self.create_storage_buffer(&a_data);
+        let buf_b = self.create_storage_buffer(&b_data);
+        let buf_out = self.create_output_buffer(count as u64);
+        let buf_params = self.create_uniform_buffer(count);
+
+        let module = self.gpu.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(entry),
+            source: wgpu::ShaderSource::Wgsl(WGSL_SOURCE.into()),
+        });
+        let pipeline = self.gpu.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(entry),
+            layout: None,
+            module: &module,
+            entry_point: Some(entry),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let bind_group = self.gpu.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buf_a.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: buf_b.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: buf_out.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: buf_params.as_entire_binding() },
+            ],
+        });
+
+        let workgroups = count.div_ceil(WORKGROUP_SIZE);
+        let mut encoder = self.gpu.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(workgroups, 1, 1);
+        }
+        self.queue.submit(Some(encoder.finish()));
+
+        let result = self.read_buffer(&buf_out, count as usize);
+        Tensor::from_vec(result, a.shape(), &Device::Cpu)
+    }
+
+    /// Run a 3-input WGSL shader: output[i] = f(a[i], b[i], c[i])
+    fn dispatch_ternary(&self, a: &Tensor, b: &Tensor, c: &Tensor, entry: &str) -> Result<Tensor> {
+        let a = a.to_dtype(DType::F32)?.contiguous()?;
+        let b = b.to_dtype(DType::F32)?.contiguous()?;
+        let c = c.to_dtype(DType::F32)?.contiguous()?;
+        let a_data: Vec<f32> = a.flatten_all()?.to_vec1()?;
+        let b_data: Vec<f32> = b.flatten_all()?.to_vec1()?;
+        let c_data: Vec<f32> = c.flatten_all()?.to_vec1()?;
+        let count = a_data.len() as u32;
+
+        let buf_a = self.create_storage_buffer(&a_data);
+        let buf_b = self.create_storage_buffer(&b_data);
+        let buf_out = self.create_output_buffer(count as u64);
+        let buf_params = self.create_uniform_buffer(count);
+        let buf_c = self.create_storage_buffer(&c_data);
+
+        let module = self.gpu.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(entry),
+            source: wgpu::ShaderSource::Wgsl(WGSL_SOURCE.into()),
+        });
+        let pipeline = self.gpu.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(entry),
+            layout: None,
+            module: &module,
+            entry_point: Some(entry),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let bind_group = self.gpu.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buf_a.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: buf_b.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: buf_out.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: buf_params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: buf_c.as_entire_binding() },
+            ],
+        });
+
+        let workgroups = count.div_ceil(WORKGROUP_SIZE);
+        let mut encoder = self.gpu.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(workgroups, 1, 1);
+        }
+        self.queue.submit(Some(encoder.finish()));
+
+        let result = self.read_buffer(&buf_out, count as usize);
+        Tensor::from_vec(result, a.shape(), &Device::Cpu)
+    }
+
+    /// Run a 1-input WGSL shader: output[i] = f(a[i])
+    /// Uses the binary layout with a dummy second buffer.
+    fn dispatch_unary(&self, x: &Tensor, entry: &str) -> Result<Tensor> {
+        let x = x.to_dtype(DType::F32)?.contiguous()?;
+        let x_data: Vec<f32> = x.flatten_all()?.to_vec1()?;
+        let count = x_data.len() as u32;
+
+        let buf_a = self.create_storage_buffer(&x_data);
+        // Dummy buffer for binding 1 (shader reads input_a only for unary ops)
+        let buf_b = self.create_storage_buffer(&[0.0f32]);
+        let buf_out = self.create_output_buffer(count as u64);
+        let buf_params = self.create_uniform_buffer(count);
+
+        let module = self.gpu.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(entry),
+            source: wgpu::ShaderSource::Wgsl(WGSL_SOURCE.into()),
+        });
+        let pipeline = self.gpu.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(entry),
+            layout: None,
+            module: &module,
+            entry_point: Some(entry),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let bind_group = self.gpu.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buf_a.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: buf_b.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: buf_out.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: buf_params.as_entire_binding() },
+            ],
+        });
+
+        let workgroups = count.div_ceil(WORKGROUP_SIZE);
+        let mut encoder = self.gpu.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(workgroups, 1, 1);
+        }
+        self.queue.submit(Some(encoder.finish()));
+
+        let result = self.read_buffer(&buf_out, count as usize);
+        Tensor::from_vec(result, x.shape(), &Device::Cpu)
+    }
+
+    fn create_storage_buffer(&self, data: &[f32]) -> wgpu::Buffer {
+        use wgpu::util::DeviceExt;
+        self.gpu.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(data),
+            usage: wgpu::BufferUsages::STORAGE,
+        })
+    }
+
+    fn create_output_buffer(&self, count: u64) -> wgpu::Buffer {
+        self.gpu.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: count * 4, // f32 = 4 bytes
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn create_uniform_buffer(&self, count: u32) -> wgpu::Buffer {
+        use wgpu::util::DeviceExt;
+        self.gpu.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&[count]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        })
+    }
+
+    fn read_buffer(&self, buffer: &wgpu::Buffer, count: usize) -> Vec<f32> {
+        let staging = self.gpu.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (count * 4) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self.gpu.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, (count * 4) as u64);
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| { tx.send(result).unwrap(); });
+        self.gpu.poll(wgpu::Maintain::Wait);
+        rx.recv().unwrap().unwrap();
+
+        let data = slice.get_mapped_range();
+        bytemuck::cast_slice(&data).to_vec()
     }
 }
 
 impl ComputeBackend for VulkanBackend {
-    fn name(&self) -> &str {
-        "vulkan"
+    fn name(&self) -> &str { "vulkan" }
+    fn device(&self) -> &Device { &self.device }
+
+    // ── GPU-accelerated elementwise ops ──────────────────────────────
+
+    fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
+        self.dispatch_binary(gate, up, "silu_mul")
     }
 
-    fn device(&self) -> &Device {
-        &self.device
+    fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
+        self.dispatch_unary(x, "stable_softplus")
     }
 
-    fn attention(
-        &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        scale: f32,
-        causal: bool,
-    ) -> Result<Tensor> {
+    fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
+        self.dispatch_ternary(a, b, c, "add3")
+    }
+
+    fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
+        self.dispatch_binary(x, y, "exp_mul")
+    }
+
+    fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
+        self.dispatch_ternary(a, b, c, "sub_mul")
+    }
+
+    // ── CPU fallback for complex ops ────────────────────────────────
+
+    fn attention(&self, q: &Tensor, k: &Tensor, v: &Tensor, scale: f32, causal: bool) -> Result<Tensor> {
         let q = q.to_dtype(DType::F32)?;
         let k = k.to_dtype(DType::F32)?;
         let v = v.to_dtype(DType::F32)?;
@@ -105,8 +315,7 @@ impl ComputeBackend for VulkanBackend {
             }
             let mask = Tensor::from_vec(mask_data, (1, 1, seq_len, kv_len), q.device())?;
             let neg_inf = Tensor::full(f32::NEG_INFINITY, attn.shape(), q.device())?;
-            mask.broadcast_as(attn.shape())?
-                .where_cond(&attn, &neg_inf)?
+            mask.broadcast_as(attn.shape())?.where_cond(&attn, &neg_inf)?
         } else {
             attn
         };
@@ -114,21 +323,9 @@ impl ComputeBackend for VulkanBackend {
         attn.matmul(&v)
     }
 
-    fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-        (candle_nn::ops::silu(&gate.contiguous()?)? * up.contiguous()?)?.contiguous()
-    }
-
-    fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
-        let t88 = Tensor::full(88.0f32, x.shape(), x.device())?.to_dtype(x.dtype())?;
-        let clamped = x.minimum(&t88)?;
-        let sp = (clamped.exp()? + 1.0)?.log()?;
-        x.maximum(&sp)
-    }
-
     fn rms_norm_gated(&self, x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
         let n = candle_nn::ops::rms_norm(&x.contiguous()?, weight, eps)?;
-        (n * candle_nn::ops::silu(&z.contiguous()?.to_dtype(x.dtype())?)?)?
-            .contiguous()
+        (n * candle_nn::ops::silu(&z.contiguous()?.to_dtype(x.dtype())?)?)?.contiguous()
     }
 
     fn add_rms_norm(&self, a: &Tensor, b: &Tensor, weight: &Tensor, eps: f32) -> Result<(Tensor, Tensor)> {
@@ -138,28 +335,23 @@ impl ComputeBackend for VulkanBackend {
     }
 
     fn rms_norm_channel(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        x.transpose(1, 2)?
-            .contiguous()
+        x.transpose(1, 2)?.contiguous()
             .and_then(|t| candle_nn::ops::rms_norm(&t, weight, eps))?
-            .transpose(1, 2)?
-            .contiguous()
+            .transpose(1, 2)?.contiguous()
     }
 
     fn depthwise_conv1d_silu(&self, window: &Tensor, weight: &Tensor, _kernel_size: usize, _channels: usize) -> Result<Tensor> {
         let w = weight.unsqueeze(0)?;
-        let conv = window.broadcast_mul(&w)?.sum(D::Minus1)?;
-        candle_nn::ops::silu(&conv)
+        candle_nn::ops::silu(&window.broadcast_mul(&w)?.sum(D::Minus1)?)
     }
 
     fn depthwise_conv1d_bias(&self, padded_input: &Tensor, weight: &Tensor, bias: &Tensor, kernel_size: usize, _channels: usize) -> Result<Tensor> {
-        let padded_time = padded_input.dim(2)?;
-        let output_time = padded_time - kernel_size + 1;
+        let output_time = padded_input.dim(2)? - kernel_size + 1;
         let mut slices = Vec::with_capacity(output_time);
         for t in 0..output_time {
             let window = padded_input.narrow(2, t, kernel_size)?;
             let w = weight.unsqueeze(0)?;
-            let conv_t = window.broadcast_mul(&w)?.sum(D::Minus1)?;
-            let conv_t = conv_t.broadcast_add(bias)?;
+            let conv_t = window.broadcast_mul(&w)?.sum(D::Minus1)?.broadcast_add(bias)?;
             slices.push(conv_t.unsqueeze(2)?);
         }
         Tensor::cat(&slices, 2)
@@ -170,21 +362,8 @@ impl ComputeBackend for VulkanBackend {
         self.depthwise_conv1d_bias(&combined, weight, bias, kernel_size, channels)
     }
 
-    fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ((a + b)? + c)?.contiguous()
-    }
-
-    fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
-        (x * y.exp()?)?.contiguous()
-    }
-
-    fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ((a - b)? * c)?.contiguous()
-    }
-
     fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        (a + b.broadcast_mul(&c.unsqueeze(0)?.unsqueeze(2)?)?)?
-            .contiguous()
+        (a + b.broadcast_mul(&c.unsqueeze(0)?.unsqueeze(2)?)?)?.contiguous()
     }
 
     fn adaln_modulate(&self, x: &Tensor, norm_weight: &Tensor, scale: &Tensor, shift: &Tensor, eps: f32) -> Result<Tensor> {
@@ -192,15 +371,7 @@ impl ComputeBackend for VulkanBackend {
         (n.broadcast_mul(&(scale + 1.0)?)? + shift)?.contiguous()
     }
 
-    fn f8e4m3_to_f32(&self, x: &Tensor) -> Result<Tensor> {
-        x.to_dtype(DType::F32)
-    }
-
-    fn f8e4m3_to_f16(&self, x: &Tensor) -> Result<Tensor> {
-        x.to_dtype(DType::F16)
-    }
-
-    fn f8e4m3_to_bf16(&self, x: &Tensor) -> Result<Tensor> {
-        x.to_dtype(DType::BF16)
-    }
+    fn f8e4m3_to_f32(&self, x: &Tensor) -> Result<Tensor> { x.to_dtype(DType::F32) }
+    fn f8e4m3_to_f16(&self, x: &Tensor) -> Result<Tensor> { x.to_dtype(DType::F16) }
+    fn f8e4m3_to_bf16(&self, x: &Tensor) -> Result<Tensor> { x.to_dtype(DType::BF16) }
 }
