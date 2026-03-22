@@ -8,7 +8,7 @@
 //! The `synchronize()` method flushes the command buffer and is called at strategic
 //! points during forward passes (see GatedDeltaNet, Qwen3_5FullAttention).
 
-use candle_core::{CpuStorage, DType, Device, Layout, Result, Shape, Tensor, D};
+use candle_core::{backend::BackendStorage as _, CpuStorage, DType, Device, Layout, Result, Shape, Tensor, D};
 
 use super::ComputeBackend;
 
@@ -233,19 +233,19 @@ impl ComputeBackend for MetalBackend {
     // ── Elementwise (candle tensor ops) ──────────────────────────────
 
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ((a + b)? + c)?
+        Ok(((a + b)? + c)?)
     }
 
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
-        (x * y.exp()?)?
+        Ok((x * y.exp()?)?)
     }
 
     fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ((a - b)? * c)?
+        Ok(((a - b)? * c)?)
     }
 
     fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        (a + b.broadcast_mul(&c.unsqueeze(0)?.unsqueeze(2)?)?)?
+        Ok((a + b.broadcast_mul(&c.unsqueeze(0)?.unsqueeze(2)?)?)?)
     }
 
     // ── AdaLN (candle tensor ops) ────────────────────────────────────
@@ -259,7 +259,7 @@ impl ComputeBackend for MetalBackend {
         eps: f32,
     ) -> Result<Tensor> {
         let n = candle_nn::ops::rms_norm(&x.contiguous()?, norm_weight, eps)?;
-        (n.broadcast_mul(&(scale + 1.0)?)? + shift)?
+        Ok((n.broadcast_mul(&(scale + 1.0)?)? + shift)?)
     }
 
     // ── F8 dequantization ────────────────────────────────────────────
