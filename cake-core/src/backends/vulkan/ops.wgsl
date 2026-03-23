@@ -326,3 +326,114 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
     if (row0 + 1u < M && col0 + 2u < N) { mat_c[(row0 + 1u) * N + col0 + 2u] = acc12; }
     if (row0 + 1u < M && col0 + 3u < N) { mat_c[(row0 + 1u) * N + col0 + 3u] = acc13; }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Scaled softmax: output[row,j] = softmax(input[row,j] * scale)
+// with optional causal masking.
+//
+// One workgroup per row. 256 threads cooperate on the reduction.
+// Three passes: (1) find max, (2) exp + sum, (3) normalize.
+// Causal mask: if seq_len > 0, mask positions j > kv_len - seq_len + q_idx.
+// ═══════════════════════════════════════════════════════════════════
+
+struct SoftmaxParams {
+    rows: u32,      // total rows (batch * heads * seq_len)
+    cols: u32,      // row length (kv_len)
+    scale_bits: u32, // f32 scale reinterpreted as u32
+    seq_len: u32,   // 0 = no causal mask, >0 = causal with this seq_len
+}
+
+@group(0) @binding(0) var<storage, read> sm_in: array<f32>;
+@group(0) @binding(1) var<storage, read> sm_dummy: array<f32>;  // unused, keeps 4-binding layout
+@group(0) @binding(2) var<storage, read_write> sm_out: array<f32>;
+@group(0) @binding(3) var<uniform> sm_params: SoftmaxParams;
+
+var<workgroup> sm_shared: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn scaled_softmax(@builtin(workgroup_id) wid: vec3<u32>,
+                  @builtin(local_invocation_id) lid: vec3<u32>) {
+    let row = wid.x;
+    let tid = lid.x;
+    let cols = sm_params.cols;
+    let scale = bitcast<f32>(sm_params.scale_bits);
+    let base = row * cols;
+
+    // Causal mask boundary: positions j > max_j are masked to -inf
+    var max_j = cols;  // no mask by default
+    if (sm_params.seq_len > 0u) {
+        let q_idx = row % sm_params.seq_len;
+        max_j = cols - sm_params.seq_len + q_idx + 1u;
+    }
+
+    // Pass 1: find row maximum (for numerical stability)
+    var local_max: f32 = -3.4e38;
+    var i = tid;
+    while (i < cols) {
+        var val = sm_in[base + i] * scale;
+        if (i >= max_j) { val = -3.4e38; }  // causal mask
+        local_max = max(local_max, val);
+        i += 256u;
+    }
+    sm_shared[tid] = local_max;
+    workgroupBarrier();
+
+    // Parallel max reduction
+    if (tid < 128u) { sm_shared[tid] = max(sm_shared[tid], sm_shared[tid + 128u]); }
+    workgroupBarrier();
+    if (tid < 64u) { sm_shared[tid] = max(sm_shared[tid], sm_shared[tid + 64u]); }
+    workgroupBarrier();
+    if (tid < 32u) { sm_shared[tid] = max(sm_shared[tid], sm_shared[tid + 32u]); }
+    workgroupBarrier();
+    if (tid < 16u) { sm_shared[tid] = max(sm_shared[tid], sm_shared[tid + 16u]); }
+    workgroupBarrier();
+    if (tid < 8u) { sm_shared[tid] = max(sm_shared[tid], sm_shared[tid + 8u]); }
+    workgroupBarrier();
+    if (tid < 4u) { sm_shared[tid] = max(sm_shared[tid], sm_shared[tid + 4u]); }
+    workgroupBarrier();
+    if (tid < 2u) { sm_shared[tid] = max(sm_shared[tid], sm_shared[tid + 2u]); }
+    workgroupBarrier();
+    if (tid == 0u) { sm_shared[0] = max(sm_shared[0], sm_shared[1]); }
+    workgroupBarrier();
+    let row_max = sm_shared[0];
+
+    // Pass 2: compute exp(val - max) and accumulate sum
+    var local_sum: f32 = 0.0;
+    i = tid;
+    while (i < cols) {
+        var val = sm_in[base + i] * scale;
+        if (i >= max_j) { val = -3.4e38; }
+        let e = exp(val - row_max);
+        sm_out[base + i] = e;  // store exp values
+        local_sum += e;
+        i += 256u;
+    }
+    sm_shared[tid] = local_sum;
+    workgroupBarrier();
+
+    // Parallel sum reduction
+    if (tid < 128u) { sm_shared[tid] += sm_shared[tid + 128u]; }
+    workgroupBarrier();
+    if (tid < 64u) { sm_shared[tid] += sm_shared[tid + 64u]; }
+    workgroupBarrier();
+    if (tid < 32u) { sm_shared[tid] += sm_shared[tid + 32u]; }
+    workgroupBarrier();
+    if (tid < 16u) { sm_shared[tid] += sm_shared[tid + 16u]; }
+    workgroupBarrier();
+    if (tid < 8u) { sm_shared[tid] += sm_shared[tid + 8u]; }
+    workgroupBarrier();
+    if (tid < 4u) { sm_shared[tid] += sm_shared[tid + 4u]; }
+    workgroupBarrier();
+    if (tid < 2u) { sm_shared[tid] += sm_shared[tid + 2u]; }
+    workgroupBarrier();
+    if (tid == 0u) { sm_shared[0] += sm_shared[1]; }
+    workgroupBarrier();
+    let inv_sum = 1.0 / sm_shared[0];
+
+    // Pass 3: normalize by dividing by sum
+    i = tid;
+    while (i < cols) {
+        sm_out[base + i] *= inv_sum;
+        i += 256u;
+    }
+}
