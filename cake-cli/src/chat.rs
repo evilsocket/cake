@@ -860,14 +860,18 @@ async fn run_app(
                                 gen_start = Some(Instant::now());
                                 token_count = 0;
 
+                                app.status = format!("connecting to {} ...", server);
                                 match stream_response(&client, server, &app.messages[..app.messages.len()-1]).await {
-                                    Ok(rx) => response_rx = Some(rx),
+                                    Ok(rx) => {
+                                        app.status = "streaming...".to_string();
+                                        response_rx = Some(rx);
+                                    }
                                     Err(e) => {
                                         if let Some(last) = app.messages.last_mut() {
                                             last.content = format!("[error: {}]", e);
                                         }
                                         app.streaming = false;
-                                        app.status = "error".to_string();
+                                        app.status = format!("error: {}", e);
                                         response_rx = None;
                                     }
                                 }
