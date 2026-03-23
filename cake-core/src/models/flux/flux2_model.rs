@@ -400,8 +400,7 @@ pub fn modulate(x: &Tensor, shift: &Tensor, scale: &Tensor) -> Result<Tensor> {
     let x_norm = layer_norm_forward(x)?.to_dtype(dtype)?;
     let scale = scale.unsqueeze(1)?;
     let shift = shift.unsqueeze(1)?;
-    let ones = Tensor::ones_like(&scale)?;
-    x_norm.broadcast_mul(&(scale + ones)?)?.broadcast_add(&shift)
+    x_norm.broadcast_mul(&(scale + 1.0)?)?.broadcast_add(&shift)
 }
 
 /// Manual layer norm (no learned params, eps=1e-6).
