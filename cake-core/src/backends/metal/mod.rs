@@ -631,16 +631,11 @@ impl ComputeBackend for MetalBackend {
     // ── Fused activations (MSL shaders) ──────────────────────────────
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-        // TODO: re-enable MSL kernel after validation
-        let g = candle_nn::ops::silu(gate)?;
-        (g * up)?.contiguous()
+        gate.apply_op2_no_bwd(up, &MetalSiluMul)
     }
 
     fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
-        // TODO: re-enable MSL kernel after validation
-        let clamped = x.minimum(&Tensor::new(88.0f32, x.device())?.broadcast_as(x.shape())?)?;
-        let sp = (clamped.exp()? + 1.0)?.log()?;
-        x.maximum(&sp)
+        x.apply_op1_no_bwd(&MetalStableSoftplus)
     }
 
     // ── Normalization (candle tensor ops) ────────────────────────────
@@ -671,31 +666,21 @@ impl ComputeBackend for MetalBackend {
         window: &Tensor, weight: &Tensor,
         _kernel_size: usize, _channels: usize,
     ) -> Result<Tensor> {
-        let w = weight.unsqueeze(0)?;
-        let dot = window.broadcast_mul(&w)?.sum(candle_core::D::Minus1)?;
-        candle_nn::ops::silu(&dot)
+        window.apply_op2_no_bwd(weight, &MetalDepthwiseConv1dSilu)
     }
 
     fn depthwise_conv1d_bias(
         &self,
         padded_input: &Tensor, weight: &Tensor, bias: &Tensor,
-        kernel_size: usize, _channels: usize,
+        _kernel_size: usize, _channels: usize,
     ) -> Result<Tensor> {
-        let (_b, _channels, t_padded) = padded_input.dims3()?;
-        let out_len = t_padded - kernel_size + 1;
-        let mut acc: Option<Tensor> = None;
-        for k in 0..kernel_size {
-            let slice = padded_input.narrow(2, k, out_len)?;
-            let w_k = weight.narrow(1, k, 1)?.unsqueeze(0)?;
-            let term = slice.broadcast_mul(&w_k)?;
-            acc = Some(match acc {
-                None => term,
-                Some(a) => (a + term)?,
-            });
-        }
-        let out = acc.unwrap();
-        let bias = bias.unsqueeze(0)?.unsqueeze(2)?;
-        out.broadcast_add(&bias)
+        // Flatten weight to 2D (channels, kernel_size) if it's 3D (channels, 1, kernel_size)
+        let weight_flat = if weight.dims().len() == 3 {
+            weight.contiguous()?.flatten(1, 2)?
+        } else {
+            weight.contiguous()?
+        };
+        padded_input.apply_op3_no_bwd(&weight_flat, bias, &MetalDepthwiseConv1dBias)
     }
 
     fn depthwise_conv1d_bias_ctx(
@@ -710,24 +695,23 @@ impl ComputeBackend for MetalBackend {
     // ── Elementwise (MSL shaders) ────────────────────────────────────
 
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ((a + b)? + c)?.contiguous()
+        a.apply_op3_no_bwd(b, c, &MetalAdd3)
     }
 
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
-        (x * y.exp()?)?.contiguous()
+        x.apply_op2_no_bwd(y, &MetalExpMul)
     }
 
     fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ((a - b)? * c)?.contiguous()
+        a.apply_op3_no_bwd(b, c, &MetalSubMul)
     }
 
     fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        let c_broadcast = if c.dims().len() == 1 {
-            c.unsqueeze(0)?.unsqueeze(2)?
+        if c.dims().len() == 1 {
+            a.apply_op3_no_bwd(b, c, &MetalAddScaled)
         } else {
-            c.clone()
-        };
-        (a + b.broadcast_mul(&c_broadcast)?)?.contiguous()
+            (a + b.broadcast_mul(c)?)?.contiguous()
+        }
     }
 
     // ── AdaLN (candle tensor ops) ────────────────────────────────────
