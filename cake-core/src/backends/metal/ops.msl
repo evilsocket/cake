@@ -322,7 +322,7 @@ kernel void rms_norm_gated_f32(
     SIMD_REDUCE_SUM(val * val, hidden, lane, simd_id)
     float rms = fast::rsqrt(_sr / float(hidden) + eps);
     float zv = z[base + col];
-    float silu_z = zv * 1.0f / (1.0f + exp(-zv));
+    float silu_z = zv / (1.0f + fast::exp(-zv));
     output[base + col] = val * rms * weight[col] * silu_z;
 }
 
@@ -344,7 +344,7 @@ kernel void rms_norm_gated_f16(
     SIMD_REDUCE_SUM(val * val, hidden, lane, simd_id)
     float rms = fast::rsqrt(_sr / float(hidden) + eps);
     float zv = float(z[base + col]);
-    float silu_z = zv * 1.0f / (1.0f + exp(-zv));
+    float silu_z = zv / (1.0f + fast::exp(-zv));
     output[base + col] = half(val * rms * float(weight[col]) * silu_z);
 }
 
