@@ -172,10 +172,21 @@ fn gemv(@builtin(global_invocation_id) gid: vec3<u32>,
 
         // Each thread accumulates dot product for its output column.
         // Adjacent threads read adjacent weight columns — coalesced access.
+        // Unrolled by 4 for better ILP.
         if (col < N) {
             let tile_base = t * 256u;
             let tile_end = min(256u, K - tile_base);
-            for (var k: u32 = 0u; k < tile_end; k++) {
+            let unrolled_end = tile_end & ~3u;  // round down to multiple of 4
+            var k: u32 = 0u;
+            for (; k < unrolled_end; k += 4u) {
+                let base_off = (tile_base + k) * N + col;
+                acc += gemv_shared[k] * gemv_w[base_off];
+                acc += gemv_shared[k + 1u] * gemv_w[base_off + N];
+                acc += gemv_shared[k + 2u] * gemv_w[base_off + 2u * N];
+                acc += gemv_shared[k + 3u] * gemv_w[base_off + 3u * N];
+            }
+            // Handle remainder
+            for (; k < tile_end; k++) {
                 acc += gemv_shared[k] * gemv_w[(tile_base + k) * N + col];
             }
         }
@@ -225,11 +236,23 @@ fn gemv_f16(@builtin(global_invocation_id) gid: vec3<u32>,
             let tile_end = min(256u, K - tile_base);
             let col_pair = col / 2u;
             let col_half = col % 2u;
-            for (var k: u32 = 0u; k < tile_end; k++) {
+            let unrolled_end = tile_end & ~3u;
+            var k: u32 = 0u;
+            for (; k < unrolled_end; k += 4u) {
+                let base_off = (tile_base + k) * half_N + col_pair;
+                let p0 = unpack2x16float(gemvh_w[base_off]);
+                let p1 = unpack2x16float(gemvh_w[base_off + half_N]);
+                let p2 = unpack2x16float(gemvh_w[base_off + 2u * half_N]);
+                let p3 = unpack2x16float(gemvh_w[base_off + 3u * half_N]);
+                acc += gemvh_shared[k] * select(p0.x, p0.y, col_half == 1u);
+                acc += gemvh_shared[k + 1u] * select(p1.x, p1.y, col_half == 1u);
+                acc += gemvh_shared[k + 2u] * select(p2.x, p2.y, col_half == 1u);
+                acc += gemvh_shared[k + 3u] * select(p3.x, p3.y, col_half == 1u);
+            }
+            for (; k < tile_end; k++) {
                 let packed = gemvh_w[(tile_base + k) * half_N + col_pair];
                 let unpacked = unpack2x16float(packed);
-                let w_val = select(unpacked.x, unpacked.y, col_half == 1u);
-                acc += gemvh_shared[k] * w_val;
+                acc += gemvh_shared[k] * select(unpacked.x, unpacked.y, col_half == 1u);
             }
         }
         workgroupBarrier();
