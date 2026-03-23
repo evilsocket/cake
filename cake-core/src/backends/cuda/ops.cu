@@ -632,10 +632,13 @@ extern "C" __global__ void FN_NAME( \
     const int channels, \
     const int time_len \
 ) { \
+    const int ct = channels * time_len; \
     for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; \
          i < numel; i += blockDim.x * gridDim.x) { \
-        int t = i % time_len; \
-        int chan = (i / time_len) % channels; \
+        /* Use single modulo: position within one batch = i % (channels*time_len) */ \
+        /* Then chan = pos / time_len */ \
+        int pos = i % ct; \
+        int chan = pos / time_len; \
         float av = static_cast<float>(a[i]); \
         float bv = static_cast<float>(b[i]); \
         float cv = static_cast<float>(c[chan]); \
