@@ -27,3 +27,4 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 025	2026-03-23T08:20:00	127fe61	49665943040	PASS	PASS	keep	Use fast::exp consistently in all sigmoid/softplus
 026	2026-03-23T08:45:00	c555d8d	53891033088	PASS	PASS	keep	Fix MSL: replace log1p/precise::recip + enable Metal in benchmarks
 ---	NOTE: from exp 026 onward, benchmarks actually run on Metal GPU, not CPU fallback	---
+027	2026-03-23T09:00:00	cdaf88c	277401088	PASS	PASS	baseline	New Metal baseline (cached binary, real GPU execution)
