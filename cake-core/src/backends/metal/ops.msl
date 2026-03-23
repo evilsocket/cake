@@ -141,7 +141,7 @@ kernel void exp_mul_f32(
     uint idx [[thread_position_in_grid]]
 ) {
     if (idx >= count) return;
-    output[idx] = x[idx] * exp(y[idx]);
+    output[idx] = x[idx] * fast::exp(y[idx]);
 }
 
 kernel void exp_mul_f16(
@@ -152,7 +152,7 @@ kernel void exp_mul_f16(
     uint idx [[thread_position_in_grid]]
 ) {
     if (idx >= count) return;
-    output[idx] = half(float(x[idx]) * exp(float(y[idx])));
+    output[idx] = half(float(x[idx]) * fast::exp(float(y[idx])));
 }
 
 // ─── sub_mul ────────────────────────────────────────────────────────
