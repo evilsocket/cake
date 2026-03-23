@@ -281,16 +281,18 @@ impl Message {
     where
         R: AsyncReadExt + Unpin,
     {
-        // Read magic + length in a single I/O call.
+        // Read magic + length as a single 8-byte I/O call.
         let mut header = [0u8; 8];
         reader.read_exact(&mut header).await?;
 
-        let magic = u32::from_be_bytes(header[..4].try_into().unwrap());
+        // Parse as a single u64 and split — avoids two separate array conversions.
+        let header_u64 = u64::from_be_bytes(header);
+        let magic = (header_u64 >> 32) as u32;
         if magic != super::PROTO_MAGIC {
             return Err(anyhow!("invalid magic value: {magic}"));
         }
 
-        let req_size = u32::from_be_bytes(header[4..8].try_into().unwrap());
+        let req_size = header_u64 as u32;
         if req_size > super::MESSAGE_MAX_SIZE {
             return Err(anyhow!("request size {req_size} > MESSAGE_MAX_SIZE"));
         }
@@ -328,9 +330,9 @@ impl Message {
             return Err(anyhow!("request size {payload_size} > MESSAGE_MAX_SIZE"));
         }
 
-        // Fill in the header in-place.
-        buf[0..4].copy_from_slice(&super::PROTO_MAGIC.to_be_bytes());
-        buf[4..8].copy_from_slice(&payload_size.to_be_bytes());
+        // Fill in the header in-place as a single u64 write.
+        let header = ((super::PROTO_MAGIC as u64) << 32) | (payload_size as u64);
+        buf[0..8].copy_from_slice(&header.to_be_bytes());
 
         writer.write_all(buf).await?;
         Ok(buf.len())
