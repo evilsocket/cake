@@ -58,23 +58,22 @@ impl Flux2PosEmbed {
 
     /// Compute (cos, sin) PE for given position IDs [S, num_axes].
     pub fn forward(&self, ids: &Tensor) -> Result<(Tensor, Tensor)> {
-        let mut all_cos = Vec::with_capacity(self.axes_dim.len());
-        let mut all_sin = Vec::with_capacity(self.axes_dim.len());
-        let pos = ids.to_dtype(DType::F32)?;
+        let mut all_cos = Vec::new();
+        let mut all_sin = Vec::new();
+        let pos = ids.to_dtype(DType::F64)?;
         let seq_len = ids.dim(0)?;
 
         for (i, &dim) in self.axes_dim.iter().enumerate() {
             let half = dim / 2;
             let p = pos.get_on_dim(D::Minus1, i)?; // [S]
 
-            // Use precomputed inv_freq table (cast from f64 to f32)
-            let inv_freq_f32: Vec<f32> = self.inv_freq_tables[i].iter().map(|&v| v as f32).collect();
-            let inv_freq = Tensor::new(inv_freq_f32.as_slice(), ids.device())?
+            // Use precomputed inv_freq table (no powf per call, just clone the Vec)
+            let inv_freq = Tensor::new(self.inv_freq_tables[i].as_slice(), ids.device())?
                 .reshape((1, half))?;
 
             let freqs = p.unsqueeze(1)?.broadcast_mul(&inv_freq)?; // [S, half]
-            let cos = freqs.cos()?;
-            let sin = freqs.sin()?;
+            let cos = freqs.cos()?.to_dtype(DType::F32)?;
+            let sin = freqs.sin()?.to_dtype(DType::F32)?;
 
             // repeat_interleave(2): each frequency applies to a pair of elements
             let cos = cos.unsqueeze(2)?.broadcast_as((seq_len, half, 2))?.reshape((seq_len, dim))?;
