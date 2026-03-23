@@ -355,11 +355,17 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
     /// Embedding lookup: select rows from weight matrix by token IDs.
     fn embedding(&self, ids: &Tensor, weight: &Tensor) -> Result<Tensor> {
         let hidden_size = weight.dim(1)?;
-        let storage = ids.storage_and_layout();
-        let ids_shape = storage.1.shape();
-        let flat_ids = ids.reshape(ids_shape.elem_count())?;
+        let dims = ids.dims();
+        // Fast path: 1D input — no reshape needed
+        if dims.len() == 1 {
+            let selected = weight.index_select(ids, 0)?;
+            return Ok(selected);
+        }
+        // General path: flatten, select, reshape
+        let elem_count: usize = dims.iter().product();
+        let flat_ids = ids.reshape(elem_count)?;
         let selected = weight.index_select(&flat_ids, 0)?;
-        let mut out_shape = ids_shape.dims().to_vec();
+        let mut out_shape = dims.to_vec();
         out_shape.push(hidden_size);
         selected.reshape(out_shape.as_slice())
     }
