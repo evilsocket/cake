@@ -141,7 +141,19 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe_cos: &Tensor, pe_sin: &Tenso
         return attn.transpose(1, 2)?.flatten_from(2);
     }
 
-    // CPU/Metal fallback: manual SDPA in F32
+    // Metal: try F32 SDPA (non-causal, no mask — image gen doesn't need causal masking)
+    #[cfg(feature = "metal")]
+    if matches!(q.device(), candle_core::Device::Metal(_)) {
+        let q32 = q.to_dtype(DType::F32)?;
+        let k32 = k.to_dtype(DType::F32)?;
+        let v32 = v.to_dtype(DType::F32)?;
+        if let Ok(attn) = candle_nn::ops::sdpa(&q32, &k32, &v32, None, false, scale as f32, 1.0) {
+            return attn.to_dtype(w_dtype)?.transpose(1, 2)?.flatten_from(2);
+        }
+        // Fallback to manual if SDPA fails (threadgroup memory exceeded)
+    }
+
+    // CPU fallback: manual SDPA in F32
     let mut batch_dims = q.dims().to_vec();
     batch_dims.pop();
     batch_dims.pop();
