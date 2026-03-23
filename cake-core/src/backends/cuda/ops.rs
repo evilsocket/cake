@@ -10,13 +10,6 @@ mod ptx {
 }
 pub(super) const FUSED_OPS_PTX: &str = ptx::OPS;
 
-/// Compute optimal block size for normalization kernels.
-/// Returns the next power of 2 of `dim`, clamped to [32, 1024].
-fn norm_block_size(dim: usize) -> u32 {
-    let p = (dim as u32).next_power_of_two();
-    p.clamp(32, 1024)
-}
-
 // ─── SiluMul: silu(gate) * up ──────────────────────────────────────
 
 pub(super) struct SiluMul;
@@ -623,7 +616,7 @@ impl candle_core::CustomOp3 for RmsNormGated {
             let el = l_x.shape().elem_count();
             let n_rows = el / n_cols;
 
-            let block_size: u32 = norm_block_size(n_cols);
+            let block_size: u32 = if n_cols < 1024 { 32 } else { 1024 };
             let cfg = LaunchConfig {
                 grid_dim: (n_rows as u32, 1, 1),
                 block_dim: (block_size, 1, 1),
@@ -746,7 +739,7 @@ impl candle_core::CustomOp3 for AddRmsNorm {
                 Some((o1, o2)) => w.slice(o1..o2),
                 None => candle_core::bail!("add_rms_norm: weight must be contiguous"),
             };
-            let block_size: u32 = norm_block_size(n_cols);
+            let block_size: u32 = if n_cols < 1024 { 32 } else { 1024 };
             let cfg = LaunchConfig {
                 grid_dim: (n_rows as u32, 1, 1),
                 block_dim: (block_size, 1, 1),
@@ -863,7 +856,7 @@ impl candle_core::CustomOp2 for RmsNormChannel {
                 Some((o1, o2)) => w.slice(o1..o2),
                 None => candle_core::bail!("rms_norm_channel: weight must be contiguous"),
             };
-            let block_size: u32 = norm_block_size(channels as usize);
+            let block_size: u32 = if channels < 1024 { 32 } else { 1024 };
             let cfg = LaunchConfig {
                 grid_dim: (n_rows as u32, 1, 1),
                 block_dim: (block_size, 1, 1),
@@ -966,7 +959,7 @@ impl candle_core::CustomOp3 for AdaLnModulate {
             let w = match l_w.contiguous_offsets() { Some((a,b)) => w.slice(a..b), None => candle_core::bail!("adaln: w") };
             let sc = match l_sc.contiguous_offsets() { Some((a,b)) => sc.slice(a..b), None => candle_core::bail!("adaln: sc") };
             let sh = match l_sh.contiguous_offsets() { Some((a,b)) => sh.slice(a..b), None => candle_core::bail!("adaln: sh") };
-            let block_size: u32 = norm_block_size(n_cols as usize);
+            let block_size: u32 = if n_cols < 1024 { 32 } else { 1024 };
             let cfg = LaunchConfig { grid_dim: (n_rows as u32, 1, 1), block_dim: (block_size, 1, 1), shared_mem_bytes: 0 };
             let func = dev.get_or_load_custom_func(&kernel_name::<T>("adaln_modulate"), "cake_fused_ops", FUSED_OPS_PTX)?;
             let out = unsafe { dev.alloc::<T>(el)? };
