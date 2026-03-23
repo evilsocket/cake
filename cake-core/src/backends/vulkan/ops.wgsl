@@ -145,9 +145,8 @@ fn gemv(@builtin(global_invocation_id) gid: vec3<u32>,
 
 // ═══════════════════════════════════════════════════════════════════
 // Tiled GEMM: C[M,N] = A[M,K] × B[K,N]  (for M > 1)
-// 32×32 output tile with 4×4 register blocking: 8×8 workgroup (64
-// threads = 1 RDNA 2 wavefront), each thread computes a 4×4 block.
-// K-dimension tile is 16. Shared memory: 32×16 + 16×32 = 1024 floats.
+// 16×16 tiles with 2×2 register tiling: 8×8 workgroup, each thread
+// computes a 2×2 block of outputs for higher arithmetic intensity.
 // ═══════════════════════════════════════════════════════════════════
 
 struct MatmulParams {
@@ -162,100 +161,83 @@ struct MatmulParams {
 @group(0) @binding(2) var<storage, read_write> mat_c: array<f32>;
 @group(0) @binding(3) var<uniform> mat_params: MatmulParams;
 
-const TILE_MN: u32 = 32;  // output tile M and N dimension
-const TILE_K: u32 = 16;   // K dimension tile
-var<workgroup> tile_a: array<f32, 512>;  // [32, 16]
-var<workgroup> tile_b: array<f32, 512>;  // [16, 32]
+const TILE: u32 = 16;
+var<workgroup> tile_a: array<f32, 256>;
+var<workgroup> tile_b: array<f32, 256>;
 
 @compute @workgroup_size(8, 8)
 fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
-          @builtin(local_invocation_id) lid: vec3<u32>,
-          @builtin(workgroup_id) wid: vec3<u32>) {
+          @builtin(local_invocation_id) lid: vec3<u32>) {
+    // Each thread covers a 2×2 block of the output tile
+    let row0 = gid.x * 2u;
+    let col0 = gid.y * 2u;
     let lr = lid.x;
     let lc = lid.y;
     let M = mat_params.M;
     let N = mat_params.N;
     let K = mat_params.K;
 
-    // Workgroup base row/col in output
-    let wg_row = wid.x * TILE_MN;
-    let wg_col = wid.y * TILE_MN;
+    // 2×2 accumulators
+    var acc00: f32 = 0.0;
+    var acc01: f32 = 0.0;
+    var acc10: f32 = 0.0;
+    var acc11: f32 = 0.0;
+    let num_tiles = (K + TILE - 1) / TILE;
 
-    // This thread's 4×4 output block position
-    let row0 = wg_row + lr * 4u;
-    let col0 = wg_col + lc * 4u;
+    // Linear thread index for cooperative tile loading (64 threads load 256 elements = 4 each)
+    let lin = lr * 8u + lc;
 
-    // 4×4 accumulators
-    var acc: array<f32, 16>;
-    for (var i = 0u; i < 16u; i++) { acc[i] = 0.0; }
+    for (var t: u32 = 0; t < num_tiles; t++) {
+        let tile_k = t * TILE;
 
-    let num_tiles = (K + TILE_K - 1u) / TILE_K;
-    let lin = lr * 8u + lc;  // linear thread index 0..63
+        // Cooperative load: 64 threads load 16×16 = 256 elements, 4 per thread
+        for (var i: u32 = 0u; i < 4u; i++) {
+            let idx = lin * 4u + i;
+            let tr = idx / TILE;
+            let tc = idx % TILE;
 
-    for (var t: u32 = 0u; t < num_tiles; t++) {
-        let tile_k = t * TILE_K;
-
-        // Cooperative load: 64 threads load 512 elements (8 per thread) for each tile
-        for (var i: u32 = 0u; i < 8u; i++) {
-            let idx = lin * 8u + i;
-            let tr = idx / TILE_K;  // row within 32×16 tile
-            let tc = idx % TILE_K;  // col within 32×16 tile
-
-            let a_row = wg_row + tr;
+            // Load tile_a: row = workgroup_row_base + tr, col = tile_k + tc
+            let a_row = gid.x * 2u - lid.x * 2u + tr;  // workgroup base row + tr
             let a_col = tile_k + tc;
             if (a_row < M && a_col < K) {
-                tile_a[idx] = mat_a[a_row * K + a_col];
+                tile_a[tr * TILE + tc] = mat_a[a_row * K + a_col];
             } else {
-                tile_a[idx] = 0.0;
+                tile_a[tr * TILE + tc] = 0.0;
             }
-        }
-        for (var i: u32 = 0u; i < 8u; i++) {
-            let idx = lin * 8u + i;
-            let tr = idx / TILE_MN;  // row within 16×32 tile
-            let tc = idx % TILE_MN;  // col within 16×32 tile
 
+            // Load tile_b: row = tile_k + tr, col = workgroup_col_base + tc
             let b_row = tile_k + tr;
-            let b_col = wg_col + tc;
+            let b_col = gid.y * 2u - lid.y * 2u + tc;  // workgroup base col + tc
             if (b_row < K && b_col < N) {
-                tile_b[idx] = mat_b[b_row * N + b_col];
+                tile_b[tr * TILE + tc] = mat_b[b_row * N + b_col];
             } else {
-                tile_b[idx] = 0.0;
+                tile_b[tr * TILE + tc] = 0.0;
             }
         }
 
         workgroupBarrier();
 
-        // Each thread accumulates its 4×4 block
-        let r_base = lr * 4u;
-        let c_base = lc * 4u;
-        for (var k: u32 = 0u; k < TILE_K; k++) {
-            // Load 4 A values from this thread's rows
-            let a0 = tile_a[(r_base) * TILE_K + k];
-            let a1 = tile_a[(r_base + 1u) * TILE_K + k];
-            let a2 = tile_a[(r_base + 2u) * TILE_K + k];
-            let a3 = tile_a[(r_base + 3u) * TILE_K + k];
-            // Load 4 B values from this thread's cols
-            let b0 = tile_b[k * TILE_MN + c_base];
-            let b1 = tile_b[k * TILE_MN + c_base + 1u];
-            let b2 = tile_b[k * TILE_MN + c_base + 2u];
-            let b3 = tile_b[k * TILE_MN + c_base + 3u];
-            // 4×4 outer product
-            acc[0]  += a0 * b0; acc[1]  += a0 * b1; acc[2]  += a0 * b2; acc[3]  += a0 * b3;
-            acc[4]  += a1 * b0; acc[5]  += a1 * b1; acc[6]  += a1 * b2; acc[7]  += a1 * b3;
-            acc[8]  += a2 * b0; acc[9]  += a2 * b1; acc[10] += a2 * b2; acc[11] += a2 * b3;
-            acc[12] += a3 * b0; acc[13] += a3 * b1; acc[14] += a3 * b2; acc[15] += a3 * b3;
+        // Each thread accumulates its 2×2 block
+        let r0 = lr * 2u;
+        let r1 = r0 + 1u;
+        let c0 = lc * 2u;
+        let c1 = c0 + 1u;
+        for (var k: u32 = 0; k < TILE; k++) {
+            let a0k = tile_a[r0 * TILE + k];
+            let a1k = tile_a[r1 * TILE + k];
+            let bk0 = tile_b[k * TILE + c0];
+            let bk1 = tile_b[k * TILE + c1];
+            acc00 += a0k * bk0;
+            acc01 += a0k * bk1;
+            acc10 += a1k * bk0;
+            acc11 += a1k * bk1;
         }
         workgroupBarrier();
     }
 
-    // Write 4×4 output block
-    for (var dr: u32 = 0u; dr < 4u; dr++) {
-        for (var dc: u32 = 0u; dc < 4u; dc++) {
-            let r = row0 + dr;
-            let c = col0 + dc;
-            if (r < M && c < N) {
-                mat_c[r * N + c] = acc[dr * 4u + dc];
-            }
-        }
-    }
+    // Write 2×2 output block
+    if (row0 < M && col0 < N) { mat_c[row0 * N + col0] = acc00; }
+    if (row0 < M && col0 + 1u < N) { mat_c[row0 * N + col0 + 1u] = acc01; }
+    if (row0 + 1u < M && col0 < N) { mat_c[(row0 + 1u) * N + col0] = acc10; }
+    if (row0 + 1u < M && col0 + 1u < N) { mat_c[(row0 + 1u) * N + col0 + 1u] = acc11; }
 }
