@@ -114,6 +114,9 @@ impl Forwarder for Transformer {
             .map_err(|e| anyhow!("attention: {e}"))?
             + residual)
             .map_err(|e| anyhow!("residual: {e}"))?;
+        // Flush Metal command buffer between attention and MLP to prevent
+        // >25 command accumulation (no-op on CPU/CUDA)
+        let _ = ctx.backend.synchronize();
         let residual = &x;
         let x = self.rms_2.forward(&x).map_err(|e| anyhow!("rms_2: {e}"))?;
         let x = (self.mlp.forward(&x).map_err(|e| anyhow!("mlp: {e}"))? + residual)
