@@ -566,9 +566,11 @@ impl VulkanBackend {
                 return Ok(buf.clone());
             }
         }
-        // Check view cache (handles weight.t() which creates new TensorIds but same storage).
-        // CRITICAL: without this, each .t() call leaks a GPU buffer (new TensorId → cache miss → new alloc).
-        let vk = Self::view_key(tensor);
+        // View cache: only for NON-CONTIGUOUS tensors (weight.t() views).
+        // Contiguous tensors (activations) must NOT use the view cache because
+        // freed tensors can be reallocated at the same address, causing stale hits.
+        let is_view = !tensor.is_contiguous();
+        let vk = if is_view { Self::view_key(tensor) } else { None };
         if let Some(ref key) = vk {
             let cache = self.weight_cache.lock().unwrap();
             if let Some(buf) = cache.views.get(key) {
