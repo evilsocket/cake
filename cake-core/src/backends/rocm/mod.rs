@@ -306,10 +306,11 @@ impl ComputeBackend for RocmBackend {
 
     fn attention(&self, q: &Tensor, k: &Tensor, v: &Tensor, scale: f32, causal: bool) -> Result<Tensor> {
         let orig = q.dtype();
-        let (q, k, v) = if orig == DType::F32 { (q.clone(), k.clone(), v.clone()) }
-            else { (q.to_dtype(DType::F32)?, k.to_dtype(DType::F32)?, v.to_dtype(DType::F32)?) };
-        let attn = self.tensor_matmul(&q, &k.t()?)?;
-        let attn = (attn * scale as f64)?;
+        let (qf, kf, vf);
+        let (q, k, v) = if orig == DType::F32 { (q, k, v) }
+            else { qf = q.to_dtype(DType::F32)?; kf = k.to_dtype(DType::F32)?; vf = v.to_dtype(DType::F32)?; (&qf, &kf, &vf) };
+        let kt = k.t()?;
+        let attn = (self.tensor_matmul(q, &kt)? * scale as f64)?;
         let attn = if causal {
             let (sl, kl) = (q.dim(2)?, k.dim(2)?);
             let mut mask = vec![0u8; sl*kl];
@@ -318,7 +319,7 @@ impl ComputeBackend for RocmBackend {
             let ni = Tensor::full(f32::NEG_INFINITY, attn.shape(), q.device())?;
             m.broadcast_as(attn.shape())?.where_cond(&attn, &ni)?
         } else { attn };
-        self.tensor_matmul(&candle_nn::ops::softmax_last_dim(&attn)?, &v)?.to_dtype(orig)
+        self.tensor_matmul(&candle_nn::ops::softmax_last_dim(&attn)?, v)?.to_dtype(orig)
     }
 
     fn silu_mul(&self, g: &Tensor, u: &Tensor) -> Result<Tensor> { (candle_nn::ops::silu(&g.contiguous()?)? * u.contiguous()?)?.contiguous() }
