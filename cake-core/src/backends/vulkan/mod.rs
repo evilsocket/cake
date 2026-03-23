@@ -602,7 +602,7 @@ impl VulkanBackend {
         }
         let buf = Arc::new(buf);
         let mut cache = self.weight_cache.lock().unwrap();
-        cache.buffers.insert(tensor.id(), buf.clone());
+        cache.buffers.insert(id, buf.clone());
         // Also insert into view cache so future .t() lookups hit
         if let Some(key) = vk {
             cache.views.insert(key, buf.clone());
@@ -1300,7 +1300,7 @@ impl ComputeBackend for VulkanBackend {
         let m = a_dims[a_dims.len() - 2];
         let k = a_dims[a_dims.len() - 1];
         let n = b_dims[b_dims.len() - 1];
-        // GPU for all sizes including M=1 (GEMV). View cache handles weight.t().
+        // GPU for all sizes: M=1 uses GEMM. View cache handles weight.t().
         log::debug!("matmul GPU: M={m} K={k} N={n}");
         let orig_dtype = a.dtype();
         let result = self.tensor_matmul(a, b)?;
