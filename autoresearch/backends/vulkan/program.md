@@ -35,7 +35,9 @@ compute shaders. Lower is better.
   reduction patterns, memory access coalescing.
 - `cake-core/src/backends/vulkan/mod.rs` — VulkanBackend implementation. Buffer cache
   strategy, pipeline creation, dispatch dimensions, uniform buffer packing, wgpu
-  configuration.
+  configuration. Also inherits 16 inference primitive defaults (linear_forward, rms_norm,
+  layer_norm, group_norm, softmax, sdpa, rope, silu, gelu, sigmoid, embedding, causal_mask,
+  topk, conv1d, conv_transpose1d, conv2d) — override any for Vulkan/wgpu acceleration.
 
 ## Files You Must NOT Modify
 

@@ -144,3 +144,64 @@ fn test_safetensors_multi_shard_index() {
     let read1: Vec<f32> = r1.flatten_all().unwrap().to_vec1().unwrap();
     assert_eq!(orig1, read1);
 }
+
+#[test]
+fn test_load_tensor_with_dtype_conversion() {
+    // Create F32 tensor, load as F16, verify shape and dtype
+    let t = Tensor::randn(0f32, 1.0, (4, 8), &Device::Cpu).unwrap();
+    let (_dir, path) = create_test_safetensors(&[("weight", t.clone())]);
+    let storage = SafetensorsStorage::from_model_path(path.parent().unwrap()).unwrap();
+
+    let loaded = storage
+        .load_tensor("weight", DType::F16, &Device::Cpu)
+        .unwrap();
+    assert_eq!(loaded.dtype(), DType::F16);
+    assert_eq!(loaded.dims(), &[4, 8]);
+
+    // Values should be close after F32→F16 conversion
+    let orig_f16 = t.to_dtype(DType::F16).unwrap();
+    let orig_vals: Vec<half::f16> = orig_f16.flatten_all().unwrap().to_vec1().unwrap();
+    let loaded_vals: Vec<half::f16> = loaded.flatten_all().unwrap().to_vec1().unwrap();
+    assert_eq!(orig_vals, loaded_vals);
+}
+
+#[test]
+fn test_load_all_returns_all_tensors() {
+    let t1 = Tensor::randn(0f32, 1.0, (2, 4), &Device::Cpu).unwrap();
+    let t2 = Tensor::randn(0f32, 1.0, (8, 3), &Device::Cpu).unwrap();
+    let t3 = Tensor::randn(0f32, 1.0, (1, 16), &Device::Cpu).unwrap();
+
+    let (_dir, path) =
+        create_test_safetensors(&[("alpha", t1), ("beta", t2), ("gamma", t3)]);
+    let storage = SafetensorsStorage::from_model_path(path.parent().unwrap()).unwrap();
+
+    let all = storage.load_all(DType::F32, &Device::Cpu).unwrap();
+    assert_eq!(all.len(), 3);
+    assert!(all.contains_key("alpha"));
+    assert!(all.contains_key("beta"));
+    assert!(all.contains_key("gamma"));
+    assert_eq!(all["alpha"].dims(), &[2, 4]);
+    assert_eq!(all["beta"].dims(), &[8, 3]);
+    assert_eq!(all["gamma"].dims(), &[1, 16]);
+}
+
+#[test]
+fn test_from_file_single_safetensors() {
+    let t1 = Tensor::randn(0f32, 1.0, (3, 5), &Device::Cpu).unwrap();
+    let t2 = Tensor::randn(0f32, 1.0, (7, 2), &Device::Cpu).unwrap();
+
+    let (_dir, path) = create_test_safetensors(&[("w1", t1.clone()), ("w2", t2.clone())]);
+
+    // Load via from_file (takes a file path, not directory)
+    let storage = SafetensorsStorage::from_file(&path).unwrap();
+
+    assert!(storage.has_tensor("w1"));
+    assert!(storage.has_tensor("w2"));
+    assert!(!storage.has_tensor("w3"));
+
+    let d1 = storage.read_tensor("w1").unwrap();
+    assert_eq!(d1.shape, vec![3, 5]);
+
+    let d2 = storage.read_tensor("w2").unwrap();
+    assert_eq!(d2.shape, vec![7, 2]);
+}

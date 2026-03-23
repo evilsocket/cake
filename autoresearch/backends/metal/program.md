@@ -31,6 +31,9 @@ memory-bandwidth-bound at ~200-400 GiB/s depending on the chip. Lower is better.
   operations, memory access patterns, half-precision ALU, register pressure, kernel fusion.
 - `cake-core/src/backends/metal/mod.rs` — MetalBackend implementation. Command buffer
   management, pipeline state caching, dispatch configuration, synchronization frequency.
+  Also inherits 16 inference primitive defaults (linear_forward, rms_norm, layer_norm,
+  group_norm, softmax, sdpa, rope, silu, gelu, sigmoid, embedding, causal_mask, topk,
+  conv1d, conv_transpose1d, conv2d) — override any for Metal acceleration.
 
 ## Files You Must NOT Modify
 

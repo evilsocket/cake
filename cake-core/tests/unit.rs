@@ -36,3 +36,9 @@ mod test_tensor_storage;
 mod test_flash_moe;
 #[path = "unit_tests/test_backend_ops.rs"]
 mod test_backend_ops;
+#[path = "unit_tests/test_hf.rs"]
+mod test_hf;
+#[path = "unit_tests/test_models_list.rs"]
+mod test_models_list;
+#[path = "unit_tests/test_quantization.rs"]
+mod test_quantization;

@@ -170,7 +170,59 @@ fn sdpa(bencher: divan::Bencher, seq_len: usize) {
     let k = Tensor::randn(0f32, 0.5, (1, 4, seq_len, 32), &Device::Cpu).unwrap();
     let v = Tensor::randn(0f32, 0.5, (1, 4, seq_len, 32), &Device::Cpu).unwrap();
     let scale = 1.0 / (32.0f32).sqrt();
+    // SDPA may not have a CPU impl — skip gracefully
+    if b.sdpa(&q, &k, &v, None, false, scale).is_err() {
+        return;
+    }
     bencher.bench_local(|| {
-        let _ = b.sdpa(&q, &k, &v, None, seq_len > 1, scale).unwrap();
+        let _ = b.sdpa(&q, &k, &v, None, seq_len > 1, scale);
+    });
+}
+
+// ── layer_norm ─────────────────────────────────────────────────────────
+#[divan::bench(args = [64, 256, 1024])]
+fn layer_norm(bencher: divan::Bencher, hidden: usize) {
+    let b = backend();
+    let x = Tensor::randn(0f32, 1.0, (1, 8, hidden), &Device::Cpu).unwrap();
+    let w = Tensor::ones(hidden, DType::F32, &Device::Cpu).unwrap();
+    let bias = Tensor::zeros(hidden, DType::F32, &Device::Cpu).unwrap();
+    bencher.bench_local(|| {
+        let _ = b.layer_norm(&x, &w, Some(&bias), 1e-5).unwrap();
+    });
+}
+
+// ── group_norm ─────────────────────────────────────────────────────────
+#[divan::bench(args = [32, 128, 512])]
+fn group_norm(bencher: divan::Bencher, channels: usize) {
+    let b = backend();
+    let groups = (channels / 4).max(1);
+    let x = Tensor::randn(0f32, 1.0, (1, channels, 8, 8), &Device::Cpu).unwrap();
+    let w = Tensor::ones(channels, DType::F32, &Device::Cpu).unwrap();
+    let bias = Tensor::zeros(channels, DType::F32, &Device::Cpu).unwrap();
+    bencher.bench_local(|| {
+        let _ = b.group_norm(&x, &w, &bias, groups, 1e-5).unwrap();
+    });
+}
+
+// ── conv2d ─────────────────────────────────────────────────────────────
+#[divan::bench(args = [32, 64, 128])]
+fn conv2d(bencher: divan::Bencher, channels: usize) {
+    let b = backend();
+    let w = Tensor::randn(0f32, 0.1, (channels, channels, 3, 3), &Device::Cpu).unwrap();
+    let bias = Tensor::randn(0f32, 0.1, (channels,), &Device::Cpu).unwrap();
+    let x = Tensor::randn(0f32, 1.0, (1, channels, 16, 16), &Device::Cpu).unwrap();
+    bencher.bench_local(|| {
+        let _ = b.conv2d(&x, &w, Some(&bias), 1, 1, 1, 1).unwrap();
+    });
+}
+
+// ── linear_forward 4D ──────────────────────────────────────────────────
+#[divan::bench(args = [64, 256])]
+fn linear_forward_4d(bencher: divan::Bencher, hidden: usize) {
+    let b = backend();
+    let x = Tensor::randn(0f32, 1.0, (1, 2, 4, hidden), &Device::Cpu).unwrap();
+    let w = Tensor::randn(0f32, 0.1, (hidden, hidden), &Device::Cpu).unwrap();
+    bencher.bench_local(|| {
+        let _ = b.linear_forward(&x, &w, None).unwrap();
     });
 }

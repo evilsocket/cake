@@ -103,6 +103,13 @@ tensor. The MoE forward pass relies on this contract — do not change the inter
 8. **Tensor construction** — `Tensor::from_raw_buffer` does a memcpy. Can we construct
    zero-copy tensors from the read buffer?
 
+9. **Batched read_tensors()** — `TensorStorageProvider::read_tensors()` now detects contiguous
+   tensors in the same shard and reads them in a single pread. Optimize the contiguity detection
+   and buffer splitting for the gate+up+down pattern.
+
+10. **load_tensor() convenience** — `SafetensorsStorage::load_tensor()` reads + converts dtype +
+    moves to device. The dtype conversion could be fused with the read for common F16→F32 paths.
+
 ## Recording Results
 
 Append to `experiments.tsv` (tab-separated):

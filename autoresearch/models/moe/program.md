@@ -25,11 +25,12 @@ where K experts are selected from N total for each token. Lower is better.
 
 ## Files You May Modify
 
-- `cake-core/src/models/common/mod.rs` — MoE layer implementation (gating, routing, expert dispatch, output combination).
 - `cake-core/src/models/common/expert_provider.rs` — ExpertProvider trait, StackedResidentProvider, IndividualResidentProvider.
-- `cake-core/src/models/common/disk_expert_provider.rs` — DiskExpertProvider, memory-mapped weight access patterns.
-- `cake-core/src/models/qwen3_moe/mod.rs` — Qwen3 MoE architecture.
-- `cake-core/src/models/qwen3_5_moe/mod.rs` — Qwen3.5 MoE architecture.
+- `cake-core/src/models/common/disk_expert_provider.rs` — DiskExpertProvider, pread-based weight access.
+- `cake-core/src/models/qwen3_moe/moe.rs` — Qwen3 MoE routing + expert dispatch (raw weight tensors, backend.softmax/topk/linear_forward).
+- `cake-core/src/models/qwen3_5_moe/moe.rs` — Qwen3.5 MoE routing + shared expert (raw weight tensors, backend.sigmoid).
+- `cake-core/src/models/qwen3_moe/block.rs` — Qwen3 MoE block (with disk offload path).
+- `cake-core/src/models/qwen3_5_moe/block.rs` — Qwen3.5 MoE block.
 
 ## Files You Must NOT Modify
 

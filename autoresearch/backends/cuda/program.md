@@ -37,7 +37,9 @@ NVIDIA hardware. Lower is better.
 - `cake-core/src/backends/cuda/ops.rs` — Kernel dispatch: grid/block dimensions, dtype routing,
   CustomOp2 shape inference. Kernel launch parameters.
 - `cake-core/src/backends/cuda/mod.rs` — CudaBackend implementation. Attention dispatch logic,
-  weight preprocessing, synchronization.
+  weight preprocessing, synchronization. Also inherits 16 new inference primitive defaults
+  (linear_forward, rms_norm, layer_norm, group_norm, softmax, sdpa, rope, silu, gelu, sigmoid,
+  embedding, causal_mask, topk, conv1d, conv_transpose1d, conv2d) — override any for GPU acceleration.
 
 ## Files You Must NOT Modify
 

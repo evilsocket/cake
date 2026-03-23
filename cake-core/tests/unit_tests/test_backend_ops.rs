@@ -531,3 +531,80 @@ fn test_sdpa_matches_manual_attention() {
     }
     // SDPA not available on CPU — that's OK, it's Metal/CUDA only
 }
+
+// ── layer_norm vs candle_nn::LayerNorm ─────────────────────────────────
+
+#[test]
+fn test_layer_norm_matches_candle_with_bias() {
+    let b = backend();
+    let x = Tensor::randn(0f32, 1.0, (2, 4, 32), &Device::Cpu).unwrap();
+    let w = Tensor::randn(0f32, 0.1, (32,), &Device::Cpu).unwrap();
+    let bias = Tensor::randn(0f32, 0.1, (32,), &Device::Cpu).unwrap();
+    let expected = candle_nn::LayerNorm::new(w.clone(), bias.clone(), 1e-5)
+        .forward(&x)
+        .unwrap();
+    let actual = b.layer_norm(&x, &w, Some(&bias), 1e-5).unwrap();
+    assert_close(&actual, &expected, 1e-5);
+}
+
+#[test]
+fn test_layer_norm_no_bias() {
+    let b = backend();
+    let x = Tensor::randn(0f32, 1.0, (1, 8, 16), &Device::Cpu).unwrap();
+    let w = Tensor::randn(0f32, 0.1, (16,), &Device::Cpu).unwrap();
+    let expected = candle_nn::LayerNorm::new_no_bias(w.clone(), 1e-5)
+        .forward(&x)
+        .unwrap();
+    let actual = b.layer_norm(&x, &w, None, 1e-5).unwrap();
+    assert_close(&actual, &expected, 1e-5);
+}
+
+// ── group_norm vs candle_nn::GroupNorm ──────────────────────────────────
+
+#[test]
+fn test_group_norm_matches_candle() {
+    let b = backend();
+    let (channels, groups) = (32, 8);
+    let x = Tensor::randn(0f32, 1.0, (1, channels, 16, 16), &Device::Cpu).unwrap();
+    let w = Tensor::randn(0f32, 0.1, (channels,), &Device::Cpu).unwrap();
+    let bias = Tensor::randn(0f32, 0.1, (channels,), &Device::Cpu).unwrap();
+    let expected = candle_nn::group_norm(
+        groups,
+        channels,
+        1e-5,
+        candle_nn::VarBuilder::from_tensors(
+            [
+                ("weight".to_string(), w.clone()),
+                ("bias".to_string(), bias.clone()),
+            ]
+            .into(),
+            DType::F32,
+            &Device::Cpu,
+        ),
+    )
+    .unwrap()
+    .forward(&x)
+    .unwrap();
+    let actual = b.group_norm(&x, &w, &bias, groups, 1e-5).unwrap();
+    assert_close(&actual, &expected, 1e-4);
+}
+
+// ── conv2d vs candle_nn::Conv2d ────────────────────────────────────────
+
+#[test]
+fn test_conv2d_matches_candle() {
+    let b = backend();
+    let (in_c, out_c, k) = (4, 8, 3);
+    let w = Tensor::randn(0f32, 0.1, (out_c, in_c, k, k), &Device::Cpu).unwrap();
+    let bias = Tensor::randn(0f32, 0.1, (out_c,), &Device::Cpu).unwrap();
+    let x = Tensor::randn(0f32, 1.0, (1, in_c, 8, 8), &Device::Cpu).unwrap();
+    let cfg = candle_nn::Conv2dConfig {
+        padding: 1,
+        ..Default::default()
+    };
+    let expected = candle_nn::Conv2d::new(w.clone(), Some(bias.clone()), cfg)
+        .forward(&x)
+        .unwrap();
+    let actual = b.conv2d(&x, &w, Some(&bias), 1, 1, 1, 1).unwrap();
+    assert_close(&actual, &expected, 1e-5);
+}
