@@ -23,14 +23,28 @@ static HIP_INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// SIGABRT handler: HIP runtime crashes in Monitor::tryLock during process exit
 /// because its atexit cleanup runs after threads are torn down. We catch the
 /// resulting abort and force a clean exit since all useful work is already done.
+///
+/// Uses `exit_group` syscall directly for reliable process termination.
 extern "C" fn hip_sigabrt_handler(_sig: libc::c_int) {
     if HIP_INITIALIZED.load(Ordering::Relaxed) {
-        unsafe { libc::_exit(0); }
+        unsafe { libc::syscall(libc::SYS_exit_group, 0); }
     }
     // Not HIP-related — re-raise with default handler
     unsafe {
         libc::signal(libc::SIGABRT, libc::SIG_DFL);
         libc::raise(libc::SIGABRT);
+    }
+}
+
+/// atexit handler: terminates process before HIP's broken atexit cleanup runs.
+/// Registered after HIP init, so runs before HIP's handler (LIFO order).
+extern "C" fn hip_atexit_handler() {
+    if HIP_INITIALIZED.load(Ordering::Relaxed) {
+        // Flush stdio then hard-exit to prevent HIP atexit crash
+        unsafe {
+            libc::fflush(std::ptr::null_mut());
+            libc::syscall(libc::SYS_exit_group, 0);
+        }
     }
 }
 
@@ -108,9 +122,18 @@ impl RocmBackend {
         let err = unsafe { (ffi.hip_init)(0) };
         if err != 0 { return Err(format!("hipInit: error {err}")); }
 
-        // Install SIGABRT handler to catch HIP's broken atexit cleanup
+        // Two-layer defense against HIP's broken atexit cleanup:
+        // 1. SIGABRT handler catches abort() from HIP's assertion failures
+        // 2. atexit handler terminates before HIP's cleanup runs (LIFO order)
         if !HIP_INITIALIZED.swap(true, Ordering::Relaxed) {
-            unsafe { libc::signal(libc::SIGABRT, hip_sigabrt_handler as *const () as libc::sighandler_t); }
+            unsafe {
+                let mut sa: libc::sigaction = std::mem::zeroed();
+                sa.sa_sigaction = hip_sigabrt_handler as *const () as libc::sighandler_t;
+                libc::sigemptyset(&mut sa.sa_mask);
+                sa.sa_flags = libc::SA_NODEFER;
+                libc::sigaction(libc::SIGABRT, &sa, std::ptr::null_mut());
+                libc::atexit(hip_atexit_handler);
+            }
         }
 
         let mut count = 0i32;
@@ -217,15 +240,35 @@ impl RocmBackend {
         let ad_flat = Self::to_f32_vec(&a)?;
         let bd_flat = Self::to_f32_vec(&b)?;
         let (mk, kn, mn) = (m*k, k*n, m*n);
-        let mut out = Vec::with_capacity(batch * mn);
+        // Upload entire A and B arrays at once — one H2D transfer per operand
+        let a_gpu = self.gpu_upload(&ad_flat)?;
+        let b_gpu = self.gpu_upload(&bd_flat)?;
+        // Pre-allocate output buffer for all batches
+        let c_gpu = self.gpu_alloc(batch * mn)?;
+        let alpha: f32 = 1.0;
+        let beta: f32 = 0.0;
         for i in 0..batch {
             let ao = if ab==1 {0} else {i*mk};
             let bo = if bb==1 {0} else {i*kn};
-            let ab = self.gpu_upload(&ad_flat[ao..ao+mk])?;
-            let bb = self.gpu_upload(&bd_flat[bo..bo+kn])?;
-            let c = self.rocblas_gemm(ab.as_ptr(), bb.as_ptr(), m, k, n)?;
-            out.extend_from_slice(&c.download().map_err(candle_core::Error::Msg)?);
+            let co = i * mn;
+            let err = unsafe {
+                (self.ffi.rocblas_sgemm)(
+                    self.blas_handle,
+                    ROCBLAS_OPERATION_NONE, ROCBLAS_OPERATION_NONE,
+                    n as i32, m as i32, k as i32,
+                    &alpha,
+                    b_gpu.as_ptr().add(bo), n as i32,
+                    a_gpu.as_ptr().add(ao), k as i32,
+                    &beta,
+                    c_gpu.as_mut_ptr().add(co), n as i32,
+                )
+            };
+            if err != 0 { return Err(candle_core::Error::Msg(format!("rocblas_sgemm batch {i}: {err}"))); }
         }
+        // Single sync + download for all batches
+        let err = unsafe { (self.ffi.hip_device_synchronize)() };
+        if err != 0 { return Err(candle_core::Error::Msg(format!("hipSync: {err}"))); }
+        let out = c_gpu.download().map_err(candle_core::Error::Msg)?;
         let mut s = ad[..ra-2].to_vec(); s.push(m); s.push(n);
         Tensor::from_vec(out, s.as_slice(), &Device::Cpu)
     }
