@@ -43,22 +43,13 @@ impl EulerSolver {
         v: &Tensor,
         t_cur: f32,
         t_next: f32,
-        is_last: bool,
+        _is_last: bool,
     ) -> Result<Tensor> {
-        // x_1_pred = x + (1 - t_cur) * v
-        let x_1_pred = (x + (v * (1.0 - t_cur) as f64)?)?;
-
-        if is_last {
-            // Last step: return x_1_pred directly
-            return Ok(x_1_pred);
-        }
-
-        // x_0_pred = x - t_cur * v
-        let x_0_pred = (x - (v * t_cur as f64)?)?;
-
-        // x_next = (1 - t_next) * x_0_pred + t_next * x_1_pred
-        let result = ((&x_0_pred * (1.0 - t_next) as f64)? + (&x_1_pred * t_next as f64)?)?;
-        Ok(result)
+        // Simplified: x_next = x + (t_next - t_cur) * v
+        // (algebraically equivalent to the x_0_pred/x_1_pred formulation)
+        // Last step (t_next=1.0): x + (1 - t_cur) * v = x_1_pred
+        let dt = (t_next - t_cur) as f64;
+        Ok((x + (v * dt)?)?)
     }
 }
 
