@@ -208,13 +208,16 @@ impl Message {
     where
         R: AsyncReadExt + Unpin,
     {
-        // read_u32() reads 4 bytes as big-endian and returns the native value.
-        let magic = reader.read_u32().await?;
+        // Read magic + length in a single I/O call.
+        let mut header = [0u8; 8];
+        reader.read_exact(&mut header).await?;
+
+        let magic = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
         if magic != super::PROTO_MAGIC {
             return Err(anyhow!("invalid magic value: {magic}"));
         }
 
-        let req_size = reader.read_u32().await?;
+        let req_size = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
         if req_size > super::MESSAGE_MAX_SIZE {
             return Err(anyhow!("request size {req_size} > MESSAGE_MAX_SIZE"));
         }
