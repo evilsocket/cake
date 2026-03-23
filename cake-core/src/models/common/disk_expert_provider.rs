@@ -37,6 +37,8 @@ pub struct DiskExpertProvider {
     dtype: DType,
     /// Pre-computed: whether device transfer is needed.
     needs_device_transfer: bool,
+    /// Pre-computed: whether F32 zero-copy path can be used (storage and target both F32).
+    use_f32_zerocopy: bool,
 }
 
 impl std::fmt::Debug for DiskExpertProvider {
@@ -64,7 +66,7 @@ impl DiskExpertProvider {
         device: Device,
         dtype: DType,
     ) -> Self {
-        let expert_names = (0..num_experts)
+        let expert_names: Vec<ExpertNames> = (0..num_experts)
             .map(|idx| {
                 let prefix = format!("{}.experts.{}", layer_prefix, idx);
                 ExpertNames {
@@ -75,6 +77,17 @@ impl DiskExpertProvider {
             })
             .collect();
         let needs_device_transfer = !device.is_cpu();
+        // Detect storage dtype from first expert's gate_proj (all experts share dtype)
+        let storage_dtype = expert_names
+            .first()
+            .and_then(|names| {
+                storage
+                    .read_tensor(&names.gate_proj)
+                    .ok()
+                    .map(|d| d.dtype)
+            });
+        let use_f32_zerocopy = dtype == DType::F32
+            && storage_dtype.is_some_and(|sd| sd == DType::F32);
         Self {
             storage,
             layer_prefix,
@@ -83,6 +96,7 @@ impl DiskExpertProvider {
             device,
             dtype,
             needs_device_transfer,
+            use_f32_zerocopy,
         }
     }
 
@@ -152,7 +166,7 @@ impl ExpertProvider for DiskExpertProvider {
         // batch+split since each read's buffer transfers directly into the
         // Tensor without copying. The batch path would add 3 memcpys to split
         // the contiguous buffer.
-        let (gate_data, up_data, down_data) = if self.dtype == DType::F32 {
+        let (gate_data, up_data, down_data) = if self.use_f32_zerocopy {
             let g = self.storage.read_tensor(&names.gate_proj)
                 .map_err(|e| candle_core::Error::Msg(format!("read_tensor: {e}")))?;
             let u = self.storage.read_tensor(&names.up_proj)
