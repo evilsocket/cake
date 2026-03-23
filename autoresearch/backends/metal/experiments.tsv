@@ -13,4 +13,8 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 011	2026-03-23T08:30:00	298f3c9	52853469952	PASS	PASS	keep	Inline dispatch helpers
 012	2026-03-23T08:40:00	da8a72f	-	PASS	PASS	keep	Merge GDN sync 1+2 (4→3 syncs)
 013	2026-03-23T08:50:00	9b4e642	-	PASS	PASS	keep	Merge GDN sync 3+4 (3→2 syncs) — 29.66 tok/s (+12%)
+014	2026-03-23T09:20:00	e7421cb	-	PASS	PASS	revert	full_attn sync removal causes regression (>25 cmds)
+015	2026-03-23T09:25:00	44657f1	-	PASS	PASS	revert	SDPA threadgroup exceeded with KV cache — keep manual attn
+016	2026-03-23T09:30:00	c62be95	-	PASS	PASS	keep	Add sync to common Transformer block (Metal safety for other models)
+017	2026-03-23T09:40:00	d286e09	53591420928	PASS	PASS	keep	Add SDPA fallback in common attention (prevent threadgroup panic)
 ---	Metal: 29.7 tok/s vs CPU: 23.8 tok/s (+25%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
