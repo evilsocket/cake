@@ -158,11 +158,19 @@ pub enum Message {
 impl Message {
     /// Create a Message::SingleOp message.
     pub fn single_op(layer_name: &str, x: &Tensor, index_pos: usize, block_idx: usize) -> Self {
-        let layer_name = layer_name.to_owned();
-        let x = RawTensor::from_tensor(x);
+        Self::SingleOp {
+            layer_name: layer_name.to_owned(),
+            x: RawTensor::from_tensor(x),
+            index_pos,
+            block_idx,
+        }
+    }
+
+    /// Create a Message::SingleOp message from an already-owned layer name.
+    pub fn single_op_owned(layer_name: String, x: &Tensor, index_pos: usize, block_idx: usize) -> Self {
         Self::SingleOp {
             layer_name,
-            x,
+            x: RawTensor::from_tensor(x),
             index_pos,
             block_idx,
         }
