@@ -52,3 +52,76 @@ kernel void silu_mul_f16(
     float g = float(gate[idx]);
     output[idx] = half((g / (1.0f + exp(-g))) * float(up[idx]));
 }
+
+// ─── add3: a + b + c ────────────────────────────────────────────────
+kernel void add3_f32(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device const float* c [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    output[idx] = a[idx] + b[idx] + c[idx];
+}
+
+kernel void add3_f16(
+    device const half* a [[buffer(0)]],
+    device const half* b [[buffer(1)]],
+    device const half* c [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    output[idx] = a[idx] + b[idx] + c[idx];
+}
+
+// ─── exp_mul: x * exp(y) ────────────────────────────────────────────
+kernel void exp_mul_f32(
+    device const float* x [[buffer(0)]],
+    device const float* y [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    output[idx] = x[idx] * exp(y[idx]);
+}
+
+kernel void exp_mul_f16(
+    device const half* x [[buffer(0)]],
+    device const half* y [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    output[idx] = half(float(x[idx]) * exp(float(y[idx])));
+}
+
+// ─── sub_mul: (a - b) * c ───────────────────────────────────────────
+kernel void sub_mul_f32(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device const float* c [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    output[idx] = (a[idx] - b[idx]) * c[idx];
+}
+
+kernel void sub_mul_f16(
+    device const half* a [[buffer(0)]],
+    device const half* b [[buffer(1)]],
+    device const half* c [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    output[idx] = half((float(a[idx]) - float(b[idx])) * float(c[idx]));
+}
