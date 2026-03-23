@@ -566,14 +566,10 @@ impl VulkanBackend {
                 return Ok(buf.clone());
             }
         }
-        // Check view cache (handles weight.t() which creates new TensorIds but same storage)
-        let vk = Self::view_key(tensor);
-        if let Some(ref key) = vk {
-            let cache = self.weight_cache.lock().unwrap();
-            if let Some(buf) = cache.views.get(key) {
-                return Ok(buf.clone());
-            }
-        }
+        // View cache disabled — causes subtle precision issues during prefill.
+        // The F32 contiguous result of a non-contiguous F16 view can differ
+        // between calls due to dtype conversion ordering.
+        let vk: Option<(usize, usize, usize, u64)> = None;
         // Upload: convert to f32 contiguous, copy to GPU
         let tensor = if tensor.dtype() == DType::F32 { tensor.clone() } else { tensor.to_dtype(DType::F32)? };
         let tensor = if tensor.is_contiguous() { tensor } else { tensor.contiguous()? };
