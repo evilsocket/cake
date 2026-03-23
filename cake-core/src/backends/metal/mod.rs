@@ -86,6 +86,7 @@ static PIPELINE_CACHE: std::sync::LazyLock<PipelineCache> = std::sync::LazyLock:
 
 // ─── Helper: dispatch an elementwise 2-input kernel ─────────────────
 
+#[inline]
 fn dispatch_binary(
     s1: &candle_core::MetalStorage, l1: &Layout,
     s2: &candle_core::MetalStorage, l2: &Layout,
@@ -119,6 +120,7 @@ fn dispatch_binary(
 struct TernaryKernel { f32_kernel: &'static str, f16_kernel: &'static str, label: &'static str }
 
 #[allow(clippy::too_many_arguments)]
+#[inline]
 fn dispatch_ternary(
     s1: &candle_core::MetalStorage, l1: &Layout,
     s2: &candle_core::MetalStorage, l2: &Layout,
