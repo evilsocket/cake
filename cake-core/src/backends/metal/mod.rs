@@ -594,6 +594,11 @@ pub struct MetalBackend {
 
 impl MetalBackend {
     pub fn new(device: Device) -> Self {
+        // Pre-warm the pipeline cache: compile MSL library + all pipelines on construction
+        // so that the first kernel dispatch doesn't pay compilation overhead (~170ms).
+        if let Device::Metal(ref metal_dev) = device {
+            let _ = PIPELINE_CACHE.get_or_create(metal_dev, ALL_KERNELS[0]);
+        }
         Self { device }
     }
 }
