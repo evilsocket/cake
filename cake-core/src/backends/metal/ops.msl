@@ -69,7 +69,7 @@ kernel void stable_softplus_f32(
     if (idx >= count) return;
     float x = input[idx];
     // Branchless: select avoids warp divergence
-    float sp = select(log(1.0f + exp(x)), x, x > 20.0f);
+    float sp = select(log(1.0f + fast::exp(x)), x, x > 20.0f);
     output[idx] = max(x, sp);
 }
 
@@ -81,7 +81,7 @@ kernel void stable_softplus_f16(
 ) {
     if (idx >= count) return;
     float x = float(input[idx]);
-    float sp = select(log(1.0f + exp(x)), x, x > 20.0f);
+    float sp = select(log(1.0f + fast::exp(x)), x, x > 20.0f);
     output[idx] = half(max(x, sp));
 }
 
@@ -95,8 +95,8 @@ kernel void silu_mul_f32(
 ) {
     if (idx >= count) return;
     float g = gate[idx];
-    // x * sigmoid(x) * up = x * (1 / (1 + exp(-x))) * up
-    float sig = 1.0f / (1.0f + exp(-g));
+    // x * sigmoid(x) * up — fast::exp safe for activation functions
+    float sig = 1.0f / (1.0f + fast::exp(-g));
     output[idx] = g * sig * up[idx];
 }
 
@@ -109,7 +109,7 @@ kernel void silu_mul_f16(
 ) {
     if (idx >= count) return;
     float g = float(gate[idx]);
-    float sig = 1.0f / (1.0f + exp(-g));
+    float sig = 1.0f / (1.0f + fast::exp(-g));
     output[idx] = half(g * sig * float(up[idx]));
 }
 
@@ -232,7 +232,7 @@ kernel void depthwise_conv1d_silu_f32(
     float dot = 0.0f;
     for (uint k = 0; k < kernel_size; k++)
         dot = fma(window[idx * kernel_size + k], weight[c * kernel_size + k], dot);
-    float sig = 1.0f / (1.0f + exp(-dot));
+    float sig = 1.0f / (1.0f + fast::exp(-dot));
     output[idx] = dot * sig;
 }
 
@@ -250,7 +250,7 @@ kernel void depthwise_conv1d_silu_f16(
     float dot = 0.0f;
     for (uint k = 0; k < kernel_size; k++)
         dot = fma(float(window[idx * kernel_size + k]), float(weight[c * kernel_size + k]), dot);
-    float sig = 1.0f / (1.0f + exp(-dot));
+    float sig = 1.0f / (1.0f + fast::exp(-dot));
     output[idx] = half(dot * sig);
 }
 
