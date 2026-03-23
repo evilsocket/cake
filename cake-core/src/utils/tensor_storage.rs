@@ -122,8 +122,8 @@ impl SafetensorsStorage {
                 .push(tensor_name.clone());
         }
 
-        let mut index = HashMap::new();
-        let mut files = HashMap::new();
+        let mut index = HashMap::with_capacity(weight_map.len());
+        let mut files = HashMap::with_capacity(shard_tensors.len());
 
         for shard_name in shard_tensors.keys() {
             let shard_path = parent.join(shard_name);
@@ -160,10 +160,10 @@ impl SafetensorsStorage {
         let f = File::open(path)?;
         let path_buf = path.to_path_buf();
 
-        let mut index = HashMap::new();
         let obj = header
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("header not object"))?;
+        let mut index = HashMap::with_capacity(obj.len());
 
         for (name, meta) in obj {
             if name == "__metadata__" {
