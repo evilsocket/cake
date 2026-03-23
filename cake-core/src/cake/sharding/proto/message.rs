@@ -243,8 +243,8 @@ impl Message {
         // Reserve 8 bytes for the header (magic + length), then serialize the
         // message directly into `buf` via speedy's stream writer.  This avoids
         // the intermediate `Vec<u8>` that `write_to_vec_with_ctx` would create.
-        buf.truncate(0); // preserve capacity across calls (clear() may deallocate)
-        buf.extend_from_slice(&[0u8; 8]); // placeholder for header
+        buf.truncate(0); // preserve capacity across calls
+        buf.resize(8, 0); // placeholder for header (no-op if capacity >= 8)
         self.write_to_stream_with_ctx(BigEndian::default(), &mut *buf)?;
 
         let payload_size = (buf.len() - 8) as u32;
