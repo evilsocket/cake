@@ -280,11 +280,20 @@ impl VulkanBackend {
     }
 
     /// Download `count` f32 values from a GPU buffer using a pooled staging buffer.
-    fn download(&self, buf: &wgpu::Buffer, count: usize) -> Vec<f32> {
+    /// If `encoder` is provided, appends the copy command to it (merging compute
+    /// dispatch + readback into a single queue submission).
+    fn download(
+        &self,
+        encoder: Option<wgpu::CommandEncoder>,
+        buf: &wgpu::Buffer,
+        count: usize,
+    ) -> Vec<f32> {
         let size = (count * 4) as u64;
         let staging = self.buffer_pool.lock().unwrap().acquire_staging(&self.gpu, size);
 
-        let mut enc = self.gpu.create_command_encoder(&Default::default());
+        let mut enc = encoder.unwrap_or_else(|| {
+            self.gpu.create_command_encoder(&Default::default())
+        });
         enc.copy_buffer_to_buffer(buf, 0, &staging, 0, size);
         self.queue.submit(Some(enc.finish()));
 
@@ -361,9 +370,11 @@ impl VulkanBackend {
             p.set_bind_group(0, &bg, &[]);
             p.dispatch_workgroups((n as u32).div_ceil(WG_ELEM), 1, 1);
         }
-        self.queue.submit(Some(enc.finish()));
-
-        let result = Self::from_f32_vec(self.download(&buf_out, n), shape.dims(), dtype);
+        let result = Self::from_f32_vec(
+            self.download(Some(enc), &buf_out, n),
+            shape.dims(),
+            dtype,
+        );
         self.release_output(buf_out);
         result
     }
@@ -422,9 +433,11 @@ impl VulkanBackend {
             p.set_bind_group(0, &bg, &[]);
             p.dispatch_workgroups((n as u32).div_ceil(WG_ELEM), 1, 1);
         }
-        self.queue.submit(Some(enc.finish()));
-
-        let result = Self::from_f32_vec(self.download(&buf_out, n), shape.dims(), dtype);
+        let result = Self::from_f32_vec(
+            self.download(Some(enc), &buf_out, n),
+            shape.dims(),
+            dtype,
+        );
         self.release_output(buf_out);
         result
     }
@@ -472,9 +485,11 @@ impl VulkanBackend {
             p.set_bind_group(0, &bg, &[]);
             p.dispatch_workgroups((n as u32).div_ceil(WG_ELEM), 1, 1);
         }
-        self.queue.submit(Some(enc.finish()));
-
-        let result = Self::from_f32_vec(self.download(&buf_out, n), shape.dims(), dtype);
+        let result = Self::from_f32_vec(
+            self.download(Some(enc), &buf_out, n),
+            shape.dims(),
+            dtype,
+        );
         self.release_output(buf_out);
         result
     }
@@ -513,9 +528,8 @@ impl VulkanBackend {
             p.set_bind_group(0, &bg, &[]);
             p.dispatch_workgroups((n as u32).div_ceil(4), 1, 1);
         }
-        self.queue.submit(Some(enc.finish()));
-
-        let result = self.download(&buf_y, n);
+        // Merge compute dispatch + copy into single submission
+        let result = self.download(Some(enc), &buf_y, n);
         self.release_output(buf_y);
         result
     }
@@ -553,9 +567,8 @@ impl VulkanBackend {
             p.set_bind_group(0, &bg, &[]);
             p.dispatch_workgroups(wg_m, wg_n, 1);
         }
-        self.queue.submit(Some(enc.finish()));
-
-        let result = self.download(&buf_c, m * n);
+        // Merge compute dispatch + copy into single submission
+        let result = self.download(Some(enc), &buf_c, m * n);
         self.release_output(buf_c);
         result
     }
