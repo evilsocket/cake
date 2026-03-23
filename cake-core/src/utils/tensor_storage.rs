@@ -47,6 +47,36 @@ pub trait TensorStorageProvider: Send + Sync {
     fn tensor_names(&self) -> Vec<String>;
 }
 
+/// Max tensor dimensions supported (covers all practical shapes).
+const MAX_DIMS: usize = 4;
+
+/// Inline shape storage — avoids Vec heap allocation for shapes up to 4 dims.
+#[derive(Debug, Clone, Copy)]
+struct InlineShape {
+    dims: [usize; MAX_DIMS],
+    ndim: u8,
+}
+
+impl InlineShape {
+    fn from_vec(v: &[usize]) -> Self {
+        let mut dims = [0usize; MAX_DIMS];
+        let ndim = v.len().min(MAX_DIMS);
+        dims[..ndim].copy_from_slice(&v[..ndim]);
+        Self {
+            dims,
+            ndim: ndim as u8,
+        }
+    }
+
+    fn as_slice(&self) -> &[usize] {
+        &self.dims[..self.ndim as usize]
+    }
+
+    fn to_vec(self) -> Vec<usize> {
+        self.as_slice().to_vec()
+    }
+}
+
 /// Metadata for a single tensor within a safetensors shard file.
 #[derive(Debug, Clone)]
 struct TensorMeta {
@@ -58,8 +88,8 @@ struct TensorMeta {
     byte_size: u64,
     /// Data type.
     dtype: DType,
-    /// Shape.
-    shape: Vec<usize>,
+    /// Shape (inline, no heap allocation for shapes <= 4 dims).
+    shape: InlineShape,
 }
 
 /// Reads individual tensors from safetensors files using `pread()`.
@@ -238,7 +268,7 @@ impl SafetensorsStorage {
             }
         };
 
-        let shape: Vec<usize> = meta
+        let shape_vec: Vec<usize> = meta
             .get("shape")
             .and_then(|v| v.as_array())
             .map(|arr| {
@@ -253,7 +283,7 @@ impl SafetensorsStorage {
             abs_offset,
             byte_size,
             dtype,
-            shape,
+            shape: InlineShape::from_vec(&shape_vec),
         }))
     }
 }
@@ -290,7 +320,7 @@ impl TensorStorageProvider for SafetensorsStorage {
         Ok(TensorData {
             bytes: buf,
             dtype: meta.dtype,
-            shape: meta.shape.clone(),
+            shape: meta.shape.to_vec(),
         })
     }
 
@@ -352,7 +382,7 @@ impl TensorStorageProvider for SafetensorsStorage {
                 results.push(TensorData {
                     bytes,
                     dtype: meta.dtype,
-                    shape: meta.shape.clone(),
+                    shape: meta.shape.to_vec(),
                 });
                 offset += size;
             }
@@ -403,7 +433,7 @@ mod tests {
         assert_eq!(tm.abs_offset, 8 + 200);
         assert_eq!(tm.byte_size, 1048576);
         assert_eq!(tm.dtype, DType::F16);
-        assert_eq!(tm.shape, vec![1024, 512]);
+        assert_eq!(tm.shape.to_vec(), vec![1024, 512]);
     }
 
     #[test]
@@ -430,7 +460,7 @@ mod tests {
                         abs_offset: 108,
                         byte_size: 1024,
                         dtype: DType::F32,
-                        shape: vec![16, 16],
+                        shape: InlineShape::from_vec(&[16, 16]),
                     },
                 );
                 m
