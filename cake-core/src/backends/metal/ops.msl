@@ -511,6 +511,51 @@ kernel void fused_vector_attention_f16(
     output[bh * head_dim + d] = half(acc / sum_exp);
 }
 
+// ─── adaln_modulate: rms_norm(x)*weight*(scale+1) + shift ───────────
+kernel void adaln_modulate_f32(
+    device const float* x [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device const float* scale [[buffer(2)]],
+    device const float* shift [[buffer(3)]],
+    device float* output [[buffer(4)]],
+    constant uint& hidden [[buffer(5)]],
+    constant float& eps [[buffer(6)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = gid.y, col = gid.x;
+    if (col >= hidden) return;
+    uint base = row * hidden;
+    float val = x[base + col];
+    SIMD_REDUCE_SUM(val * val, hidden, lane, simd_id)
+    float rms = fast::rsqrt(_sr / float(hidden) + eps);
+    float normed = val * rms * weight[col];
+    output[base + col] = fma(normed, scale[base + col] + 1.0f, shift[base + col]);
+}
+
+kernel void adaln_modulate_f16(
+    device const half* x [[buffer(0)]],
+    device const half* weight [[buffer(1)]],
+    device const half* scale [[buffer(2)]],
+    device const half* shift [[buffer(3)]],
+    device half* output [[buffer(4)]],
+    constant uint& hidden [[buffer(5)]],
+    constant float& eps [[buffer(6)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = gid.y, col = gid.x;
+    if (col >= hidden) return;
+    uint base = row * hidden;
+    float val = float(x[base + col]);
+    SIMD_REDUCE_SUM(val * val, hidden, lane, simd_id)
+    float rms = fast::rsqrt(_sr / float(hidden) + eps);
+    float normed = val * rms * float(weight[col]);
+    output[base + col] = half(fma(normed, float(scale[base + col]) + 1.0f, float(shift[base + col])));
+}
+
 kernel void fused_vector_attention_f32(
     device const float* q [[buffer(0)]],
     device const float* k [[buffer(1)]],
