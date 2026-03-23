@@ -126,6 +126,11 @@ pub struct VulkanBackend {
     // Buffer management
     weight_cache: Mutex<WeightCache>,
     buffer_pool: Mutex<BufferPool>,
+    // Activation cache: recent dispatch outputs cached by TensorId.
+    // When the next dispatch consumes an output (e.g., silu_mul → matmul),
+    // it finds the GPU buffer here and skips re-uploading.
+    // Bounded FIFO (max 16 entries), evicts oldest on overflow.
+    activation_cache: Mutex<Vec<(TensorId, Arc<MappedBuffer>)>>,
     // Dispatch lock (serializes GPU submissions)
     dispatch_lock: Mutex<()>,
 }
@@ -359,6 +364,7 @@ impl VulkanBackend {
             params_buf,
             weight_cache: Mutex::new(WeightCache::new()),
             buffer_pool: Mutex::new(BufferPool::new()),
+            activation_cache: Mutex::new(Vec::with_capacity(16)),
             dispatch_lock: Mutex::new(()),
         };
 
@@ -493,8 +499,33 @@ impl VulkanBackend {
 
     // ── Weight cache ─────────────────────────────────────────────────
 
+    /// Cache a dispatch output buffer by the returned Tensor's TensorId.
+    /// If the next dispatch consumes this tensor, `get_or_upload` will find
+    /// the buffer here and skip the re-upload.
+    fn cache_activation(&self, tensor_id: TensorId, buf: MappedBuffer) {
+        let buf = Arc::new(buf);
+        let mut act_cache = self.activation_cache.lock().unwrap();
+        if act_cache.len() >= 16 {
+            // Evict oldest entry, release its buffer back to pool
+            let (_, old_buf) = act_cache.remove(0);
+            if let Ok(old) = Arc::try_unwrap(old_buf) {
+                self.release_output(old);
+            }
+        }
+        act_cache.push((tensor_id, buf));
+    }
+
     fn get_or_upload(&self, tensor: &Tensor) -> Result<Arc<MappedBuffer>> {
         let id = tensor.id();
+        // Check activation cache first (ephemeral outputs from recent dispatches)
+        {
+            let mut act_cache = self.activation_cache.lock().unwrap();
+            if let Some(pos) = act_cache.iter().position(|(tid, _)| *tid == id) {
+                let (_, buf) = act_cache.remove(pos);
+                return Ok(buf);
+            }
+        }
+        // Then check weight cache (persistent)
         {
             let cache = self.weight_cache.lock().unwrap();
             if let Some(buf) = cache.buffers.get(&id) {
@@ -716,9 +747,9 @@ impl VulkanBackend {
             (threads_needed.div_ceil(WG_ELEM), 1, 1),
         );
 
-        let tensor = Self::from_f32_vec(result, shape.dims(), dtype);
-        self.release_output(buf_out);
-        tensor
+        let tensor = Self::from_f32_vec(result, shape.dims(), dtype)?;
+        self.cache_activation(tensor.id(), buf_out);
+        Ok(tensor)
     }
 
     fn dispatch_ternary_vec4(
@@ -747,9 +778,9 @@ impl VulkanBackend {
             (threads_needed.div_ceil(WG_ELEM), 1, 1),
         );
 
-        let tensor = Self::from_f32_vec(result, shape.dims(), dtype);
-        self.release_output(buf_out);
-        tensor
+        let tensor = Self::from_f32_vec(result, shape.dims(), dtype)?;
+        self.cache_activation(tensor.id(), buf_out);
+        Ok(tensor)
     }
 
     fn dispatch_unary_vec4(&self, x: &Tensor, entry: &str) -> Result<Tensor> {
@@ -771,20 +802,21 @@ impl VulkanBackend {
             (threads_needed.div_ceil(WG_ELEM), 1, 1),
         );
 
-        let tensor = Self::from_f32_vec(result, shape.dims(), dtype);
-        self.release_output(buf_out);
-        tensor
+        let tensor = Self::from_f32_vec(result, shape.dims(), dtype)?;
+        self.cache_activation(tensor.id(), buf_out);
+        Ok(tensor)
     }
 
     // ── GPU matmul ───────────────────────────────────────────────────
 
+    /// Returns (result_data, output_buffer) so caller can cache the buffer.
     fn gpu_gemv(
         &self,
         buf_x: &MappedBuffer,
         buf_w: &MappedBuffer,
         k: usize,
         n: usize,
-    ) -> Vec<f32> {
+    ) -> (Vec<f32>, MappedBuffer) {
         let buf_y = self.alloc_output(n);
         let result = self.dispatch_compute(
             "gemv",
@@ -794,8 +826,7 @@ impl VulkanBackend {
             &[n as u32, k as u32, 0, 0],
             ((n as u32).div_ceil(4), 1, 1),
         );
-        self.release_output(buf_y);
-        result
+        (result, buf_y)
     }
 
     fn gpu_gemm(
@@ -805,7 +836,7 @@ impl VulkanBackend {
         m: usize,
         k: usize,
         n: usize,
-    ) -> Vec<f32> {
+    ) -> (Vec<f32>, MappedBuffer) {
         let buf_c = self.alloc_output(m * n);
         let wg_m = (m as u32).div_ceil(32);
         let wg_n = (n as u32).div_ceil(64);
@@ -817,8 +848,7 @@ impl VulkanBackend {
             &[m as u32, n as u32, k as u32, 0],
             (wg_m, wg_n, 1),
         );
-        self.release_output(buf_c);
-        result
+        (result, buf_c)
     }
 
     fn gpu_matmul(
@@ -828,7 +858,7 @@ impl VulkanBackend {
         m: usize,
         k: usize,
         n: usize,
-    ) -> Vec<f32> {
+    ) -> (Vec<f32>, MappedBuffer) {
         if m == 1 {
             self.gpu_gemv(buf_a, buf_b, k, n)
         } else {
@@ -858,11 +888,13 @@ impl VulkanBackend {
             // get_or_upload handles dtype conversion + contiguity
             let buf_a = self.get_or_upload(a)?;
             let buf_b = self.get_or_upload(b)?;
-            let out = self.gpu_matmul(&buf_a, &buf_b, m, k, n);
+            let (out, buf_out) = self.gpu_matmul(&buf_a, &buf_b, m, k, n);
             let mut out_shape: Vec<usize> = a_dims[..a_rank - 2].to_vec();
             out_shape.push(m);
             out_shape.push(n);
-            return Tensor::from_vec(out, out_shape.as_slice(), &Device::Cpu);
+            let tensor = Tensor::from_vec(out, out_shape.as_slice(), &Device::Cpu)?;
+            self.cache_activation(tensor.id(), buf_out);
+            return Ok(tensor);
         }
 
         // Batch path: need f32 contiguous data for slicing
@@ -877,7 +909,9 @@ impl VulkanBackend {
             let b_off = if b_batch == 1 { 0 } else { i * kn };
             let buf_a = self.upload_uncached(&a_data[a_off..a_off + mk]);
             let buf_b = self.upload_uncached(&b_data[b_off..b_off + kn]);
-            out.extend_from_slice(&self.gpu_matmul(&buf_a, &buf_b, m, k, n));
+            let (data, buf_out) = self.gpu_matmul(&buf_a, &buf_b, m, k, n);
+            out.extend_from_slice(&data);
+            self.release_output(buf_out);
         }
 
         let mut out_shape: Vec<usize> = a_dims[..a_rank - 2].to_vec();
