@@ -58,6 +58,7 @@ impl std::fmt::Debug for RawTensor {
 
 /// Extract raw bytes from a CpuStorage slice range as a newly-allocated Vec<u8>.
 /// This avoids the flatten_all + to_vec1 + reinterpret chain in candle's data() path.
+#[inline]
 fn cpu_storage_bytes_range(storage: &candle_core::CpuStorage, start: usize, end: usize) -> Vec<u8> {
     if start == end {
         return Vec::new();
@@ -91,9 +92,13 @@ fn cpu_storage_bytes_range(storage: &candle_core::CpuStorage, start: usize, end:
 
 impl RawTensor {
     /// Convert x into a RawTensor.
+    #[inline]
     pub fn from_tensor(x: &Tensor) -> Self {
         let dtype = dtype_to_u8(x.dtype());
-        let shape = x.shape().dims().to_vec();
+        let dims = x.shape().dims();
+        // Pre-size shape Vec exactly — avoids over-allocation for typical 2D shapes.
+        let mut shape = Vec::with_capacity(dims.len());
+        shape.extend_from_slice(dims);
         // Fast path: CPU contiguous tensors — access storage directly.
         let data = if x.device().is_cpu() {
             if let Some((start, end)) = x.layout().contiguous_offsets() {
