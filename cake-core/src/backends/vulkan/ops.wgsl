@@ -217,40 +217,20 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
 
         workgroupBarrier();
 
-        // Each thread accumulates its 2×2 block (unrolled by 4)
+        // Each thread accumulates its 2×2 block
         let r0 = lr * 2u;
         let r1 = r0 + 1u;
         let c0 = lc * 2u;
         let c1 = c0 + 1u;
-        for (var k: u32 = 0; k < TILE; k += 4u) {
-            // k+0
-            var a0k = tile_a[r0 * TILE + k];
-            var a1k = tile_a[r1 * TILE + k];
-            var bk0 = tile_b[k * TILE + c0];
-            var bk1 = tile_b[k * TILE + c1];
-            acc00 += a0k * bk0; acc01 += a0k * bk1;
-            acc10 += a1k * bk0; acc11 += a1k * bk1;
-            // k+1
-            a0k = tile_a[r0 * TILE + k + 1u];
-            a1k = tile_a[r1 * TILE + k + 1u];
-            bk0 = tile_b[(k + 1u) * TILE + c0];
-            bk1 = tile_b[(k + 1u) * TILE + c1];
-            acc00 += a0k * bk0; acc01 += a0k * bk1;
-            acc10 += a1k * bk0; acc11 += a1k * bk1;
-            // k+2
-            a0k = tile_a[r0 * TILE + k + 2u];
-            a1k = tile_a[r1 * TILE + k + 2u];
-            bk0 = tile_b[(k + 2u) * TILE + c0];
-            bk1 = tile_b[(k + 2u) * TILE + c1];
-            acc00 += a0k * bk0; acc01 += a0k * bk1;
-            acc10 += a1k * bk0; acc11 += a1k * bk1;
-            // k+3
-            a0k = tile_a[r0 * TILE + k + 3u];
-            a1k = tile_a[r1 * TILE + k + 3u];
-            bk0 = tile_b[(k + 3u) * TILE + c0];
-            bk1 = tile_b[(k + 3u) * TILE + c1];
-            acc00 += a0k * bk0; acc01 += a0k * bk1;
-            acc10 += a1k * bk0; acc11 += a1k * bk1;
+        for (var k: u32 = 0; k < TILE; k++) {
+            let a0k = tile_a[r0 * TILE + k];
+            let a1k = tile_a[r1 * TILE + k];
+            let bk0 = tile_b[k * TILE + c0];
+            let bk1 = tile_b[k * TILE + c1];
+            acc00 += a0k * bk0;
+            acc01 += a0k * bk1;
+            acc10 += a1k * bk0;
+            acc11 += a1k * bk1;
         }
         workgroupBarrier();
     }
