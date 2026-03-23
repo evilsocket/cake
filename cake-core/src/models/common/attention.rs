@@ -292,25 +292,30 @@ impl CausalSelfAttention {
                 ).map_err(|e| anyhow!("flash_attn: {e}"))?;
             }
 
-            // Compute attention in F32 for numerical stability (Metal, CPU).
-            let q = q.to_dtype(DType::F32)?;
-            let k = k.to_dtype(DType::F32)?;
-            let v = v.to_dtype(DType::F32)?;
-
             // The actual kv seq_len (may differ from query seq_len with sliding window)
             let kv_seq_len = k.dims()[2];
 
-            // Metal SDPA with fallback to manual attention if threadgroup memory exceeded
+            // Metal: mixed-precision attention (F16 matmuls + F32 softmax)
+            // Try SDPA first, fall back to manual if threadgroup memory exceeded
             #[cfg(feature = "metal")]
             if matches!(q.device(), candle_core::Device::Metal(_)) {
                 let scale = 1.0 / (self.head_dim as f32).sqrt();
-                match candle_nn::ops::sdpa(&q, &k, &v, None, seq_len > 1, scale, 1.0) {
+                // Try F32 SDPA (fastest when it works)
+                let q32 = q.to_dtype(DType::F32)?;
+                let k32 = k.to_dtype(DType::F32)?;
+                let v32 = v.to_dtype(DType::F32)?;
+                match candle_nn::ops::sdpa(&q32, &k32, &v32, None, seq_len > 1, scale, 1.0) {
                     Ok(result) => break 'attn result,
                     Err(_) => {
-                        // Fall through to manual attention below
+                        // Fallback: mixed-precision manual attention
                     }
                 }
             }
+
+            // Compute attention in F32 for numerical stability (CPU, Metal fallback)
+            let q = q.to_dtype(DType::F32)?;
+            let k = k.to_dtype(DType::F32)?;
+            let v = v.to_dtype(DType::F32)?;
 
             // Manual attention with GQA head expansion (CPU fallback)
             let k = self
