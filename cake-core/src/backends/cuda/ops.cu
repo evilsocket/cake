@@ -303,13 +303,12 @@ extern "C" __global__ void FN_NAME( \
     const int in_off = row * n_cols; \
     const int res_off = row * out_stride; \
     const int norm_off = res_off + n_cols; \
-    /* Compute sum and sum of squares in one pass */ \
+    /* Compute sum of squares in first pass (don't write yet) */ \
     float sum2 = 0.0f; \
     for (int col = threadIdx.x; col < n_cols; col += block_size) { \
         float av = static_cast<float>(a[in_off + col]); \
         float bv = static_cast<float>(b[in_off + col]); \
         float s = av + bv; \
-        out[res_off + col] = static_cast<TYPENAME>(s); \
         sum2 += s * s; \
     } \
     /* Warp reduction */ \
@@ -327,9 +326,10 @@ extern "C" __global__ void FN_NAME( \
         sum2 += __shfl_xor_sync(0xffffffff, sum2, mask); \
     } \
     float inv_rms = rsqrtf(sum2 / (float)n_cols + eps); \
-    /* Write normed output */ \
+    /* Re-read a+b (L2-cached) and write both residual + normed output */ \
     for (int col = threadIdx.x; col < n_cols; col += block_size) { \
-        float s = static_cast<float>(out[res_off + col]); \
+        float s = static_cast<float>(a[in_off + col]) + static_cast<float>(b[in_off + col]); \
+        out[res_off + col] = static_cast<TYPENAME>(s); \
         float wv = static_cast<float>(weight[col]); \
         out[norm_off + col] = static_cast<TYPENAME>(s * inv_rms * wv); \
     } \
