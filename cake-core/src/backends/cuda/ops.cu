@@ -125,10 +125,18 @@ extern "C" __global__ void f8e4m3_to_bf16(
 // ─── silu_mul: silu(x) * y = x * sigmoid(x) * y ────────────────────
 // Fuses 2 kernels (silu + mul) into 1.
 // Used in every MLP (gate activation * up projection).
+// F32 path uses fast reciprocal to avoid slow fdiv.
 template<typename T>
 __device__ __forceinline__ T silu_mul_fwd(T x, T y) {
     T one = static_cast<T>(1);
     return x / (one + expg(-x)) * y;
+}
+
+// Fast f32 specialization: use __frcp_rn for reciprocal instead of division
+template<>
+__device__ __forceinline__ float silu_mul_fwd<float>(float x, float y) {
+    float sig = __frcp_rn(1.0f + expf(-x));
+    return x * sig * y;
 }
 
 #define SILU_MUL_OP(TYPENAME, FN_NAME) \
@@ -165,13 +173,21 @@ __device__ __forceinline__ T stable_softplus_fwd(T x) {
     return (x > sp) ? x : sp;
 }
 
+// Float specialization: use log1pf for better speed and numerical stability
+template<>
+__device__ __forceinline__ float stable_softplus_fwd<float>(float x) {
+    float clamped = fminf(x, 88.0f);
+    float sp = log1pf(expf(clamped));
+    return fmaxf(x, sp);
+}
+
 // Specialise for half types using float intermediates
 #if __CUDA_ARCH__ >= 530
 template<>
 __device__ __forceinline__ __half stable_softplus_fwd<__half>(__half x) {
     float fx = __half2float(x);
     float clamped = fminf(fx, 88.0f);
-    float sp = logf(expf(clamped) + 1.0f);
+    float sp = log1pf(expf(clamped));
     float result = fmaxf(fx, sp);
     return __float2half(result);
 }
@@ -181,7 +197,7 @@ template<>
 __device__ __forceinline__ __nv_bfloat16 stable_softplus_fwd<__nv_bfloat16>(__nv_bfloat16 x) {
     float fx = __bfloat162float(x);
     float clamped = fminf(fx, 88.0f);
-    float sp = logf(expf(clamped) + 1.0f);
+    float sp = log1pf(expf(clamped));
     float result = fmaxf(fx, sp);
     return __float2bfloat16(result);
 }
@@ -252,7 +268,7 @@ extern "C" __global__ void FN_NAME( \
         float xv = static_cast<float>(x[offset + col]); \
         float wv = static_cast<float>(weight[col]); \
         float zv = static_cast<float>(z[offset + col]); \
-        float silu_z = zv / (1.0f + expf(-zv)); \
+        float silu_z = zv * __frcp_rn(1.0f + expf(-zv)); \
         out[offset + col] = static_cast<TYPENAME>(xv * inv_rms * wv * silu_z); \
     } \
 }
@@ -424,7 +440,7 @@ extern "C" __global__ void FN_NAME( \
                  * static_cast<float>(weight[wt_off + k]); \
         } \
         /* silu(acc) = acc * sigmoid(acc) */ \
-        float sig = 1.0f / (1.0f + expf(-acc)); \
+        float sig = __frcp_rn(1.0f + expf(-acc)); \
         out[i] = static_cast<TYPENAME>(acc * sig); \
     } \
 }
