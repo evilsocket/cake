@@ -80,9 +80,10 @@ kernel void stable_softplus_f16(
     uint idx [[thread_position_in_grid]]
 ) {
     if (idx >= count) return;
-    float x = float(input[idx]);
-    float sp = select(log(1.0f + fast::exp(x)), x, x > 20.0f);
-    output[idx] = half(max(x, sp));
+    half x = input[idx];
+    float xf = float(x);
+    half sp = half(select(log(1.0f + fast::exp(xf)), xf, xf > 20.0f));
+    output[idx] = max(x, sp);
 }
 
 // ─── silu_mul ───────────────────────────────────────────────────────
@@ -108,9 +109,10 @@ kernel void silu_mul_f16(
     uint idx [[thread_position_in_grid]]
 ) {
     if (idx >= count) return;
-    float g = float(gate[idx]);
-    float sig = 1.0f / (1.0f + fast::exp(-g));
-    output[idx] = half(g * sig * float(up[idx]));
+    half g = gate[idx];
+    // sigmoid in float (exp precision), final multiply in half (2x ALU)
+    half sig = half(1.0f / (1.0f + fast::exp(-float(g))));
+    output[idx] = g * sig * up[idx];
 }
 
 // ─── add3 ───────────────────────────────────────────────────────────
@@ -251,8 +253,10 @@ kernel void depthwise_conv1d_silu_f16(
     float dot = 0.0f;
     for (uint k = 0; k < kernel_size; k++)
         dot = fma(float(window[idx * kernel_size + k]), float(weight[c * kernel_size + k]), dot);
-    float sig = 1.0f / (1.0f + fast::exp(-dot));
-    output[idx] = half(dot * sig);
+    // silu: dot * sigmoid(dot) — sigmoid in float, multiply result in half
+    half hd = half(dot);
+    half sig = half(1.0f / (1.0f + fast::exp(-dot)));
+    output[idx] = hd * sig;
 }
 
 // ─── depthwise_conv1d_bias ──────────────────────────────────────────
