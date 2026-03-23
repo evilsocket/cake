@@ -619,13 +619,34 @@ async fn push_model_data(
                 &read_buf[..to_read]
             };
 
-            // Compress with zstd level 1 (only if it saves space)
-            let compressed_data = zstd::encode_all(raw_slice, 1)
-                .unwrap_or_else(|_| raw_slice.to_vec());
-            let (data, is_compressed) = if compressed_data.len() < raw_slice.len() {
-                (compressed_data, true)
+            // Compress with zstd level 1 (only if it saves space).
+            // For large chunks, probe a small sample first to avoid wasting CPU
+            // on incompressible model weight data (F16/BF16 pseudo-random).
+            let (data, is_compressed) = if raw_slice.len() > 4096 {
+                let sample = &raw_slice[..4096.min(raw_slice.len())];
+                let sample_compressed = zstd::encode_all(sample, 1)
+                    .unwrap_or_else(|_| sample.to_vec());
+                if sample_compressed.len() < sample.len() {
+                    // Sample compresses — try the full chunk
+                    let compressed_data = zstd::encode_all(raw_slice, 1)
+                        .unwrap_or_else(|_| raw_slice.to_vec());
+                    if compressed_data.len() < raw_slice.len() {
+                        (compressed_data, true)
+                    } else {
+                        (raw_slice.to_vec(), false)
+                    }
+                } else {
+                    // Sample doesn't compress — skip full compression
+                    (raw_slice.to_vec(), false)
+                }
             } else {
-                (raw_slice.to_vec(), false)
+                let compressed_data = zstd::encode_all(raw_slice, 1)
+                    .unwrap_or_else(|_| raw_slice.to_vec());
+                if compressed_data.len() < raw_slice.len() {
+                    (compressed_data, true)
+                } else {
+                    (raw_slice.to_vec(), false)
+                }
             };
 
             // CRC32 checksum of wire data (after compression)
