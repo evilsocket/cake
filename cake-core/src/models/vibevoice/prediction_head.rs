@@ -29,11 +29,12 @@ impl TimestepEmbedder {
         // Sinusoidal embedding: t → (batch, 256)
         let half_dim = 128;
         let emb = {
-            let freq = Tensor::arange(0u32, half_dim as u32, t.device())?
-                .to_dtype(DType::F32)?;
-            let freq = (freq * (-f64::ln(10000.0) / half_dim as f64))?.exp()?;
+            // Compute frequency vector on CPU — avoids arange + to_dtype + mul + exp tensor ops
+            let decay = -f64::ln(10000.0) / half_dim as f64;
+            let freq_data: Vec<f32> = (0..half_dim).map(|j| (j as f64 * decay).exp() as f32).collect();
+            let freq = Tensor::new(freq_data.as_slice(), t.device())?.unsqueeze(0)?;
             let t_f32 = t.to_dtype(DType::F32)?;
-            let args = t_f32.unsqueeze(1)?.broadcast_mul(&freq.unsqueeze(0)?)?;
+            let args = t_f32.unsqueeze(1)?.broadcast_mul(&freq)?;
             Tensor::cat(&[args.cos()?, args.sin()?], D::Minus1)?.to_dtype(t.dtype())?
         };
         // MLP: 256 → hidden → hidden with SiLU
