@@ -385,7 +385,7 @@ impl Message {
         }
 
         // Fill in the header in-place as a single u64 write.
-        let header = ((super::PROTO_MAGIC as u64) << 32) | (payload_size as u64);
+        let header = super::PROTO_MAGIC_U64_HIGH | (payload_size as u64);
         buf[0..8].copy_from_slice(&header.to_be_bytes());
 
         writer.write_all(buf).await?;
