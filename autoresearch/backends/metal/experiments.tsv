@@ -28,4 +28,8 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 026	2026-03-23T11:10:00	7a75324	-	PASS	PASS	revert	F16 SDPA garbage even for gen — confirmed always broken
 027	2026-03-23T11:30:00	4dc2dfb	-	PASS	PASS	keep	Fused vector attention MSL kernel (online softmax, ready for wiring)
 028	2026-03-23T11:40:00	2cf1344	-	PASS	PASS	revert	backend.attention() triggers SDPA panic — keep inline path
+029	2026-03-23T21:50:00	40190f6	60624675072	PASS	PASS	keep	Use fast::exp for silu gate in rms_norm_gated (+ clippy fix)
+030	2026-03-23T22:00:00	025bd9b	52284075776	PASS	PASS	keep	Wire fused vector attention kernel for gen (seq_len=1, F16)
+031	2026-03-23T22:10:00	3bdd7ab	55306610176	PASS	PASS	keep	fast::exp + fma in fused vector attention online softmax
+032	2026-03-23T22:20:00	dd4f897	61687027200	PASS	PASS	keep	F32 fused vector attention + sdpa() override (gen seq_len=1: 35→21µs)
 ---	Metal: 36.4 tok/s avg vs CPU: 22.9 tok/s (+59%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
