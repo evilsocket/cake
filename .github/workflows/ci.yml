@@ -225,6 +225,13 @@ jobs:
           linux-local-args: '["--toolkit"]'
           log-file-suffix: '${{ matrix.name }}.txt'
 
+      - name: Create CUDA runtime stub
+        if: matrix.cuda != ''
+        run: |
+          STUBS_DIR="${CUDA_PATH}/lib64/stubs"
+          sudo ln -s "${STUBS_DIR}/libcuda.so" "${STUBS_DIR}/libcuda.so.1"
+          echo "LD_LIBRARY_PATH=${STUBS_DIR}:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
       - name: Cache cargo registry & build
         uses: actions/cache@v4
         with:
