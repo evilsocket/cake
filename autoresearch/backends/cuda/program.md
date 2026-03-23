@@ -11,9 +11,8 @@ NVIDIA hardware. Lower is better.
 
 ## Setup
 
-1. **Agree on a run tag**: e.g. `mar23`. Branch: `autoresearch/cuda/<tag>`.
-2. **Create the branch**: `git checkout -b autoresearch/cuda/<tag>`
-3. **Read the in-scope files**:
+1. **Create the branch**: `git checkout -b autoresearch/backends/cuda`
+2. **Read the in-scope files**:
    - `cake-core/src/backends/cuda/ops.cu` — Raw CUDA PTX kernels. **Primary target.**
      Contains all fused operation kernels: silu_mul, stable_softplus, rms_norm_gated,
      add_rms_norm, rms_norm_channel, add3, add_scaled, depthwise_conv1d_silu,
@@ -25,8 +24,8 @@ NVIDIA hardware. Lower is better.
    - `cake-core/src/backends/cuda/compat/` — CUDA version compatibility layer.
    - `cake-core/src/backends/mod.rs` — ComputeBackend trait definition.
    - `cake-core/benches/bench_utils.rs` — Backend operation benchmarks (fused_*_gpu variants).
-4. **Run prepare.sh**: `bash autoresearch/backends/cuda/prepare.sh`
-5. **Confirm baseline** and start experimenting.
+3. **Run prepare.sh**: `bash autoresearch/backends/cuda/prepare.sh`
+4. **Confirm baseline** and start experimenting.
 
 **IMPORTANT**: This task requires an NVIDIA GPU with CUDA support. Build with `--features cuda`.
 

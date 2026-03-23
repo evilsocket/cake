@@ -12,9 +12,8 @@ with small dimensions (hidden=64) for fast iteration. Lower is better.
 
 To set up a new experiment run, work with the user to:
 
-1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar23`). The branch `autoresearch/<tag>` must not already exist.
-2. **Create the branch**: `git checkout -b autoresearch/text-inference/<tag>` from the current branch.
-3. **Read the in-scope files** for full context:
+1. **Create the branch**: `git checkout -b autoresearch/models/text-inference`
+2. **Read the in-scope files** for full context:
    - `cake-core/src/models/common/attention.rs` — CausalSelfAttention: Q/K/V projection, rotary embeddings, scaled dot-product attention, output projection.
    - `cake-core/src/models/common/mlp.rs` — MLP: gate/up projection, SiLU activation, down projection.
    - `cake-core/src/models/common/transformer.rs` — TransformerBlock: attention + MLP + residual + RmsNorm composition.
@@ -27,9 +26,9 @@ To set up a new experiment run, work with the user to:
    - `cake-core/benches/bench_blocks.rs` — Transformer block benchmarks.
    - `cake-core/benches/bench_cache.rs` — Cache benchmarks.
    - `cake-core/benches/bench_helpers.rs` — Shared benchmark helpers (test_config, make_tensor, etc.).
-4. **Run prepare.sh**: `bash autoresearch/models/text-inference/prepare.sh`
-5. **Confirm baseline**: Check that `baseline.txt` and `experiments.tsv` were created.
-6. **Start experimenting**.
+3. **Run prepare.sh**: `bash autoresearch/models/text-inference/prepare.sh`
+4. **Confirm baseline**: Check that `baseline.txt` and `experiments.tsv` were created.
+5. **Start experimenting**.
 
 ## Files You May Modify
 

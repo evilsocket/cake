@@ -13,9 +13,8 @@ with reduced dimensions for fast iteration. Lower is better.
 
 To set up a new experiment run, work with the user to:
 
-1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar23`). The branch `autoresearch/tts/<tag>` must not already exist.
-2. **Create the branch**: `git checkout -b autoresearch/tts/<tag>` from the current branch.
-3. **Read the in-scope files** for full context:
+1. **Create the branch**: `git checkout -b autoresearch/models/tts`
+2. **Read the in-scope files** for full context:
 
    ### VibeVoice (primary target — diffusion TTS)
    - `cake-core/src/models/vibevoice/prediction_head.rs` — DiT-style diffusion head: 4 layers
@@ -63,8 +62,8 @@ To set up a new experiment run, work with the user to:
    - `cake-core/benches/bench_wav.rs` — WAV I/O benchmarks.
    - `cake-core/benches/bench_helpers.rs` — Shared helpers.
 
-4. **Run prepare.sh**: `bash autoresearch/models/tts/prepare.sh`
-5. **Confirm baseline** and start experimenting.
+3. **Run prepare.sh**: `bash autoresearch/models/tts/prepare.sh`
+4. **Confirm baseline** and start experimenting.
 
 ## Features
 

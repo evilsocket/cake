@@ -10,9 +10,8 @@ single most expensive operation in every transformer forward pass. Lower is bett
 
 ## Setup
 
-1. **Agree on a run tag**: e.g. `mar23`. Branch: `autoresearch/attention/<tag>`.
-2. **Create the branch**: `git checkout -b autoresearch/attention/<tag>`
-3. **Read the in-scope files**:
+1. **Create the branch**: `git checkout -b autoresearch/kernels/attention`
+2. **Read the in-scope files**:
    - `cake-core/src/models/common/attention.rs` — CausalSelfAttention: Q/K/V projection,
      rotary position embeddings (RoPE), optional QK normalization, grouped-query attention
      (GQA) head repeat, scaled dot-product attention dispatch, output projection.
@@ -27,8 +26,8 @@ single most expensive operation in every transformer forward pass. Lower is bett
    - `cake-core/benches/bench_attention.rs` — Attention benchmarks.
    - `cake-core/benches/bench_linear_attn.rs` — GatedDeltaNet linear attention benchmarks.
    - `cake-core/benches/bench_cache.rs` — Cache benchmarks.
-4. **Run prepare.sh**: `bash autoresearch/kernels/attention/prepare.sh`
-5. **Confirm baseline** and start experimenting.
+3. **Run prepare.sh**: `bash autoresearch/kernels/attention/prepare.sh`
+4. **Confirm baseline** and start experimenting.
 
 ## Files You May Modify
 
