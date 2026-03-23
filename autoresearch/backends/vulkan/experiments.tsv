@@ -1,0 +1,79 @@
+id	timestamp	commit	score_ns	tests	clippy	status	notes
+000	2026-03-23T02:48:22	a32a407	146236960043	PASS	PASS	baseline	Unmodified baseline
+001	2026-03-23T02:59:57	ab6e749	128160769505	PASS	PASS	KEEP	GEMM 2x2 register tiling: 12.4% improvement
+002	2026-03-23T03:07:09	f312e33	128662523357	PASS	PASS	KEEP	GEMV shared-memory x tiling, ~flat score but fixes 3072x1024 regression
+003	2026-03-23T03:12:34	b01f61e	148642232202	PASS	PASS	DISCARD	GEMM 32x32 4x4 register: wall-clock regressed, GEMM fastest good but high variance
+004	2026-03-23T03:16:37	a484f2b	149107298520	PASS	PASS	DISCARD	GEMM k-loop unroll by 4: no improvement, GEMV regressed
+005	2026-03-23T03:21:22	f3c1e66	149485964570	PASS	PASS	DISCARD	GEMV 8x32 layout: 32-thread groups worse than 64 on RDNA2
+006	2026-03-23T03:26:14	a5d2eab	149679803363	PASS	PASS	DISCARD	Simplified GEMM loading: no improvement, GEMV regressed
+007	2026-03-23T03:33:28	236160d	149681027144	PASS	PASS	KEEP	Merged dispatch+readback: code improvement, wall-clock dominated by compilation
+008	2026-03-23T03:37:59	477f5bc	145315945231	PASS	PASS	KEEP	GEMM K-tile 32: M=32 25% faster (7.7ms), M=64 15% faster (13.6ms)
+009	2026-03-23T03:42:22	f7847ac	150208847687	PASS	PASS	DISCARD	GEMM K-tile 64: GEMM regressed badly, too much register pressure
+010	2026-03-23T03:46:45	f27a01a	147548947618	PASS	PASS	KEEP	Pre-warm pipelines: reduces first-call stalls, slight variance reduction
+011	2026-03-23T03:51:14	01c2d9e	147672978782	PASS	PASS	KEEP	GEMM bank conflict padding: M=32 5.6ms (beats CPU 6.9ms!), M=64 10.1ms (beats CPU 12.7ms!)
+012	2026-03-23T03:55:23	488cd11	148133419534	PASS	PASS	KEEP	tile_b padding: M=64 11.5ms (beats CPU 12.0ms), M=32 5.6ms consistent
+013	2026-03-23T04:00:22	7d6131f	150218410699	PASS	PASS	KEEP	Cache-first lookup: M=32 3.1ms (2.2x faster than CPU!), M=64 6.0ms (1.9x faster than CPU!)
+014	2026-03-23T04:04:28	858443a	150514777652	PASS	PASS	KEEP	M<=1 threshold: M=8 1.7ms (1.8x CPU), M=32 3.1ms (2.2x CPU), M=64 6.2ms (2.0x CPU)
+015	2026-03-23T04:10:37	7d0b188	132658168907	PASS	PASS	BASELINE	New baseline with GPU-exercising benchmarks. MLP=180ms needs work.
+016	2026-03-23T04:14:42	9058f67	151521571205	PASS	PASS	KEEP	Raised GPU threshold to 32768: add3 139us->5us, silu_mul 166us->52us at 16K
+017	2026-03-23T04:18:30	f97eb0d	132522718043	PASS	PASS	KEEP	Pre-transposed MLP weights: MLP 172ms->3.9ms (44x improvement!), matches CPU
+018	2026-03-23T04:22:54	abed66d	150438550380	PASS	PASS	KEEP	to_f32_vec skip redundant conversion: marginal, code quality improvement
+019	2026-03-23T04:28:19	f0f5072	150644574340	PASS	PASS	KEEP	write_buffer uploads: cleaner API, consistent perf
+020	2026-03-23T04:33:40	5032d29	150407840749	PASS	PASS	KEEP	GEMM inner unroll-by-2: flat perf, compiler handles it
+022	2026-03-23T04:44:41	94e6db0	150939108600	PASS	PASS	KEEP	vec4 silu_mul: consistent perf, better GPU utilization for large tensors
+023	2026-03-23T04:49:49	6555daf	131913179514	PASS	PASS	KEEP	vec4 add3: best wall-clock, MLP 3.8ms beats CPU 4.5ms
+024	2026-03-23T04:56:54	c9cdfa4	150331986180	PASS	PASS	KEEP	vec4 all elementwise: consistent, cleaner shader code
+025	2026-03-23T05:01:54	cd9843e	150408269422	PASS	PASS	KEEP	Submission-specific poll: cleaner sync, consistent perf
+026	2026-03-23T05:06:30	a5c1674	150999103404	PASS	PASS	KEEP	Atomic flag download: removes mpsc channel alloc, consistent perf
+027	2026-03-23T05:12:14	627cf4b	150854867286	PASS	PASS	KEEP	Pooled uniform buffer: eliminates per-dispatch alloc, GEMM M=64 6.1ms best
+028	2026-03-23T05:19:15	f05bb16	151334710290	PASS	PASS	KEEP	16x16 WG (256 threads): M=64 5.8ms (new best!), 3072x1024 M=32 2.2ms (-18%)
+029	2026-03-23T05:24:25	156b749	151865971291	PASS	PASS	KEEP	16x16 WG + 2x2 reg: M=32 2.3ms (-30%!), M=64 3.5ms (-40%!), new all-time bests
+030	2026-03-23T05:29:02	36f4f49	151875496610	PASS	PASS	KEEP	K-tile 64 with 256 threads: M=32 1.9ms (-16%!), 6144 M=32 2.9ms (-33%!)
+031	2026-03-23T06:43:35	96f7d66	270596618969	PASS	PASS	KEEP	ash backend: M=32 1.77ms (2.9x CPU), M=64 3.27ms (2.9x CPU), zero-copy foundation
+032	2026-03-23T08:06:54+01:00	b634a76	130687940839	PASS	PASS	KEEP	Pre-alloc descriptor sets: 52% wall-clock improvement (270s->131s), dispatch overhead 400ns, GEMM M=64 3.4ms (3.9x CPU)
+033	2026-03-23T08:13:03+01:00	45ad2bb	157429298751	PASS	PASS	DISCARD	Stack-alloc descriptor writes: wall-clock regressed (compilation noise 2m35s vs 2m09s), kernel times flat
+034	2026-03-23T08:18:19+01:00	72c8f38	163764994308	PASS	PASS	DISCARD	GEMM unroll-by-4: kernel times flat (M=64 3.1ms), wall-clock compilation noise
+035	2026-03-23T08:26:45+01:00	75485b4	0	PASS	PASS	DISCARD	GEMM 4x4 register tiling: GPU hang during inference, reverted
+036	2026-03-23T08:39:00+01:00	bc864e6	128478967776	PASS	PASS	KEEP	Warm-up dispatch at init: new best 128.5s, dispatch 390ns, GEMM M=64 3.4ms
+037	2026-03-23T08:42:25+01:00	65bbee7	127244690849	PASS	PASS	KEEP	Warm all 7 pipelines: new best 127.2s, GEMM M=64 3.2ms (4.2x CPU), MLP 4.0ms
+038	2026-03-23T08:46:43+01:00	dad8466	127076164436	PASS	PASS	KEEP	Buffer pool pre-warm: flat score 127.1s, first-sample penalty from weight upload (inherent)
+039	2026-03-23T08:52:44+01:00	287cbfe	142577258351	PASS	PASS	KEEP	GEMM 2x4 tiling: M=64 2.4ms (-35%!), M=2 1.4ms (-21%), 3072x1024 1.2ms (-26%), MLP 3.5ms. Wall-clock compilation noise
+040	2026-03-23T09:02:00+01:00	6bbd1da	243912763948	PASS	PASS	DISCARD	GEMM K-tile 64 with 2x4: massive regression, M=64 3.3ms (was 2.4ms), 16-elem load too heavy
+041	2026-03-23T09:05:36+01:00	6bbd1da	108887257370	PASS	PASS	KEEP	Re-bench 2x4: new best 108.9s (lucky compile 1m47s), MLP 2.9ms (1.9x CPU!), M=64 2.4ms (5.5x CPU)
+042	2026-03-23T09:10:05+01:00	c7de310	127713929439	PASS	PASS	KEEP	Direct tensor write: 127.7s, first-sample variance reduced (M=2 slowest 7.4ms vs 17.8ms), MLP 3.4ms
+043	2026-03-23T09:13:59+01:00	e7f2f37	127623285739	PASS	PASS	KEEP	Skip redundant to_dtype: 127.6s, M=64 2.4ms, MLP 3.1ms, first-sample penalty further reduced
+044	2026-03-23T09:18:16+01:00	125f22b	127677638534	PASS	PASS	DISCARD	Threshold 8192: add3 16K 471us (100x regression!), upload overhead dominates for small uncached tensors
+045	2026-03-23T09:21:41+01:00	125f22b	108915563191	PASS	PASS	KEEP	Final validation: 108.9s, M=64 2.4ms (5.6x CPU), M=2 1.3ms (2.4x CPU), MLP 3.0ms (1.6x CPU)
+046	2026-03-23T09:52:10+01:00	e452116	127271739169	PASS	PASS	KEEP	Phase 1: activation buffer cache. MLP 3.5ms, cache hits skip re-upload for silu_mul->matmul
+047	2026-03-23T10:08:04+01:00	91e5efa	134229512287	PASS	PASS	KEEP	Phase 3: GPU scaled softmax kernel. Fuses scale+causal+softmax in attention. Not benchmarked (no attention bench)
+048	2026-03-23T10:21:18+01:00	063e1c0	0	PASS	PASS	DISCARD	GPU GEMV for generation: inference timeout, per-dispatch fence overhead makes batch GEMV 5-10x slower than CPU
+049	2026-03-23T10:32:35+01:00	44365d6	129459515925	PASS	PASS	KEEP	Phase 2: batched cmd buffer for batch matmul. 1 fence/batch vs N. Inference 6.89 tok/s, correct output
+050	2026-03-23T10:40:52+01:00	414df70	0	PASS	PASS	DISCARD	GPU GEMV with batched cmd: 0.06 tok/s — weight().t() creates new TensorId each call, cache miss → re-upload all weights per token
+051	2026-03-23T10:44:26+01:00	414df70	112948240028	PASS	PASS	KEEP	Final: all 3 phases + M<=1 CPU fallback. MLP 3.1ms (1.3x CPU). Inference 6.89 tok/s, coherent output
+052	2026-03-23T11:02:02+01:00	b99b153	0	PASS	PASS	DISCARD	View cache + GPU GEMV: inference stuck during model loading. View cache may deadlock or slow path
+053	2026-03-23T11:05:05+01:00	b99b153	116019747100	PASS	PASS	KEEP	Stable final: Phase 1+2+3 with M<=1 CPU. MLP 3.4ms. Inference 6.89 tok/s
+054	2026-03-23T12:21:17+01:00	1864095	0	PASS	PASS	DISCARD	GEMV Kahan: still garbled output. GEMV vs GEMM float precision mismatch breaks generation coherence
+055	2026-03-23T16:42:04+0000	d6af2c0	142292325247	PASS	PASS	DISCARD	GEMM vec4 fma: M=32 regressed 2.3ms->6.9ms, vec4 accum hurts RDNA2 scalar arch
+056	2026-03-23T16:47:51+0000	dcb0b30	126519432931	PASS	PASS	DISCARD	GEMV unroll-by-4: no direct GEMV bench, wall-clock dominated by compilation
+057	2026-03-23T16:55:34+0000	83a9f30	128414765503	PASS	PASS	KEEP	Lazy pipeline creation: defer JIT to first use. Wall-clock=compilation noise. GEMM M=64 2.88ms, MLP 3.05ms
+058	2026-03-23T17:00:52+0000	dcb0b30	152418900777	PASS	PASS	DISCARD	Lazy pipelines + small-M GEMM: JIT on first sample caused 8.8s stall for M=2. Reverted both.
+059	2026-03-23T17:06:26+0000	94b8107	128600826037	PASS	PASS	KEEP	Small-M GEMM 16x64 tile: M=8 3072x1024 970us (-8%), M=2 1024x4096 1.49ms. Wall-clock=compilation noise
+060	2026-03-23T17:09:57+0000	7d6153b	128739670815	PASS	PASS	KEEP	Remove redundant fence wait: MLP 2.84ms (new best!), dispatch 400ns, cleaner sync
+061	2026-03-23T17:13:28+0000	c8fc9a4	128668177676	PASS	PASS	KEEP	Remove compute-to-host barrier: HOST_COHERENT+fence sufficient. Consistent perf, cleaner dispatch
+062	2026-03-23T17:14:55+0000	c8fc9a4	1994311561	PASS	PASS	BASELINE	Cached compilation: pure benchmark 2.0s. MLP 3.04ms, M=64 2.87ms, M=8 1.97ms, dispatch 470ns
+063	2026-03-23T17:18:48+0000	9b26e9e	129224755937	PASS	PASS	KEEP	Stack-alloc descriptor writes: eliminates 2 Vec allocs/dispatch, dispatch 410ns consistent
+064	2026-03-23T17:23:41+0000	4820c83	144341000121	PASS	PASS	KEEP	GEMM coalesced tile loading: row-major pattern. M=2 1.3ms, M=32 6.9ms consistent. Wall-clock=compilation
+065	2026-03-23T17:24:01+0000	4820c83	1993537361	PASS	PASS	KEEP	Cached re-run: 1.994s confirms coalesced loading neutral. M=64 2.79ms, M=2 1.39ms, MLP 3.07ms
+066	2026-03-23T17:27:44+0000	3fb9c08	137594882498	PASS	PASS	KEEP	matmul_small coalesced loading: MLP 2.64ms (-7%!), M=2 3072x1024 903us (-9%!), M=8 923us (-7%!)
+067	2026-03-23T17:29:07+0000	3fb9c08	1925764828	PASS	PASS	KEEP	Cached re-run: 1.93s (3.5% better than baseline). MLP 2.64ms confirmed, dispatch 399ns
+068	2026-03-23T17:36:19+0000	919e0ab	212603779624	PASS	PASS	DISCARD	matmul_small K-tile 64: 20.8KB shared mem -> 3 WG/CU (was 5), massive regression. Reverted.
+069	2026-03-23T17:41:14+0000	0a42da5	1956678565	PASS	PASS	KEEP	matmul_small STILE_M=8: MLP 2.56ms (new best! -3%), less shared memory, better occupancy
+070	2026-03-23T17:42:08+0000	0a42da5	1913450263	PASS	PASS	KEEP	STILE_M=8 cached: 1.91s (new best!). MLP 2.54ms, M=8 3072x1024 795us (-12%!), M=8 6144 1.45ms (-19%!)
+071	2026-03-23T17:45:21+0000	643b3c2	128795624935	PASS	PASS	KEEP	M<=8 threshold: M=2 3072x1024 853us (new best!), M=8 6144 1.31ms (new best!), M=64 2.63ms
+072	2026-03-23T17:45:38+0000	643b3c2	1920409932	PASS	PASS	KEEP	Cached verification: 1.92s. MLP 2.37ms (22% faster than session start!), dispatch 400ns
+073	2026-03-23T17:51:04+0000	e33f526	128650369401	PASS	PASS	KEEP	Pre-alloc dummy buffer: eliminates per-dispatch alloc for unary+softmax. MLP 2.84ms (compilation noise)
+074	2026-03-23T17:51:30+0000	e33f526	1926926755	PASS	PASS	KEEP	Final cached: 1.93s. MLP 2.35ms (23% faster than session start), M=64 2.63ms, dispatch 520ns
+075	2026-03-23T17:55:26+0000	9733943	1933266992	PASS	PASS	DISCARD	Lower silu_mul threshold: MLP regressed 2.35ms->3.51ms, upload cost > cache savings. Reverted.
+076	2026-03-23T17:57:55+0000	9733943	110149434963	PASS	PASS	KEEP	Post-revert verification: 110.1s (near all-time best!). MLP 2.51ms confirmed, regression fixed.
+077	2026-03-23T17:58:19+0000	9733943	1903739236	PASS	PASS	KEEP	Cached: 1.90s (best cached score!). MLP 2.90ms (high variance with 3 samples). Stable.
+078	2026-03-23T18:02:08+0000	94556c0	1820191199	PASS	PASS	KEEP	Warm all pipelines (add softmax+gemv_f16): cached 1.82s (new best!). Eliminates first-call JIT stalls.
