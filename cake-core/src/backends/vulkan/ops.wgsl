@@ -165,8 +165,9 @@ struct MatmulParams {
 const TILE_MN: u32 = 16;   // output tile M and N dimension
 const TILE_K: u32 = 32;    // K dimension tile (doubled for fewer iterations)
 const TILE_A_STRIDE: u32 = 33;  // padded stride to avoid bank conflicts (32 banks on RDNA 2)
+const TILE_B_STRIDE: u32 = 17;  // padded stride for tile_b
 var<workgroup> tile_a: array<f32, 528>;  // [16, 33] padded
-var<workgroup> tile_b: array<f32, 512>;  // [32, 16]
+var<workgroup> tile_b: array<f32, 544>;  // [32, 17] padded
 
 @compute @workgroup_size(8, 8)
 fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -211,7 +212,7 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
             }
         }
 
-        // Cooperative load tile_b[32, 16]: 64 threads, 8 elements each
+        // Cooperative load tile_b[32, 16] with padded stride: 64 threads, 8 elements each
         for (var i: u32 = 0u; i < 8u; i++) {
             let idx = lin * 8u + i;
             let tr = idx / TILE_MN;  // row 0..31
@@ -219,9 +220,9 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
             let b_row = tk + tr;
             let b_col = wg_col + tc;
             if (b_row < K && b_col < N) {
-                tile_b[idx] = mat_b[b_row * N + b_col];
+                tile_b[tr * TILE_B_STRIDE + tc] = mat_b[b_row * N + b_col];
             } else {
-                tile_b[idx] = 0.0;
+                tile_b[tr * TILE_B_STRIDE + tc] = 0.0;
             }
         }
 
@@ -235,8 +236,8 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
         for (var k: u32 = 0u; k < TILE_K; k++) {
             let a0k = tile_a[r0 * TILE_A_STRIDE + k];
             let a1k = tile_a[r1 * TILE_A_STRIDE + k];
-            let bk0 = tile_b[k * TILE_MN + c0];
-            let bk1 = tile_b[k * TILE_MN + c1];
+            let bk0 = tile_b[k * TILE_B_STRIDE + c0];
+            let bk1 = tile_b[k * TILE_B_STRIDE + c1];
             acc00 += a0k * bk0;
             acc01 += a0k * bk1;
             acc10 += a1k * bk0;
