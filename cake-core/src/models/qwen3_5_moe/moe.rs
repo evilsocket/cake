@@ -324,16 +324,14 @@ impl Qwen3_5MoeSparseMlp {
                 .map_err(|e| anyhow!("down_proj t: {e}"))?)
                 .map_err(|e| anyhow!("expert down matmul: {e}"))?; // (n_sel, h)
 
-            // Scale by routing weight
+            // Scale by routing weight — broadcast_mul avoids materializing full (n_sel, h) weight tensor
             let w_t = Tensor::new(weights.as_slice(), x_flat.device())
                 .map_err(|e| anyhow!("w tensor: {e}"))?
                 .to_dtype(compute_dtype)
                 .map_err(|e| anyhow!("w to_dtype: {e}"))?
                 .unsqueeze(1)
-                .map_err(|e| anyhow!("w unsqueeze: {e}"))?
-                .broadcast_as(expert_out.shape())
-                .map_err(|e| anyhow!("w broadcast: {e}"))?;
-            let expert_out = (expert_out * w_t)
+                .map_err(|e| anyhow!("w unsqueeze: {e}"))?;
+            let expert_out = expert_out.broadcast_mul(&w_t)
                 .map_err(|e| anyhow!("expert_out * w: {e}"))?;
 
             output = output
