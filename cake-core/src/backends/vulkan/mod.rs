@@ -351,7 +351,15 @@ impl VulkanBackend {
 
     // ── Dispatch: elementwise binary ────────────────────────────────
 
+    fn dispatch_binary_vec4(&self, a: &Tensor, b: &Tensor, entry: &str) -> Result<Tensor> {
+        self.dispatch_binary_impl(a, b, entry, 4)
+    }
+
     fn dispatch_binary(&self, a: &Tensor, b: &Tensor, entry: &str) -> Result<Tensor> {
+        self.dispatch_binary_impl(a, b, entry, 1)
+    }
+
+    fn dispatch_binary_impl(&self, a: &Tensor, b: &Tensor, entry: &str, elems_per_thread: u32) -> Result<Tensor> {
         let dtype = a.dtype();
         let shape = a.shape().clone();
         let n = a.elem_count();
@@ -390,7 +398,8 @@ impl VulkanBackend {
             let mut p = enc.begin_compute_pass(&Default::default());
             p.set_pipeline(&pipeline);
             p.set_bind_group(0, &bg, &[]);
-            p.dispatch_workgroups((n as u32).div_ceil(WG_ELEM), 1, 1);
+            let threads_needed = (n as u32).div_ceil(elems_per_thread);
+            p.dispatch_workgroups(threads_needed.div_ceil(WG_ELEM), 1, 1);
         }
         let result = Self::from_f32_vec(
             self.download(Some(enc), &buf_out, n),
@@ -730,7 +739,7 @@ impl ComputeBackend for VulkanBackend {
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
         if gate.elem_count() > 32768 {
-            self.dispatch_binary(gate, up, "silu_mul")
+            self.dispatch_binary_vec4(gate, up, "silu_mul")
         } else {
             (candle_nn::ops::silu(&gate.contiguous()?)? * up.contiguous()?)?.contiguous()
         }
