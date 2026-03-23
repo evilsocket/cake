@@ -1300,7 +1300,10 @@ impl ComputeBackend for VulkanBackend {
         let m = a_dims[a_dims.len() - 2];
         let k = a_dims[a_dims.len() - 1];
         let n = b_dims[b_dims.len() - 1];
-        // GPU for all sizes: M=1 uses GEMM. View cache handles weight.t().
+        if m <= 1 {
+            log::debug!("matmul CPU: M={m} K={k} N={n} (M<=1, generation)");
+            return a.matmul(b);
+        }
         log::debug!("matmul GPU: M={m} K={k} N={n}");
         let orig_dtype = a.dtype();
         let result = self.tensor_matmul(a, b)?;
