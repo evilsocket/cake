@@ -199,20 +199,25 @@ impl Fp8Linear {
     }
 
     fn get_weight(&self) -> candle_core::Result<candle_core::Tensor> {
+        // Fast path: return cached dequantized weight
         if let Some(w) = self.weight.read().unwrap().as_ref() {
             return Ok(w.clone());
         }
+        // Slow path: dequantize F8→F32→F16 and cache for future calls
         let f8_w = self
             .f8_weight
             .as_ref()
             .expect("no F8 weight and no cached weight");
-        f8_w.to_dtype(candle_core::DType::F32)?.to_dtype(candle_core::DType::F16)
+        let dequantized = f8_w.to_dtype(candle_core::DType::F32)?.to_dtype(candle_core::DType::F16)?;
+        *self.weight.write().unwrap() = Some(dequantized.clone());
+        Ok(dequantized)
     }
 
     /// Pre-dequantize F8→F16 and cache. Call once before inference loop.
     pub fn warmup(&mut self) -> candle_core::Result<()> {
-        let _ = self.get_weight()?;
-        self.f8_weight = None;
+        let w = self.get_weight()?;
+        *self.weight.write().unwrap() = Some(w);
+        self.f8_weight = None; // Free the F8 storage
         Ok(())
     }
 
