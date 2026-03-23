@@ -291,7 +291,8 @@ impl ComputeBackend for RocmBackend {
 
     fn attention(&self, q: &Tensor, k: &Tensor, v: &Tensor, scale: f32, causal: bool) -> Result<Tensor> {
         let orig = q.dtype();
-        let q = q.to_dtype(DType::F32)?; let k = k.to_dtype(DType::F32)?; let v = v.to_dtype(DType::F32)?;
+        let (q, k, v) = if orig == DType::F32 { (q.clone(), k.clone(), v.clone()) }
+            else { (q.to_dtype(DType::F32)?, k.to_dtype(DType::F32)?, v.to_dtype(DType::F32)?) };
         let attn = self.tensor_matmul(&q, &k.t()?)?;
         let attn = (attn * scale as f64)?;
         let attn = if causal {
