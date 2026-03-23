@@ -36,6 +36,11 @@ pub struct TensorData {
 pub trait TensorStorageProvider: Send + Sync {
     /// Read a tensor's raw bytes and metadata by name.
     fn read_tensor(&self, name: &str) -> Result<TensorData>;
+    /// Read multiple tensors at once. Default calls read_tensor in a loop.
+    /// Implementations may optimize by batching I/O for contiguous tensors.
+    fn read_tensors(&self, names: &[&str]) -> Result<Vec<TensorData>> {
+        names.iter().map(|n| self.read_tensor(n)).collect()
+    }
     /// Check if a tensor exists in this storage.
     fn has_tensor(&self, name: &str) -> bool;
     /// List all tensor names available in this storage.
@@ -287,6 +292,75 @@ impl TensorStorageProvider for SafetensorsStorage {
             dtype: meta.dtype,
             shape: meta.shape.clone(),
         })
+    }
+
+    fn read_tensors(&self, names: &[&str]) -> Result<Vec<TensorData>> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Resolve all metadata first
+        let metas: Vec<&TensorMeta> = names
+            .iter()
+            .map(|n| {
+                self.index
+                    .get(*n)
+                    .ok_or_else(|| anyhow::anyhow!("tensor '{}' not found in storage", n))
+            })
+            .collect::<Result<_>>()?;
+
+        // Check if all tensors are in the same shard and contiguous
+        let same_shard = metas.windows(2).all(|w| w[0].shard_path == w[1].shard_path);
+        let contiguous = same_shard
+            && metas
+                .windows(2)
+                .all(|w| w[0].abs_offset + w[0].byte_size == w[1].abs_offset);
+
+        if contiguous && metas.len() > 1 {
+            // Single pread for the entire contiguous region
+            let first = metas[0];
+            let last = metas[metas.len() - 1];
+            let total_size = (last.abs_offset + last.byte_size - first.abs_offset) as usize;
+
+            let file = self
+                .files
+                .get(&first.shard_path)
+                .ok_or_else(|| anyhow::anyhow!("shard file not open: {:?}", first.shard_path))?;
+
+            let mut buf = vec![0u8; total_size];
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileExt;
+                file.read_at(&mut buf, first.abs_offset)?;
+            }
+
+            #[cfg(not(unix))]
+            {
+                use std::io::{Read as _, Seek, SeekFrom};
+                let mut f = file.try_clone()?;
+                f.seek(SeekFrom::Start(first.abs_offset))?;
+                f.read_exact(&mut buf)?;
+            }
+
+            // Split the buffer into individual tensor data
+            let mut results = Vec::with_capacity(metas.len());
+            let mut offset = 0usize;
+            for meta in &metas {
+                let size = meta.byte_size as usize;
+                let bytes = buf[offset..offset + size].to_vec();
+                results.push(TensorData {
+                    bytes,
+                    dtype: meta.dtype,
+                    shape: meta.shape.clone(),
+                });
+                offset += size;
+            }
+            Ok(results)
+        } else {
+            // Fall back to individual reads
+            names.iter().map(|n| self.read_tensor(n)).collect()
+        }
     }
 
     fn has_tensor(&self, name: &str) -> bool {

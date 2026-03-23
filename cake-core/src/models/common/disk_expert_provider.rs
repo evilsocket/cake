@@ -82,14 +82,8 @@ impl DiskExpertProvider {
         }
     }
 
-    /// Read a single tensor from storage, wrap as candle Tensor.
-    fn read_weight(&self, name: &str) -> Result<Tensor> {
-        let data = self
-            .storage
-            .read_tensor(name)
-            .map_err(|e| candle_core::Error::Msg(format!("read_tensor({name}): {e}")))?;
-
-        // Create tensor from raw bytes
+    /// Convert raw TensorData to a candle Tensor with target dtype/device.
+    fn materialize(&self, data: crate::utils::tensor_storage::TensorData) -> Result<Tensor> {
         let tensor = Tensor::from_raw_buffer(
             &data.bytes,
             data.dtype,
@@ -97,7 +91,6 @@ impl DiskExpertProvider {
             &Device::Cpu,
         )?;
 
-        // Convert to target dtype and device if needed
         let tensor = if tensor.dtype() != self.dtype {
             tensor.to_dtype(self.dtype)?
         } else {
@@ -123,14 +116,26 @@ impl ExpertProvider for DiskExpertProvider {
 
         let names = &self.expert_names[idx];
 
-        let gate_proj = self.read_weight(&names.gate_proj)?;
-        let up_proj = self.read_weight(&names.up_proj)?;
-        let down_proj = self.read_weight(&names.down_proj)?;
+        // Batch read: may merge into single pread if contiguous in safetensors
+        let tensor_names = [
+            names.gate_proj.as_str(),
+            names.up_proj.as_str(),
+            names.down_proj.as_str(),
+        ];
+        let mut data = self
+            .storage
+            .read_tensors(&tensor_names)
+            .map_err(|e| candle_core::Error::Msg(format!("read_tensors: {e}")))?;
+
+        // data is [gate, up, down] in order
+        let down_data = data.pop().unwrap();
+        let up_data = data.pop().unwrap();
+        let gate_data = data.pop().unwrap();
 
         Ok(ExpertWeights {
-            gate_proj,
-            up_proj,
-            down_proj,
+            gate_proj: self.materialize(gate_data)?,
+            up_proj: self.materialize(up_data)?,
+            down_proj: self.materialize(down_data)?,
         })
     }
 
