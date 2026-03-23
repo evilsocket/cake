@@ -318,7 +318,8 @@ impl ComputeBackend for RocmBackend {
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         let m = a.dims()[a.dims().len() - 2];
         if m <= 4 { return a.matmul(b); }
-        self.tensor_matmul(a, b)?.to_dtype(a.dtype())
+        let out = self.tensor_matmul(a, b)?;
+        if a.dtype() == DType::F32 { Ok(out) } else { out.to_dtype(a.dtype()) }
     }
 
     fn attention(&self, q: &Tensor, k: &Tensor, v: &Tensor, scale: f32, causal: bool) -> Result<Tensor> {
