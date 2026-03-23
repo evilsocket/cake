@@ -525,6 +525,7 @@ impl VulkanBackend {
     /// Compute a stable cache key from tensor's storage pointer + layout.
     /// Survives `.t()` calls which create new TensorIds but share storage.
     /// Works for any dtype by extracting raw Vec pointer from CpuStorage.
+    #[allow(dead_code)]
     fn view_key(tensor: &Tensor) -> Option<(usize, usize, usize, u64)> {
         let (storage, layout) = tensor.storage_and_layout();
         let ptr = match &*storage {
