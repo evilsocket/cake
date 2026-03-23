@@ -36,6 +36,7 @@ const ALL_KERNELS: &[&str] = &[
     "rms_norm_gated_f32", "rms_norm_gated_f16",
     "add_rms_norm_f32", "add_rms_norm_f16",
     "rms_norm_channel_f32", "rms_norm_channel_f16",
+    "f8e4m3_to_f32", "f8e4m3_to_f16",
 ];
 
 struct PipelineCache {

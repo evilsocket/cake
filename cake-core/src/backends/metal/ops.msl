@@ -14,6 +14,57 @@ using namespace metal;
       if (simd_id == 0 && lane < _ns) _t = _ps[lane]; \
       _sr = simd_sum(_t); }
 
+// ─── F8E4M3 dequantization ──────────────────────────────────────────
+// Decode F8E4M3 (1 sign + 4 exponent + 3 mantissa) to float32.
+// Metal has no native F8 type, so we decode from raw uint8.
+kernel void f8e4m3_to_f32(
+    device const uchar* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    uchar bits = input[idx];
+    uint sign = (bits >> 7) & 1u;
+    uint exp_bits = (bits >> 3) & 0xFu;
+    uint mant_bits = bits & 0x7u;
+
+    float result;
+    if (exp_bits == 0u) {
+        // Subnormal: (-1)^sign * 2^(-6) * (mant/8)
+        result = ldexp(float(mant_bits) / 8.0f, -6);
+    } else if (exp_bits == 15u && mant_bits == 7u) {
+        result = as_type<float>(0x7FC00000u); // NaN
+    } else {
+        // Normal: (-1)^sign * 2^(exp-7) * (1 + mant/8)
+        result = ldexp(1.0f + float(mant_bits) / 8.0f, int(exp_bits) - 7);
+    }
+    output[idx] = sign ? -result : result;
+}
+
+kernel void f8e4m3_to_f16(
+    device const uchar* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    uchar bits = input[idx];
+    uint sign = (bits >> 7) & 1u;
+    uint exp_bits = (bits >> 3) & 0xFu;
+    uint mant_bits = bits & 0x7u;
+
+    float result;
+    if (exp_bits == 0u) {
+        result = ldexp(float(mant_bits) / 8.0f, -6);
+    } else if (exp_bits == 15u && mant_bits == 7u) {
+        result = as_type<float>(0x7FC00000u);
+    } else {
+        result = ldexp(1.0f + float(mant_bits) / 8.0f, int(exp_bits) - 7);
+    }
+    output[idx] = half(sign ? -result : result);
+}
+
 // ─── stable_softplus ────────────────────────────────────────────────
 kernel void stable_softplus_f32(
     device const float* input [[buffer(0)]],
