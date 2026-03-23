@@ -48,6 +48,7 @@ cake pull evilsocket/flux1-dev               # image model (FLUX.1-dev FP8)
 cake pull evilsocket/VibeVoice-1.5B          # voice synthesis model
 
 cake list                                    # show all locally available models
+cake rm evilsocket/Qwen3-0.6B               # delete a cached model
 ```
 
 Models are also downloaded automatically on first use if not already cached.
