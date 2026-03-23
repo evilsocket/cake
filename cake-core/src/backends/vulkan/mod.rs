@@ -338,10 +338,10 @@ impl VulkanBackend {
     // ── Tensor ↔ GPU helpers ────────────────────────────────────────
 
     fn to_f32_vec(t: &Tensor) -> Result<Vec<f32>> {
-        t.to_dtype(DType::F32)?
-            .contiguous()?
-            .flatten_all()?
-            .to_vec1()
+        // Avoid redundant allocations for common case (F32 + contiguous)
+        let t = if t.dtype() == DType::F32 { t.clone() } else { t.to_dtype(DType::F32)? };
+        let t = if t.is_contiguous() { t } else { t.contiguous()? };
+        t.flatten_all()?.to_vec1()
     }
 
     fn from_f32_vec(data: Vec<f32>, shape: &[usize], dtype: DType) -> Result<Tensor> {
