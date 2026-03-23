@@ -94,3 +94,7 @@ flux-tests/target/
 distributed_tests/
 voice.wav
 topology-*.yml
+
+# Autoresearch generated files (machine-specific)
+autoresearch/**/baseline.txt
+autoresearch/**/experiments.tsv
