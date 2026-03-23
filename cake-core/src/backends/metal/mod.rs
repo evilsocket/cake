@@ -12,8 +12,49 @@ use candle_core::{backend::BackendStorage as _, CpuStorage, DType, Device, Layou
 
 use super::ComputeBackend;
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 // ─── MSL shader source (loaded from ops.msl) ───────────────────────
 const FUSED_OPS_MSL: &str = include_str!("ops.msl");
+
+// ─── Pipeline cache ─────────────────────────────────────────────────
+//
+// Metal shader compilation from MSL source is expensive (~ms). Cache compiled
+// pipeline states keyed by kernel name to avoid recompilation on every op call.
+
+struct PipelineCache {
+    pipelines: Mutex<HashMap<&'static str, candle_metal_kernels::metal::ComputePipeline>>,
+}
+
+impl PipelineCache {
+    fn new() -> Self {
+        Self { pipelines: Mutex::new(HashMap::new()) }
+    }
+
+    fn get_or_create(
+        &self,
+        device: &candle_core::MetalDevice,
+        kernel_name: &'static str,
+    ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+        let mut cache = self.pipelines.lock().map_err(|e| candle_core::Error::Msg(format!("pipeline cache lock: {e}")))?;
+        if let Some(pipeline) = cache.get(kernel_name) {
+            return Ok(pipeline.clone());
+        }
+        let lib = device.new_library_with_source(FUSED_OPS_MSL, None)
+            .map_err(|e| candle_core::Error::Msg(format!("metal shader compile: {e}")))?;
+        let func = lib.get_function(kernel_name, None)
+            .map_err(|e| candle_core::Error::Msg(format!("metal get_function: {e}")))?;
+        let pipeline = device.new_compute_pipeline_state_with_function(&func)
+            .map_err(|e| candle_core::Error::Msg(format!("metal pipeline: {e}")))?;
+        cache.insert(kernel_name, pipeline.clone());
+        Ok(pipeline)
+    }
+}
+
+// Use a global pipeline cache since CustomOp structs cannot carry state references
+// (candle requires CustomOp to be stateless value types).
+static PIPELINE_CACHE: std::sync::LazyLock<PipelineCache> = std::sync::LazyLock::new(PipelineCache::new);
 
 // ─── CustomOp structs for MSL-accelerated ops ───────────────────────
 //
@@ -39,17 +80,12 @@ impl candle_core::CustomOp2 for MetalSiluMul {
     ) -> Result<(candle_core::MetalStorage, Shape)> {
         let device = s1.device();
         let el = l1.shape().elem_count();
-        let kernel_name = match s1.dtype() {
+        let kernel_name: &'static str = match s1.dtype() {
             DType::F32 => "silu_mul_f32",
             DType::F16 => "silu_mul_f16",
             dt => candle_core::bail!("silu_mul metal: unsupported dtype {dt:?}"),
         };
-        let lib = device.new_library_with_source(FUSED_OPS_MSL, None)
-            .map_err(|e| candle_core::Error::Msg(format!("metal shader compile: {e}")))?;
-        let func = lib.get_function(kernel_name, None)
-            .map_err(|e| candle_core::Error::Msg(format!("metal get_function: {e}")))?;
-        let pipeline = device.new_compute_pipeline_state_with_function(&func)
-            .map_err(|e| candle_core::Error::Msg(format!("metal pipeline: {e}")))?;
+        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
         let output = device.new_buffer(el, s1.dtype(), "silu_mul")?;
         let encoder = device.command_encoder()?;
         encoder.set_compute_pipeline_state(&pipeline);
@@ -82,17 +118,12 @@ impl candle_core::CustomOp1 for MetalStableSoftplus {
     ) -> Result<(candle_core::MetalStorage, Shape)> {
         let device = s.device();
         let el = l.shape().elem_count();
-        let kernel_name = match s.dtype() {
+        let kernel_name: &'static str = match s.dtype() {
             DType::F32 => "stable_softplus_f32",
             DType::F16 => "stable_softplus_f16",
             dt => candle_core::bail!("stable_softplus metal: unsupported dtype {dt:?}"),
         };
-        let lib = device.new_library_with_source(FUSED_OPS_MSL, None)
-            .map_err(|e| candle_core::Error::Msg(format!("metal shader compile: {e}")))?;
-        let func = lib.get_function(kernel_name, None)
-            .map_err(|e| candle_core::Error::Msg(format!("metal get_function: {e}")))?;
-        let pipeline = device.new_compute_pipeline_state_with_function(&func)
-            .map_err(|e| candle_core::Error::Msg(format!("metal pipeline: {e}")))?;
+        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
         let output = device.new_buffer(el, s.dtype(), "stable_softplus")?;
         let encoder = device.command_encoder()?;
         encoder.set_compute_pipeline_state(&pipeline);
