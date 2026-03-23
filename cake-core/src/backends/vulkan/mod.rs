@@ -412,12 +412,33 @@ impl VulkanBackend {
 
     // ── Dispatch: elementwise ternary ───────────────────────────────
 
+    fn dispatch_ternary_vec4(
+        &self,
+        a: &Tensor,
+        b: &Tensor,
+        c: &Tensor,
+        entry: &str,
+    ) -> Result<Tensor> {
+        self.dispatch_ternary_impl(a, b, c, entry, 4)
+    }
+
     fn dispatch_ternary(
         &self,
         a: &Tensor,
         b: &Tensor,
         c: &Tensor,
         entry: &str,
+    ) -> Result<Tensor> {
+        self.dispatch_ternary_impl(a, b, c, entry, 1)
+    }
+
+    fn dispatch_ternary_impl(
+        &self,
+        a: &Tensor,
+        b: &Tensor,
+        c: &Tensor,
+        entry: &str,
+        elems_per_thread: u32,
     ) -> Result<Tensor> {
         let dtype = a.dtype();
         let shape = a.shape().clone();
@@ -462,7 +483,8 @@ impl VulkanBackend {
             let mut p = enc.begin_compute_pass(&Default::default());
             p.set_pipeline(&pipeline);
             p.set_bind_group(0, &bg, &[]);
-            p.dispatch_workgroups((n as u32).div_ceil(WG_ELEM), 1, 1);
+            let threads_needed = (n as u32).div_ceil(elems_per_thread);
+            p.dispatch_workgroups(threads_needed.div_ceil(WG_ELEM), 1, 1);
         }
         let result = Self::from_f32_vec(
             self.download(Some(enc), &buf_out, n),
@@ -758,7 +780,7 @@ impl ComputeBackend for VulkanBackend {
 
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
         if a.elem_count() > 32768 {
-            self.dispatch_ternary(a, b, c, "add3")
+            self.dispatch_ternary_vec4(a, b, c, "add3")
         } else {
             ((a + b)? + c)?.contiguous()
         }
