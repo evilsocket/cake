@@ -253,8 +253,10 @@ impl Qwen3_5FullAttention {
         // Final projection
         let y = self.o_proj.forward(&y).map_err(|e| anyhow!("o_proj: {e}"))?;
 
-        // Flush GPU commands after attention + out_proj
-        let _ = self.backend.synchronize();
+        // Flush GPU commands — needed for prefill, skip for generation
+        if seq_len > 1 {
+            let _ = self.backend.synchronize();
+        }
 
         Ok(y)
     }
