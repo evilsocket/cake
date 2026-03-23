@@ -208,8 +208,8 @@ impl SparseMoeMlp {
                 .map_err(|e| anyhow!("moe up matmul -> {e}"))?;
 
             let hidden = self.backend.silu_mul(
-                &gate_out.contiguous().map_err(|e| anyhow!("moe gate contig -> {e}"))?,
-                &up_out.contiguous().map_err(|e| anyhow!("moe up contig -> {e}"))?,
+                &gate_out,
+                &up_out,
             )
             .map_err(|e| anyhow!("moe silu_mul -> {e}"))?;
 
@@ -283,8 +283,8 @@ impl SparseMoeMlp {
             .map_err(|e| anyhow!("moe batched up matmul -> {e}"))?;
 
         let hidden = self.backend.silu_mul(
-            &gate_out.contiguous().map_err(|e| anyhow!("moe gate contig -> {e}"))?,
-            &up_out.contiguous().map_err(|e| anyhow!("moe up contig -> {e}"))?,
+            &gate_out,
+            &up_out,
         )
         .map_err(|e| anyhow!("moe silu_mul -> {e}"))?;
 
