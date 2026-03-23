@@ -138,27 +138,28 @@ fn vulkan_add_rms_norm(bencher: divan::Bencher, size: usize) {
 fn vulkan_mlp_full(bencher: divan::Bencher) {
     let backend = vk();
     let x = cpu_tensor(&[8, 1024], 1800);
-    let gate_up_w = cpu_tensor(&[6144, 1024], 1801);
-    let down_w = cpu_tensor(&[1024, 3072], 1802);
+    // Pre-transpose weights so they get cached on GPU across iterations
+    let gate_up_wt = cpu_tensor(&[6144, 1024], 1801).t().unwrap().contiguous().unwrap();
+    let down_wt = cpu_tensor(&[1024, 3072], 1802).t().unwrap().contiguous().unwrap();
     bencher.bench_local(|| {
-        let fused = backend.matmul(&x, &gate_up_w.t().unwrap()).unwrap();
+        let fused = backend.matmul(&x, &gate_up_wt).unwrap();
         let gate = fused.narrow(1, 0, 3072).unwrap().contiguous().unwrap();
         let up = fused.narrow(1, 3072, 3072).unwrap().contiguous().unwrap();
         let act = backend.silu_mul(&gate, &up).unwrap();
-        backend.matmul(&act, &down_w.t().unwrap()).unwrap()
+        backend.matmul(&act, &down_wt).unwrap()
     });
 }
 
 #[divan::bench]
 fn cpu_mlp_full(bencher: divan::Bencher) {
     let x = cpu_tensor(&[8, 1024], 1800);
-    let gate_up_w = cpu_tensor(&[6144, 1024], 1801);
-    let down_w = cpu_tensor(&[1024, 3072], 1802);
+    let gate_up_wt = cpu_tensor(&[6144, 1024], 1801).t().unwrap().contiguous().unwrap();
+    let down_wt = cpu_tensor(&[1024, 3072], 1802).t().unwrap().contiguous().unwrap();
     bencher.bench_local(|| {
-        let fused = x.matmul(&gate_up_w.t().unwrap()).unwrap();
+        let fused = x.matmul(&gate_up_wt).unwrap();
         let gate = fused.narrow(1, 0, 3072).unwrap();
         let up = fused.narrow(1, 3072, 3072).unwrap();
         let act = (candle_nn::ops::silu(&gate).unwrap() * &up).unwrap();
-        act.matmul(&down_w.t().unwrap()).unwrap()
+        act.matmul(&down_wt).unwrap()
     });
 }
