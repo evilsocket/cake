@@ -44,9 +44,11 @@ impl ComputeBackend for CudaBackend {
             return crate::utils::flash_attn::flash_attention(q, k, v, scale, causal);
         }
 
-        let q = (q.to_dtype(candle_core::DType::F32)? * scale as f64)?;
-        let k = k.to_dtype(candle_core::DType::F32)?;
-        let v = v.to_dtype(candle_core::DType::F32)?;
+        let f32_dt = candle_core::DType::F32;
+        let q = if q.dtype() == f32_dt { q.clone() } else { q.to_dtype(f32_dt)? };
+        let q = (q * scale as f64)?;
+        let k = if k.dtype() == f32_dt { k.clone() } else { k.to_dtype(f32_dt)? };
+        let v = if v.dtype() == f32_dt { v.clone() } else { v.to_dtype(f32_dt)? };
         let attn = q.matmul(&k.t()?)?;
         let attn = if causal {
             let seq_len = q.dim(2)?;
