@@ -56,12 +56,59 @@ impl std::fmt::Debug for RawTensor {
     }
 }
 
+/// Extract raw bytes from a CpuStorage slice range as a newly-allocated Vec<u8>.
+/// This avoids the flatten_all + to_vec1 + reinterpret chain in candle's data() path.
+fn cpu_storage_bytes_range(storage: &candle_core::CpuStorage, start: usize, end: usize) -> Vec<u8> {
+    if start == end {
+        return Vec::new();
+    }
+    use candle_core::CpuStorage;
+    macro_rules! extract {
+        ($slice:expr) => {{
+            let data = &$slice[start..end];
+            let byte_len = data.len() * std::mem::size_of_val(&data[0]);
+            let ptr = data.as_ptr() as *const u8;
+            unsafe { std::slice::from_raw_parts(ptr, byte_len) }.to_vec()
+        }};
+    }
+    match storage {
+        CpuStorage::U8(s) => extract!(s),
+        CpuStorage::U32(s) => extract!(s),
+        CpuStorage::I16(s) => extract!(s),
+        CpuStorage::I32(s) => extract!(s),
+        CpuStorage::I64(s) => extract!(s),
+        CpuStorage::BF16(s) => extract!(s),
+        CpuStorage::F16(s) => extract!(s),
+        CpuStorage::F32(s) => extract!(s),
+        CpuStorage::F64(s) => extract!(s),
+        CpuStorage::F8E4M3(s) => extract!(s),
+        // Dummy dtype variants store raw bytes
+        CpuStorage::F6E2M3(s) | CpuStorage::F6E3M2(s) | CpuStorage::F4(s) | CpuStorage::F8E8M0(s) => {
+            s[start..end].to_vec()
+        }
+    }
+}
+
 impl RawTensor {
     /// Convert x into a RawTensor.
     pub fn from_tensor(x: &Tensor) -> Self {
-        let data: Vec<u8> = x.data().into_owned();
         let dtype = dtype_to_u8(x.dtype());
         let shape = x.shape().dims().to_vec();
+        // Fast path: CPU contiguous tensors — access storage directly.
+        let data = if x.device().is_cpu() {
+            if let Some((start, end)) = x.layout().contiguous_offsets() {
+                let (storage, _) = x.storage_and_layout();
+                if let candle_core::Storage::Cpu(cpu) = &*storage {
+                    cpu_storage_bytes_range(cpu, start, end)
+                } else {
+                    x.data().into_owned()
+                }
+            } else {
+                x.data().into_owned()
+            }
+        } else {
+            x.data().into_owned()
+        };
         Self { data, dtype, shape }
     }
 
