@@ -573,38 +573,39 @@ extern "C" __global__ void FN_NAME( \
     const int idx = blockIdx.x; \
     const int b = idx / time_len; \
     const int t = idx % time_len; \
-    /* Compute sum of squares over channels for this (b, t) position */ \
-    /* x layout: (batch, channels, time) → x[b*channels*time + c*time + t] */ \
+    const int base = b * channels * time_len + t; \
+    /* Pass 1: read x values (strided), cache in shared mem, compute sum2 */ \
+    extern __shared__ float smem[]; /* dynamically allocated: channels floats + 32 for reduction */ \
+    float *x_cache = smem; \
+    float *red = smem + channels; \
     float sum2 = 0.0f; \
     for (int c = threadIdx.x; c < channels; c += block_size) { \
-        float v = static_cast<float>(x[b * channels * time_len + c * time_len + t]); \
-        sum2 += v * v; \
+        float v = static_cast<float>(x[base + c * time_len]); \
+        x_cache[c] = v; \
+        sum2 = fmaf(v, v, sum2); \
     } \
     /* Warp-level reduction */ \
     for (int mask = 16; mask > 0; mask >>= 1) { \
         sum2 += __shfl_xor_sync(0xffffffff, sum2, mask); \
     } \
-    /* Block-level reduction via shared memory */ \
-    __shared__ float shared[32]; \
+    /* Block-level reduction */ \
     int warp_id = threadIdx.x / 32; \
     int lane_id = threadIdx.x % 32; \
-    if (lane_id == 0) shared[warp_id] = sum2; \
+    if (lane_id == 0) red[warp_id] = sum2; \
     __syncthreads(); \
     if (warp_id == 0) { \
-        sum2 = (lane_id < (block_size + 31) / 32) ? shared[lane_id] : 0.0f; \
+        sum2 = (lane_id < (block_size + 31) / 32) ? red[lane_id] : 0.0f; \
         for (int mask = 16; mask > 0; mask >>= 1) { \
             sum2 += __shfl_xor_sync(0xffffffff, sum2, mask); \
         } \
-        shared[0] = sum2; \
+        red[0] = sum2; \
     } \
     __syncthreads(); \
-    float inv_rms = rsqrtf(shared[0] / (float)channels + eps); \
-    /* Apply normalization: out[b,c,t] = x[b,c,t] * inv_rms * weight[c] */ \
+    float inv_rms = rsqrtf(red[0] / (float)channels + eps); \
+    /* Pass 2: write output from cached x values (no second global read) */ \
     for (int c = threadIdx.x; c < channels; c += block_size) { \
-        int off = b * channels * time_len + c * time_len + t; \
-        float xv = static_cast<float>(x[off]); \
         float wv_scaled = static_cast<float>(weight[c]) * inv_rms; \
-        out[off] = static_cast<TYPENAME>(xv * wv_scaled); \
+        out[base + c * time_len] = static_cast<TYPENAME>(x_cache[c] * wv_scaled); \
     } \
 }
 

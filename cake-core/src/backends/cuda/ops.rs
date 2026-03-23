@@ -857,10 +857,12 @@ impl candle_core::CustomOp2 for RmsNormChannel {
                 None => candle_core::bail!("rms_norm_channel: weight must be contiguous"),
             };
             let block_size: u32 = if channels < 1024 { 32 } else { 1024 };
+            // Shared memory: channels floats for x_cache + 32 floats for reduction
+            let smem_bytes = ((channels as u32) + 32) * 4;
             let cfg = LaunchConfig {
                 grid_dim: (n_rows as u32, 1, 1),
                 block_dim: (block_size, 1, 1),
-                shared_mem_bytes: 0,
+                shared_mem_bytes: smem_bytes,
             };
             let func = dev.get_or_load_custom_func(
                 &kernel_name::<T>("rms_norm_channel"),
