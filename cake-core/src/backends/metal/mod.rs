@@ -614,10 +614,8 @@ impl ComputeBackend for MetalBackend {
         q: &Tensor, k: &Tensor, v: &Tensor,
         scale: f32, causal: bool,
     ) -> Result<Tensor> {
-        let q = q.to_dtype(DType::F32)?;
-        let k = k.to_dtype(DType::F32)?;
-        let v = v.to_dtype(DType::F32)?;
-        candle_nn::ops::sdpa(&q, &k, &v, None, causal, scale, 1.0)
+        // Metal SDPA natively supports F16, F32, BF16 — no dtype conversion needed
+        candle_nn::ops::sdpa(q, k, v, None, causal, scale, 1.0)
     }
 
     // ── Fused activations (MSL shaders) ──────────────────────────────
