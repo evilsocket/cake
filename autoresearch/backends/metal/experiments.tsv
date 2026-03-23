@@ -37,4 +37,5 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 035	2026-03-23T23:10:00	17280de	59652808192	PASS	PASS	keep	Fuse adaln_modulate into single MSL kernel (3 dispatches → 1)
 036	2026-03-23T23:20:00	c78a958	63751747072	PASS	PASS	keep	Relax causal constraint in fused attention (causal=true ok for seq_len=1)
 037	2026-03-23T23:35:00	0d1b2e8	64067161088	PASS	PASS	keep	Fused standalone SiLU MSL kernel (4 dispatches → 1)
+038	2026-03-23T23:45:00	48e77db	57197404928	PASS	PASS	keep	Fused sigmoid MSL kernel with fast::exp
 ---	Metal: 36.4 tok/s avg vs CPU: 22.9 tok/s (+59%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
