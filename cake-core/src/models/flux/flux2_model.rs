@@ -31,13 +31,19 @@ pub fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor
 /// Returns (cos, sin) each of shape [S, head_dim] with repeat_interleave.
 #[derive(Debug, Clone)]
 pub struct Flux2PosEmbed {
-    theta: usize,
     axes_dim: Vec<usize>,
+    /// Pre-computed inverse frequencies per axis (cached to avoid reallocation)
+    inv_freqs: Vec<Vec<f64>>,
 }
 
 impl Flux2PosEmbed {
     fn new(theta: usize, axes_dim: Vec<usize>) -> Self {
-        Self { theta, axes_dim }
+        let theta_f = theta as f64;
+        let inv_freqs: Vec<Vec<f64>> = axes_dim.iter().map(|&dim| {
+            (0..dim).step_by(2).map(|j| 1.0 / theta_f.powf(j as f64 / dim as f64)).collect()
+        }).collect();
+        let _ = theta; // used for inv_freqs computation above
+        Self { axes_dim, inv_freqs }
     }
 
     /// Public constructor for testing.
@@ -47,37 +53,30 @@ impl Flux2PosEmbed {
 
     /// Compute (cos, sin) PE for given position IDs [S, num_axes].
     pub fn forward(&self, ids: &Tensor) -> Result<(Tensor, Tensor)> {
-        let mut all_cos = Vec::new();
-        let mut all_sin = Vec::new();
+        let mut all_cos = Vec::with_capacity(self.axes_dim.len());
+        let mut all_sin = Vec::with_capacity(self.axes_dim.len());
         let pos = ids.to_dtype(DType::F64)?;
+        let seq_len = ids.dim(0)?;
 
-        for i in 0..self.axes_dim.len() {
-            let dim = self.axes_dim[i];
+        for (i, &dim) in self.axes_dim.iter().enumerate() {
             let half = dim / 2;
-            let p = pos.get_on_dim(D::Minus1, i)?; // [S]
-            let theta = self.theta as f64;
+            let p = pos.get_on_dim(D::Minus1, i)?;
 
-            let inv_freq: Vec<f64> = (0..dim)
-                .step_by(2)
-                .map(|j| 1.0 / theta.powf(j as f64 / dim as f64))
-                .collect();
-            let inv_freq = Tensor::from_vec(inv_freq, (1, half), ids.device())?
-                .to_dtype(DType::F64)?;
+            let inv_freq = Tensor::from_slice(&self.inv_freqs[i], (1, half), ids.device())?;
 
-            let freqs = p.unsqueeze(1)?.broadcast_mul(&inv_freq)?; // [S, half]
+            let freqs = p.unsqueeze(1)?.broadcast_mul(&inv_freq)?;
             let cos = freqs.cos()?.to_dtype(DType::F32)?;
             let sin = freqs.sin()?.to_dtype(DType::F32)?;
 
-            // repeat_interleave(2): each frequency applies to a pair of elements
-            // [S, half] → [S, dim] by repeating each value twice
-            let cos = cos.unsqueeze(2)?.broadcast_as((ids.dim(0)?, half, 2))?.reshape((ids.dim(0)?, dim))?;
-            let sin = sin.unsqueeze(2)?.broadcast_as((ids.dim(0)?, half, 2))?.reshape((ids.dim(0)?, dim))?;
+            // repeat_interleave(2): [S, half] → [S, dim]
+            let cos = cos.unsqueeze(2)?.broadcast_as((seq_len, half, 2))?.reshape((seq_len, dim))?;
+            let sin = sin.unsqueeze(2)?.broadcast_as((seq_len, half, 2))?.reshape((seq_len, dim))?;
 
             all_cos.push(cos);
             all_sin.push(sin);
         }
 
-        let cos = Tensor::cat(&all_cos, D::Minus1)?; // [S, head_dim]
+        let cos = Tensor::cat(&all_cos, D::Minus1)?;
         let sin = Tensor::cat(&all_sin, D::Minus1)?;
         Ok((cos, sin))
     }
