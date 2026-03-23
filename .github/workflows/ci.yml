@@ -47,8 +47,8 @@ jobs:
       - name: Protocol tests
         run: cargo test -p cake-core --test protocol
 
-  build-android:
-    name: Build (Android aarch64)
+  test-android:
+    name: Test (Android aarch64)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -101,23 +101,17 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: cargo ndk -t aarch64-linux-android clippy -p cake-core --lib --no-default-features --features "llama,qwen2,qwen3_5" -p cake-mobile -- -D warnings
 
-      - name: Compile tests (cake-core lib, Android)
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: cargo ndk -t aarch64-linux-android test -p cake-core --lib --no-default-features --features "llama,qwen2,qwen3_5,qwen3,qwen3_moe,qwen3_5_moe,phi4,mistral,gemma3,falcon3,olmo2,exaone4,flux,vibevoice,luxtts" --no-run
+      - name: Unit tests (cake-core lib)
+        run: cargo test -p cake-core --lib
 
-      - name: Compile tests (cake-core unit, Android)
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: cargo ndk -t aarch64-linux-android test -p cake-core --test unit --no-default-features --features "llama,qwen2,qwen3_5,qwen3,qwen3_moe,qwen3_5_moe,phi4,mistral,gemma3,falcon3,olmo2,exaone4,flux,vibevoice,luxtts" --no-run
+      - name: Unit tests (cake-core external)
+        run: cargo test -p cake-core --test unit
 
-      - name: Compile tests (cake-core protocol, Android)
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: cargo ndk -t aarch64-linux-android test -p cake-core --test protocol --no-default-features --features "llama,qwen2,qwen3_5,qwen3,qwen3_moe,qwen3_5_moe,phi4,mistral,gemma3,falcon3,olmo2,exaone4,flux,vibevoice,luxtts" --no-run
+      - name: Protocol tests
+        run: cargo test -p cake-core --test protocol
 
-  build-ios:
-    name: Build (iOS arm64)
+  test-ios:
+    name: Test (iOS arm64)
     runs-on: macos-latest
     permissions:
       contents: read
@@ -150,20 +144,106 @@ jobs:
           IPHONEOS_DEPLOYMENT_TARGET: "16.0"
         run: cargo clippy --target=aarch64-apple-ios -p cake-core --lib --no-default-features --features "llama,qwen2,qwen3_5,metal" -p cake-mobile --features metal -- -D warnings
 
-      - name: Compile tests (cake-core lib, iOS)
-        env:
-          IPHONEOS_DEPLOYMENT_TARGET: "16.0"
-        run: cargo test --target=aarch64-apple-ios -p cake-core --lib --no-default-features --features "llama,qwen2,qwen3_5,qwen3,qwen3_moe,qwen3_5_moe,phi4,mistral,gemma3,falcon3,olmo2,exaone4,flux,vibevoice,luxtts,metal" --no-run
+      - name: Unit tests (cake-core lib, Metal)
+        run: cargo test -p cake-core --lib --features metal
 
-      - name: Compile tests (cake-core unit, iOS)
-        env:
-          IPHONEOS_DEPLOYMENT_TARGET: "16.0"
-        run: cargo test --target=aarch64-apple-ios -p cake-core --test unit --no-default-features --features "llama,qwen2,qwen3_5,qwen3,qwen3_moe,qwen3_5_moe,phi4,mistral,gemma3,falcon3,olmo2,exaone4,flux,vibevoice,luxtts,metal" --no-run
+      - name: Unit tests (cake-core external, Metal)
+        run: cargo test -p cake-core --test unit --features metal
 
-      - name: Compile tests (cake-core protocol, iOS)
+      - name: Protocol tests (Metal)
+        run: cargo test -p cake-core --test protocol --features metal
+
+  test-features:
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-cuda
+            os: ubuntu-latest
+            features: cuda
+            cuda: "12.4.0"
+            compute_cap: "89"
+
+          - name: linux-flash-attn
+            os: ubuntu-latest
+            features: flash-attn
+            cuda: "12.4.0"
+            compute_cap: "89"
+
+          - name: linux-vulkan
+            os: ubuntu-latest
+            features: vulkan
+            cuda: ""
+            compute_cap: ""
+
+          - name: linux-rocm
+            os: ubuntu-latest
+            features: rocm
+            cuda: ""
+            compute_cap: ""
+
+          - name: macos-metal
+            os: macos-latest
+            features: metal
+            cuda: ""
+            compute_cap: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y lld
+
+      - name: Install CUDA toolkit
+        if: matrix.cuda != ''
+        uses: Jimver/cuda-toolkit@v0.2.30
+        with:
+          cuda: ${{ matrix.cuda }}
+          method: local
+          linux-local-args: '["--toolkit"]'
+          log-file-suffix: '${{ matrix.name }}.txt'
+
+      - name: Create CUDA runtime stub
+        if: matrix.cuda != ''
+        run: |
+          STUBS_DIR="${CUDA_PATH}/lib64/stubs"
+          sudo ln -s "${STUBS_DIR}/libcuda.so" "${STUBS_DIR}/libcuda.so.1"
+          echo "LD_LIBRARY_PATH=${STUBS_DIR}:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ matrix.name }}-
+
+      - name: Unit tests (cake-core lib)
         env:
-          IPHONEOS_DEPLOYMENT_TARGET: "16.0"
-        run: cargo test --target=aarch64-apple-ios -p cake-core --test protocol --no-default-features --features "llama,qwen2,qwen3_5,qwen3,qwen3_moe,qwen3_5_moe,phi4,mistral,gemma3,falcon3,olmo2,exaone4,flux,vibevoice,luxtts,metal" --no-run
+          CUDA_COMPUTE_CAP: ${{ matrix.compute_cap }}
+        run: cargo test -p cake-core --lib --features "${{ matrix.features }}"
+
+      - name: Unit tests (cake-core external)
+        env:
+          CUDA_COMPUTE_CAP: ${{ matrix.compute_cap }}
+        run: cargo test -p cake-core --test unit --features "${{ matrix.features }}"
+
+      - name: Protocol tests
+        env:
+          CUDA_COMPUTE_CAP: ${{ matrix.compute_cap }}
+        run: cargo test -p cake-core --test protocol --features "${{ matrix.features }}"
 
   clippy:
     name: Clippy
@@ -186,5 +266,5 @@ jobs:
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-clippy-
 
-      - name: Clippy (cake-core + cake-cli)
-        run: cargo clippy -p cake-core --lib --tests -p cake-cli -- -D warnings
+      - name: Clippy (cake-core + cake-cli, all features)
+        run: cargo clippy -p cake-core --lib --tests -p cake-cli --features "vulkan,rocm" -- -D warnings
