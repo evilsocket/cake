@@ -86,6 +86,29 @@ kernel void stable_softplus_f16(
     output[idx] = max(x, sp);
 }
 
+// ─── silu (standalone) ──────────────────────────────────────────────
+kernel void silu_f32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    float x = input[idx];
+    output[idx] = x / (1.0f + fast::exp(-x));
+}
+
+kernel void silu_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    half x = input[idx];
+    output[idx] = x * half(1.0f / (1.0f + fast::exp(-float(x))));
+}
+
 // ─── silu_mul ───────────────────────────────────────────────────────
 kernel void silu_mul_f32(
     device const float* gate [[buffer(0)]],
