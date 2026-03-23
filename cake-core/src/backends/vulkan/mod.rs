@@ -566,10 +566,15 @@ impl VulkanBackend {
                 return Ok(buf.clone());
             }
         }
-        // View cache disabled — causes subtle precision issues during prefill.
-        // The F32 contiguous result of a non-contiguous F16 view can differ
-        // between calls due to dtype conversion ordering.
-        let vk: Option<(usize, usize, usize, u64)> = None;
+        // Check view cache (handles weight.t() which creates new TensorIds but same storage).
+        // CRITICAL: without this, each .t() call leaks a GPU buffer (new TensorId → cache miss → new alloc).
+        let vk = Self::view_key(tensor);
+        if let Some(ref key) = vk {
+            let cache = self.weight_cache.lock().unwrap();
+            if let Some(buf) = cache.views.get(key) {
+                return Ok(buf.clone());
+            }
+        }
         // Upload: convert to f32 contiguous, copy to GPU
         let tensor = if tensor.dtype() == DType::F32 { tensor.clone() } else { tensor.to_dtype(DType::F32)? };
         let tensor = if tensor.is_contiguous() { tensor } else { tensor.contiguous()? };
@@ -598,10 +603,13 @@ impl VulkanBackend {
         }
         let buf = Arc::new(buf);
         let mut cache = self.weight_cache.lock().unwrap();
-        cache.buffers.insert(id, buf.clone());
-        // Also insert into view cache so future .t() lookups hit
         if let Some(key) = vk {
+            // Non-contiguous view (e.g., weight.t()): store in view cache only.
+            // Don't store by TensorId since .t() creates new IDs each call (would leak).
             cache.views.insert(key, buf.clone());
+        } else {
+            // Contiguous tensor with stable TensorId: store in buffers cache.
+            cache.buffers.insert(id, buf.clone());
         }
         Ok(buf)
     }
