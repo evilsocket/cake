@@ -44,14 +44,14 @@ const ALL_KERNELS: &[&str] = &[
 
 struct PipelineCache {
     pipelines: RwLock<HashMap<&'static str, candle_metal_kernels::metal::ComputePipeline>>,
-    compile_lock: Mutex<()>,
+    library: Mutex<Option<candle_metal_kernels::metal::Library>>,
 }
 
 impl PipelineCache {
     fn new() -> Self {
         Self {
             pipelines: RwLock::new(HashMap::new()),
-            compile_lock: Mutex::new(()),
+            library: Mutex::new(None),
         }
     }
 
@@ -60,31 +60,36 @@ impl PipelineCache {
         device: &candle_core::MetalDevice,
         kernel_name: &'static str,
     ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
+        // Fast path: pipeline already cached
         if let Ok(cache) = self.pipelines.read() {
             if let Some(pipeline) = cache.get(kernel_name) {
                 return Ok(pipeline.clone());
             }
         }
-        let _guard = self.compile_lock.lock().map_err(|e| candle_core::Error::Msg(format!("compile lock: {e}")))?;
+        // Slow path: compile library if needed, create pipeline for requested kernel
+        let mut lib_guard = self.library.lock().map_err(|e| candle_core::Error::Msg(format!("library lock: {e}")))?;
+        // Double-check after acquiring lock
         if let Ok(cache) = self.pipelines.read() {
             if let Some(pipeline) = cache.get(kernel_name) {
                 return Ok(pipeline.clone());
             }
         }
-        let lib = device.new_library_with_source(FUSED_OPS_MSL, None)
-            .map_err(|e| candle_core::Error::Msg(format!("metal shader compile: {e}")))?;
+        let lib = match lib_guard.as_ref() {
+            Some(lib) => lib.clone(),
+            None => {
+                let lib = device.new_library_with_source(FUSED_OPS_MSL, None)
+                    .map_err(|e| candle_core::Error::Msg(format!("metal shader compile: {e}")))?;
+                *lib_guard = Some(lib.clone());
+                lib
+            }
+        };
+        let func = lib.get_function(kernel_name, None)
+            .map_err(|e| candle_core::Error::Msg(format!("metal function {kernel_name}: {e}")))?;
+        let pipeline = device.new_compute_pipeline_state_with_function(&func)
+            .map_err(|e| candle_core::Error::Msg(format!("metal pipeline {kernel_name}: {e}")))?;
         let mut cache = self.pipelines.write().map_err(|e| candle_core::Error::Msg(format!("pipeline write lock: {e}")))?;
-        for &name in ALL_KERNELS {
-            if cache.contains_key(name) { continue; }
-            if let Ok(func) = lib.get_function(name, None) {
-                if let Ok(pipeline) = device.new_compute_pipeline_state_with_function(&func) {
-                    cache.insert(name, pipeline);
-                }
-            }
-        }
-        cache.get(kernel_name).cloned().ok_or_else(|| {
-            candle_core::Error::Msg(format!("metal kernel not found: {kernel_name}"))
-        })
+        cache.insert(kernel_name, pipeline.clone());
+        Ok(pipeline)
     }
 }
 
