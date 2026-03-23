@@ -295,6 +295,7 @@ impl Message {
     }
 
     /// Estimate serialized size to pre-allocate output buffers.
+    #[inline]
     fn serialized_size_hint(&self) -> usize {
         match self {
             // Tensor messages: enum tag + dtype + shape overhead + data length
