@@ -291,6 +291,7 @@ jobs:
     needs: [test, test-android, test-ios, test-features]
     permissions:
       contents: read
+      pull-requests: write
     steps:
       - name: Download coverage artifacts
         uses: actions/download-artifact@v4
@@ -337,17 +338,64 @@ jobs:
                   platform, accel = name_map.get(dirname, (dirname, 'Unknown'))
                   rows.append((platform, accel, totals['lines'], totals['functions'], totals['regions']))
 
-          summary = os.environ.get('GITHUB_STEP_SUMMARY', '/dev/stdout')
-          with open(summary, 'a') as out:
-              out.write('## 📊 Code Coverage by Platform & Acceleration\n\n')
-              if rows:
-                  out.write('| Platform | Acceleration | Line Coverage | Function Coverage | Region Coverage |\n')
-                  out.write('|----------|-------------|---------------|-------------------|------------------|\n')
-                  for platform, accel, lines, funcs, regions in rows:
-                      lp = f"{lines['percent']:.1f}% ({lines['covered']}/{lines['count']})"
-                      fp = f"{funcs['percent']:.1f}% ({funcs['covered']}/{funcs['count']})"
-                      rp = f"{regions['percent']:.1f}% ({regions['covered']}/{regions['count']})"
-                      out.write(f'| {platform} | {accel} | {lp} | {fp} | {rp} |\n')
-              else:
-                  out.write('No coverage data available.\n')
+          lines_out = []
+          lines_out.append('## 📊 Code Coverage by Platform & Acceleration\n')
+          if rows:
+              lines_out.append('| Platform | Acceleration | Line Coverage | Function Coverage | Region Coverage |')
+              lines_out.append('|----------|-------------|---------------|-------------------|------------------|')
+              for platform, accel, lines, funcs, regions in rows:
+                  lp = f"{lines['percent']:.1f}% ({lines['covered']}/{lines['count']})"
+                  fp = f"{funcs['percent']:.1f}% ({funcs['covered']}/{funcs['count']})"
+                  rp = f"{regions['percent']:.1f}% ({regions['covered']}/{regions['count']})"
+                  lines_out.append(f'| {platform} | {accel} | {lp} | {fp} | {rp} |')
+          else:
+              lines_out.append('No coverage data available.')
+
+          table = '\n'.join(lines_out) + '\n'
+
+          # Print to job log
+          print(table)
+
+          # Write to job summary
+          summary_path = os.environ.get('GITHUB_STEP_SUMMARY')
+          if summary_path:
+              with open(summary_path, 'a') as f:
+                  f.write(table)
+
+          # Save for PR comment step
+          with open('coverage-table.md', 'w') as f:
+              f.write(table)
           PYEOF
+
+      - name: Post coverage comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('coverage-table.md', 'utf8');
+            const marker = '<!-- coverage-report -->';
+            const fullBody = marker + '\n' + body;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.startsWith(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: fullBody,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: fullBody,
+              });
+            }
