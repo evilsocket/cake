@@ -303,14 +303,6 @@ pub struct FluxArgs {
     /// Image width for FLUX generation.
     #[arg(long = "flux-width", default_value_t = 1024, id = "flux_width")]
     pub width: usize,
-
-    /// Number of denoising steps (20 for FLUX.1-dev, 4 for distilled FLUX.2-klein).
-    #[arg(long = "flux-steps", default_value_t = 20, id = "flux_steps")]
-    pub num_steps: usize,
-
-    /// Guidance scale for classifier-free guidance.
-    #[arg(long = "flux-guidance", default_value_t = 3.5, id = "flux_guidance")]
-    pub guidance_scale: f64,
 }
 
 #[derive(Clone, Parser, Default, Debug)]
@@ -385,8 +377,8 @@ pub struct ImageGenerationArgs {
     tracing: bool,
 
     /// The number of steps to run the diffusion for.
-    #[arg(long = "sd-n-steps")]
-    #[serde(rename(deserialize = "sd-n-steps"))]
+    #[arg(long = "n-steps")]
+    #[serde(rename(deserialize = "n-steps"))]
     n_steps: Option<usize>,
 
     /// The number of samples to generate iteratively.
@@ -404,8 +396,8 @@ pub struct ImageGenerationArgs {
     #[serde(rename(deserialize = "sd-intermediary-images"), default)]
     intermediary_images: usize,
 
-    #[arg(long = "sd-guidance-scale")]
-    #[serde(rename(deserialize = "sd-guidance-scale"))]
+    #[arg(long = "guidance-scale")]
+    #[serde(rename(deserialize = "guidance-scale"))]
     guidance_scale: Option<f64>,
 
     #[arg(long = "sd-img2img", value_name = "FILE")]
@@ -423,8 +415,8 @@ pub struct ImageGenerationArgs {
     img2img_strength: f64,
 
     /// The seed to use when generating random samples.
-    #[arg(long = "sd-seed")]
-    #[serde(rename(deserialize = "sd-seed"))]
+    #[arg(long = "image-seed")]
+    #[serde(rename(deserialize = "image-seed"))]
     image_seed: Option<u64>,
 }
 

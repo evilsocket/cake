@@ -232,7 +232,7 @@ curl http://localhost:8080/api/v1/image \
     "image_args": {
       "prompt": "An old man sitting on the chair at seaside",
       "sd-num-samples": 1,
-      "sd-image-seed": 2439383
+      "image-seed": 2439383
     }
 }'
 ```

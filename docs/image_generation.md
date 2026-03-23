@@ -43,8 +43,8 @@ cake run black-forest-labs/FLUX.2-klein-4B \
 |----------|---------|-------------|
 | `--flux-height` | 1024 | Image height in pixels |
 | `--flux-width` | 1024 | Image width in pixels |
-| `--flux-steps` | 20 | Denoising steps (FLUX.2-klein uses 4) |
-| `--flux-guidance` | 3.5 | CFG guidance scale |
+| `--n-steps` | 20 | Denoising steps (FLUX.2-klein uses 4) |
+| `--guidance-scale` | 3.5 | CFG guidance scale |
 | `--image-output` | `output.png` | Output file path (PNG) |
 
 ## Stable Diffusion
@@ -55,7 +55,7 @@ cake run black-forest-labs/FLUX.2-klein-4B \
 cake run evilsocket/flux1-dev \
   "An old man sitting on the chair at seaside" \
   --model-type image-model \
-  --sd-version xl --sd-num-samples 1 --sd-image-seed 2439383
+  --sd-version xl --sd-num-samples 1 --image-seed 2439383
 ```
 
 ### Distributed Generation
@@ -112,7 +112,7 @@ curl http://master-ip:8080/api/v1/image \
     "image_args": {
       "prompt": "An old man sitting on the chair at seaside",
       "sd-num-samples": 1,
-      "sd-image-seed": 2439383
+      "image-seed": 2439383
     }
 }'
 ```
@@ -134,4 +134,4 @@ See the full [REST API Reference](api.md) for details.
 |----------|---------|-------------|
 | `--sd-version` | `v1-5` | SD version to use |
 | `--sd-num-samples` | 1 | Number of images to generate |
-| `--sd-image-seed` | random | Seed for reproducibility |
+| `--image-seed` | random | Seed for reproducibility |

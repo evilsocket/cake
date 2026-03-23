@@ -81,10 +81,11 @@ impl ImageGenerator for FluxGen {
         let ImageGenerationArgs {
             image_prompt,
             image_seed,
+            n_steps,
             ..
         } = args;
 
-        let num_steps = self.context.args.flux_args.num_steps;
+        let num_steps = n_steps.unwrap_or(20);
 
         if let Some(seed) = image_seed {
             self.context.device.set_seed(*seed)?;

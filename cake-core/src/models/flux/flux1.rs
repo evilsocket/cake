@@ -162,11 +162,13 @@ impl ImageGenerator for Flux1Gen {
         let ImageGenerationArgs {
             image_prompt,
             image_seed,
+            n_steps,
+            guidance_scale,
             ..
         } = args;
 
-        let num_steps = self.context.args.flux_args.num_steps;
-        let guidance_scale = self.context.args.flux_args.guidance_scale;
+        let num_steps = n_steps.unwrap_or(20);
+        let guidance_scale = guidance_scale.unwrap_or(3.5);
         let dev = self.context.device.clone();
 
         if let Some(seed) = image_seed {
