@@ -251,6 +251,13 @@ impl VulkanBackend {
     /// are uploaded once; activation tensors are uploaded each time.
     fn get_or_upload(&self, tensor: &Tensor) -> Result<Arc<wgpu::Buffer>> {
         let id = tensor.id();
+        // Fast path: check cache before expensive CPU conversion
+        {
+            let cache = self.buffer_cache.lock().unwrap();
+            if let Some(buf) = cache.buffers.get(&id) {
+                return Ok(buf.clone());
+            }
+        }
         let data = Self::to_f32_vec(tensor)?;
         let mut cache = self.buffer_cache.lock().unwrap();
         Ok(cache.get_or_upload(id, &data, &self.gpu))
