@@ -19,3 +19,6 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 017	2026-03-23T06:20:00	a9ae5ff	498957056	PASS	PASS	rerun	Cached binary: actual runtime ~500ms (prev scores were compilation time)
 018	2026-03-23T06:35:00	97c9a11	48260664064	PASS	PASS	keep	Use fma in add_scaled (single-instruction multiply-add)
 019	2026-03-23T06:50:00	2361f79	49699390976	PASS	PASS	keep	Use fma in conv kernels for accumulation
+020	2026-03-23T07:05:00	230d40e	48644560128	PASS	PASS	keep	Use precise::recip for sigmoid (avoids division)
+021	2026-03-23T07:20:00	a62b8e6	49768460032	PASS	PASS	keep	Branchless select in stable_softplus
+022	2026-03-23T07:35:00	9d55baf	48410481920	PASS	PASS	keep	Use precise::recip for silu in rms_norm_gated
