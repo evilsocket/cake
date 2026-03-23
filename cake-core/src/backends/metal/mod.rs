@@ -13,7 +13,7 @@ use candle_core::{backend::BackendStorage as _, CpuStorage, DType, Device, Layou
 use super::ComputeBackend;
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 // ─── MSL shader source (loaded from ops.msl) ───────────────────────
 const FUSED_OPS_MSL: &str = include_str!("ops.msl");
@@ -39,12 +39,17 @@ const ALL_KERNELS: &[&str] = &[
 ];
 
 struct PipelineCache {
-    pipelines: Mutex<HashMap<&'static str, candle_metal_kernels::metal::ComputePipeline>>,
+    // RwLock: reads (cache hits) are concurrent, writes (compilation) are exclusive
+    pipelines: RwLock<HashMap<&'static str, candle_metal_kernels::metal::ComputePipeline>>,
+    compile_lock: Mutex<()>,
 }
 
 impl PipelineCache {
     fn new() -> Self {
-        Self { pipelines: Mutex::new(HashMap::new()) }
+        Self {
+            pipelines: RwLock::new(HashMap::new()),
+            compile_lock: Mutex::new(()),
+        }
     }
 
     fn get_or_create(
@@ -52,13 +57,23 @@ impl PipelineCache {
         device: &candle_core::MetalDevice,
         kernel_name: &'static str,
     ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
-        let mut cache = self.pipelines.lock().map_err(|e| candle_core::Error::Msg(format!("pipeline cache lock: {e}")))?;
-        if let Some(pipeline) = cache.get(kernel_name) {
-            return Ok(pipeline.clone());
+        // Fast read-only path (concurrent)
+        if let Ok(cache) = self.pipelines.read() {
+            if let Some(pipeline) = cache.get(kernel_name) {
+                return Ok(pipeline.clone());
+            }
         }
-        // First access — compile library and create ALL pipelines at once
+        // Slow path: compile under exclusive lock
+        let _guard = self.compile_lock.lock().map_err(|e| candle_core::Error::Msg(format!("compile lock: {e}")))?;
+        // Double-check after acquiring lock
+        if let Ok(cache) = self.pipelines.read() {
+            if let Some(pipeline) = cache.get(kernel_name) {
+                return Ok(pipeline.clone());
+            }
+        }
         let lib = device.new_library_with_source(FUSED_OPS_MSL, None)
             .map_err(|e| candle_core::Error::Msg(format!("metal shader compile: {e}")))?;
+        let mut cache = self.pipelines.write().map_err(|e| candle_core::Error::Msg(format!("pipeline write lock: {e}")))?;
         for &name in ALL_KERNELS {
             if cache.contains_key(name) { continue; }
             if let Ok(func) = lib.get_function(name, None) {
