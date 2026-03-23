@@ -161,7 +161,8 @@ impl Topology {
 
     /// Return a set of all layer names assigned to workers in this topology.
     pub fn all_worker_layers(&self) -> std::collections::HashSet<String> {
-        let mut layers = std::collections::HashSet::new();
+        let total: usize = self.0.values().map(|n| n.layers.len()).sum();
+        let mut layers = std::collections::HashSet::with_capacity(total);
         for node in self.0.values() {
             for layer in &node.layers {
                 layers.insert(layer.clone());
