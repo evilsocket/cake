@@ -294,11 +294,12 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
     for (var t: u32 = 0u; t < num_tiles; t++) {
         let tk = t * TILE_K;
 
-        // Cooperative load tile_a[32, 32]: 256 threads, 4 elements each
-        for (var i: u32 = 0u; i < 4u; i++) {
-            let idx = lin * 4u + i;
-            let tr = idx / TILE_K;
-            let tc = idx % TILE_K;
+        // Cooperative load tile_a[32, 32]: row-coalesced pattern.
+        // 256 threads cover 8 rows per iteration (32 threads/row), 4 iterations for 32 rows.
+        // Adjacent threads in a wavefront read adjacent columns — perfectly coalesced.
+        for (var r: u32 = 0u; r < 4u; r++) {
+            let tr = r * 8u + lin / 32u;
+            let tc = lin % 32u;
             let a_row = wg_row + tr;
             let a_col = tk + tc;
             if (a_row < M && a_col < K) {
@@ -308,11 +309,12 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
             }
         }
 
-        // Cooperative load tile_b[32, 64]: 256 threads, 8 elements each
-        for (var i: u32 = 0u; i < 8u; i++) {
-            let idx = lin * 8u + i;
-            let tr = idx / TILE_N;
-            let tc = idx % TILE_N;
+        // Cooperative load tile_b[32, 64]: row-coalesced pattern.
+        // 256 threads cover 4 rows per iteration (64 threads/row), 8 iterations for 32 rows.
+        // Adjacent threads in a wavefront read adjacent columns — perfectly coalesced.
+        for (var r: u32 = 0u; r < 8u; r++) {
+            let tr = r * 4u + lin / 64u;
+            let tc = lin % 64u;
             let b_row = tk + tr;
             let b_col = wg_col + tc;
             if (b_row < K && b_col < N) {
