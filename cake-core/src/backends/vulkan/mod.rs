@@ -49,21 +49,22 @@ impl GpuBufferCache {
         id: TensorId,
         data: &[f32],
         gpu: &wgpu::Device,
+        queue: &wgpu::Queue,
     ) -> Arc<wgpu::Buffer> {
         if let Some(buf) = self.buffers.get(&id) {
             return buf.clone();
         }
         let size = (data.len() * 4) as u64;
+        let bucket = size.next_power_of_two().max(256);
         let buf = gpu.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: true,
+            size: bucket,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
-        buf.slice(..)
-            .get_mapped_range_mut()
-            .copy_from_slice(bytemuck::cast_slice(data));
-        buf.unmap();
+        queue.write_buffer(&buf, 0, bytemuck::cast_slice(data));
         let buf = Arc::new(buf);
         self.buffers.insert(id, buf.clone());
         buf
@@ -260,22 +261,22 @@ impl VulkanBackend {
         }
         let data = Self::to_f32_vec(tensor)?;
         let mut cache = self.buffer_cache.lock().unwrap();
-        Ok(cache.get_or_upload(id, &data, &self.gpu))
+        Ok(cache.get_or_upload(id, &data, &self.gpu, &self.queue))
     }
 
     /// Upload raw f32 data without caching (for data not tied to a tensor).
     fn upload_uncached(&self, data: &[f32]) -> wgpu::Buffer {
         let size = (data.len() * 4) as u64;
+        let bucket = size.next_power_of_two().max(256);
         let buf = self.gpu.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: true,
+            size: bucket,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
-        buf.slice(..)
-            .get_mapped_range_mut()
-            .copy_from_slice(bytemuck::cast_slice(data));
-        buf.unmap();
+        self.queue.write_buffer(&buf, 0, bytemuck::cast_slice(data));
         buf
     }
 
