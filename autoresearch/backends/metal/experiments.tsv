@@ -10,4 +10,7 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 008	2026-03-23T07:50:00	ac5e9e6	56221574912	PASS	PASS	keep	Use fast::exp in silu_mul, softplus, conv_silu (keep std exp in norms)
 009	2026-03-23T08:00:00	f744fbc	-	PASS	PASS	keep	Simplify attention F32 promotion
 010	2026-03-23T08:10:00	9a3332a	53269377024	PASS	PASS	keep	Wire F8E4M3 dequant MSL kernels (GPU-side, no CPU roundtrip)
----	Metal: 25.65 tok/s vs CPU: 23.77 tok/s (+8%) on Qwen3.5-0.8B (M3 Pro)
+011	2026-03-23T08:30:00	298f3c9	52853469952	PASS	PASS	keep	Inline dispatch helpers
+012	2026-03-23T08:40:00	da8a72f	-	PASS	PASS	keep	Merge GDN sync 1+2 (4→3 syncs)
+013	2026-03-23T08:50:00	9b4e642	-	PASS	PASS	keep	Merge GDN sync 3+4 (3→2 syncs) — 29.66 tok/s (+12%)
+---	Metal: 29.7 tok/s vs CPU: 23.8 tok/s (+25%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
