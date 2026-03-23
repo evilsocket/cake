@@ -272,7 +272,18 @@ fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Te
         return attn.transpose(1, 2)?.to_dtype(q.dtype());
     }
 
-    // CPU/Metal/CUDA-without-flash-attn fallback: manual SDPA in F32
+    // Metal: try F32 SDPA (non-causal, no mask)
+    #[cfg(feature = "metal")]
+    if matches!(q.device(), candle_core::Device::Metal(_)) {
+        let q32 = q.to_dtype(DType::F32)?;
+        let k32 = k.to_dtype(DType::F32)?;
+        let v32 = v.to_dtype(DType::F32)?;
+        if let Ok(attn) = candle_nn::ops::sdpa(&q32, &k32, &v32, None, false, scale_factor as f32, 1.0) {
+            return Ok(attn.to_dtype(q.dtype())?);
+        }
+    }
+
+    // CPU fallback: manual SDPA in F32
     let in_dtype = q.dtype();
     let q = q.flatten_to(batch_dims.len() - 1)?.to_dtype(DType::F32)?;
     let k = k.flatten_to(batch_dims.len() - 1)?.to_dtype(DType::F32)?;
