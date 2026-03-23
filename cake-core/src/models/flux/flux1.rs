@@ -167,8 +167,8 @@ impl ImageGenerator for Flux1Gen {
             ..
         } = args;
 
-        let num_steps = n_steps.unwrap_or(20);
-        let guidance_scale = guidance_scale.unwrap_or(3.5);
+        let num_steps = n_steps.unwrap_or(20); // default 20 for FLUX.1-dev
+        let guidance_scale = guidance_scale.unwrap_or(3.5); // default 3.5 for FLUX.1-dev CFG
         let dev = self.context.device.clone();
 
         if let Some(seed) = image_seed {

@@ -52,7 +52,7 @@ cake run black-forest-labs/FLUX.2-klein-4B \
 ### Single Node
 
 ```sh
-cake run evilsocket/flux1-dev \
+cake run stabilityai/stable-diffusion-xl-base-1.0 \
   "An old man sitting on the chair at seaside" \
   --model-type image-model \
   --sd-version xl --sd-num-samples 1 --image-seed 2439383

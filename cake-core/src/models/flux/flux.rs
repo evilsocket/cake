@@ -85,7 +85,7 @@ impl ImageGenerator for FluxGen {
             ..
         } = args;
 
-        let num_steps = n_steps.unwrap_or(20);
+        let num_steps = n_steps.unwrap_or(20); // default 20; use --n-steps 4 for FLUX.2-klein
 
         if let Some(seed) = image_seed {
             self.context.device.set_seed(*seed)?;
