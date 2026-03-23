@@ -355,10 +355,6 @@ impl VulkanBackend {
         self.dispatch_binary_impl(a, b, entry, 4)
     }
 
-    fn dispatch_binary(&self, a: &Tensor, b: &Tensor, entry: &str) -> Result<Tensor> {
-        self.dispatch_binary_impl(a, b, entry, 1)
-    }
-
     fn dispatch_binary_impl(&self, a: &Tensor, b: &Tensor, entry: &str, elems_per_thread: u32) -> Result<Tensor> {
         let dtype = a.dtype();
         let shape = a.shape().clone();
@@ -420,16 +416,6 @@ impl VulkanBackend {
         entry: &str,
     ) -> Result<Tensor> {
         self.dispatch_ternary_impl(a, b, c, entry, 4)
-    }
-
-    fn dispatch_ternary(
-        &self,
-        a: &Tensor,
-        b: &Tensor,
-        c: &Tensor,
-        entry: &str,
-    ) -> Result<Tensor> {
-        self.dispatch_ternary_impl(a, b, c, entry, 1)
     }
 
     fn dispatch_ternary_impl(
@@ -497,7 +483,11 @@ impl VulkanBackend {
 
     // ── Dispatch: elementwise unary ─────────────────────────────────
 
-    fn dispatch_unary(&self, x: &Tensor, entry: &str) -> Result<Tensor> {
+    fn dispatch_unary_vec4(&self, x: &Tensor, entry: &str) -> Result<Tensor> {
+        self.dispatch_unary_impl(x, entry, 4)
+    }
+
+    fn dispatch_unary_impl(&self, x: &Tensor, entry: &str, elems_per_thread: u32) -> Result<Tensor> {
         let dtype = x.dtype();
         let shape = x.shape().clone();
         let n = x.elem_count();
@@ -536,7 +526,8 @@ impl VulkanBackend {
             let mut p = enc.begin_compute_pass(&Default::default());
             p.set_pipeline(&pipeline);
             p.set_bind_group(0, &bg, &[]);
-            p.dispatch_workgroups((n as u32).div_ceil(WG_ELEM), 1, 1);
+            let threads_needed = (n as u32).div_ceil(elems_per_thread);
+            p.dispatch_workgroups(threads_needed.div_ceil(WG_ELEM), 1, 1);
         }
         let result = Self::from_f32_vec(
             self.download(Some(enc), &buf_out, n),
@@ -769,7 +760,7 @@ impl ComputeBackend for VulkanBackend {
 
     fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
         if x.elem_count() > 32768 {
-            self.dispatch_unary(x, "stable_softplus")
+            self.dispatch_unary_vec4(x, "stable_softplus")
         } else {
             let t88 = Tensor::full(88.0f32, x.shape(), x.device())?.to_dtype(x.dtype())?;
             let clamped = x.minimum(&t88)?;
@@ -788,7 +779,7 @@ impl ComputeBackend for VulkanBackend {
 
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
         if x.elem_count() > 32768 {
-            self.dispatch_binary(x, y, "exp_mul")
+            self.dispatch_binary_vec4(x, y, "exp_mul")
         } else {
             (x * y.exp()?)?.contiguous()
         }
@@ -796,7 +787,7 @@ impl ComputeBackend for VulkanBackend {
 
     fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
         if a.elem_count() > 32768 {
-            self.dispatch_ternary(a, b, c, "sub_mul")
+            self.dispatch_ternary_vec4(a, b, c, "sub_mul")
         } else {
             ((a - b)? * c)?.contiguous()
         }
