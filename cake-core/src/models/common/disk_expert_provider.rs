@@ -86,21 +86,44 @@ impl DiskExpertProvider {
         }
     }
 
+    /// Reinterpret a `Vec<u8>` as `Vec<f32>` without copying.
+    ///
+    /// # Safety
+    /// The buffer must:
+    /// - Have length divisible by 4
+    /// - Be properly aligned for f32 (alignment >= 4, guaranteed by std allocator)
+    /// - Contain valid f32 bytes (guaranteed by pread from safetensors F32 data)
+    #[inline]
+    fn bytes_to_f32_vec(bytes: Vec<u8>) -> Vec<f32> {
+        let byte_len = bytes.len();
+        let f32_len = byte_len / 4;
+        let ptr = bytes.as_ptr();
+        let cap = bytes.capacity();
+        std::mem::forget(bytes);
+        // SAFETY: Vec<u8> from global allocator is aligned >= 8 on 64-bit,
+        // satisfying f32's alignment of 4. Length and capacity are adjusted
+        // from u8 to f32 units. Data is valid F32 from safetensors.
+        unsafe { Vec::from_raw_parts(ptr as *mut f32, f32_len, cap / 4) }
+    }
+
     /// Convert raw TensorData to a candle Tensor with target dtype/device.
     #[inline]
     fn materialize(&self, data: crate::utils::tensor_storage::TensorData) -> Result<Tensor> {
-        // Construct tensor from raw bytes on CPU
         let target_device = if self.needs_device_transfer {
             &self.device
         } else {
             &Device::Cpu
         };
 
+        // Fast path: F32 storage → F32 target, zero-copy via Vec ownership transfer
+        if data.dtype == DType::F32 && self.dtype == DType::F32 {
+            let f32_data = Self::bytes_to_f32_vec(data.bytes);
+            return Tensor::from_vec(f32_data, &*data.shape, target_device);
+        }
+
         let tensor = if data.dtype == self.dtype {
-            // Same dtype: construct directly on target device
             Tensor::from_raw_buffer(&data.bytes, data.dtype, &data.shape, target_device)?
         } else {
-            // Different dtype: construct on CPU, convert, then move
             let tensor = Tensor::from_raw_buffer(&data.bytes, data.dtype, &data.shape, &Device::Cpu)?;
             let tensor = tensor.to_dtype(self.dtype)?;
             if self.needs_device_transfer {
