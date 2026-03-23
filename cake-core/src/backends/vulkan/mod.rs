@@ -718,10 +718,9 @@ impl VulkanBackend {
 
             self.vk_device.update_descriptor_sets(&writes, &[]);
 
-            // Reset fence + command buffer
-            self.vk_device
-                .wait_for_fences(&[self.fence], true, u64::MAX)
-                .expect("wait_for_fences");
+            // Reset fence + command buffer.
+            // Fence is always signaled here: either from SIGNALED init flag (first call)
+            // or from the wait_for_fences at the bottom of the previous dispatch.
             self.vk_device.reset_fences(&[self.fence]).expect("reset_fences");
             self.vk_device
                 .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
