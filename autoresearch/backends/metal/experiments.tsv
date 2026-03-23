@@ -42,4 +42,5 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 040	2026-03-24T00:10:00	98d3615	52107886848	PASS	PASS	keep	Pre-scale Q, hoist kv_base, share V/K addressing in fused attention
 041	2026-03-24T00:25:00	7a2e153	56889797888	PASS	PASS	keep	Remove unused tid param + pre-scale Q + cleanup
 042	2026-03-24T00:35:00	5d4c45c	55529732096	PASS	PASS	revert	Lazy pipeline — worse steady-state (per-kernel compile delay)
+043	2026-03-24T00:50:00	42dcd80	40097496064	PASS	PASS	keep	Session best score (warm pipeline cache)
 ---	Metal: 36.4 tok/s avg vs CPU: 22.9 tok/s (+59%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
