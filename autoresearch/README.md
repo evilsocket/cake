@@ -28,7 +28,9 @@ autoresearch/
 │   ├── fused-ops/              # silu_mul, rms_norm, add3, add_scaled, etc.
 │   └── quantization/           # FP8 dequantization and weight preprocessing
 └── network/                    # Distributed inference protocol
-    └── protocol/               # Serialization, topology, auth, discovery
+    ├── protocol/               # Serialization, topology, auth, discovery
+    ├── inference-io/           # Per-token client↔worker data path
+    └── model-transfer/         # Model weight distribution (zstd, chunking)
 ```
 
 Each task directory contains:
@@ -125,6 +127,8 @@ bash prepare.sh
 | Task | Branch | Target | Benchmarks |
 |------|--------|--------|------------|
 | protocol | `autoresearch/network/protocol` | Serialization, topology, auth, discovery | protocol, serialization, discovery, topology, auth |
+| inference-io | `autoresearch/network/inference-io` | Per-token client↔worker tensor I/O | protocol (encode/decode/roundtrip), serialization |
+| model-transfer | `autoresearch/network/model-transfer` | Model weight distribution to workers | protocol (zstd, crc32, model_data_chunk) |
 
 ## Prerequisites
 
