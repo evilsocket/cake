@@ -904,7 +904,7 @@ impl VulkanBackend {
             &buf_y,
             n,
             &[n as u32, k as u32, 0, 0],
-            ((n as u32).div_ceil(4), 1, 1),
+            ((n as u32).div_ceil(256), 1, 1),
         );
         (result, buf_y)
     }
@@ -1004,7 +1004,7 @@ impl VulkanBackend {
             [m as u32, n as u32, k as u32, 0]
         };
         let workgroups = if is_gemv {
-            ((n as u32).div_ceil(4), 1, 1)
+            ((n as u32).div_ceil(256), 1, 1)
         } else {
             ((m as u32).div_ceil(32), (n as u32).div_ceil(64), 1)
         };
