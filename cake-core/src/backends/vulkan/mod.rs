@@ -774,9 +774,9 @@ impl ComputeBackend for VulkanBackend {
 
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         // GPU dispatch overhead (~175µs on Steam Deck) makes CPU faster for
-        // generation (M=1). GPU only beneficial for prefill (M>8).
+        // generation (M=1). GPU beneficial for prefill (M>1) with cached weights.
         let m = a.dims()[a.dims().len() - 2];
-        if m <= 8 {
+        if m <= 1 {
             return a.matmul(b);
         }
         let orig_dtype = a.dtype();
