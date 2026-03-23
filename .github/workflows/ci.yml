@@ -289,6 +289,8 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ always() }}
     needs: [test, test-android, test-ios, test-features]
+    permissions:
+      contents: read
     steps:
       - name: Download coverage artifacts
         uses: actions/download-artifact@v4
@@ -299,9 +301,11 @@ jobs:
       - name: Generate coverage table
         run: |
           python3 << 'PYEOF'
-          import json, os
+          import json, os, sys
 
           artifact_dir = 'coverage-artifacts'
+          # NOTE: artifact names must match the upload step names in each test job.
+          # If matrix.os values or artifact names change, update this map accordingly.
           name_map = {
               'coverage-ubuntu-latest-cpu': ('Linux', 'CPU'),
               'coverage-macos-latest-cpu': ('macOS', 'CPU'),
@@ -321,10 +325,16 @@ jobs:
                   cov_file = os.path.join(artifact_dir, dirname, 'coverage.json')
                   if not os.path.isfile(cov_file):
                       continue
-                  with open(cov_file) as f:
-                      data = json.load(f)
-                  totals = data['data'][0]['totals']
-                  platform, accel = name_map.get(dirname, (dirname, '?'))
+                  try:
+                      with open(cov_file) as f:
+                          data = json.load(f)
+                      totals = data['data'][0]['totals']
+                  except (json.JSONDecodeError, KeyError, IndexError) as e:
+                      print(f"WARNING: skipping {dirname}: {e}", file=sys.stderr)
+                      continue
+                  if dirname not in name_map:
+                      print(f"WARNING: unmapped artifact '{dirname}', using raw name", file=sys.stderr)
+                  platform, accel = name_map.get(dirname, (dirname, 'Unknown'))
                   rows.append((platform, accel, totals['lines'], totals['functions'], totals['regions']))
 
           summary = os.environ.get('GITHUB_STEP_SUMMARY', '/dev/stdout')
