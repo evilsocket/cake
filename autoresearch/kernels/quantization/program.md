@@ -56,7 +56,7 @@ for quantized models, making it one of the highest-frequency operations. Lower i
 1. **Propose** a single, focused quantization optimization hypothesis.
 2. **Implement** the change.
 3. **Commit**: `git add cake-core/src/ && git commit -m "<description>"`
-4. **Quality gate**: `cargo test -p cake-core --lib --test unit`
+4. **Quality gate**: `cargo clippy -p cake-core --lib --tests -- -D warnings && cargo test -p cake-core --lib && cargo test -p cake-core --test unit && cargo test -p cake-core --test protocol`
 5. **Benchmark**: `bash autoresearch/kernels/quantization/benchmark.sh`
 6. **Parse** BENCH_RESULT, **decide**, **record**, **repeat**.
 

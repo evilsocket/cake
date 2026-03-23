@@ -29,7 +29,7 @@ echo "Build OK" >&2
 # --- Step 2: CLIPPY GATE ---
 echo "=== CLIPPY ===" >&2
 CLIPPY_PASS="FAIL"
-if cargo clippy -p cake-core --features "$FEATURES" --lib -- -D warnings 2>&1 | tail -5 >&2; then
+if cargo clippy -p cake-core --features "$FEATURES" --lib --tests -- -D warnings 2>&1 | tail -5 >&2; then
     CLIPPY_PASS="PASS"
 fi
 echo "Clippy: $CLIPPY_PASS" >&2
@@ -37,7 +37,9 @@ echo "Clippy: $CLIPPY_PASS" >&2
 # --- Step 3: TEST GATE ---
 echo "=== TESTS ===" >&2
 TEST_PASS="FAIL"
-if cargo test -p cake-core --features "$FEATURES" --lib --test unit 2>&1 | tail -10 >&2; then
+if cargo test -p cake-core --features "$FEATURES" --lib 2>&1 | tail -10 >&2 \
+   && cargo test -p cake-core --features "$FEATURES" --test unit 2>&1 | tail -10 >&2 \
+   && cargo test -p cake-core --features "$FEATURES" --test protocol 2>&1 | tail -10 >&2; then
     TEST_PASS="PASS"
 fi
 echo "Tests: $TEST_PASS" >&2

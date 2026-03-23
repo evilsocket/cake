@@ -49,7 +49,7 @@ where K experts are selected from N total for each token. Lower is better.
 1. **Propose** a single, focused optimization hypothesis. Write it down.
 2. **Implement** the change in the allowed source files.
 3. **Commit**: `git add cake-core/src/ && git commit -m "<description>"`
-4. **Quality gate**: `cargo test -p cake-core --lib --test unit` — must pass.
+4. **Quality gate**: `cargo clippy -p cake-core --lib --tests -- -D warnings && cargo test -p cake-core --lib && cargo test -p cake-core --test unit && cargo test -p cake-core --test protocol` — must pass.
 5. **Benchmark**: `bash autoresearch/models/moe/benchmark.sh`
 6. **Parse** the BENCH_RESULT line.
 7. **If build/test failed**: quick fix (2 tries), then revert and log as `crash`.

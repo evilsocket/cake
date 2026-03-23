@@ -48,7 +48,7 @@ for micro-optimization. Lower is better.
 1. **Propose** a single, focused optimization for a CPU fused operation.
 2. **Implement** the change in `cpu/mod.rs`.
 3. **Commit**: `git add cake-core/src/backends/cpu/ && git commit -m "<description>"`
-4. **Quality gate**: `cargo test -p cake-core --lib --test unit`
+4. **Quality gate**: `cargo clippy -p cake-core --lib --tests -- -D warnings && cargo test -p cake-core --lib && cargo test -p cake-core --test unit && cargo test -p cake-core --test protocol`
 5. **Benchmark**: `bash autoresearch/kernels/fused-ops/benchmark.sh`
 6. **Parse** BENCH_RESULT, **decide**, **record**, **repeat**.
 

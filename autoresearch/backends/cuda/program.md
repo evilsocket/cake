@@ -56,7 +56,7 @@ NVIDIA hardware. Lower is better.
 1. **Propose** a single, focused kernel optimization hypothesis.
 2. **Implement** the change in ops.cu / ops.rs / mod.rs.
 3. **Commit**: `git add cake-core/src/backends/cuda/ && git commit -m "<description>"`
-4. **Quality gate**: `cargo test -p cake-core --features cuda --lib --test unit`
+4. **Quality gate**: `cargo clippy -p cake-core --features cuda --lib --tests -- -D warnings && cargo test -p cake-core --features cuda --lib && cargo test -p cake-core --features cuda --test unit && cargo test -p cake-core --features cuda --test protocol`
 5. **Benchmark**: `bash autoresearch/backends/cuda/benchmark.sh`
 6. **Parse** BENCH_RESULT, **decide**, **record**, **repeat**.
 

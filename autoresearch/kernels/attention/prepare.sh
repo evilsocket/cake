@@ -24,7 +24,9 @@ echo "Build: OK"
 echo ""
 
 echo "Running tests..."
-if ! cargo test -p cake-core --lib --test unit 2>&1 | tail -10; then
+if ! cargo test -p cake-core --lib 2>&1 | tail -10 \
+   || ! cargo test -p cake-core --test unit 2>&1 | tail -10 \
+   || ! cargo test -p cake-core --test protocol 2>&1 | tail -10; then
     echo "ERROR: Tests failed"
     exit 1
 fi

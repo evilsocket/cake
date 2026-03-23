@@ -49,7 +49,7 @@ memory-bandwidth-bound at ~200-400 GiB/s depending on the chip. Lower is better.
 1. **Propose** a single, focused shader optimization hypothesis.
 2. **Implement** the change in ops.msl / mod.rs.
 3. **Commit**: `git add cake-core/src/backends/metal/ && git commit -m "<description>"`
-4. **Quality gate**: `cargo test -p cake-core --features metal --lib --test unit`
+4. **Quality gate**: `cargo clippy -p cake-core --features metal --lib --tests -- -D warnings && cargo test -p cake-core --features metal --lib && cargo test -p cake-core --features metal --test unit && cargo test -p cake-core --features metal --test protocol`
 5. **Benchmark**: `bash autoresearch/backends/metal/benchmark.sh`
 6. **Parse** BENCH_RESULT, **decide**, **record**, **repeat**.
 

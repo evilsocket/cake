@@ -55,7 +55,7 @@ compute shaders. Lower is better.
 1. **Propose** a single, focused shader optimization hypothesis.
 2. **Implement** the change in ops.wgsl / mod.rs.
 3. **Commit**: `git add cake-core/src/backends/vulkan/ && git commit -m "<description>"`
-4. **Quality gate**: `cargo test -p cake-core --features vulkan --lib --test unit`
+4. **Quality gate**: `cargo clippy -p cake-core --features vulkan --lib --tests -- -D warnings && cargo test -p cake-core --features vulkan --lib && cargo test -p cake-core --features vulkan --test unit && cargo test -p cake-core --features vulkan --test protocol`
 5. **Benchmark**: `bash autoresearch/backends/vulkan/benchmark.sh`
 6. **Parse** BENCH_RESULT, **decide**, **record**, **repeat**.
 

@@ -65,9 +65,10 @@ bash prepare.sh
    - **Propose** a single, focused optimization hypothesis
    - **Implement** the change in the allowed source files
    - **Build**: `cargo build -p cake-core` (with backend features if needed)
-   - **Test**: `cargo test -p cake-core` — quality gate must pass
+   - **Clippy**: `cargo clippy -p cake-core --lib --tests -- -D warnings` (with features)
+   - **Test**: `cargo test -p cake-core --lib`, `--test unit`, `--test protocol` — all three suites
    - **Benchmark**: `bash benchmark.sh` — measures performance
-   - **Decide**: KEEP if faster (within noise margin) and tests pass; DISCARD otherwise
+   - **Decide**: KEEP if faster (within noise margin) and all quality gates pass; DISCARD otherwise
    - **Record** result in `experiments.tsv`
    - **Repeat forever** until manually interrupted
 

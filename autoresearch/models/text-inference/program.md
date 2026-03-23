@@ -60,7 +60,7 @@ Each experiment: modify → build → test → benchmark → decide → repeat.
 1. **Propose** a single, focused optimization hypothesis. Write it down.
 2. **Implement** the change in the allowed source files.
 3. **Commit**: `git add cake-core/src/ && git commit -m "<description>"`
-4. **Quality gate**: `cargo test -p cake-core --lib --test unit` — must pass with zero failures.
+4. **Quality gate**: `cargo clippy -p cake-core --lib --tests -- -D warnings && cargo test -p cake-core --lib && cargo test -p cake-core --test unit && cargo test -p cake-core --test protocol` — must pass with zero failures.
 5. **Benchmark**: `bash autoresearch/models/text-inference/benchmark.sh`
 6. **Parse** the BENCH_RESULT line: `score=X tests=PASS/FAIL clippy=PASS/FAIL status=OK/...`
 7. **If build or test failed**: attempt a quick fix. If unfixable after 2 tries, revert and log as `crash`.

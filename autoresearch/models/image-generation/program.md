@@ -39,7 +39,7 @@ text encoders (T5, CLIP), timestep embedding, and FP8 linear layers. Lower is be
 1. **Propose** a single optimization hypothesis.
 2. **Implement** the change.
 3. **Commit**: `git add cake-core/src/ && git commit -m "<description>"`
-4. **Quality gate**: `cargo test -p cake-core --lib --test unit`
+4. **Quality gate**: `cargo clippy -p cake-core --lib --tests -- -D warnings && cargo test -p cake-core --lib && cargo test -p cake-core --test unit && cargo test -p cake-core --test protocol`
 5. **Benchmark**: `bash autoresearch/models/image-generation/benchmark.sh`
 6. **Parse** BENCH_RESULT, **decide**, **record**, **repeat**.
 
