@@ -320,12 +320,14 @@ impl VulkanBackend {
         let sub_idx = self.queue.submit(Some(enc.finish()));
 
         let slice = staging.slice(..size);
-        let (tx, rx) = std::sync::mpsc::channel();
+        let map_result = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let map_flag = map_result.clone();
         slice.map_async(wgpu::MapMode::Read, move |r| {
-            tx.send(r).unwrap();
+            r.unwrap();
+            map_flag.store(true, std::sync::atomic::Ordering::Release);
         });
         self.gpu.poll(wgpu::Maintain::wait_for(sub_idx));
-        rx.recv().unwrap().unwrap();
+        debug_assert!(map_result.load(std::sync::atomic::Ordering::Acquire));
 
         let view = slice.get_mapped_range();
         let result: Vec<f32> = bytemuck::cast_slice(&view)[..count].to_vec();
