@@ -57,11 +57,11 @@ fn add3(@builtin(global_invocation_id) gid: vec3<u32>) {
 // ═══════════════════════════════════════════════════════════════════
 // GEMV: y[j] = sum_i(x[i] * W[i * N + j])  for x[1,K] × W[K,N] = y[1,N]
 //
-// Each workgroup computes 8 output elements y[wg*8 .. wg*8+7].
-// 256 threads split into 8 groups of 32. Each group reduces the
-// K-length dot product for one output column. Input vector x is
-// loaded in tiles into shared memory so all 8 column groups share
-// the same cached data (2× more reuse than 4-column layout).
+// Each workgroup computes 4 output elements y[wg*4 .. wg*4+3].
+// 256 threads split into 4 groups of 64 (matching RDNA 2 wavefront).
+// Each group reduces the K-length dot product for one output column.
+// Input vector x is loaded in tiles into shared memory so all 4
+// column groups share the same cached data.
 // ═══════════════════════════════════════════════════════════════════
 
 struct GemvParams {
@@ -77,8 +77,8 @@ struct GemvParams {
 @group(0) @binding(3) var<uniform> gemv_params: GemvParams;
 
 const GEMV_WG: u32 = 256;
-const GEMV_COLS: u32 = 8;       // output columns per workgroup
-const GEMV_GROUP: u32 = 32;     // threads per column
+const GEMV_COLS: u32 = 4;       // output columns per workgroup
+const GEMV_GROUP: u32 = 64;     // threads per column (= RDNA 2 wavefront)
 // First 256 floats: shared x tile; next 256: reduction scratch
 var<workgroup> gemv_shared: array<f32, 512>;
 
@@ -91,8 +91,8 @@ fn gemv(@builtin(global_invocation_id) gid: vec3<u32>,
     let K = gemv_params.K;
 
     // Map tid to (column_index, lane_within_group)
-    let col_idx = tid / GEMV_GROUP;    // 0..7
-    let lane = tid % GEMV_GROUP;       // 0..31
+    let col_idx = tid / GEMV_GROUP;    // 0..3
+    let lane = tid % GEMV_GROUP;       // 0..63
     let col = wid.x * GEMV_COLS + col_idx;
 
     // Process K in tiles of 256 (one element per thread loaded into shared x cache)
@@ -127,7 +127,9 @@ fn gemv(@builtin(global_invocation_id) gid: vec3<u32>,
     gemv_shared[red_base + lane] = partial;
     workgroupBarrier();
 
-    // Parallel reduction within each 32-element group
+    // Parallel reduction within each 64-element group
+    if (lane < 32u) { gemv_shared[red_base + lane] += gemv_shared[red_base + lane + 32u]; }
+    workgroupBarrier();
     if (lane < 16u) { gemv_shared[red_base + lane] += gemv_shared[red_base + lane + 16u]; }
     workgroupBarrier();
     if (lane < 8u) { gemv_shared[red_base + lane] += gemv_shared[red_base + lane + 8u]; }
