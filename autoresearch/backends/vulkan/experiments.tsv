@@ -77,3 +77,4 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 076	2026-03-23T17:57:55+0000	9733943	110149434963	PASS	PASS	KEEP	Post-revert verification: 110.1s (near all-time best!). MLP 2.51ms confirmed, regression fixed.
 077	2026-03-23T17:58:19+0000	9733943	1903739236	PASS	PASS	KEEP	Cached: 1.90s (best cached score!). MLP 2.90ms (high variance with 3 samples). Stable.
 078	2026-03-23T18:02:08+0000	94556c0	1820191199	PASS	PASS	KEEP	Warm all pipelines (add softmax+gemv_f16): cached 1.82s (new best!). Eliminates first-call JIT stalls.
+079	2026-03-23T18:08:03+0000	8caccfd	1913071503	PASS	PASS	KEEP	Pipeline cache: cached 1.91s consistent. Best Vulkan practice for shader compilation reuse.
