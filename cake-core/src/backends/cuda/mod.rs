@@ -52,20 +52,20 @@ impl ComputeBackend for CudaBackend {
         let attn = if causal {
             let seq_len = q.dim(2)?;
             let kv_len = k.dim(2)?;
-            // Build causal mask on GPU: row indices >= col indices (with offset for kv_len > seq_len)
-            let offset = kv_len.saturating_sub(seq_len);
-            let rows = Tensor::arange(0u32, seq_len as u32, q.device())?
-                .reshape((seq_len, 1))?;
-            let cols = Tensor::arange(0u32, kv_len as u32, q.device())?
-                .reshape((1, kv_len))?;
-            let offset_t = Tensor::full(offset as u32, (1, 1), q.device())?;
-            // mask[i,j] = 1 where j <= i + offset, i.e. (i + offset) >= j
-            let shifted = rows.broadcast_add(&offset_t)?;
-            let mask = shifted.broadcast_ge(&cols)?;
-            let mask = mask.reshape((1, 1, seq_len, kv_len))?;
-            let neg_inf = Tensor::full(f32::NEG_INFINITY, attn.shape(), q.device())?;
-            mask.broadcast_as(attn.shape())?
-                .where_cond(&attn, &neg_inf)?
+            // Build causal mask on GPU: row_idx + offset >= col_idx
+            let offset = kv_len.saturating_sub(seq_len) as f32;
+            let rows = Tensor::arange(0f32, seq_len as f32, q.device())?
+                .reshape((1, 1, seq_len, 1))?;
+            let cols = Tensor::arange(0f32, kv_len as f32, q.device())?
+                .reshape((1, 1, 1, kv_len))?;
+            // bias = 0 where causal (row+offset >= col), -inf where masked
+            // (rows + offset - cols) < 0 means masked → add -inf
+            let diff = ((rows + offset as f64)? - cols)?;
+            let zeros = diff.zeros_like()?;
+            let neg_inf = Tensor::full(f32::NEG_INFINITY, diff.shape(), q.device())?;
+            let bias = diff.ge(&zeros)?.where_cond(&zeros, &neg_inf)?;
+            let bias = bias.broadcast_as(attn.shape())?;
+            (attn + bias)?
         } else {
             attn
         };
