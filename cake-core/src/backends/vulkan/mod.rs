@@ -117,10 +117,11 @@ pub struct VulkanBackend {
     // Memory
     allocator: Mutex<Option<gpu_allocator::vulkan::Allocator>>,
     uma_memory_type: Option<u32>,
-    // Pipelines: entry_point -> (pipeline, pipeline_layout, descriptor_set, num_bindings)
+    // Pipelines: entry_point -> (pipeline, pipeline_layout, ds_layout, descriptor_set, num_bindings)
     // Descriptor sets are pre-allocated at init (one per pipeline, reused across dispatches).
-    pipelines: HashMap<String, (vk::Pipeline, vk::PipelineLayout, vk::DescriptorSet, u32)>,
-    _descriptor_pool: vk::DescriptorPool, // kept alive, descriptor sets freed implicitly on drop
+    // ds_layout is kept for allocating additional sets during batched dispatch.
+    pipelines: HashMap<String, (vk::Pipeline, vk::PipelineLayout, vk::DescriptorSetLayout, vk::DescriptorSet, u32)>,
+    descriptor_pool: vk::DescriptorPool,
     // Params uniform buffer (16 bytes, persistently mapped)
     params_buf: MappedBuffer,
     // Buffer management
@@ -261,8 +262,9 @@ impl VulkanBackend {
             descriptor_count: 64,
         }];
         let dp_ci = vk::DescriptorPoolCreateInfo::default()
-            .max_sets(64)
-            .pool_sizes(&pool_sizes);
+            .max_sets(256)
+            .pool_sizes(&pool_sizes)
+            .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET);
         let descriptor_pool = vk_device
             .create_descriptor_pool(&dp_ci, None)
             .map_err(|e| format!("create_descriptor_pool: {e}"))?;
@@ -336,7 +338,7 @@ impl VulkanBackend {
                 .map_err(|e| format!("create_compute_pipeline({name}): {e:?}"))?[0];
 
             vk_device.destroy_shader_module(shader_module, None);
-            pipelines.insert(name.to_string(), (pipeline, pipe_layout, descriptor_set, num_bindings));
+            pipelines.insert(name.to_string(), (pipeline, pipe_layout, ds_layout, descriptor_set, num_bindings));
         }
 
         // 11. Params uniform buffer (16 bytes)
@@ -360,7 +362,7 @@ impl VulkanBackend {
             allocator: Mutex::new(Some(allocator)),
             uma_memory_type,
             pipelines,
-            _descriptor_pool: descriptor_pool,
+            descriptor_pool,
             params_buf,
             weight_cache: Mutex::new(WeightCache::new()),
             buffer_pool: Mutex::new(BufferPool::new()),
@@ -606,7 +608,7 @@ impl VulkanBackend {
         workgroups: (u32, u32, u32),
     ) -> Vec<f32> {
         let _lock = self.dispatch_lock.lock().unwrap();
-        let (pipeline, pipe_layout, descriptor_set, _num_bindings) =
+        let (pipeline, pipe_layout, _ds_layout, descriptor_set, _num_bindings) =
             self.pipelines.get(entry).unwrap_or_else(|| panic!("unknown pipeline: {entry}"));
         let descriptor_set = *descriptor_set;
 
@@ -931,21 +933,146 @@ impl VulkanBackend {
             return Ok(tensor);
         }
 
-        // Batch path: need f32 contiguous data for slicing
+        // Batch path: record ALL batch dispatches in one command buffer (1 fence wait).
         let a = a.to_dtype(DType::F32)?.contiguous()?;
         let b = b.to_dtype(DType::F32)?.contiguous()?;
         let a_data: Vec<f32> = a.flatten_all()?.to_vec1()?;
         let b_data: Vec<f32> = b.flatten_all()?.to_vec1()?;
 
-        let mut out = Vec::with_capacity(batch * mn);
+        // Upload all batch slices first
+        let mut a_bufs = Vec::with_capacity(batch);
+        let mut b_bufs = Vec::with_capacity(batch);
+        let mut out_bufs = Vec::with_capacity(batch);
         for i in 0..batch {
             let a_off = if a_batch == 1 { 0 } else { i * mk };
             let b_off = if b_batch == 1 { 0 } else { i * kn };
-            let buf_a = self.upload_uncached(&a_data[a_off..a_off + mk]);
-            let buf_b = self.upload_uncached(&b_data[b_off..b_off + kn]);
-            let (data, buf_out) = self.gpu_matmul(&buf_a, &buf_b, m, k, n);
-            out.extend_from_slice(&data);
-            self.release_output(buf_out);
+            a_bufs.push(self.upload_uncached(&a_data[a_off..a_off + mk]));
+            b_bufs.push(self.upload_uncached(&b_data[b_off..b_off + kn]));
+            out_bufs.push(self.alloc_output(mn));
+        }
+
+        // Determine pipeline and workgroup dims
+        let is_gemv = m == 1;
+        let entry = if is_gemv { "gemv" } else { "matmul" };
+        let params: [u32; 4] = if is_gemv {
+            [n as u32, k as u32, 0, 0]
+        } else {
+            [m as u32, n as u32, k as u32, 0]
+        };
+        let workgroups = if is_gemv {
+            ((n as u32).div_ceil(4), 1, 1)
+        } else {
+            ((m as u32).div_ceil(32), (n as u32).div_ceil(64), 1)
+        };
+
+        // Record all dispatches in one command buffer
+        let _lock = self.dispatch_lock.lock().unwrap();
+        let (pipeline, pipe_layout, ds_layout, _default_ds, _) =
+            self.pipelines.get(entry).unwrap_or_else(|| panic!("unknown pipeline: {entry}"));
+
+        unsafe {
+            // Allocate batch descriptor sets
+            let ds_layouts: Vec<vk::DescriptorSetLayout> = vec![*ds_layout; batch];
+            let ds_alloc = vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(self.descriptor_pool)
+                .set_layouts(&ds_layouts);
+            let descriptor_sets = self.vk_device
+                .allocate_descriptor_sets(&ds_alloc)
+                .expect("allocate batch descriptor sets");
+
+            // Write params (shared across all dispatches)
+            self.params_buf.write_u32(&params);
+
+            // Update descriptor sets for all batch elements
+            for i in 0..batch {
+                let buf_infos = [
+                    vk::DescriptorBufferInfo::default().buffer(a_bufs[i].buffer).offset(0).range(vk::WHOLE_SIZE),
+                    vk::DescriptorBufferInfo::default().buffer(b_bufs[i].buffer).offset(0).range(vk::WHOLE_SIZE),
+                    vk::DescriptorBufferInfo::default().buffer(out_bufs[i].buffer).offset(0).range(vk::WHOLE_SIZE),
+                    vk::DescriptorBufferInfo::default().buffer(self.params_buf.buffer).offset(0).range(16),
+                ];
+                let writes = [
+                    vk::WriteDescriptorSet::default().dst_set(descriptor_sets[i]).dst_binding(0)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(std::slice::from_ref(&buf_infos[0])),
+                    vk::WriteDescriptorSet::default().dst_set(descriptor_sets[i]).dst_binding(1)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(std::slice::from_ref(&buf_infos[1])),
+                    vk::WriteDescriptorSet::default().dst_set(descriptor_sets[i]).dst_binding(2)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(std::slice::from_ref(&buf_infos[2])),
+                    vk::WriteDescriptorSet::default().dst_set(descriptor_sets[i]).dst_binding(3)
+                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).buffer_info(std::slice::from_ref(&buf_infos[3])),
+                ];
+                self.vk_device.update_descriptor_sets(&writes, &[]);
+            }
+
+            // Reset fence + command buffer
+            self.vk_device.wait_for_fences(&[self.fence], true, u64::MAX).expect("wait_for_fences");
+            self.vk_device.reset_fences(&[self.fence]).expect("reset_fences");
+            self.vk_device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
+                .expect("reset_command_buffer");
+
+            // Record all dispatches
+            let begin_ci = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            self.vk_device.begin_command_buffer(self.command_buffer, &begin_ci)
+                .expect("begin_command_buffer");
+
+            let compute_barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ);
+
+            for (i, &ds) in descriptor_sets.iter().enumerate() {
+                if i > 0 {
+                    // Compute-to-compute barrier between dispatches
+                    self.vk_device.cmd_pipeline_barrier(
+                        self.command_buffer,
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[compute_barrier], &[], &[],
+                    );
+                }
+                self.vk_device.cmd_bind_pipeline(self.command_buffer, vk::PipelineBindPoint::COMPUTE, *pipeline);
+                self.vk_device.cmd_bind_descriptor_sets(
+                    self.command_buffer, vk::PipelineBindPoint::COMPUTE, *pipe_layout,
+                    0, &[ds], &[],
+                );
+                self.vk_device.cmd_dispatch(self.command_buffer, workgroups.0, workgroups.1, workgroups.2);
+            }
+
+            // Final compute-to-host barrier
+            let host_barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::HOST_READ);
+            self.vk_device.cmd_pipeline_barrier(
+                self.command_buffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::HOST,
+                vk::DependencyFlags::empty(),
+                &[host_barrier], &[], &[],
+            );
+
+            self.vk_device.end_command_buffer(self.command_buffer).expect("end_command_buffer");
+
+            // Single submit + single fence wait for ALL batch dispatches
+            let submit_info = vk::SubmitInfo::default()
+                .command_buffers(std::slice::from_ref(&self.command_buffer));
+            self.vk_device.queue_submit(self.queue, &[submit_info], self.fence)
+                .expect("queue_submit");
+            self.vk_device.wait_for_fences(&[self.fence], true, u64::MAX)
+                .expect("wait_for_fences");
+
+            // Free batch descriptor sets
+            self.vk_device.free_descriptor_sets(self.descriptor_pool, &descriptor_sets)
+                .expect("free batch descriptor sets");
+        }
+
+        // Read all outputs
+        let mut out = Vec::with_capacity(batch * mn);
+        for buf in &out_bufs {
+            out.extend_from_slice(&buf.read_f32(mn));
+        }
+        for buf in out_bufs {
+            self.release_output(buf);
         }
 
         let mut out_shape: Vec<usize> = a_dims[..a_rank - 2].to_vec();
@@ -971,12 +1098,12 @@ impl Drop for VulkanBackend {
         unsafe {
             let _ = self.vk_device.device_wait_idle();
             // Pipelines (descriptor sets freed implicitly with pool)
-            for (pipeline, layout, _ds, _) in self.pipelines.values() {
+            for (pipeline, layout, _dsl, _ds, _) in self.pipelines.values() {
                 self.vk_device.destroy_pipeline(*pipeline, None);
                 self.vk_device.destroy_pipeline_layout(*layout, None);
             }
             self.vk_device
-                .destroy_descriptor_pool(self._descriptor_pool, None);
+                .destroy_descriptor_pool(self.descriptor_pool, None);
 
             // Free all allocations via gpu-allocator before destroying device.
             // We must free allocations before destroying buffers.
