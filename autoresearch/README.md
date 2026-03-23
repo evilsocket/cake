@@ -1,6 +1,6 @@
 # Cake Autoresearch
 
-Autonomous optimization of inference throughput across models, backends, and kernels.
+Autonomous optimization of inference throughput across models, backends, kernels, and network.
 
 ## Concept
 
@@ -17,15 +17,20 @@ autoresearch/
 ├── models/                     # Model-specific optimization
 │   ├── text-inference/         # Attention, MLP, cache, transformer blocks
 │   ├── moe/                    # Mixture-of-Experts routing and dispatch
+│   ├── tts/                    # TTS: diffusion head, DDPM, VAE, vocoder, mel
 │   └── image-generation/       # FLUX/Stable Diffusion components
 ├── backends/                   # Backend-specific GPU/CPU optimization
 │   ├── cuda/                   # NVIDIA CUDA kernels (ops.cu, ops.rs)
 │   ├── metal/                  # Apple Metal shaders (ops.msl)
 │   └── vulkan/                 # Vulkan/wgpu compute shaders (ops.wgsl)
-└── kernels/                    # Kernel-specific fused operation optimization
-    ├── attention/              # Scaled dot-product attention
-    ├── fused-ops/              # silu_mul, rms_norm, add3, add_scaled, etc.
-    └── quantization/           # FP8 dequantization and weight preprocessing
+├── kernels/                    # Kernel-specific fused operation optimization
+│   ├── attention/              # Scaled dot-product attention
+│   ├── fused-ops/              # silu_mul, rms_norm, add3, add_scaled, etc.
+│   └── quantization/           # FP8 dequantization and weight preprocessing
+└── network/                    # Distributed inference protocol
+    ├── protocol/               # Serialization, topology, auth, discovery
+    ├── inference-io/           # Per-token client↔worker data path
+    └── model-transfer/         # Model weight distribution (zstd, chunking)
 ```
 
 Each task directory contains:
@@ -43,11 +48,24 @@ Generated at runtime (gitignored):
 | `baseline.txt` | Baseline benchmark score from `prepare.sh` |
 | `experiments.tsv` | Tab-separated experiment log |
 
+## Branching
+
+Each task uses a **fixed branch name** matching its directory path:
+
+```bash
+git checkout -b autoresearch/backends/cuda       # CUDA kernels
+git checkout -b autoresearch/models/tts          # TTS models
+git checkout -b autoresearch/network/protocol    # Network protocol
+# etc.
+```
+
+No date tags — one branch per task. Merge to main when done.
+
 ## Quick Start
 
 ```bash
 # 1. Pick a task
-cd autoresearch/kernels/fused-ops
+cd autoresearch/network/protocol
 
 # 2. Run setup (builds, benchmarks baseline)
 bash prepare.sh
@@ -81,31 +99,41 @@ bash prepare.sh
 
 ### Models
 
-| Task | Target | Primary Metric | Benchmarks |
-|------|--------|----------------|------------|
-| text-inference | Common text model components | Forward pass time | attention, mlp, blocks, cache |
-| moe | MoE routing and expert dispatch | MoE forward time | moe, expert_provider |
-| image-generation | FLUX/SD image pipeline | Component time | flux |
+| Task | Branch | Target | Benchmarks |
+|------|--------|--------|------------|
+| text-inference | `autoresearch/models/text-inference` | Attention, MLP, cache, blocks | attention, mlp, blocks, cache |
+| moe | `autoresearch/models/moe` | MoE routing and dispatch | moe, expert_provider |
+| tts | `autoresearch/models/tts` | Diffusion head, DDPM, VAE, vocoder | prediction_head, ddpm, connectors, mel, wav |
+| image-generation | `autoresearch/models/image-generation` | FLUX/SD pipeline | flux |
 
 ### Backends
 
-| Task | Target | Hardware | Benchmarks |
+| Task | Branch | Hardware | Benchmarks |
 |------|--------|----------|------------|
-| cuda | CUDA kernels (ops.cu) | NVIDIA GPU | fused ops (GPU path) |
-| metal | Metal shaders (ops.msl) | Apple Silicon | fused ops (GPU path) |
-| vulkan | WGSL compute shaders (ops.wgsl) | Vulkan 1.3+ GPU | vulkan benchmarks |
+| cuda | `autoresearch/backends/cuda` | NVIDIA GPU | fused ops (GPU path) |
+| metal | `autoresearch/backends/metal` | Apple Silicon | fused ops (GPU path) |
+| vulkan | `autoresearch/backends/vulkan` | Vulkan 1.3+ GPU | vulkan benchmarks |
 
 ### Kernels
 
-| Task | Target | Primary Metric | Benchmarks |
-|------|--------|----------------|------------|
-| attention | Attention implementations | Attention forward time | attention, linear_attn |
-| fused-ops | Fused activation/norm ops | Per-op latency | bench_utils fused ops |
-| quantization | FP8/GPTQ dequantization | Dequant throughput | quantization, flux dequant |
+| Task | Branch | Target | Benchmarks |
+|------|--------|--------|------------|
+| attention | `autoresearch/kernels/attention` | Attention implementations | attention, linear_attn |
+| fused-ops | `autoresearch/kernels/fused-ops` | Fused activation/norm ops | bench_utils fused ops |
+| quantization | `autoresearch/kernels/quantization` | FP8/GPTQ dequantization | quantization, flux dequant |
+
+### Network
+
+| Task | Branch | Target | Benchmarks |
+|------|--------|--------|------------|
+| protocol | `autoresearch/network/protocol` | Serialization, topology, auth, discovery | protocol, serialization, discovery, topology, auth |
+| inference-io | `autoresearch/network/inference-io` | Per-token client↔worker tensor I/O | protocol (encode/decode/roundtrip), serialization |
+| model-transfer | `autoresearch/network/model-transfer` | Model weight distribution to workers | protocol (zstd, crc32, model_data_chunk) |
 
 ## Prerequisites
 
 - Rust toolchain (stable)
 - `cargo bench` support (divan benchmarks)
 - For backend tasks: appropriate GPU + feature flags (cuda, metal, vulkan)
+- For TTS tasks: `--features vibevoice,luxtts`
 - No model downloads required — all benchmarks use synthetic tensors

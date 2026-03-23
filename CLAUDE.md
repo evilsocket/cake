@@ -24,6 +24,18 @@ cargo build --release --features metal
 cargo build --release --features vulkan
 ```
 
+## Interactive Chat
+
+```bash
+# Local mode (loads model, starts TUI chat — no server needed)
+cake chat evilsocket/Qwen3-0.6B
+
+# Remote mode (connects to a running API server)
+cake chat --server http://localhost:8080
+```
+
+The TUI streams tokens in real time and detects `<think>` tags — showing a "thinking..." indicator with reasoning in gray, then the final response in white.
+
 ## Run Commands (Qwen3.5-0.8B cluster)
 
 ```bash

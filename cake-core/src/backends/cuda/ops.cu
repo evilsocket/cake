@@ -24,6 +24,32 @@ template<> __device__ __forceinline__ __nv_bfloat16 expg<__nv_bfloat16>(__nv_bfl
 }
 #endif
 
+// ─── f8e4m3 dequant helper: branchless bit manipulation ─────────────
+// Constructs IEEE 754 float32 directly from F8E4M3 bit pattern.
+// F8E4M3: 1 sign, 4 exponent (bias=7), 3 mantissa.
+// Float32: 1 sign, 8 exponent (bias=127), 23 mantissa.
+__device__ __forceinline__ float f8e4m3_decode(uint8_t bits) {
+    uint32_t sign = (bits >> 7) & 1;
+    uint32_t exp  = (bits >> 3) & 0xF;
+    uint32_t mant = bits & 0x7;
+
+    if (exp == 0 && mant == 0) {
+        return sign ? -0.0f : 0.0f;
+    } else if (exp == 0) {
+        // Subnormal: 2^(-6) * (mant / 8)
+        float result = ldexpf((float)mant / 8.0f, -6);
+        return sign ? -result : result;
+    } else if (exp == 0xF && mant == 0x7) {
+        return __int_as_float(0x7FC00000); // NaN
+    } else {
+        // Normal: construct float32 directly via bit manipulation
+        // F8 exp bias=7 → float32 exp = exp - 7 + 127 = exp + 120
+        // F8 mant 3 bits → float32 mant shifted left by 20
+        uint32_t f32_bits = (sign << 31) | ((exp + 120) << 23) | (mant << 20);
+        return __uint_as_float(f32_bits);
+    }
+}
+
 // ─── f8e4m3_to_f32: software FP8 dequantization for SM < 8.9 ────────
 // On SM89+ (Ada/Hopper), candle uses native __nv_fp8_e4m3 hardware.
 // On SM80 (A100) and below, the native FP8 type doesn't exist.
@@ -35,25 +61,7 @@ extern "C" __global__ void f8e4m3_to_f32(
 ) {
     for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
          i < numel; i += blockDim.x * gridDim.x) {
-        uint8_t bits = inp[i];
-        uint32_t sign = (bits >> 7) & 1;
-        uint32_t exp  = (bits >> 3) & 0xF;
-        uint32_t mant = bits & 0x7;
-
-        float result;
-        if (exp == 0 && mant == 0) {
-            result = 0.0f;
-        } else if (exp == 0) {
-            // Subnormal: 2^(-6) * (mant / 8)
-            result = ldexpf((float)mant / 8.0f, -6);
-        } else if (exp == 0xF && mant == 0x7) {
-            result = __int_as_float(0x7FC00000); // NaN
-        } else {
-            // Normal: 2^(exp-7) * (1 + mant/8)
-            result = ldexpf(1.0f + (float)mant / 8.0f, (int)exp - 7);
-        }
-        if (sign) result = -result;
-        out[i] = result;
+        out[i] = f8e4m3_decode(inp[i]);
     }
 }
 
@@ -69,23 +77,7 @@ extern "C" __global__ void f8e4m3_to_f16(
 ) {
     for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
          i < numel; i += blockDim.x * gridDim.x) {
-        uint8_t bits = inp[i];
-        uint32_t sign = (bits >> 7) & 1;
-        uint32_t exp  = (bits >> 3) & 0xF;
-        uint32_t mant = bits & 0x7;
-
-        float result;
-        if (exp == 0 && mant == 0) {
-            result = 0.0f;
-        } else if (exp == 0) {
-            result = ldexpf((float)mant / 8.0f, -6);
-        } else if (exp == 0xF && mant == 0x7) {
-            result = __int_as_float(0x7FC00000);
-        } else {
-            result = ldexpf(1.0f + (float)mant / 8.0f, (int)exp - 7);
-        }
-        if (sign) result = -result;
-        out[i] = __float2half(result);
+        out[i] = __float2half(f8e4m3_decode(inp[i]));
     }
 }
 #endif
@@ -101,23 +93,7 @@ extern "C" __global__ void f8e4m3_to_bf16(
 ) {
     for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
          i < numel; i += blockDim.x * gridDim.x) {
-        uint8_t bits = inp[i];
-        uint32_t sign = (bits >> 7) & 1;
-        uint32_t exp  = (bits >> 3) & 0xF;
-        uint32_t mant = bits & 0x7;
-
-        float result;
-        if (exp == 0 && mant == 0) {
-            result = 0.0f;
-        } else if (exp == 0) {
-            result = ldexpf((float)mant / 8.0f, -6);
-        } else if (exp == 0xF && mant == 0x7) {
-            result = __int_as_float(0x7FC00000);
-        } else {
-            result = ldexpf(1.0f + (float)mant / 8.0f, (int)exp - 7);
-        }
-        if (sign) result = -result;
-        out[i] = __float2bfloat16(result);
+        out[i] = __float2bfloat16(f8e4m3_decode(inp[i]));
     }
 }
 #endif
@@ -125,10 +101,18 @@ extern "C" __global__ void f8e4m3_to_bf16(
 // ─── silu_mul: silu(x) * y = x * sigmoid(x) * y ────────────────────
 // Fuses 2 kernels (silu + mul) into 1.
 // Used in every MLP (gate activation * up projection).
+// F32 path uses fast reciprocal to avoid slow fdiv.
 template<typename T>
 __device__ __forceinline__ T silu_mul_fwd(T x, T y) {
     T one = static_cast<T>(1);
     return x / (one + expg(-x)) * y;
+}
+
+// Fast f32 specialization: use __expf + __frcp_rn for fast sigmoid
+template<>
+__device__ __forceinline__ float silu_mul_fwd<float>(float x, float y) {
+    float sig = __frcp_rn(1.0f + __expf(-x));
+    return x * sig * y;
 }
 
 #define SILU_MUL_OP(TYPENAME, FN_NAME) \
@@ -165,25 +149,31 @@ __device__ __forceinline__ T stable_softplus_fwd(T x) {
     return (x > sp) ? x : sp;
 }
 
+// Float specialization: fast-path branches + __expf + log1pf
+template<>
+__device__ __forceinline__ float stable_softplus_fwd<float>(float x) {
+    if (x > 20.0f) return x;           // softplus(x) ≈ x for large x
+    if (x < -10.0f) return __expf(x);   // softplus(x) ≈ exp(x) ≈ 0 for very negative x
+    return log1pf(__expf(x));
+}
+
 // Specialise for half types using float intermediates
 #if __CUDA_ARCH__ >= 530
 template<>
 __device__ __forceinline__ __half stable_softplus_fwd<__half>(__half x) {
     float fx = __half2float(x);
-    float clamped = fminf(fx, 88.0f);
-    float sp = logf(expf(clamped) + 1.0f);
-    float result = fmaxf(fx, sp);
-    return __float2half(result);
+    if (fx > 20.0f) return x;
+    if (fx < -10.0f) return __float2half(__expf(fx));
+    return __float2half(log1pf(__expf(fx)));
 }
 #endif
 #if __CUDA_ARCH__ >= 800
 template<>
 __device__ __forceinline__ __nv_bfloat16 stable_softplus_fwd<__nv_bfloat16>(__nv_bfloat16 x) {
     float fx = __bfloat162float(x);
-    float clamped = fminf(fx, 88.0f);
-    float sp = logf(expf(clamped) + 1.0f);
-    float result = fmaxf(fx, sp);
-    return __float2bfloat16(result);
+    if (fx > 20.0f) return x;
+    if (fx < -10.0f) return __float2bfloat16(__expf(fx));
+    return __float2bfloat16(log1pf(__expf(fx)));
 }
 #endif
 
@@ -250,10 +240,10 @@ extern "C" __global__ void FN_NAME( \
     /* Apply: weight * rms_norm(x) * silu(z) */ \
     for (int col = threadIdx.x; col < n_cols; col += block_size) { \
         float xv = static_cast<float>(x[offset + col]); \
-        float wv = static_cast<float>(weight[col]); \
+        float wv_scaled = static_cast<float>(weight[col]) * inv_rms; \
         float zv = static_cast<float>(z[offset + col]); \
-        float silu_z = zv / (1.0f + expf(-zv)); \
-        out[offset + col] = static_cast<TYPENAME>(xv * inv_rms * wv * silu_z); \
+        float silu_z = zv * __frcp_rn(1.0f + __expf(-zv)); \
+        out[offset + col] = static_cast<TYPENAME>(xv * wv_scaled * silu_z); \
     } \
 }
 
@@ -269,8 +259,8 @@ RMS_NORM_GATED_OP(__nv_bfloat16, rms_norm_gated_bf16)
 // ─── add_rms_norm: rms_norm(a + b, weight, eps) with residual output ──
 // Fuses 2 kernels (add + rms_norm) into 1.
 // Used in transformer blocks: residual add followed by layer norm.
-// Output is [a+b, rms_norm(a+b)] concatenated on last dim (2 * n_cols).
-// Caller splits with narrow (zero-cost view).
+// Output layout: [all residual rows, all normed rows] = (2*n_rows, n_cols).
+// narrow(0, 0, n_rows) / narrow(0, n_rows, n_rows) yields contiguous views.
 // a, b: (n_rows, n_cols), weight: (n_cols,)
 #define ADD_RMS_NORM_OP(TYPENAME, FN_NAME) \
 extern "C" __global__ void FN_NAME( \
@@ -280,20 +270,19 @@ extern "C" __global__ void FN_NAME( \
     TYPENAME *out, \
     const int n_cols, \
     const int block_size, \
-    const float eps \
+    const float eps, \
+    const int n_rows \
 ) { \
     const int row = blockIdx.x; \
-    const int out_stride = n_cols * 2; \
     const int in_off = row * n_cols; \
-    const int res_off = row * out_stride; \
-    const int norm_off = res_off + n_cols; \
-    /* Compute sum and sum of squares in one pass */ \
+    const int res_off = row * n_cols; \
+    const int norm_off = n_rows * n_cols + row * n_cols; \
+    /* Compute sum of squares in first pass (don't write yet) */ \
     float sum2 = 0.0f; \
     for (int col = threadIdx.x; col < n_cols; col += block_size) { \
         float av = static_cast<float>(a[in_off + col]); \
         float bv = static_cast<float>(b[in_off + col]); \
         float s = av + bv; \
-        out[res_off + col] = static_cast<TYPENAME>(s); \
         sum2 += s * s; \
     } \
     /* Warp reduction */ \
@@ -311,11 +300,12 @@ extern "C" __global__ void FN_NAME( \
         sum2 += __shfl_xor_sync(0xffffffff, sum2, mask); \
     } \
     float inv_rms = rsqrtf(sum2 / (float)n_cols + eps); \
-    /* Write normed output */ \
+    /* Re-read a+b (L2-cached), residual rows first then normed rows */ \
     for (int col = threadIdx.x; col < n_cols; col += block_size) { \
-        float s = static_cast<float>(out[res_off + col]); \
-        float wv = static_cast<float>(weight[col]); \
-        out[norm_off + col] = static_cast<TYPENAME>(s * inv_rms * wv); \
+        float s = static_cast<float>(a[in_off + col]) + static_cast<float>(b[in_off + col]); \
+        out[res_off + col] = static_cast<TYPENAME>(s); \
+        float wv_scaled = static_cast<float>(weight[col]) * inv_rms; \
+        out[norm_off + col] = static_cast<TYPENAME>(s * wv_scaled); \
     } \
 }
 
@@ -415,16 +405,16 @@ extern "C" __global__ void FN_NAME( \
     for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; \
          i < numel; i += blockDim.x * gridDim.x) { \
         int chan = i % channels; \
-        int batch_idx = i / channels; \
         float acc = 0.0f; \
-        int w_off = batch_idx * channels * kernel_size + chan * kernel_size; \
+        int w_off = i * kernel_size; \
         int wt_off = chan * kernel_size; \
+        _Pragma("unroll 8") \
         for (int k = 0; k < kernel_size; k++) { \
-            acc += static_cast<float>(window[w_off + k]) \
-                 * static_cast<float>(weight[wt_off + k]); \
+            acc = fmaf(static_cast<float>(window[w_off + k]), \
+                       static_cast<float>(weight[wt_off + k]), acc); \
         } \
         /* silu(acc) = acc * sigmoid(acc) */ \
-        float sig = 1.0f / (1.0f + expf(-acc)); \
+        float sig = __frcp_rn(1.0f + __expf(-acc)); \
         out[i] = static_cast<TYPENAME>(acc * sig); \
     } \
 }
@@ -460,15 +450,15 @@ extern "C" __global__ void FN_NAME( \
     for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; \
          i < numel; i += blockDim.x * gridDim.x) { \
         int t = i % out_len; \
-        int temp = i / out_len; \
-        int c = temp % channels; \
-        int b = temp / channels; \
+        int bc = i / out_len; /* combined batch*channels index */ \
+        int c = bc % channels; \
         float acc = 0.0f; \
-        int in_off = (b * channels + c) * input_len + t; \
+        int in_off = bc * input_len + t; \
         int wt_off = c * kernel_size; \
+        _Pragma("unroll 8") \
         for (int k = 0; k < kernel_size; k++) { \
-            acc += static_cast<float>(input[in_off + k]) \
-                 * static_cast<float>(weight[wt_off + k]); \
+            acc = fmaf(static_cast<float>(input[in_off + k]), \
+                       static_cast<float>(weight[wt_off + k]), acc); \
         } \
         acc += static_cast<float>(bias[c]); \
         out[i] = static_cast<TYPENAME>(acc); \
@@ -507,21 +497,21 @@ extern "C" __global__ void FN_NAME( \
     for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; \
          i < numel; i += blockDim.x * gridDim.x) { \
         int t = i % time_len; \
-        int temp = i / time_len; \
-        int c = temp % channels; \
-        int b = temp / channels; \
+        int bc = i / time_len; /* combined batch*channels index */ \
+        int c = bc % channels; \
         float acc = 0.0f; \
         int wt_off = c * kernel_size; \
         /* Virtual position in [ctx, input]: t + k, where ctx occupies [0, ctx_len) */ \
+        _Pragma("unroll 8") \
         for (int k = 0; k < kernel_size; k++) { \
             int pos = t + k; /* position in virtual [ctx, input] */ \
             float v; \
             if (pos < ctx_len) { \
-                v = static_cast<float>(ctx[(b * channels + c) * ctx_len + pos]); \
+                v = static_cast<float>(ctx[bc * ctx_len + pos]); \
             } else { \
-                v = static_cast<float>(input[(b * channels + c) * time_len + (pos - ctx_len)]); \
+                v = static_cast<float>(input[bc * time_len + (pos - ctx_len)]); \
             } \
-            acc += v * static_cast<float>(weight[wt_off + k]); \
+            acc = fmaf(v, static_cast<float>(weight[wt_off + k]), acc); \
         } \
         acc += static_cast<float>(bias[c]); \
         out[i] = static_cast<TYPENAME>(acc); \
@@ -556,38 +546,39 @@ extern "C" __global__ void FN_NAME( \
     const int idx = blockIdx.x; \
     const int b = idx / time_len; \
     const int t = idx % time_len; \
-    /* Compute sum of squares over channels for this (b, t) position */ \
-    /* x layout: (batch, channels, time) → x[b*channels*time + c*time + t] */ \
+    const int base = b * channels * time_len + t; \
+    /* Pass 1: read x values (strided), cache in shared mem, compute sum2 */ \
+    extern __shared__ float smem[]; /* dynamically allocated: channels floats + 32 for reduction */ \
+    float *x_cache = smem; \
+    float *red = smem + channels; \
     float sum2 = 0.0f; \
     for (int c = threadIdx.x; c < channels; c += block_size) { \
-        float v = static_cast<float>(x[b * channels * time_len + c * time_len + t]); \
-        sum2 += v * v; \
+        float v = static_cast<float>(x[base + c * time_len]); \
+        x_cache[c] = v; \
+        sum2 = fmaf(v, v, sum2); \
     } \
     /* Warp-level reduction */ \
     for (int mask = 16; mask > 0; mask >>= 1) { \
         sum2 += __shfl_xor_sync(0xffffffff, sum2, mask); \
     } \
-    /* Block-level reduction via shared memory */ \
-    __shared__ float shared[32]; \
+    /* Block-level reduction */ \
     int warp_id = threadIdx.x / 32; \
     int lane_id = threadIdx.x % 32; \
-    if (lane_id == 0) shared[warp_id] = sum2; \
+    if (lane_id == 0) red[warp_id] = sum2; \
     __syncthreads(); \
     if (warp_id == 0) { \
-        sum2 = (lane_id < (block_size + 31) / 32) ? shared[lane_id] : 0.0f; \
+        sum2 = (lane_id < (block_size + 31) / 32) ? red[lane_id] : 0.0f; \
         for (int mask = 16; mask > 0; mask >>= 1) { \
             sum2 += __shfl_xor_sync(0xffffffff, sum2, mask); \
         } \
-        shared[0] = sum2; \
+        red[0] = sum2; \
     } \
     __syncthreads(); \
-    float inv_rms = rsqrtf(shared[0] / (float)channels + eps); \
-    /* Apply normalization: out[b,c,t] = x[b,c,t] * inv_rms * weight[c] */ \
+    float inv_rms = rsqrtf(red[0] / (float)channels + eps); \
+    /* Pass 2: write output from cached x values (no second global read) */ \
     for (int c = threadIdx.x; c < channels; c += block_size) { \
-        int off = b * channels * time_len + c * time_len + t; \
-        float xv = static_cast<float>(x[off]); \
-        float wv = static_cast<float>(weight[c]); \
-        out[off] = static_cast<TYPENAME>(xv * inv_rms * wv); \
+        float wv_scaled = static_cast<float>(weight[c]) * inv_rms; \
+        out[base + c * time_len] = static_cast<TYPENAME>(x_cache[c] * wv_scaled); \
     } \
 }
 
@@ -615,14 +606,17 @@ extern "C" __global__ void FN_NAME( \
     const int channels, \
     const int time_len \
 ) { \
+    const int ct = channels * time_len; \
     for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; \
          i < numel; i += blockDim.x * gridDim.x) { \
-        int t = i % time_len; \
-        int chan = (i / time_len) % channels; \
+        /* Use single modulo: position within one batch = i % (channels*time_len) */ \
+        /* Then chan = pos / time_len */ \
+        int pos = i % ct; \
+        int chan = pos / time_len; \
         float av = static_cast<float>(a[i]); \
         float bv = static_cast<float>(b[i]); \
         float cv = static_cast<float>(c[chan]); \
-        out[i] = static_cast<TYPENAME>(av + bv * cv); \
+        out[i] = static_cast<TYPENAME>(fmaf(bv, cv, av)); \
     } \
 }
 
@@ -680,7 +674,7 @@ extern "C" __global__ void FN_NAME( \
         float wv = static_cast<float>(weight[col]); \
         float sv = static_cast<float>(scale[offset + col]); \
         float shv = static_cast<float>(shift[offset + col]); \
-        out[offset + col] = static_cast<TYPENAME>(xv * wv * (1.0f + sv) + shv); \
+        out[offset + col] = static_cast<TYPENAME>(fmaf(xv * wv, 1.0f + sv, shv)); \
     } \
 }
 

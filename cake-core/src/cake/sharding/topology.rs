@@ -41,12 +41,15 @@ pub struct Node {
 impl Node {
     /// Return true if this node hosts the specified layer.
     pub fn is_text_model_layer_owner(&self, full_layer_name: &str) -> bool {
+        let name_bytes = full_layer_name.as_bytes();
         for prefix in self.layers.iter() {
-            if full_layer_name.starts_with(&format!("{}.", prefix)) {
+            let plen = prefix.len();
+            if full_layer_name.starts_with(prefix.as_str())
+                && name_bytes.get(plen) == Some(&b'.')
+            {
                 return true;
             }
         }
-
         false
     }
 
@@ -93,10 +96,19 @@ impl WorkerCapacity for NamedNode<'_> {
         self.node.vram_bytes
     }
     fn total_tflops(&self) -> f64 {
+        // Fast path: if TFLOPS is explicitly set, skip GPU info construction
+        if self.node.tflops > 0.0 {
+            return self.node.tflops;
+        }
         let gpus = self.node.as_gpu_info();
         estimate_tflops_for_gpus(&gpus)
     }
     fn max_layers_for_size(&self, layer_size_bytes: u64) -> usize {
+        // Fast path: if VRAM is directly available, skip GPU info construction
+        if self.node.vram_bytes > 0 && layer_size_bytes > 0 {
+            let usable = (self.node.vram_bytes as f64 * 0.85) as u64;
+            return (usable / layer_size_bytes) as usize;
+        }
         let gpus = self.node.as_gpu_info();
         max_layers_for_gpus(&gpus, layer_size_bytes)
     }
@@ -158,7 +170,8 @@ impl Topology {
 
     /// Return a set of all layer names assigned to workers in this topology.
     pub fn all_worker_layers(&self) -> std::collections::HashSet<String> {
-        let mut layers = std::collections::HashSet::new();
+        let total: usize = self.0.values().map(|n| n.layers.len()).sum();
+        let mut layers = std::collections::HashSet::with_capacity(total);
         for node in self.0.values() {
             for layer in &node.layers {
                 layers.insert(layer.clone());

@@ -10,9 +10,8 @@ memory-bandwidth-bound at ~200-400 GiB/s depending on the chip. Lower is better.
 
 ## Setup
 
-1. **Agree on a run tag**: e.g. `mar23`. Branch: `autoresearch/metal/<tag>`.
-2. **Create the branch**: `git checkout -b autoresearch/metal/<tag>`
-3. **Read the in-scope files**:
+1. **Create the branch**: `git checkout -b autoresearch/backends/metal`
+2. **Read the in-scope files**:
    - `cake-core/src/backends/metal/ops.msl` — Metal Shading Language compute kernels.
      **Primary target.** Contains all fused ops: silu_mul, stable_softplus, rms_norm_gated,
      add_rms_norm, rms_norm_channel, add3, add_scaled, depthwise_conv1d_silu,
@@ -21,8 +20,8 @@ memory-bandwidth-bound at ~200-400 GiB/s depending on the chip. Lower is better.
      implementation, MSL compilation, command buffer management, synchronization logic.
    - `cake-core/src/backends/mod.rs` — ComputeBackend trait definition.
    - `cake-core/benches/bench_utils.rs` — Backend operation benchmarks.
-4. **Run prepare.sh**: `bash autoresearch/backends/metal/prepare.sh`
-5. **Confirm baseline** and start experimenting.
+3. **Run prepare.sh**: `bash autoresearch/backends/metal/prepare.sh`
+4. **Confirm baseline** and start experimenting.
 
 **IMPORTANT**: This task requires a Mac with Apple Silicon or Intel GPU. Build with `--features metal`.
 

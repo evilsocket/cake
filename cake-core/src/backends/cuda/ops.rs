@@ -712,7 +712,6 @@ impl candle_core::CustomOp3 for AddRmsNorm {
         let eps = self.eps;
         let el = l_a.shape().elem_count();
         let n_rows = el / n_cols;
-        let out_cols = n_cols * 2;
 
         #[allow(clippy::too_many_arguments)]
         fn launch<T: DeviceRepr + WithDType>(
@@ -757,7 +756,7 @@ impl candle_core::CustomOp3 for AddRmsNorm {
             builder.arg(&b);
             builder.arg(&w);
             builder.arg(&out);
-            candle_core::builder_arg!(builder, n_cols as i32, block_size as i32, eps);
+            candle_core::builder_arg!(builder, n_cols as i32, block_size as i32, eps, n_rows as i32);
             unsafe { builder.launch(cfg) }.w()?;
             Ok(out)
         }
@@ -782,8 +781,9 @@ impl candle_core::CustomOp3 for AddRmsNorm {
             _ => candle_core::bail!("add_rms_norm: unsupported dtype"),
         };
 
+        // Output layout: (2*n_rows, n_cols) — residual rows then normed rows
         let mut out_dims = l_a.shape().dims().to_vec();
-        *out_dims.last_mut().unwrap() = out_cols;
+        out_dims[0] *= 2;
 
         Ok((
             CudaStorage {
@@ -857,10 +857,12 @@ impl candle_core::CustomOp2 for RmsNormChannel {
                 None => candle_core::bail!("rms_norm_channel: weight must be contiguous"),
             };
             let block_size: u32 = if channels < 1024 { 32 } else { 1024 };
+            // Shared memory: channels floats for x_cache + 32 floats for reduction
+            let smem_bytes = ((channels as u32) + 32) * 4;
             let cfg = LaunchConfig {
                 grid_dim: (n_rows as u32, 1, 1),
                 block_dim: (block_size, 1, 1),
-                shared_mem_bytes: 0,
+                shared_mem_bytes: smem_bytes,
             };
             let func = dev.get_or_load_custom_func(
                 &kernel_name::<T>("rms_norm_channel"),

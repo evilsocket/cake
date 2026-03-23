@@ -10,9 +10,8 @@ where K experts are selected from N total for each token. Lower is better.
 
 ## Setup
 
-1. **Agree on a run tag**: e.g. `mar23`. Branch: `autoresearch/moe/<tag>`.
-2. **Create the branch**: `git checkout -b autoresearch/moe/<tag>`
-3. **Read the in-scope files**:
+1. **Create the branch**: `git checkout -b autoresearch/models/moe`
+2. **Read the in-scope files**:
    - `cake-core/src/models/common/mod.rs` — MoE layer: router, top-k gating, expert dispatch, combine.
    - `cake-core/src/models/common/expert_provider.rs` — ExpertProvider trait + StackedResidentProvider + IndividualResidentProvider.
    - `cake-core/src/models/common/disk_expert_provider.rs` — DiskExpertProvider for memory-mapped expert weights.
@@ -21,8 +20,8 @@ where K experts are selected from N total for each token. Lower is better.
    - `cake-core/benches/bench_moe.rs` — MoE forward benchmarks.
    - `cake-core/benches/bench_expert_provider.rs` — Expert weight access benchmarks.
    - `cake-core/benches/bench_blocks.rs` — MoE block benchmarks (qwen3_moe_block, qwen3_5_moe_block).
-4. **Run prepare.sh**: `bash autoresearch/models/moe/prepare.sh`
-5. **Confirm baseline** and start experimenting.
+3. **Run prepare.sh**: `bash autoresearch/models/moe/prepare.sh`
+4. **Confirm baseline** and start experimenting.
 
 ## Files You May Modify
 

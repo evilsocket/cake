@@ -86,31 +86,33 @@ fn fused_rms_norm_gated_cpu(bencher: divan::Bencher, size: usize) {
     });
 }
 
-// ── GPU fused ops (CUDA when available, CPU fallback) ────────────────
+// ── GPU fused ops — model-realistic sizes ────────────────────────────
+// Sizes: 1024 (Qwen3.5-0.8B hidden), 4096 (7B hidden), 16384 (intermediate)
+// Shapes use seq_len=64 to simulate real forward pass workloads.
 
-#[divan::bench(args = [1024, 4096])]
-fn fused_silu_mul_gpu(bencher: divan::Bencher, size: usize) {
+#[divan::bench(args = [1024, 4096, 16384])]
+fn fused_silu_mul_gpu(bencher: divan::Bencher, hidden: usize) {
     let dev = gpu_device();
-    let gate = make_gpu_tensor(&[1, 1, size], 250);
-    let up = make_gpu_tensor(&[1, 1, size], 251);
+    let gate = make_gpu_tensor(&[1, 64, hidden], 250);
+    let up = make_gpu_tensor(&[1, 64, hidden], 251);
     let backend = cake_core::backends::create_backend(&dev);
     bencher.bench_local(|| backend.silu_mul(&gate, &up).unwrap());
 }
 
-#[divan::bench(args = [1024, 4096])]
-fn fused_stable_softplus_gpu(bencher: divan::Bencher, size: usize) {
+#[divan::bench(args = [1024, 4096, 16384])]
+fn fused_stable_softplus_gpu(bencher: divan::Bencher, hidden: usize) {
     let dev = gpu_device();
-    let x = make_gpu_tensor(&[1, 1, size], 260);
+    let x = make_gpu_tensor(&[1, 64, hidden], 260);
     let backend = cake_core::backends::create_backend(&dev);
     bencher.bench_local(|| backend.stable_softplus(&x).unwrap());
 }
 
-#[divan::bench(args = [1024, 4096])]
-fn fused_rms_norm_gated_gpu(bencher: divan::Bencher, size: usize) {
+#[divan::bench(args = [1024, 4096, 16384])]
+fn fused_rms_norm_gated_gpu(bencher: divan::Bencher, hidden: usize) {
     let dev = gpu_device();
-    let x = make_gpu_tensor(&[1, 1, size], 270);
-    let z = make_gpu_tensor(&[1, 1, size], 271);
-    let weight = Tensor::ones(size, DType::F32, &dev).unwrap();
+    let x = make_gpu_tensor(&[1, 64, hidden], 270);
+    let z = make_gpu_tensor(&[1, 64, hidden], 271);
+    let weight = Tensor::ones(hidden, DType::F32, &dev).unwrap();
     let backend = cake_core::backends::create_backend(&dev);
     bencher.bench_local(|| {
         backend.rms_norm_gated(&x, &z, &weight, 1e-6).unwrap()
@@ -118,20 +120,20 @@ fn fused_rms_norm_gated_gpu(bencher: divan::Bencher, size: usize) {
 }
 
 /// Baseline: separate silu + mul on GPU (to compare against fused)
-#[divan::bench(args = [1024, 4096])]
-fn unfused_silu_mul_gpu(bencher: divan::Bencher, size: usize) {
-    let gate = make_gpu_tensor(&[1, 1, size], 280);
-    let up = make_gpu_tensor(&[1, 1, size], 281);
+#[divan::bench(args = [1024, 4096, 16384])]
+fn unfused_silu_mul_gpu(bencher: divan::Bencher, hidden: usize) {
+    let gate = make_gpu_tensor(&[1, 64, hidden], 280);
+    let up = make_gpu_tensor(&[1, 64, hidden], 281);
     bencher.bench_local(|| (candle_nn::ops::silu(&gate).unwrap() * &up).unwrap());
 }
 
 /// Baseline: separate rms_norm + silu + mul on GPU
-#[divan::bench(args = [1024, 4096])]
-fn unfused_rms_norm_gated_gpu(bencher: divan::Bencher, size: usize) {
+#[divan::bench(args = [1024, 4096, 16384])]
+fn unfused_rms_norm_gated_gpu(bencher: divan::Bencher, hidden: usize) {
     let dev = gpu_device();
-    let x = make_gpu_tensor(&[1, 1, size], 290);
-    let z = make_gpu_tensor(&[1, 1, size], 291);
-    let weight = Tensor::ones(size, DType::F32, &dev).unwrap();
+    let x = make_gpu_tensor(&[1, 64, hidden], 290);
+    let z = make_gpu_tensor(&[1, 64, hidden], 291);
+    let weight = Tensor::ones(hidden, DType::F32, &dev).unwrap();
     let eps = 1e-6f32;
     bencher.bench_local(|| {
         let normed = candle_nn::ops::rms_norm(&x, &weight, eps).unwrap();
@@ -142,37 +144,37 @@ fn unfused_rms_norm_gated_gpu(bencher: divan::Bencher, size: usize) {
 
 // ── exp_mul / sub_mul GPU benchmarks ─────────────────────────────────
 
-#[divan::bench(args = [1024, 4096])]
-fn fused_exp_mul_gpu(bencher: divan::Bencher, size: usize) {
+#[divan::bench(args = [1024, 4096, 16384])]
+fn fused_exp_mul_gpu(bencher: divan::Bencher, hidden: usize) {
     let dev = gpu_device();
-    let x = make_gpu_tensor(&[1, 1, size], 300);
-    let y = make_gpu_tensor(&[1, 1, size], 301);
+    let x = make_gpu_tensor(&[1, 64, hidden], 300);
+    let y = make_gpu_tensor(&[1, 64, hidden], 301);
     let backend = cake_core::backends::create_backend(&dev);
     bencher.bench_local(|| backend.exp_mul(&x, &y).unwrap());
 }
 
-#[divan::bench(args = [1024, 4096])]
-fn unfused_exp_mul_gpu(bencher: divan::Bencher, size: usize) {
-    let x = make_gpu_tensor(&[1, 1, size], 310);
-    let y = make_gpu_tensor(&[1, 1, size], 311);
+#[divan::bench(args = [1024, 4096, 16384])]
+fn unfused_exp_mul_gpu(bencher: divan::Bencher, hidden: usize) {
+    let x = make_gpu_tensor(&[1, 64, hidden], 310);
+    let y = make_gpu_tensor(&[1, 64, hidden], 311);
     bencher.bench_local(|| (&x * y.exp().unwrap()).unwrap());
 }
 
-#[divan::bench(args = [1024, 4096])]
-fn fused_sub_mul_gpu(bencher: divan::Bencher, size: usize) {
+#[divan::bench(args = [1024, 4096, 16384])]
+fn fused_sub_mul_gpu(bencher: divan::Bencher, hidden: usize) {
     let dev = gpu_device();
-    let a = make_gpu_tensor(&[1, 1, size], 320);
-    let b = make_gpu_tensor(&[1, 1, size], 321);
-    let c = make_gpu_tensor(&[1, 1, size], 322);
+    let a = make_gpu_tensor(&[1, 64, hidden], 320);
+    let b = make_gpu_tensor(&[1, 64, hidden], 321);
+    let c = make_gpu_tensor(&[1, 64, hidden], 322);
     let backend = cake_core::backends::create_backend(&dev);
     bencher.bench_local(|| backend.sub_mul(&a, &b, &c).unwrap());
 }
 
-#[divan::bench(args = [1024, 4096])]
-fn unfused_sub_mul_gpu(bencher: divan::Bencher, size: usize) {
-    let a = make_gpu_tensor(&[1, 1, size], 330);
-    let b = make_gpu_tensor(&[1, 1, size], 331);
-    let c = make_gpu_tensor(&[1, 1, size], 332);
+#[divan::bench(args = [1024, 4096, 16384])]
+fn unfused_sub_mul_gpu(bencher: divan::Bencher, hidden: usize) {
+    let a = make_gpu_tensor(&[1, 64, hidden], 330);
+    let b = make_gpu_tensor(&[1, 64, hidden], 331);
+    let c = make_gpu_tensor(&[1, 64, hidden], 332);
     bencher.bench_local(|| ((&a - &b).unwrap() * &c).unwrap());
 }
 
@@ -242,22 +244,24 @@ fn fused_depthwise_conv1d_bias_cpu(bencher: divan::Bencher, channels: usize) {
 
 // ── GPU variants for new fused ops ───────────────────────────────────
 
-#[divan::bench(args = [1024, 4096])]
-fn fused_add3_gpu(bencher: divan::Bencher, size: usize) {
+#[divan::bench(args = [1024, 4096, 16384])]
+fn fused_add3_gpu(bencher: divan::Bencher, hidden: usize) {
     let dev = gpu_device();
-    let a = make_gpu_tensor(&[1, 1, size], 500);
-    let b = make_gpu_tensor(&[1, 1, size], 501);
-    let c = make_gpu_tensor(&[1, 1, size], 502);
+    let a = make_gpu_tensor(&[1, 64, hidden], 500);
+    let b = make_gpu_tensor(&[1, 64, hidden], 501);
+    let c = make_gpu_tensor(&[1, 64, hidden], 502);
     let backend = cake_core::backends::create_backend(&dev);
     bencher.bench_local(|| backend.add3(&a, &b, &c).unwrap());
 }
 
 #[divan::bench(args = [1024, 4096])]
-fn fused_add_scaled_gpu(bencher: divan::Bencher, size: usize) {
+fn fused_add_scaled_gpu(bencher: divan::Bencher, channels: usize) {
     let dev = gpu_device();
-    let a = make_gpu_tensor(&[1, 1, size], 510);
-    let b = make_gpu_tensor(&[1, 1, size], 511);
-    let c = make_gpu_tensor(&[1, 1, size], 512);
+    // add_scaled expects (batch, channels, time) with c=(channels,)
+    let time_len = 64;
+    let a = make_gpu_tensor(&[1, channels, time_len], 510);
+    let b = make_gpu_tensor(&[1, channels, time_len], 511);
+    let c = make_gpu_tensor(&[channels], 512);
     let backend = cake_core::backends::create_backend(&dev);
     bencher.bench_local(|| backend.add_scaled(&a, &b, &c).unwrap());
 }
@@ -287,17 +291,17 @@ fn fp8_linear_forward_with_bias_cpu(bencher: divan::Bencher, size: usize) {
 
 // ── GPU variants for new fused ops (CUDA when available, CPU fallback) ──
 
-#[divan::bench(args = [1024, 4096])]
-fn fused_add_rms_norm_gpu(bencher: divan::Bencher, size: usize) {
+#[divan::bench(args = [1024, 4096, 16384])]
+fn fused_add_rms_norm_gpu(bencher: divan::Bencher, hidden: usize) {
     let dev = gpu_device();
-    let a = make_gpu_tensor(&[1, 1, size], 700);
-    let b = make_gpu_tensor(&[1, 1, size], 701);
-    let w = Tensor::ones(size, DType::F32, &dev).unwrap();
+    let a = make_gpu_tensor(&[1, 64, hidden], 700);
+    let b = make_gpu_tensor(&[1, 64, hidden], 701);
+    let w = Tensor::ones(hidden, DType::F32, &dev).unwrap();
     let backend = cake_core::backends::create_backend(&dev);
     bencher.bench_local(|| backend.add_rms_norm(&a, &b, &w, 1e-6).unwrap());
 }
 
-#[divan::bench(args = [256, 1024])]
+#[divan::bench(args = [1024, 4096])]
 fn fused_depthwise_conv1d_silu_gpu(bencher: divan::Bencher, channels: usize) {
     let dev = gpu_device();
     let kernel_size = 4;
@@ -310,20 +314,20 @@ fn fused_depthwise_conv1d_silu_gpu(bencher: divan::Bencher, channels: usize) {
     });
 }
 
-#[divan::bench(args = [256, 1024])]
+#[divan::bench(args = [1024, 4096])]
 fn fused_rms_norm_channel_gpu(bencher: divan::Bencher, channels: usize) {
     let dev = gpu_device();
-    let x = make_gpu_tensor(&[1, channels, 8], 720);
+    let x = make_gpu_tensor(&[1, channels, 64], 720);
     let w = Tensor::ones(channels, DType::F32, &dev).unwrap();
     let backend = cake_core::backends::create_backend(&dev);
     bencher.bench_local(|| backend.rms_norm_channel(&x, &w, 1e-6).unwrap());
 }
 
-#[divan::bench(args = [256, 1024])]
+#[divan::bench(args = [1024, 4096])]
 fn fused_depthwise_conv1d_bias_gpu(bencher: divan::Bencher, channels: usize) {
     let dev = gpu_device();
     let kernel_size = 4usize;
-    let seq_len = 8usize;
+    let seq_len = 64usize;
     let padded = make_gpu_tensor(&[1, channels, seq_len + kernel_size - 1], 730);
     let weight = make_gpu_tensor(&[channels, 1, kernel_size], 731);
     let bias = make_gpu_tensor(&[channels], 732);
@@ -334,7 +338,7 @@ fn fused_depthwise_conv1d_bias_gpu(bencher: divan::Bencher, channels: usize) {
     });
 }
 
-// ── Transformer block forward benchmark ──────────────────────────────
+// ── Transformer block forward benchmarks ─────────────────────────────
 
 #[divan::bench(args = [1, 8, 64])]
 fn transformer_block_forward(bencher: divan::Bencher, seq_len: usize) {
@@ -344,6 +348,37 @@ fn transformer_block_forward(bencher: divan::Bencher, seq_len: usize) {
     let block = Transformer::load_for_vibevoice(vb, &cfg, std::sync::Arc::new(cake_core::backends::CpuBackend::new())).unwrap();
     let mut cache = super::bench_helpers::make_cache(&cfg);
     let x = super::bench_helpers::make_tensor(&[1, seq_len, cfg.hidden_size], 800);
+    bencher.bench_local(|| block.forward_with_cache(&x, 0, 0, &mut cache).unwrap());
+}
+
+/// GPU transformer block: uses CudaBackend for all fused ops.
+#[divan::bench(args = [1, 8, 64])]
+fn transformer_block_forward_gpu(bencher: divan::Bencher, seq_len: usize) {
+    use cake_core::models::common::{Transformer, Cache};
+    use std::collections::HashMap;
+    let dev = gpu_device();
+    let cfg = super::bench_helpers::test_config();
+    // Rebuild VarBuilder with tensors on GPU device
+    let h = cfg.hidden_size;
+    let head_dim = cfg.head_dim.unwrap_or(h / cfg.num_attention_heads);
+    let size_q = head_dim * cfg.num_attention_heads;
+    let size_kv = head_dim * cfg.num_key_value_heads;
+    let i = cfg.intermediate_size;
+    let mut map: HashMap<String, Tensor> = HashMap::new();
+    map.insert("input_layernorm.weight".into(), Tensor::ones(h, DType::F32, &dev).unwrap());
+    map.insert("post_attention_layernorm.weight".into(), Tensor::ones(h, DType::F32, &dev).unwrap());
+    map.insert("self_attn.q_proj.weight".into(), make_gpu_tensor(&[size_q, h], 30));
+    map.insert("self_attn.k_proj.weight".into(), make_gpu_tensor(&[size_kv, h], 31));
+    map.insert("self_attn.v_proj.weight".into(), make_gpu_tensor(&[size_kv, h], 32));
+    map.insert("self_attn.o_proj.weight".into(), make_gpu_tensor(&[h, size_q], 33));
+    map.insert("mlp.gate_proj.weight".into(), make_gpu_tensor(&[i, h], 36));
+    map.insert("mlp.up_proj.weight".into(), make_gpu_tensor(&[i, h], 37));
+    map.insert("mlp.down_proj.weight".into(), make_gpu_tensor(&[h, i], 38));
+    let vb = candle_nn::VarBuilder::from_tensors(map, DType::F32, &dev);
+    let backend = cake_core::backends::create_backend(&dev);
+    let block = Transformer::load_for_vibevoice(vb, &cfg, backend).unwrap();
+    let mut cache = Cache::new(true, DType::F32, &cfg, &dev).unwrap();
+    let x = make_gpu_tensor(&[1, seq_len, cfg.hidden_size], 800);
     bencher.bench_local(|| block.forward_with_cache(&x, 0, 0, &mut cache).unwrap());
 }
 

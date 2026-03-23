@@ -11,9 +11,8 @@ for micro-optimization. Lower is better.
 
 ## Setup
 
-1. **Agree on a run tag**: e.g. `mar23`. Branch: `autoresearch/fused-ops/<tag>`.
-2. **Create the branch**: `git checkout -b autoresearch/fused-ops/<tag>`
-3. **Read the in-scope files**:
+1. **Create the branch**: `git checkout -b autoresearch/kernels/fused-ops`
+2. **Read the in-scope files**:
    - `cake-core/src/backends/cpu/mod.rs` — CPU implementations of all fused ops. These are the
      default fallback and what benchmarks measure without GPU features.
    - `cake-core/src/backends/mod.rs` — ComputeBackend trait defining the fused op interface.
@@ -23,8 +22,8 @@ for micro-optimization. Lower is better.
      `fused_rms_norm_channel_cpu`, `fused_depthwise_conv1d_silu_cpu`, `fused_depthwise_conv1d_bias_cpu`,
      and GPU variants.
    - `cake-core/benches/bench_helpers.rs` — Shared helpers.
-4. **Run prepare.sh**: `bash autoresearch/kernels/fused-ops/prepare.sh`
-5. **Confirm baseline** and start experimenting.
+3. **Run prepare.sh**: `bash autoresearch/kernels/fused-ops/prepare.sh`
+4. **Confirm baseline** and start experimenting.
 
 ## Files You May Modify
 

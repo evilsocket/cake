@@ -6,7 +6,7 @@
 
 mod ops;
 
-use candle_core::{Device, Result, Tensor, D};
+use candle_core::{Device, Result, Tensor};
 
 use super::ComputeBackend;
 
@@ -44,25 +44,28 @@ impl ComputeBackend for CudaBackend {
             return crate::utils::flash_attn::flash_attention(q, k, v, scale, causal);
         }
 
-        let q = q.to_dtype(candle_core::DType::F32)?;
+        let q = (q.to_dtype(candle_core::DType::F32)? * scale as f64)?;
         let k = k.to_dtype(candle_core::DType::F32)?;
         let v = v.to_dtype(candle_core::DType::F32)?;
         let attn = q.matmul(&k.t()?)?;
-        let attn = (attn * scale as f64)?;
         let attn = if causal {
             let seq_len = q.dim(2)?;
-            let kv_len = k.dim(2)?;
-            let mut mask_data = vec![0u8; seq_len * kv_len];
-            for i in 0..seq_len {
-                let max_j = kv_len.saturating_sub(seq_len) + i;
-                for j in 0..=max_j.min(kv_len - 1) {
-                    mask_data[i * kv_len + j] = 1;
-                }
+            if seq_len == 1 {
+                // Single-token generation: causal mask is all-true, no masking needed
+                attn
+            } else {
+                let kv_len = k.dim(2)?;
+                let offset = kv_len.saturating_sub(seq_len);
+                // Build causal mask via u32 comparison
+                let rows = Tensor::arange(0u32, seq_len as u32, q.device())?
+                    .reshape((1, 1, seq_len, 1))?;
+                let cols = Tensor::arange(0u32, kv_len as u32, q.device())?
+                    .reshape((1, 1, 1, kv_len))?;
+                let mask = (rows + offset as f64)?.broadcast_ge(&cols)?;
+                let mask = mask.broadcast_as(attn.shape())?;
+                let neg_large = Tensor::full(-1e9f32, attn.shape(), q.device())?;
+                mask.where_cond(&attn, &neg_large)?
             }
-            let mask = Tensor::from_vec(mask_data, (1, 1, seq_len, kv_len), q.device())?;
-            let neg_inf = Tensor::full(f32::NEG_INFINITY, attn.shape(), q.device())?;
-            mask.broadcast_as(attn.shape())?
-                .where_cond(&attn, &neg_inf)?
         } else {
             attn
         };
@@ -91,8 +94,10 @@ impl ComputeBackend for CudaBackend {
         let b = b.contiguous()?;
         let w = weight.contiguous()?;
         let combined = a.apply_op3_no_bwd(&b, &w, &ops::AddRmsNorm { eps, n_cols })?;
-        let residual = combined.narrow(D::Minus1, 0, n_cols)?.contiguous()?;
-        let normed = combined.narrow(D::Minus1, n_cols, n_cols)?.contiguous()?;
+        // Layout: (2*n_rows, n_cols) — narrow on dim 0 yields contiguous views (no copy)
+        let n_rows = combined.dim(0)? / 2;
+        let residual = combined.narrow(0, 0, n_rows)?;
+        let normed = combined.narrow(0, n_rows, n_rows)?;
         Ok((residual, normed))
     }
 

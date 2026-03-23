@@ -7,7 +7,6 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use futures::StreamExt;
 use ratatui::{
     layout::{Constraint, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
@@ -119,6 +118,8 @@ struct App {
     scroll_offset: u16,
     total_lines: u16,
     streaming: bool,
+    waiting: bool,   // true after send, before first token
+    thinking: bool,  // true while inside <think>...</think>
     // Cluster state
     topology: Option<TopologyResponse>,
     cluster_scroll: u16,
@@ -140,6 +141,8 @@ impl App {
             scroll_offset: 0,
             total_lines: 0,
             streaming: false,
+            waiting: false,
+            thinking: false,
             topology: None,
             cluster_scroll: 0,
             cluster_total_lines: 0,
@@ -179,7 +182,7 @@ fn human_bytes(bytes: u64) -> String {
     }
 }
 
-fn build_message_lines(messages: &[ChatMessage], width: u16) -> Vec<Line<'static>> {
+fn build_message_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let wrap_width = if width > 4 {
         width as usize - 4
@@ -187,44 +190,130 @@ fn build_message_lines(messages: &[ChatMessage], width: u16) -> Vec<Line<'static
         width as usize
     };
 
-    for (i, msg) in messages.iter().enumerate() {
+    for (i, msg) in app.messages.iter().enumerate() {
         if i > 0 {
             lines.push(Line::from(""));
         }
 
-        let (prefix, style) = if msg.role == "user" {
-            (
-                "you> ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            ("  ", Style::default().fg(Color::White))
-        };
+        let is_last = i == app.messages.len() - 1;
 
-        for text_line in msg.content.split('\n') {
-            let full = format!("{}{}", prefix, text_line);
-            if wrap_width == 0 {
-                lines.push(Line::from(Span::styled(full, style)));
-                continue;
-            }
-            let chars: Vec<char> = full.chars().collect();
-            if chars.is_empty() {
-                lines.push(Line::from(Span::styled(String::new(), style)));
-            } else {
-                let mut pos = 0;
-                while pos < chars.len() {
-                    let end = (pos + wrap_width).min(chars.len());
-                    let chunk: String = chars[pos..end].iter().collect();
-                    lines.push(Line::from(Span::styled(chunk, style)));
-                    pos = end;
+        if msg.role == "user" {
+            let prefix = "you> ";
+            let style = Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD);
+            wrap_text(&mut lines, &msg.content, prefix, style, wrap_width);
+        } else {
+            let visible = strip_think_tags(&msg.content);
+
+            if is_last && app.waiting {
+                // Before first token: show inline indicator
+                lines.push(Line::from(Span::styled(
+                    "  generating...",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                )));
+            } else if is_last && app.thinking {
+                // Inside <think> block: show thinking label + content in gray
+                let think_content = extract_open_think(&msg.content);
+                lines.push(Line::from(Span::styled(
+                    "  thinking...",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::ITALIC),
+                )));
+                if !think_content.is_empty() {
+                    let style = Style::default().fg(Color::DarkGray);
+                    wrap_text(&mut lines, &think_content, "  ", style, wrap_width);
                 }
+            } else if !visible.is_empty() {
+                let style = Style::default().fg(Color::White);
+                wrap_text(&mut lines, &visible, "  ", style, wrap_width);
             }
         }
     }
 
     lines
+}
+
+fn wrap_text(
+    lines: &mut Vec<Line<'static>>,
+    text: &str,
+    prefix: &str,
+    style: Style,
+    wrap_width: usize,
+) {
+    for text_line in text.split('\n') {
+        let full = format!("{}{}", prefix, text_line);
+        if wrap_width == 0 {
+            lines.push(Line::from(Span::styled(full, style)));
+            continue;
+        }
+        let chars: Vec<char> = full.chars().collect();
+        if chars.is_empty() {
+            lines.push(Line::from(Span::styled(String::new(), style)));
+        } else {
+            let mut pos = 0;
+            while pos < chars.len() {
+                let end = (pos + wrap_width).min(chars.len());
+                let chunk: String = chars[pos..end].iter().collect();
+                lines.push(Line::from(Span::styled(chunk, style)));
+                pos = end;
+            }
+        }
+    }
+}
+
+/// Extract the text inside an open (unclosed) `<think>` block, if any.
+/// Returns empty string if there's no open think block.
+fn extract_open_think(content: &str) -> String {
+    let mut rest = content;
+    loop {
+        match rest.find("<think>") {
+            Some(pos) => {
+                rest = &rest[pos + 7..];
+                match rest.find("</think>") {
+                    Some(end) => {
+                        rest = &rest[end + 8..];
+                    }
+                    None => {
+                        // This is the open block
+                        return rest.trim().to_string();
+                    }
+                }
+            }
+            None => return String::new(),
+        }
+    }
+}
+
+/// Remove all `<think>...</think>` blocks (closed) and any trailing open
+/// `<think>...` (still thinking) from the displayed content.
+fn strip_think_tags(content: &str) -> String {
+    let mut result = String::new();
+    let mut rest = content;
+
+    loop {
+        match rest.find("<think>") {
+            Some(pos) => {
+                result.push_str(&rest[..pos]);
+                rest = &rest[pos + 7..];
+                match rest.find("</think>") {
+                    Some(end) => {
+                        rest = &rest[end + 8..];
+                    }
+                    None => break, // open think block, discard remainder
+                }
+            }
+            None => {
+                result.push_str(rest);
+                break;
+            }
+        }
+    }
+
+    result.trim().to_string()
 }
 
 // ── Drawing ────────────────────────────────────────────────────────────────
@@ -294,7 +383,7 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner_width = msg_area.width.saturating_sub(2);
     let visible_height = msg_area.height.saturating_sub(2);
 
-    let all_lines = build_message_lines(&app.messages, inner_width);
+    let all_lines = build_message_lines(app, inner_width);
     app.total_lines = all_lines.len() as u16;
 
     if app.auto_scroll {
@@ -303,12 +392,7 @@ fn draw_chat(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let msg_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(if app.streaming {
-            " generating... "
-        } else {
-            ""
-        });
+        .border_style(Style::default().fg(Color::DarkGray));
 
     let messages_widget = Paragraph::new(all_lines)
         .block(msg_block)
@@ -677,7 +761,7 @@ fn push_layer_bar(
 // ── SSE streaming ──────────────────────────────────────────────────────────
 
 async fn stream_response(
-    client: &Client,
+    _client: &Client,
     server: &str,
     messages: &[ChatMessage],
 ) -> Result<tokio::sync::mpsc::UnboundedReceiver<Option<String>>> {
@@ -688,55 +772,81 @@ async fn stream_response(
         "stream": true
     });
 
-    let resp = client
-        .post(format!("{}/v1/chat/completions", server))
-        .json(&body)
-        .send()
-        .await?;
+    // Use a blocking thread for the HTTP stream to avoid tokio runtime conflicts
+    // when the server runs on a separate runtime (local chat mode).
+    let url = format!("{}/v1/chat/completions", server);
+    let body_str = serde_json::to_string(&body)?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("API error {}: {}", status, text);
-    }
+    std::thread::spawn(move || {
+        let resp = match reqwest::blocking::Client::new()
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .body(body_str)
+            .send()
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(Some(format!("[connection error: {}]", e)));
+                let _ = tx.send(None);
+                return;
+            }
+        };
 
-    let mut byte_stream = resp.bytes_stream();
+        if !resp.status().is_success() {
+            let _ = tx.send(Some(format!("[API error: {}]", resp.status())));
+            let _ = tx.send(None);
+            return;
+        }
 
-    tokio::spawn(async move {
-        let mut buffer = String::new();
+        // Read raw bytes one at a time to avoid any buffering that would
+        // delay SSE events. BufReader and .lines() batch small writes;
+        // byte-level reads ensure each token is forwarded immediately.
+        use std::io::Read;
+        let mut reader = resp;
+        let mut line_buf = String::new();
+        let mut prev_was_empty = false;
+        let mut byte = [0u8; 1];
 
-        while let Some(chunk) = byte_stream.next().await {
-            let chunk = match chunk {
-                Ok(c) => c,
-                Err(_) => break,
-            };
+        loop {
+            match reader.read(&mut byte) {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    if byte[0] == b'\n' {
+                        let line = std::mem::take(&mut line_buf);
+                        let line = line.trim_end().to_string();
 
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+                        if line.is_empty() {
+                            prev_was_empty = true;
+                            continue;
+                        }
 
-            while let Some(pos) = buffer.find("\n\n") {
-                let event = buffer[..pos].to_string();
-                buffer = buffer[pos + 2..].to_string();
+                        // Process the SSE line (may follow an empty line separator)
+                        let _ = prev_was_empty; // reset below
+                        prev_was_empty = false;
 
-                for line in event.lines() {
-                    let line = line.trim();
-                    if line == "data: [DONE]" {
-                        let _ = tx.send(None);
-                        return;
-                    }
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        if let Ok(resp) = serde_json::from_str::<StreamResponse>(data) {
-                            if let Some(choice) = resp.choices.first() {
-                                if let Some(ref content) = choice.delta.content {
-                                    let _ = tx.send(Some(content.clone()));
-                                }
-                                if choice.finish_reason.is_some() {
-                                    let _ = tx.send(None);
-                                    return;
+                        if line == "data: [DONE]" {
+                            let _ = tx.send(None);
+                            return;
+                        }
+                        if let Some(data) = line.strip_prefix("data: ") {
+                            if let Ok(resp) = serde_json::from_str::<StreamResponse>(data) {
+                                if let Some(choice) = resp.choices.first() {
+                                    if let Some(ref content) = choice.delta.content {
+                                        let _ = tx.send(Some(content.clone()));
+                                    }
+                                    if choice.finish_reason.is_some() {
+                                        let _ = tx.send(None);
+                                        return;
+                                    }
                                 }
                             }
                         }
+                    } else {
+                        prev_was_empty = false;
+                        line_buf.push(byte[0] as char);
                     }
                 }
+                Err(_) => break,
             }
         }
 
@@ -856,18 +966,23 @@ async fn run_app(
                                     content: String::new(),
                                 });
                                 app.streaming = true;
-                                app.status = "thinking...".to_string();
+                                app.waiting = true;
+                                app.thinking = false;
                                 gen_start = Some(Instant::now());
                                 token_count = 0;
 
+                                app.status = String::new();
                                 match stream_response(&client, server, &app.messages[..app.messages.len()-1]).await {
-                                    Ok(rx) => response_rx = Some(rx),
+                                    Ok(rx) => {
+                                        response_rx = Some(rx);
+                                    }
                                     Err(e) => {
                                         if let Some(last) = app.messages.last_mut() {
                                             last.content = format!("[error: {}]", e);
                                         }
                                         app.streaming = false;
-                                        app.status = "error".to_string();
+                                        app.waiting = false;
+                                        app.status = format!("error: {}", e);
                                         response_rx = None;
                                     }
                                 }
@@ -952,20 +1067,28 @@ async fn run_app(
             } => {
                 match msg {
                     Some(Some(content)) => {
+                        app.waiting = false;
                         token_count += 1;
                         if let Some(last) = app.messages.last_mut() {
                             last.content.push_str(&content);
+                            // Detect thinking state from accumulated content
+                            let text = &last.content;
+                            let opens = text.matches("<think>").count();
+                            let closes = text.matches("</think>").count();
+                            app.thinking = opens > closes;
                         }
+                        app.auto_scroll = true;
                         if let Some(start) = gen_start {
                             let elapsed = start.elapsed().as_secs_f64();
                             if elapsed > 0.0 {
                                 app.status = format!("{:.1} tok/s", token_count as f64 / elapsed);
                             }
                         }
-                        app.auto_scroll = true;
                     }
                     Some(None) | None => {
                         app.streaming = false;
+                        app.waiting = false;
+                        app.thinking = false;
                         response_rx = None;
                         if let Some(start) = gen_start.take() {
                             let elapsed = start.elapsed().as_secs_f64();

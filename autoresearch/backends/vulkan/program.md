@@ -10,9 +10,8 @@ compute shaders. Lower is better.
 
 ## Setup
 
-1. **Agree on a run tag**: e.g. `mar23`. Branch: `autoresearch/vulkan/<tag>`.
-2. **Create the branch**: `git checkout -b autoresearch/vulkan/<tag>`
-3. **Read the in-scope files**:
+1. **Create the branch**: `git checkout -b autoresearch/backends/vulkan`
+2. **Read the in-scope files**:
    - `cake-core/src/backends/vulkan/ops.wgsl` — WGSL compute shaders. **Primary target.**
      Contains: elementwise ops (silu_mul, add3, add_scaled, rms_norm_gated, add_rms_norm,
      stable_softplus, exp_mul, sub_mul) and matrix operations (GEMV with tiled 4×64 layout,
@@ -24,8 +23,8 @@ compute shaders. Lower is better.
    - `cake-core/benches/bench_vulkan.rs` — Vulkan-specific benchmarks (GEMV, GEMM, silu_mul,
      add3, rms_norm, MLP, dispatch overhead).
    - `cake-core/benches/bench_utils.rs` — Backend operation benchmarks.
-4. **Run prepare.sh**: `bash autoresearch/backends/vulkan/prepare.sh`
-5. **Confirm baseline** and start experimenting.
+3. **Run prepare.sh**: `bash autoresearch/backends/vulkan/prepare.sh`
+4. **Confirm baseline** and start experimenting.
 
 **IMPORTANT**: This task requires a Vulkan 1.3+ GPU. Build with `--features vulkan`.
 

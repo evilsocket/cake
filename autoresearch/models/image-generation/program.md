@@ -9,15 +9,14 @@ text encoders (T5, CLIP), timestep embedding, and FP8 linear layers. Lower is be
 
 ## Setup
 
-1. **Agree on a run tag**: e.g. `mar23`. Branch: `autoresearch/image-generation/<tag>`.
-2. **Create the branch**: `git checkout -b autoresearch/image-generation/<tag>`
-3. **Read the in-scope files**:
+1. **Create the branch**: `git checkout -b autoresearch/models/image-generation`
+2. **Read the in-scope files**:
    - `cake-core/src/models/flux/` — FLUX transformer, T5/CLIP encoders, VAE, shardable variants.
    - `cake-core/src/models/sd/` — Stable Diffusion: CLIP, VAE, U-Net, scheduler.
    - `cake-core/benches/bench_flux.rs` — FLUX component benchmarks.
    - `cake-core/benches/bench_helpers.rs` — Shared helpers.
-4. **Run prepare.sh**: `bash autoresearch/models/image-generation/prepare.sh`
-5. **Confirm baseline** and start experimenting.
+3. **Run prepare.sh**: `bash autoresearch/models/image-generation/prepare.sh`
+4. **Confirm baseline** and start experimenting.
 
 ## Files You May Modify
 

@@ -61,36 +61,42 @@ jobs:
             target: ""
             features: ""
             cuda: ""
+            compute_cap: ""
 
           - name: linux-x86_64-cuda-11.8
             os: ubuntu-latest
             target: ""
             features: cuda
             cuda: "11.8.0"
+            compute_cap: "89"
 
           - name: linux-x86_64-cuda-12.4
             os: ubuntu-latest
             target: ""
             features: cuda
             cuda: "12.4.0"
+            compute_cap: "89"
 
           - name: linux-x86_64-cuda-13.0
             os: ubuntu-latest
             target: ""
             features: cuda
             cuda: "13.0.0"
+            compute_cap: "89"
 
           - name: linux-aarch64-cpu
             os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             features: ""
             cuda: ""
+            compute_cap: ""
 
           - name: macos-arm64-metal
             os: macos-latest
             target: ""
             features: metal
             cuda: ""
+            compute_cap: ""
 
     steps:
       - name: Checkout repository
@@ -108,10 +114,12 @@ jobs:
 
       - name: Install CUDA toolkit
         if: matrix.cuda != ''
-        uses: Jimver/cuda-toolkit@v0.2.16
+        uses: Jimver/cuda-toolkit@v0.2.30
         with:
           cuda: ${{ matrix.cuda }}
-          method: network
+          method: local
+          linux-local-args: '["--toolkit"]'
+          log-file-suffix: '${{ matrix.name }}.txt'
 
       - name: Build release binary (native, default features)
         if: matrix.target == '' && matrix.features == ''
@@ -119,6 +127,8 @@ jobs:
 
       - name: Build release binary (native, extra features)
         if: matrix.target == '' && matrix.features != ''
+        env:
+          CUDA_COMPUTE_CAP: ${{ matrix.compute_cap }}
         run: cargo build --verbose --release -p cake-cli --features "${{ matrix.features }}"
 
       - name: Build release binary (cross)

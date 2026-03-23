@@ -10,9 +10,8 @@ for quantized models, making it one of the highest-frequency operations. Lower i
 
 ## Setup
 
-1. **Agree on a run tag**: e.g. `mar23`. Branch: `autoresearch/quantization/<tag>`.
-2. **Create the branch**: `git checkout -b autoresearch/quantization/<tag>`
-3. **Read the in-scope files**:
+1. **Create the branch**: `git checkout -b autoresearch/kernels/quantization`
+2. **Read the in-scope files**:
    - `cake-core/src/utils/quantization.rs` — GPTQ 4-bit dequantization, FP8 blockwise
      dequantization, weight format detection, quantization utilities.
    - `cake-core/src/backends/cpu/mod.rs` — CPU FP8 dequant: software decoding of E4M3
@@ -26,8 +25,8 @@ for quantized models, making it one of the highest-frequency operations. Lower i
      FP8 blockwise).
    - `cake-core/benches/bench_flux.rs` — FP8 linear forward, F8 dequant benchmarks.
    - `cake-core/benches/bench_utils.rs` — fp8_linear_forward_cpu, fp8_linear_forward_with_bias_cpu.
-4. **Run prepare.sh**: `bash autoresearch/kernels/quantization/prepare.sh`
-5. **Confirm baseline** and start experimenting.
+3. **Run prepare.sh**: `bash autoresearch/kernels/quantization/prepare.sh`
+4. **Confirm baseline** and start experimenting.
 
 ## Files You May Modify
 
