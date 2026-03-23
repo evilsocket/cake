@@ -104,18 +104,21 @@ pub fn estimate_tflops_for_gpus(gpus: &[discovery::GpuInfo]) -> f64 {
     if reported > 0.0 {
         return reported;
     }
+    fn name_contains_ci(name: &str, needle: &str) -> bool {
+        name.as_bytes().windows(needle.len()).any(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+    }
     gpus.iter()
         .map(|g| {
             let vram_gb = g.vram_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-            let name_lower = g.name.to_lowercase();
-            if name_lower.contains("nvidia")
-                || name_lower.contains("geforce")
-                || name_lower.contains("rtx")
-                || name_lower.contains("gtx")
-                || name_lower.contains("tesla")
+            let name = &g.name;
+            if name_contains_ci(name, "nvidia")
+                || name_contains_ci(name, "geforce")
+                || name_contains_ci(name, "rtx")
+                || name_contains_ci(name, "gtx")
+                || name_contains_ci(name, "tesla")
             {
                 vram_gb * 3.0
-            } else if name_lower.contains("apple") || name_lower.contains("silicon") {
+            } else if name_contains_ci(name, "apple") || name_contains_ci(name, "silicon") {
                 vram_gb * 0.4
             } else {
                 2.0
