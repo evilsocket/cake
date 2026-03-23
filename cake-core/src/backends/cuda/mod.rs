@@ -52,20 +52,17 @@ impl ComputeBackend for CudaBackend {
         let attn = if causal {
             let seq_len = q.dim(2)?;
             let kv_len = k.dim(2)?;
-            // Build causal mask on GPU: row_idx + offset >= col_idx
-            let offset = kv_len.saturating_sub(seq_len) as f32;
-            let rows = Tensor::arange(0f32, seq_len as f32, q.device())?
+            let offset = kv_len.saturating_sub(seq_len);
+            // Build causal mask via u8 comparison (u32 arange → compare → where_cond)
+            let rows = Tensor::arange(0u32, seq_len as u32, q.device())?
                 .reshape((1, 1, seq_len, 1))?;
-            let cols = Tensor::arange(0f32, kv_len as f32, q.device())?
+            let cols = Tensor::arange(0u32, kv_len as u32, q.device())?
                 .reshape((1, 1, 1, kv_len))?;
-            // bias = 0 where causal (row+offset >= col), -inf where masked
-            // (rows + offset - cols) < 0 means masked → add -inf
-            let diff = ((rows + offset as f64)? - cols)?;
-            let zeros = diff.zeros_like()?;
-            let neg_inf = Tensor::full(f32::NEG_INFINITY, diff.shape(), q.device())?;
-            let bias = diff.ge(&zeros)?.where_cond(&zeros, &neg_inf)?;
-            let bias = bias.broadcast_as(attn.shape())?;
-            (attn + bias)?
+            // mask[i,j] = (i + offset >= j) — true where attention is allowed
+            let mask = (rows + offset as f64)?.broadcast_ge(&cols)?;
+            let mask = mask.broadcast_as(attn.shape())?;
+            let neg_inf = Tensor::full(f32::NEG_INFINITY, attn.shape(), q.device())?;
+            mask.where_cond(&attn, &neg_inf)?
         } else {
             attn
         };
