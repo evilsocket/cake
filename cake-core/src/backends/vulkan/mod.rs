@@ -807,6 +807,40 @@ impl VulkanBackend {
         Ok(tensor)
     }
 
+    // ── GPU softmax ──────────────────────────────────────────────────
+
+    /// Dispatch scaled softmax on GPU: output[row,j] = softmax(input[row,j] * scale).
+    /// If seq_len > 0, applies causal mask.
+    fn dispatch_softmax(
+        &self,
+        input: &Tensor,
+        rows: usize,
+        cols: usize,
+        scale: f32,
+        seq_len: usize,
+    ) -> Result<Tensor> {
+        let dtype = input.dtype();
+        let shape = input.shape().clone();
+        let n = input.elem_count();
+
+        let buf_in = self.get_or_upload(input)?;
+        let dummy = self.upload_uncached(&[0.0f32]);
+        let buf_out = self.alloc_output(n);
+
+        let result = self.dispatch_compute(
+            "scaled_softmax",
+            &[buf_in.buffer, dummy.buffer, buf_out.buffer],
+            &buf_out,
+            n,
+            &[rows as u32, cols as u32, scale.to_bits(), seq_len as u32],
+            (rows as u32, 1, 1), // one workgroup per row
+        );
+
+        let tensor = Self::from_f32_vec(result, shape.dims(), dtype)?;
+        self.cache_activation(tensor.id(), buf_out);
+        Ok(tensor)
+    }
+
     // ── GPU matmul ───────────────────────────────────────────────────
 
     /// Returns (result_data, output_buffer) so caller can cache the buffer.
@@ -1015,28 +1049,17 @@ impl ComputeBackend for VulkanBackend {
         let k = k.to_dtype(DType::F32)?;
         let v = v.to_dtype(DType::F32)?;
 
+        // Q @ K^T
         let attn = self.tensor_matmul(&q, &k.t()?)?;
-        let attn = (attn * scale as f64)?;
 
-        let attn = if causal {
-            let seq_len = q.dim(2)?;
-            let kv_len = k.dim(2)?;
-            let mut mask_data = vec![0u8; seq_len * kv_len];
-            for i in 0..seq_len {
-                let max_j = kv_len.saturating_sub(seq_len) + i;
-                for j in 0..=max_j.min(kv_len - 1) {
-                    mask_data[i * kv_len + j] = 1;
-                }
-            }
-            let mask = Tensor::from_vec(mask_data, (1, 1, seq_len, kv_len), q.device())?;
-            let neg_inf = Tensor::full(f32::NEG_INFINITY, attn.shape(), q.device())?;
-            mask.broadcast_as(attn.shape())?
-                .where_cond(&attn, &neg_inf)?
-        } else {
-            attn
-        };
+        // GPU scaled softmax (fuses scale + optional causal mask + softmax)
+        let seq_len = q.dim(q.dims().len() - 2)?;
+        let kv_len = k.dim(k.dims().len() - 2)?;
+        let total_rows = attn.elem_count() / kv_len;
+        let causal_seq_len = if causal { seq_len } else { 0 };
+        let attn = self.dispatch_softmax(&attn, total_rows, kv_len, scale, causal_seq_len)?;
 
-        let attn = candle_nn::ops::softmax_last_dim(&attn)?;
+        // Attn @ V
         let out = self.tensor_matmul(&attn, &v)?;
         out.to_dtype(orig_dtype)
     }
