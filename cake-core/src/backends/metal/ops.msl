@@ -74,7 +74,8 @@ kernel void stable_softplus_f32(
 ) {
     if (idx >= count) return;
     float x = input[idx];
-    float sp = (x > 20.0f) ? x : log1p(exp(x));
+    // Branchless: select avoids warp divergence
+    float sp = select(log1p(exp(x)), x, x > 20.0f);
     output[idx] = max(x, sp);
 }
 
@@ -86,7 +87,7 @@ kernel void stable_softplus_f16(
 ) {
     if (idx >= count) return;
     float x = float(input[idx]);
-    float sp = (x > 20.0f) ? x : log1p(exp(x));
+    float sp = select(log1p(exp(x)), x, x > 20.0f);
     output[idx] = half(max(x, sp));
 }
 
