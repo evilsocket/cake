@@ -216,13 +216,27 @@ impl RocmBackend {
     #[inline]
     fn gpu_upload(&self, data: &[f32]) -> Result<GpuBuf> {
         let buf = self.gpu_alloc(data.len())?;
-        let err = unsafe {
-            (self.ffi.hip_memcpy_async)(
-                buf.ptr, data.as_ptr() as *const _, data.len() * 4,
-                HIP_MEMCPY_HOST_TO_DEVICE, self.stream,
-            )
-        };
-        if err != 0 { return Err(candle_core::Error::Msg(format!("hipMemcpyAsync H2D: {err}"))); }
+        let bytes = data.len() * 4;
+        // Try pinned staging buffer for faster DMA (important on UMA like Steam Deck)
+        let mut pinned = std::ptr::null_mut();
+        if unsafe { (self.ffi.hip_host_malloc)(&mut pinned, bytes, 0) } == 0 {
+            unsafe {
+                std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, pinned as *mut u8, bytes);
+            }
+            let err = unsafe {
+                (self.ffi.hip_memcpy_async)(buf.ptr, pinned, bytes, HIP_MEMCPY_HOST_TO_DEVICE, self.stream)
+            };
+            // Sync before freeing pinned buffer (memcpy must complete first)
+            let _ = unsafe { (self.ffi.hip_stream_synchronize)(self.stream) };
+            unsafe { (self.ffi.hip_host_free)(pinned) };
+            if err != 0 { return Err(candle_core::Error::Msg(format!("hipMemcpyAsync H2D: {err}"))); }
+        } else {
+            // Fallback: regular async memcpy from unpinned memory
+            let err = unsafe {
+                (self.ffi.hip_memcpy_async)(buf.ptr, data.as_ptr() as *const _, bytes, HIP_MEMCPY_HOST_TO_DEVICE, self.stream)
+            };
+            if err != 0 { return Err(candle_core::Error::Msg(format!("hipMemcpyAsync H2D: {err}"))); }
+        }
         Ok(buf)
     }
 
