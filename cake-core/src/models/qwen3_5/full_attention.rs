@@ -192,9 +192,8 @@ impl Qwen3_5FullAttention {
                 ).map_err(|e| anyhow!("flash_attn: {e}"))?;
             }
 
-            // Metal: use manual F32 attention to avoid:
-            // 1. F16 precision loss in SDPA that causes garbage output
-            // 2. Threadgroup memory exceeded errors with F32 SDPA on some GPUs
+            // Metal: F32 manual attention (F16 SDPA causes garbage, F32 SDPA
+            // exceeds threadgroup memory on some GPUs when KV cache grows)
             #[cfg(feature = "metal")]
             if matches!(q.device(), candle_core::Device::Metal(_)) {
                 let k = self.repeat_kv(k).map_err(|e| anyhow!("repeat_kv k: {e}"))?;
@@ -206,10 +205,8 @@ impl Qwen3_5FullAttention {
                 let att = if seq_len == 1 {
                     att
                 } else {
-                    // Additive causal mask: tril = 0 for valid, -inf for masked positions
                     let tril = Tensor::tril2(seq_len, candle_core::DType::F32, att.device())
                         .map_err(|e| anyhow!("tril: {e}"))?;
-                    // Convert: 1->0, 0->-inf
                     let mask = ((tril - 1.0)? * 1e9)?;
                     let mask = mask.broadcast_as(att.shape())
                         .map_err(|e| anyhow!("mask broadcast: {e}"))?;
