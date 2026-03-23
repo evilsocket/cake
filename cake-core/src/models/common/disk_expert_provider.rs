@@ -16,6 +16,13 @@ use crate::utils::tensor_storage::TensorStorageProvider;
 
 use super::expert_provider::{ExpertProvider, ExpertWeights};
 
+/// Pre-computed tensor names for a single expert (avoids format! on hot path).
+struct ExpertNames {
+    gate_proj: String,
+    up_proj: String,
+    down_proj: String,
+}
+
 /// Streams expert weights from disk via `TensorStorageProvider`.
 ///
 /// Expert tensors are read from safetensors files by name, e.g.:
@@ -23,6 +30,8 @@ use super::expert_provider::{ExpertProvider, ExpertWeights};
 pub struct DiskExpertProvider {
     storage: Arc<dyn TensorStorageProvider>,
     layer_prefix: String,
+    /// Pre-computed tensor name strings for each expert index.
+    expert_names: Vec<ExpertNames>,
     num_experts: usize,
     device: Device,
     dtype: DType,
@@ -53,9 +62,20 @@ impl DiskExpertProvider {
         device: Device,
         dtype: DType,
     ) -> Self {
+        let expert_names = (0..num_experts)
+            .map(|idx| {
+                let prefix = format!("{}.experts.{}", layer_prefix, idx);
+                ExpertNames {
+                    gate_proj: format!("{prefix}.gate_proj.weight"),
+                    up_proj: format!("{prefix}.up_proj.weight"),
+                    down_proj: format!("{prefix}.down_proj.weight"),
+                }
+            })
+            .collect();
         Self {
             storage,
             layer_prefix,
+            expert_names,
             num_experts,
             device,
             dtype,
@@ -101,11 +121,11 @@ impl ExpertProvider for DiskExpertProvider {
             )));
         }
 
-        let prefix = format!("{}.experts.{}", self.layer_prefix, idx);
+        let names = &self.expert_names[idx];
 
-        let gate_proj = self.read_weight(&format!("{prefix}.gate_proj.weight"))?;
-        let up_proj = self.read_weight(&format!("{prefix}.up_proj.weight"))?;
-        let down_proj = self.read_weight(&format!("{prefix}.down_proj.weight"))?;
+        let gate_proj = self.read_weight(&names.gate_proj)?;
+        let up_proj = self.read_weight(&names.up_proj)?;
+        let down_proj = self.read_weight(&names.down_proj)?;
 
         Ok(ExpertWeights {
             gate_proj,
