@@ -35,6 +35,7 @@ const ALL_KERNELS: &[&str] = &[
     "rms_norm_channel_f32", "rms_norm_channel_f16",
     "f8e4m3_to_f32", "f8e4m3_to_f16",
     "fused_vector_attention_f16",
+    "fused_vector_attention_f32",
 ];
 
 struct PipelineCache {
@@ -472,8 +473,14 @@ impl candle_core::CustomOp3 for MetalFusedVectorAttention {
         let k_dims = l_k.shape().dims();
         let (bh, head_dim) = (q_dims[0], q_dims[1]);
         let kv_len = k_dims[1];
-        let pipeline = PIPELINE_CACHE.get_or_create(device, "fused_vector_attention_f16")?;
-        let output = device.new_buffer(bh * head_dim, DType::F16, "fused_vec_attn")?;
+        let kernel_name: &'static str = match s_q.dtype() {
+            DType::F16 => "fused_vector_attention_f16",
+            DType::F32 => "fused_vector_attention_f32",
+            dt => candle_core::bail!("fused_vector_attention: unsupported dtype {dt:?}"),
+        };
+        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+        let out_dtype = s_q.dtype();
+        let output = device.new_buffer(bh * head_dim, out_dtype, "fused_vec_attn")?;
         let encoder = device.command_encoder()?;
         encoder.set_compute_pipeline_state(&pipeline);
         let off_q = l_q.start_offset() * s_q.dtype().size_in_bytes();
@@ -493,7 +500,7 @@ impl candle_core::CustomOp3 for MetalFusedVectorAttention {
         let grid = objc2_metal::MTLSize { width: head_dim, height: bh, depth: 1 };
         let group = objc2_metal::MTLSize { width: tg_width, height: 1, depth: 1 };
         encoder.dispatch_threads(grid, group);
-        Ok((candle_core::MetalStorage::new(output, device.clone(), bh * head_dim, DType::F16), Shape::from(vec![bh, head_dim])))
+        Ok((candle_core::MetalStorage::new(output, device.clone(), bh * head_dim, out_dtype), Shape::from(vec![bh, head_dim])))
     }
 }
 
@@ -519,8 +526,8 @@ impl ComputeBackend for MetalBackend {
 
     fn attention(&self, q: &Tensor, k: &Tensor, v: &Tensor, scale: f32, causal: bool) -> Result<Tensor> {
         let q_dims = q.dims();
-        // Generation case: seq_len=1 + F16 → use fused MSL kernel (F32 internal precision)
-        if q_dims.len() == 4 && q_dims[2] == 1 && q.dtype() == DType::F16 && !causal {
+        // Generation case: seq_len=1 → use fused MSL kernel (F32 internal precision)
+        if q_dims.len() == 4 && q_dims[2] == 1 && matches!(q.dtype(), DType::F16 | DType::F32) && !causal {
             let (batch, heads, _, head_dim) = (q_dims[0], q_dims[1], q_dims[2], q_dims[3]);
             let k_dims = k.dims();
             let kv_heads = k_dims[1];
@@ -555,6 +562,26 @@ impl ComputeBackend for MetalBackend {
                 att.matmul(&v.contiguous()?)
             }
         }
+    }
+
+    fn sdpa(&self, q: &Tensor, k: &Tensor, v: &Tensor, mask: Option<&Tensor>, causal: bool, scale: f32) -> Result<Tensor> {
+        let q_dims = q.dims();
+        // Generation case: seq_len=1, no mask → fused MSL kernel (avoids SDPA overhead)
+        if q_dims.len() == 4 && q_dims[2] == 1 && mask.is_none()
+            && matches!(q.dtype(), DType::F16 | DType::F32)
+        {
+            let (batch, heads, _, head_dim) = (q_dims[0], q_dims[1], q_dims[2], q_dims[3]);
+            let k_dims = k.dims();
+            let kv_heads = k_dims[1];
+            let gqa_ratio = (heads / kv_heads) as u32;
+            let q_flat = q.contiguous()?.reshape((batch * heads, head_dim))?;
+            let k_flat = k.contiguous()?.reshape((batch * kv_heads, k_dims[2], head_dim))?;
+            let v_flat = v.contiguous()?.reshape((batch * kv_heads, k_dims[2], head_dim))?;
+            let out = q_flat.apply_op3_no_bwd(&k_flat, &v_flat, &MetalFusedVectorAttention { scale, gqa_ratio })?;
+            return out.reshape((batch, heads, 1, head_dim));
+        }
+        // Default: candle's SDPA
+        candle_nn::ops::sdpa(q, k, v, mask, causal, scale, 1.0)
     }
 
     // ── MSL-accelerated ops (validated by Metal vs CPU tests) ────────

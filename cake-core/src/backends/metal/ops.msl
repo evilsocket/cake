@@ -505,3 +505,63 @@ kernel void fused_vector_attention_f16(
     // Normalize
     output[bh * head_dim + d] = half(acc / sum_exp);
 }
+
+kernel void fused_vector_attention_f32(
+    device const float* q [[buffer(0)]],
+    device const float* k [[buffer(1)]],
+    device const float* v [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& head_dim [[buffer(4)]],
+    constant uint& kv_len [[buffer(5)]],
+    constant float& scale [[buffer(6)]],
+    constant uint& gqa_ratio [[buffer(7)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint bh = gid.y;
+    uint bkv = bh / gqa_ratio;
+    uint d = gid.x;
+
+    if (d >= head_dim) return;
+
+    float q_val = q[bh * head_dim + d];
+
+    float max_score = -1e30f;
+    float sum_exp = 0.0f;
+    float acc = 0.0f;
+
+    for (uint t = 0; t < kv_len; t++) {
+        uint k_base = bkv * kv_len * head_dim + t * head_dim;
+        float qk = q_val * k[k_base + d];
+        float score = simd_sum(qk);
+        threadgroup float partial[32];
+        if (head_dim > 32) {
+            if (lane == 0) partial[simd_id] = score;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            uint ns = (head_dim + 31) / 32;
+            float t2 = 0.0f;
+            if (simd_id == 0 && lane < ns) t2 = partial[lane];
+            t2 = simd_sum(t2);
+            if (simd_id == 0 && lane == 0) partial[0] = t2;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            score = partial[0];
+        }
+        score *= scale;
+
+        float v_val = v[bkv * kv_len * head_dim + t * head_dim + d];
+        if (score > max_score) {
+            float correction = fast::exp(max_score - score);
+            sum_exp = fma(sum_exp, correction, 1.0f);
+            acc = fma(acc, correction, v_val);
+            max_score = score;
+        } else {
+            float w = fast::exp(score - max_score);
+            sum_exp += w;
+            acc = fma(w, v_val, acc);
+        }
+    }
+
+    output[bh * head_dim + d] = acc / sum_exp;
+}
