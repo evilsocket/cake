@@ -478,11 +478,11 @@ fn scaled_softmax(@builtin(workgroup_id) wid: vec3<u32>,
 
 const STILE_M: u32 = 16;
 const STILE_N: u32 = 64;
-const STILE_K: u32 = 32;
-const STILE_A_STRIDE: u32 = 33;
+const STILE_K: u32 = 64;
+const STILE_A_STRIDE: u32 = 65;  // padded (64+1)
 const STILE_B_STRIDE: u32 = 65;
-var<workgroup> stile_a: array<f32, 528>;   // [16, 33]
-var<workgroup> stile_b: array<f32, 2080>;  // [32, 65]
+var<workgroup> stile_a: array<f32, 1040>;  // [16, 65]
+var<workgroup> stile_b: array<f32, 4160>;  // [64, 65]
 
 @compute @workgroup_size(16, 16)
 fn matmul_small(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -505,11 +505,11 @@ fn matmul_small(@builtin(global_invocation_id) gid: vec3<u32>,
     for (var t: u32 = 0u; t < num_tiles; t++) {
         let tk = t * STILE_K;
 
-        // Load tile_a[16, 32]: row-coalesced pattern.
-        // 256 threads cover 8 rows per iteration (32 threads/row), 2 iterations for 16 rows.
-        for (var r: u32 = 0u; r < 2u; r++) {
-            let tr = r * 8u + lin / 32u;
-            let tc = lin % 32u;
+        // Load tile_a[16, 64]: row-coalesced pattern.
+        // 256 threads cover 4 rows per iteration (64 threads/row), 4 iterations for 16 rows.
+        for (var r: u32 = 0u; r < 4u; r++) {
+            let tr = r * 4u + lin / 64u;
+            let tc = lin % 64u;
             let a_row = wg_row + tr;
             let a_col = tk + tc;
             if (tr < STILE_M && a_row < M && a_col < K) {
@@ -519,9 +519,9 @@ fn matmul_small(@builtin(global_invocation_id) gid: vec3<u32>,
             }
         }
 
-        // Load tile_b[32, 64]: row-coalesced pattern.
-        // 256 threads cover 4 rows per iteration (64 threads/row), 8 iterations for 32 rows.
-        for (var r: u32 = 0u; r < 8u; r++) {
+        // Load tile_b[64, 64]: row-coalesced pattern.
+        // 256 threads cover 4 rows per iteration (64 threads/row), 16 iterations for 64 rows.
+        for (var r: u32 = 0u; r < 16u; r++) {
             let tr = r * 4u + lin / 64u;
             let tc = lin % 64u;
             let b_row = tk + tr;
