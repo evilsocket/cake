@@ -832,7 +832,12 @@ impl ComputeBackend for VulkanBackend {
     }
 
     fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        (a + b.broadcast_mul(&c.unsqueeze(0)?.unsqueeze(2)?)?)?.contiguous()
+        let c_broadcast = if c.dims().len() == 1 {
+            c.unsqueeze(0)?.unsqueeze(2)?
+        } else {
+            c.clone()
+        };
+        (a + b.broadcast_mul(&c_broadcast)?)?.contiguous()
     }
 
     fn adaln_modulate(
