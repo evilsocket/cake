@@ -283,9 +283,9 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
     let row0 = wg_row + lr * 2u;
     let col0 = wg_col + lc * 4u;
 
-    // 2×4 accumulators using vec4 for the 4 columns (2 vec4 registers)
-    var acc0: vec4<f32> = vec4(0.0);  // row 0, cols c0..c0+3
-    var acc1: vec4<f32> = vec4(0.0);  // row 1, cols c0..c0+3
+    // 2×4 accumulators (8 registers)
+    var acc00: f32 = 0.0; var acc01: f32 = 0.0; var acc02: f32 = 0.0; var acc03: f32 = 0.0;
+    var acc10: f32 = 0.0; var acc11: f32 = 0.0; var acc12: f32 = 0.0; var acc13: f32 = 0.0;
     let num_tiles = (K + TILE_K - 1u) / TILE_K;
 
     // Linear thread index
@@ -330,25 +330,25 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
         for (var k: u32 = 0u; k < TILE_K; k++) {
             let a0k = tile_a[r0 * TILE_A_STRIDE + k];
             let a1k = tile_a[r1 * TILE_A_STRIDE + k];
-            let bk = vec4(tile_b[k * TILE_B_STRIDE + c0],
-                          tile_b[k * TILE_B_STRIDE + c0 + 1u],
-                          tile_b[k * TILE_B_STRIDE + c0 + 2u],
-                          tile_b[k * TILE_B_STRIDE + c0 + 3u]);
-            acc0 = fma(vec4(a0k), bk, acc0);
-            acc1 = fma(vec4(a1k), bk, acc1);
+            let bk0 = tile_b[k * TILE_B_STRIDE + c0];
+            let bk1 = tile_b[k * TILE_B_STRIDE + c0 + 1u];
+            let bk2 = tile_b[k * TILE_B_STRIDE + c0 + 2u];
+            let bk3 = tile_b[k * TILE_B_STRIDE + c0 + 3u];
+            acc00 += a0k * bk0; acc01 += a0k * bk1; acc02 += a0k * bk2; acc03 += a0k * bk3;
+            acc10 += a1k * bk0; acc11 += a1k * bk1; acc12 += a1k * bk2; acc13 += a1k * bk3;
         }
         workgroupBarrier();
     }
 
     // Write 2×4 output block
-    if (row0 < M && col0 < N) { mat_c[row0 * N + col0] = acc0.x; }
-    if (row0 < M && col0 + 1u < N) { mat_c[row0 * N + col0 + 1u] = acc0.y; }
-    if (row0 < M && col0 + 2u < N) { mat_c[row0 * N + col0 + 2u] = acc0.z; }
-    if (row0 < M && col0 + 3u < N) { mat_c[row0 * N + col0 + 3u] = acc0.w; }
-    if (row0 + 1u < M && col0 < N) { mat_c[(row0 + 1u) * N + col0] = acc1.x; }
-    if (row0 + 1u < M && col0 + 1u < N) { mat_c[(row0 + 1u) * N + col0 + 1u] = acc1.y; }
-    if (row0 + 1u < M && col0 + 2u < N) { mat_c[(row0 + 1u) * N + col0 + 2u] = acc1.z; }
-    if (row0 + 1u < M && col0 + 3u < N) { mat_c[(row0 + 1u) * N + col0 + 3u] = acc1.w; }
+    if (row0 < M && col0 < N) { mat_c[row0 * N + col0] = acc00; }
+    if (row0 < M && col0 + 1u < N) { mat_c[row0 * N + col0 + 1u] = acc01; }
+    if (row0 < M && col0 + 2u < N) { mat_c[row0 * N + col0 + 2u] = acc02; }
+    if (row0 < M && col0 + 3u < N) { mat_c[row0 * N + col0 + 3u] = acc03; }
+    if (row0 + 1u < M && col0 < N) { mat_c[(row0 + 1u) * N + col0] = acc10; }
+    if (row0 + 1u < M && col0 + 1u < N) { mat_c[(row0 + 1u) * N + col0 + 1u] = acc11; }
+    if (row0 + 1u < M && col0 + 2u < N) { mat_c[(row0 + 1u) * N + col0 + 2u] = acc12; }
+    if (row0 + 1u < M && col0 + 3u < N) { mat_c[(row0 + 1u) * N + col0 + 3u] = acc13; }
 }
 
 // ═══════════════════════════════════════════════════════════════════
