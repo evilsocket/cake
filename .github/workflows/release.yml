@@ -111,7 +111,8 @@ jobs:
         uses: Jimver/cuda-toolkit@v0.2.30
         with:
           cuda: ${{ matrix.cuda }}
-          method: network
+          method: local
+          linux-local-args: '["--toolkit"]'
 
       - name: Build release binary (native, default features)
         if: matrix.target == '' && matrix.features == ''

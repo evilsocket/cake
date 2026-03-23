@@ -216,7 +216,8 @@ jobs:
         uses: Jimver/cuda-toolkit@v0.2.30
         with:
           cuda: ${{ matrix.cuda }}
-          method: network
+          method: local
+          linux-local-args: '["--toolkit"]'
 
       - name: Cache cargo registry & build
         uses: actions/cache@v4
