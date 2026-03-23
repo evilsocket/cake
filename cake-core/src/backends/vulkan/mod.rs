@@ -435,6 +435,20 @@ impl VulkanBackend {
                 &[dummy, dummy, out.buffer],
                 &out, 4, &[2, 2, 2, 0], (1, 1, 1),
             );
+            // Scaled softmax: 1 row × 4 cols
+            let _ = backend.dispatch_compute(
+                "scaled_softmax",
+                &[dummy, dummy, out.buffer],
+                &out, 4,
+                &[1, 4, 1.0f32.to_bits(), 0],
+                (1, 1, 1),
+            );
+            // GEMV F16: 1×4 * 4×4 = 1×4
+            let _ = backend.dispatch_compute(
+                "gemv_f16",
+                &[dummy, dummy, out.buffer],
+                &out, 4, &[4, 4, 0, 0], (1, 1, 1),
+            );
             backend.release_output(out);
 
             // Pre-warm buffer pool with common output sizes (avoids allocation on first real dispatch).
