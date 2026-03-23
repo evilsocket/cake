@@ -488,6 +488,19 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
 
     /// GELU activation function.
     fn gelu(&self, x: &Tensor) -> Result<Tensor> {
+        // Fast path: raw f32 GELU approximation (tanh-based, matches PyTorch)
+        if x.dtype() == DType::F32 {
+            let data = x.contiguous()?.flatten_all()?.to_vec1::<f32>()?;
+            let shape = x.dims();
+            let mut out = data;
+            let sqrt_2_over_pi: f32 = 0.797_884_6; // sqrt(2/pi)
+            for v in out.iter_mut() {
+                let x = *v;
+                let inner = sqrt_2_over_pi * (x + 0.044715 * x * x * x);
+                *v = 0.5 * x * (1.0 + inner.tanh());
+            }
+            return Tensor::from_vec(out, shape, x.device());
+        }
         x.gelu()
     }
 
