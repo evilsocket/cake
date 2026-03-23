@@ -413,6 +413,50 @@ impl candle_core::CustomOp2 for MetalRmsNormChannel {
     }
 }
 
+struct MetalF8ToF32;
+impl candle_core::CustomOp1 for MetalF8ToF32 {
+    fn name(&self) -> &'static str { "metal_f8e4m3_to_f32" }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalF8ToF32: expected Metal device") }
+    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
+        let device = s.device();
+        let el = l.shape().elem_count();
+        let pipeline = PIPELINE_CACHE.get_or_create(device, "f8e4m3_to_f32")?;
+        let output = device.new_buffer(el, DType::F32, "f8_to_f32")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let offset = l.start_offset() * s.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
+        let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
+        let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
+        encoder.dispatch_threads(grid, group);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), el, DType::F32), l.shape().clone()))
+    }
+}
+
+struct MetalF8ToF16;
+impl candle_core::CustomOp1 for MetalF8ToF16 {
+    fn name(&self) -> &'static str { "metal_f8e4m3_to_f16" }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalF8ToF16: expected Metal device") }
+    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
+        let device = s.device();
+        let el = l.shape().elem_count();
+        let pipeline = PIPELINE_CACHE.get_or_create(device, "f8e4m3_to_f16")?;
+        let output = device.new_buffer(el, DType::F16, "f8_to_f16")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let offset = l.start_offset() * s.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
+        let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
+        let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
+        encoder.dispatch_threads(grid, group);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), el, DType::F16), l.shape().clone()))
+    }
+}
+
 // ─── MetalBackend ────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -533,14 +577,12 @@ impl ComputeBackend for MetalBackend {
 
     fn f8e4m3_to_f32(&self, x: &Tensor) -> Result<Tensor> {
         if x.dtype() != DType::F8E4M3 { return x.to_dtype(DType::F32); }
-        let dev = x.device().clone();
-        x.to_device(&Device::Cpu)?.to_dtype(DType::F32)?.to_device(&dev)
+        x.apply_op1_no_bwd(&MetalF8ToF32)
     }
 
     fn f8e4m3_to_f16(&self, x: &Tensor) -> Result<Tensor> {
         if x.dtype() != DType::F8E4M3 { return x.to_dtype(DType::F16); }
-        let dev = x.device().clone();
-        x.to_device(&Device::Cpu)?.to_dtype(DType::F32)?.to_dtype(DType::F16)?.to_device(&dev)
+        x.apply_op1_no_bwd(&MetalF8ToF16)
     }
 
     fn f8e4m3_to_bf16(&self, x: &Tensor) -> Result<Tensor> {
