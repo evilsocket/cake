@@ -61,7 +61,7 @@ impl RawTensor {
     pub fn from_tensor(x: &Tensor) -> Self {
         let data: Vec<u8> = x.data().into_owned();
         let dtype = dtype_to_u8(x.dtype());
-        let shape = x.shape().clone().into_dims();
+        let shape = x.shape().dims().to_vec();
         Self { data, dtype, shape }
     }
 
