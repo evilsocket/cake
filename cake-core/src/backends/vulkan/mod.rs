@@ -1267,11 +1267,13 @@ impl ComputeBackend for VulkanBackend {
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
         let n = gate.elem_count();
-        if n > 32768 {
+        // Lower threshold for silu_mul: in MLP, silu_mul output feeds into
+        // the next matmul. GPU path caches the output buffer, saving re-upload.
+        if n > 16384 {
             log::debug!("silu_mul GPU: {n} elements");
             self.dispatch_binary_vec4(gate, up, "silu_mul")
         } else {
-            log::debug!("silu_mul CPU: {n} elements (<=32768)");
+            log::debug!("silu_mul CPU: {n} elements (<=16384)");
             (candle_nn::ops::silu(&gate.contiguous()?)? * up.contiguous()?)?.contiguous()
         }
     }
