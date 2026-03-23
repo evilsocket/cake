@@ -435,8 +435,8 @@ extern "C" __global__ void FN_NAME( \
         int wt_off = chan * kernel_size; \
         _Pragma("unroll 8") \
         for (int k = 0; k < kernel_size; k++) { \
-            acc += static_cast<float>(window[w_off + k]) \
-                 * static_cast<float>(weight[wt_off + k]); \
+            acc = fmaf(static_cast<float>(window[w_off + k]), \
+                       static_cast<float>(weight[wt_off + k]), acc); \
         } \
         /* silu(acc) = acc * sigmoid(acc) */ \
         float sig = __frcp_rn(1.0f + __expf(-acc)); \
@@ -483,8 +483,8 @@ extern "C" __global__ void FN_NAME( \
         int wt_off = c * kernel_size; \
         _Pragma("unroll 8") \
         for (int k = 0; k < kernel_size; k++) { \
-            acc += static_cast<float>(input[in_off + k]) \
-                 * static_cast<float>(weight[wt_off + k]); \
+            acc = fmaf(static_cast<float>(input[in_off + k]), \
+                       static_cast<float>(weight[wt_off + k]), acc); \
         } \
         acc += static_cast<float>(bias[c]); \
         out[i] = static_cast<TYPENAME>(acc); \
@@ -538,7 +538,7 @@ extern "C" __global__ void FN_NAME( \
             } else { \
                 v = static_cast<float>(input[(b * channels + c) * time_len + (pos - ctx_len)]); \
             } \
-            acc += v * static_cast<float>(weight[wt_off + k]); \
+            acc = fmaf(v, static_cast<float>(weight[wt_off + k]), acc); \
         } \
         acc += static_cast<float>(bias[c]); \
         out[i] = static_cast<TYPENAME>(acc); \
