@@ -526,7 +526,6 @@ kernel void fused_vector_attention_f16(
     constant float& scale [[buffer(6)]],
     constant uint& gqa_ratio [[buffer(7)]],  // heads / kv_heads
     uint2 gid [[thread_position_in_grid]],   // (thread_in_group, batch*head_idx)
-    uint tid [[thread_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],
     uint simd_id [[simdgroup_index_in_threadgroup]]
 ) {
@@ -633,7 +632,6 @@ kernel void fused_vector_attention_f32(
     constant float& scale [[buffer(6)]],
     constant uint& gqa_ratio [[buffer(7)]],
     uint2 gid [[thread_position_in_grid]],
-    uint tid [[thread_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]],
     uint simd_id [[simdgroup_index_in_threadgroup]]
 ) {

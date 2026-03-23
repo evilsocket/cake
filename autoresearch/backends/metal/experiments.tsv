@@ -39,4 +39,5 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 037	2026-03-23T23:35:00	0d1b2e8	64067161088	PASS	PASS	keep	Fused standalone SiLU MSL kernel (4 dispatches → 1)
 038	2026-03-23T23:45:00	48e77db	57197404928	PASS	PASS	keep	Fused sigmoid MSL kernel with fast::exp
 039	2026-03-23T23:55:00	2ff3c4c	56747311104	PASS	PASS	keep	Fused GELU kernel with tanh approx + fast::tanh
+040	2026-03-24T00:10:00	98d3615	52107886848	PASS	PASS	keep	Pre-scale Q, hoist kv_base, share V/K addressing in fused attention
 ---	Metal: 36.4 tok/s avg vs CPU: 22.9 tok/s (+59%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
