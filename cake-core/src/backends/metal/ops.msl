@@ -6,13 +6,15 @@ using namespace metal;
 // SIMD group operations (32-wide on Apple Silicon).
 #define SIMD_REDUCE_SUM(val, dim, lane, simd_id) \
     float _sr = simd_sum(val); \
-    threadgroup float _ps[32]; \
-    if (lane == 0) _ps[simd_id] = _sr; \
-    threadgroup_barrier(mem_flags::mem_threadgroup); \
-    { uint _ns = ((dim) + 31) / 32; \
-      float _t = 0.0f; \
-      if (simd_id == 0 && lane < _ns) _t = _ps[lane]; \
-      _sr = simd_sum(_t); }
+    if ((dim) > 32) { \
+        threadgroup float _ps[32]; \
+        if (lane == 0) _ps[simd_id] = _sr; \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+        uint _ns = ((dim) + 31) / 32; \
+        float _t = 0.0f; \
+        if (simd_id == 0 && lane < _ns) _t = _ps[lane]; \
+        _sr = simd_sum(_t); \
+    }
 
 // ─── F8E4M3 dequantization ──────────────────────────────────────────
 // Decode F8E4M3 (1 sign + 4 exponent + 3 mantissa) to float32.
