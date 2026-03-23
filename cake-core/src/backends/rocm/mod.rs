@@ -14,7 +14,25 @@
 mod ffi;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+
+/// Whether HIP runtime has been initialized (used for SIGABRT workaround).
+static HIP_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// SIGABRT handler: HIP runtime crashes in Monitor::tryLock during process exit
+/// because its atexit cleanup runs after threads are torn down. We catch the
+/// resulting abort and force a clean exit since all useful work is already done.
+extern "C" fn hip_sigabrt_handler(_sig: libc::c_int) {
+    if HIP_INITIALIZED.load(Ordering::Relaxed) {
+        unsafe { libc::_exit(0); }
+    }
+    // Not HIP-related — re-raise with default handler
+    unsafe {
+        libc::signal(libc::SIGABRT, libc::SIG_DFL);
+        libc::raise(libc::SIGABRT);
+    }
+}
 
 use candle_core::{DType, Device, Result, Tensor, TensorId, D};
 
@@ -89,6 +107,11 @@ impl RocmBackend {
 
         let err = unsafe { (ffi.hip_init)(0) };
         if err != 0 { return Err(format!("hipInit: error {err}")); }
+
+        // Install SIGABRT handler to catch HIP's broken atexit cleanup
+        if !HIP_INITIALIZED.swap(true, Ordering::Relaxed) {
+            unsafe { libc::signal(libc::SIGABRT, hip_sigabrt_handler as *const () as libc::sighandler_t); }
+        }
 
         let mut count = 0i32;
         unsafe { (ffi.hip_get_device_count)(&mut count) };
