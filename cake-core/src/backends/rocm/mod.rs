@@ -64,17 +64,21 @@ impl GpuBuf {
     fn as_ptr(&self) -> *const f32 { self.ptr as *const f32 }
     fn as_mut_ptr(&self) -> *mut f32 { self.ptr as *mut f32 }
 
-    fn download(&self) -> std::result::Result<Vec<f32>, String> {
+    /// Async download on the given stream, then sync. Single sync point.
+    fn download_on_stream(&self, stream: *mut std::ffi::c_void) -> std::result::Result<Vec<f32>, String> {
         let mut host = vec![0f32; self.count];
         let err = unsafe {
-            ((*self.ffi).hip_memcpy)(
+            ((*self.ffi).hip_memcpy_async)(
                 host.as_mut_ptr() as *mut std::ffi::c_void,
                 self.ptr,
                 self.count * 4,
                 HIP_MEMCPY_DEVICE_TO_HOST,
+                stream,
             )
         };
-        if err != 0 { return Err(format!("hipMemcpy D2H: error {err}")); }
+        if err != 0 { return Err(format!("hipMemcpyAsync D2H: error {err}")); }
+        let err = unsafe { ((*self.ffi).hip_stream_synchronize)(stream) };
+        if err != 0 { return Err(format!("hipStreamSync: error {err}")); }
         Ok(host)
     }
 }
@@ -231,8 +235,7 @@ impl RocmBackend {
             )
         };
         if err != 0 { return Err(candle_core::Error::Msg(format!("rocblas_sgemm: {err}"))); }
-        let err = unsafe { (self.ffi.hip_stream_synchronize)(self.stream) };
-        if err != 0 { return Err(candle_core::Error::Msg(format!("hipStreamSync: {err}"))); }
+        // No sync here — caller does download_on_stream which syncs
         Ok(c)
     }
 
@@ -250,7 +253,7 @@ impl RocmBackend {
             let ap = self.get_or_upload(&a)?;
             let bp = self.get_or_upload(&b)?;
             let c = self.rocblas_gemm(ap, bp, m, k, n)?;
-            let data = c.download().map_err(candle_core::Error::Msg)?;
+            let data = c.download_on_stream(self.stream).map_err(candle_core::Error::Msg)?;
             let mut s = ad[..ra-2].to_vec(); s.push(m); s.push(n);
             return Tensor::from_vec(data, s.as_slice(), &Device::Cpu);
         }
@@ -283,10 +286,8 @@ impl RocmBackend {
             };
             if err != 0 { return Err(candle_core::Error::Msg(format!("rocblas_sgemm batch {i}: {err}"))); }
         }
-        // Single stream sync + download for all batches
-        let err = unsafe { (self.ffi.hip_stream_synchronize)(self.stream) };
-        if err != 0 { return Err(candle_core::Error::Msg(format!("hipStreamSync: {err}"))); }
-        let out = c_gpu.download().map_err(candle_core::Error::Msg)?;
+        // Single async download + stream sync for all batches
+        let out = c_gpu.download_on_stream(self.stream).map_err(candle_core::Error::Msg)?;
         let mut s = ad[..ra-2].to_vec(); s.push(m); s.push(n);
         Tensor::from_vec(out, s.as_slice(), &Device::Cpu)
     }
