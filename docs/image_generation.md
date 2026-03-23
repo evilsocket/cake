@@ -20,8 +20,9 @@ Cake supports image generation with Stable Diffusion and FLUX models.
 High-quality 12B parameter flow-matching transformer. Runs in FP8 precision on a single GPU with 16GB+ VRAM. Models are downloaded automatically from HuggingFace.
 
 ```sh
-cake run evilsocket/flux1-dev --model-type image-model --image-model-arch flux1 \
-  --prompt "a photorealistic landscape at golden hour, dramatic clouds" \
+cake run evilsocket/flux1-dev \
+  "a photorealistic landscape at golden hour, dramatic clouds" \
+  --model-type image-model --image-model-arch flux1 \
   --flux-height 768 --flux-width 1024 \
   --image-output landscape.png
 ```
@@ -31,9 +32,10 @@ cake run evilsocket/flux1-dev --model-type image-model --image-model-arch flux1 
 Faster 4B variant, 4 denoising steps, best at 512x512:
 
 ```sh
-cake run black-forest-labs/FLUX.2-klein-4B --model-type image-model --image-model-arch flux \
-  --model black-forest-labs/FLUX.2-klein-4B \
-  --prompt "a fluffy orange cat sitting on a wooden table"
+cake run black-forest-labs/FLUX.2-klein-4B \
+  "a fluffy orange cat sitting on a wooden table" \
+  --model-type image-model --image-model-arch flux \
+  --model black-forest-labs/FLUX.2-klein-4B
 ```
 
 ### FLUX Arguments
@@ -51,8 +53,9 @@ cake run black-forest-labs/FLUX.2-klein-4B --model-type image-model --image-mode
 ### Single Node
 
 ```sh
-cake run evilsocket/flux1-dev --model-type image-model \
-  --prompt "An old man sitting on the chair at seaside" \
+cake run evilsocket/flux1-dev \
+  "An old man sitting on the chair at seaside" \
+  --model-type image-model \
   --sd-version xl --sd-num-samples 1 --sd-image-seed 2439383
 ```
 
@@ -131,6 +134,5 @@ See the full [REST API Reference](api.md) for details.
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--sd-version` | `v1-5` | SD version to use |
-| `--prompt` | (required) | Text prompt for image generation |
 | `--sd-num-samples` | 1 | Number of images to generate |
 | `--sd-image-seed` | random | Seed for reproducibility |

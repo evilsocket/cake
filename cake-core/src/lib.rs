@@ -370,11 +370,8 @@ fn default_img2img_strength() -> f64 {
 
 #[derive(Clone, Parser, Default, Debug, Deserialize)]
 pub struct ImageGenerationArgs {
-    /// The prompt to be used for image generation.
-    #[arg(
-        long = "prompt",
-        default_value = "A very realistic photo of a rusty robot walking on a sandy beach"
-    )]
+    /// The prompt to be used for image generation (set from positional arg or API body).
+    #[arg(skip = default_prompt())]
     #[serde(rename(deserialize = "prompt"), default = "default_prompt")]
     image_prompt: String,
 
@@ -438,6 +435,11 @@ impl ImageGenerationArgs {
             image_prompt: prompt.to_string(),
             ..Default::default()
         }
+    }
+
+    /// Override the image prompt (used to pass the positional CLI prompt).
+    pub fn set_prompt(&mut self, prompt: &str) {
+        self.image_prompt = prompt.to_string();
     }
 }
 

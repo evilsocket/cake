@@ -46,7 +46,9 @@ impl<M: Model> Master<M> {
                 }
                 ModelType::ImageModel => {
                     let image_output = self.ctx.args.image_output.clone();
-                    self.generate_image(self.ctx.args.sd_img_gen_args.clone(), move |images| {
+                    let mut img_args = self.ctx.args.sd_img_gen_args.clone();
+                    img_args.set_prompt(&self.ctx.args.prompt);
+                    self.generate_image(img_args, move |images| {
                         if let Some(image) = images.into_iter().next() {
                             if let Some(parent) = std::path::Path::new(&image_output).parent() {
                                 if !parent.as_os_str().is_empty() {

@@ -123,7 +123,6 @@ See the full [REST API Reference](api.md) for all endpoints, request/response fo
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--model` | - | Model path or HuggingFace repo ID |
-| `--prompt` | - | Prompt for image generation (text/audio use positional arg) |
 | `--system-prompt` | `"You are a helpful AI assistant."` | System prompt |
 | `--api` | - | API bind address (e.g. `0.0.0.0:8080`) |
 | `--topology` | - | Topology file for manual cluster setup |
