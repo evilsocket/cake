@@ -63,8 +63,8 @@ impl ComputeBackend for CudaBackend {
                     .reshape((1, 1, 1, kv_len))?;
                 let mask = (rows + offset as f64)?.broadcast_ge(&cols)?;
                 let mask = mask.broadcast_as(attn.shape())?;
-                let neg_large = Tensor::new(-1e9f32, q.device())?;
-                mask.where_cond(&attn, &neg_large.broadcast_as(attn.shape())?)?
+                let neg_large = Tensor::full(-1e9f32, attn.shape(), q.device())?;
+                mask.where_cond(&attn, &neg_large)?
             }
         } else {
             attn
