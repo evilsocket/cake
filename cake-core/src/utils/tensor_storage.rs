@@ -126,6 +126,51 @@ impl SafetensorsStorage {
         }
     }
 
+    /// Build from a single safetensors file path (not a directory).
+    pub fn from_file(path: &Path) -> Result<Self> {
+        Self::from_single_file(path)
+    }
+
+    /// Load a tensor by name and return it as a candle Tensor on the given device.
+    pub fn load_tensor(
+        &self,
+        name: &str,
+        dtype: candle_core::DType,
+        device: &candle_core::Device,
+    ) -> Result<candle_core::Tensor> {
+        let data = self.read_tensor(name)?;
+        let tensor = candle_core::Tensor::from_raw_buffer(
+            &data.bytes,
+            data.dtype,
+            &data.shape,
+            &candle_core::Device::Cpu,
+        ).map_err(|e| anyhow::anyhow!("from_raw_buffer({name}): {e}"))?;
+        let tensor = if tensor.dtype() != dtype {
+            tensor.to_dtype(dtype).map_err(|e| anyhow::anyhow!("to_dtype({name}): {e}"))?
+        } else {
+            tensor
+        };
+        if !device.is_cpu() {
+            tensor.to_device(device).map_err(|e| anyhow::anyhow!("to_device({name}): {e}"))
+        } else {
+            Ok(tensor)
+        }
+    }
+
+    /// Load all tensors as a HashMap suitable for VarBuilder::from_tensors().
+    pub fn load_all(
+        &self,
+        dtype: candle_core::DType,
+        device: &candle_core::Device,
+    ) -> Result<HashMap<String, candle_core::Tensor>> {
+        let mut map = HashMap::new();
+        for name in self.tensor_names() {
+            let tensor = self.load_tensor(&name, dtype, device)?;
+            map.insert(name, tensor);
+        }
+        Ok(map)
+    }
+
     /// Build from a multi-shard model with index JSON.
     fn from_index_json(index_path: &Path) -> Result<Self> {
         let parent = index_path

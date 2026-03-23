@@ -2,29 +2,41 @@
 //!
 //! Simple MLP: fc1(vae_dim → hidden) + RmsNorm + fc2(hidden → hidden).
 
-use candle_core::{Module, Result, Tensor};
-use candle_nn::{Linear, RmsNorm, VarBuilder};
+use std::sync::Arc;
+
+use candle_core::Result;
+use candle_core::Tensor;
+use candle_nn::VarBuilder;
+
+use crate::backends::ComputeBackend;
 
 #[derive(Debug, Clone)]
 pub struct AcousticConnector {
-    fc1: Linear,
-    norm: RmsNorm,
-    fc2: Linear,
+    fc1_weight: Tensor,
+    fc1_bias: Option<Tensor>,
+    norm_weight: Tensor,
+    norm_eps: f32,
+    fc2_weight: Tensor,
+    fc2_bias: Option<Tensor>,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl AcousticConnector {
-    pub fn load(vb: VarBuilder, vae_dim: usize, hidden: usize, eps: f64) -> Result<Self> {
-        let fc1 = candle_nn::linear(vae_dim, hidden, vb.pp("fc1"))?;
-        let norm = candle_nn::rms_norm(hidden, eps, vb.pp("norm"))?;
-        let fc2 = candle_nn::linear(hidden, hidden, vb.pp("fc2"))?;
-        Ok(Self { fc1, norm, fc2 })
+    pub fn load(vb: VarBuilder, vae_dim: usize, hidden: usize, eps: f64, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
+        let fc1_weight = vb.pp("fc1").get((hidden, vae_dim), "weight")?;
+        let fc1_bias = vb.pp("fc1").get(hidden, "bias").ok();
+        let norm_weight = vb.pp("norm").get(hidden, "weight")?;
+        let norm_eps = eps as f32;
+        let fc2_weight = vb.pp("fc2").get((hidden, hidden), "weight")?;
+        let fc2_bias = vb.pp("fc2").get(hidden, "bias").ok();
+        Ok(Self { fc1_weight, fc1_bias, norm_weight, norm_eps, fc2_weight, fc2_bias, backend })
     }
 
     /// Map acoustic VAE latent (batch, vae_dim) → LLM hidden (batch, hidden).
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let h = self.fc1.forward(x)?;
-        let h = self.norm.forward(&h)?;
-        self.fc2.forward(&h)
+        let h = self.backend.linear_forward(x, &self.fc1_weight, self.fc1_bias.as_ref())?;
+        let h = self.backend.rms_norm(&h, &self.norm_weight, self.norm_eps)?;
+        self.backend.linear_forward(&h, &self.fc2_weight, self.fc2_bias.as_ref())
     }
 }
 
@@ -54,7 +66,8 @@ mod tests {
         map.insert("fc2.bias".into(), make_tensor(&[hidden], 4));
 
         let vb = VarBuilder::from_tensors(map, DType::F32, &Device::Cpu);
-        let conn = AcousticConnector::load(vb, vae_dim, hidden, 1e-5).unwrap();
+        let backend = crate::backends::create_backend(&Device::Cpu);
+        let conn = AcousticConnector::load(vb, vae_dim, hidden, 1e-5, backend).unwrap();
 
         let x = make_tensor(&[2, vae_dim], 10);
         let y = conn.forward(&x).unwrap();

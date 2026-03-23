@@ -84,6 +84,7 @@ impl Forwarder for ZipformerBlock {
             m.pos_head_dim,
             cnn_kernel,
             vb,
+            ctx.backend.clone(),
         )?;
 
         Ok(Box::new(Self {

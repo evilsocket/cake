@@ -149,21 +149,20 @@ pub struct Config {
     pub attn_output_gate: bool,
 }
 
-/// Load an RMS norm, optionally applying the residual weight pattern `(1 + weight)`.
+/// Load an RMS norm weight tensor, optionally applying the residual pattern `(1 + weight)`.
 /// When `residual` is true (Qwen3.5), the stored weight is treated as a residual and 1.0 is added.
-pub fn load_rms_norm(
+/// Returns the raw weight tensor — callers use `backend.rms_norm(x, &weight, eps)` at forward time.
+pub fn load_rms_norm_weight(
     size: usize,
-    eps: f64,
     residual: bool,
     vb: candle_nn::VarBuilder,
-) -> candle_core::Result<candle_nn::RmsNorm> {
+) -> candle_core::Result<candle_core::Tensor> {
     let weight = vb.get(size, "weight")?;
-    let weight = if residual {
-        (weight + 1.0)?
+    if residual {
+        Ok((weight + 1.0)?)
     } else {
-        weight
-    };
-    Ok(candle_nn::RmsNorm::new(weight, eps))
+        Ok(weight)
+    }
 }
 
 /// Auto-detect text model architecture from config.json's "architectures" field.

@@ -3,6 +3,7 @@
 //! Uses a custom decoder matching `AutoencoderKLFlux2` weight layout,
 //! with batch norm denormalization for the patchified latent space.
 
+use crate::backends::ComputeBackend;
 use crate::cake::{Context, Forwarder};
 use crate::models::sd::util::{pack_tensors, unpack_tensors};
 use async_trait::async_trait;
@@ -10,6 +11,7 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use log::{debug, info};
 use std::fmt::{Debug, Display, Formatter};
+use std::sync::Arc;
 
 use super::config::FluxModelFile;
 use super::flux2_vae::Flux2VAE;
@@ -35,7 +37,7 @@ impl Forwarder for FluxVAE {
     where
         Self: Sized,
     {
-        Self::load_model(&ctx.device, ctx.dtype, &ctx.args.model)
+        Self::load_model(&ctx.device, ctx.dtype, &ctx.args.model, ctx.backend.clone())
     }
 
     async fn forward(
@@ -112,6 +114,7 @@ impl FluxVAE {
         device: &Device,
         _dtype: DType,
         model_repo: &str,
+        backend: Arc<dyn ComputeBackend>,
     ) -> anyhow::Result<Box<Self>> {
         // VAE always runs in F32 for numerical stability
         let dtype = DType::F32;
@@ -132,7 +135,7 @@ impl FluxVAE {
         let bn_running_mean = vb.get(128, "bn.running_mean")?.to_dtype(DType::F32)?;
         let bn_running_var = vb.get(128, "bn.running_var")?.to_dtype(DType::F32)?;
 
-        let model = Flux2VAE::load(vb)?;
+        let model = Flux2VAE::load(vb, backend)?;
         info!("FLUX VAE loaded (custom decoder)");
 
         Ok(Box::new(Self {

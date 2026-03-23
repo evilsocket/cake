@@ -9,9 +9,13 @@
 //! - `conv_module1`, `conv_module2` -- ConvolutionModule
 //! - `bypass`, `bypass_mid` -- BypassModule
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use candle_core::Tensor;
 use candle_nn::VarBuilder;
+
+use crate::backends::ComputeBackend;
 
 use super::bias_norm::BiasNorm;
 use super::bypass_module::BypassModule;
@@ -48,6 +52,7 @@ impl ZipformerEncoderLayer {
         pos_head_dim: usize,
         cnn_kernel: usize,
         vb: VarBuilder,
+        backend: Arc<dyn ComputeBackend>,
     ) -> Result<Self> {
         let norm = BiasNorm::load(dim, vb.pp("norm"))?;
 
@@ -55,9 +60,9 @@ impl ZipformerEncoderLayer {
         let ff1_dim = ff_dim * 3 / 4;
         let ff2_dim = ff_dim;
         let ff3_dim = ff_dim * 5 / 4;
-        let feed_forward1 = FeedforwardModule::load(dim, ff1_dim, vb.pp("feed_forward1"))?;
-        let feed_forward2 = FeedforwardModule::load(dim, ff2_dim, vb.pp("feed_forward2"))?;
-        let feed_forward3 = FeedforwardModule::load(dim, ff3_dim, vb.pp("feed_forward3"))?;
+        let feed_forward1 = FeedforwardModule::load(dim, ff1_dim, vb.pp("feed_forward1"), backend.clone())?;
+        let feed_forward2 = FeedforwardModule::load(dim, ff2_dim, vb.pp("feed_forward2"), backend.clone())?;
+        let feed_forward3 = FeedforwardModule::load(dim, ff3_dim, vb.pp("feed_forward3"), backend.clone())?;
 
         // Attention weights (computes Q, K, pos -> attention matrix)
         let self_attn_weights = RelPositionMultiheadAttentionWeights::load(
@@ -67,18 +72,19 @@ impl ZipformerEncoderLayer {
             pos_head_dim,
             pos_dim,
             vb.pp("self_attn_weights"),
+            backend.clone(),
         )?;
 
         // Two self-attention modules (apply weights to values)
-        let self_attn1 = SelfAttention::load(dim, num_heads, value_head_dim, vb.pp("self_attn1"))?;
-        let self_attn2 = SelfAttention::load(dim, num_heads, value_head_dim, vb.pp("self_attn2"))?;
+        let self_attn1 = SelfAttention::load(dim, num_heads, value_head_dim, vb.pp("self_attn1"), backend.clone())?;
+        let self_attn2 = SelfAttention::load(dim, num_heads, value_head_dim, vb.pp("self_attn2"), backend.clone())?;
 
         // Nonlinear attention
-        let nonlin_attention = NonlinAttention::load(dim, num_heads, vb.pp("nonlin_attention"))?;
+        let nonlin_attention = NonlinAttention::load(dim, num_heads, vb.pp("nonlin_attention"), backend.clone())?;
 
         // Two convolution modules
-        let conv_module1 = ConvolutionModule::load(dim, cnn_kernel, vb.pp("conv_module1"))?;
-        let conv_module2 = ConvolutionModule::load(dim, cnn_kernel, vb.pp("conv_module2"))?;
+        let conv_module1 = ConvolutionModule::load(dim, cnn_kernel, vb.pp("conv_module1"), backend.clone())?;
+        let conv_module2 = ConvolutionModule::load(dim, cnn_kernel, vb.pp("conv_module2"), backend)?;
 
         // Bypass modules (per-channel scale)
         let bypass = BypassModule::load_dim(dim, vb.pp("bypass"))?;

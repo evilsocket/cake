@@ -2,10 +2,9 @@
 
 use anyhow::Result;
 use candle_core::Tensor;
-use candle_nn::{Module, RmsNorm};
 
 use crate::cake::{Context, Forwarder};
-use crate::models::common::MLP;
+use crate::models::common::{load_rms_norm_weight, MLP};
 use async_trait::async_trait;
 
 use super::full_attention::Qwen3_5FullAttention;
@@ -16,16 +15,18 @@ use super::linear_attention::GatedDeltaNet;
 pub enum Qwen3_5Block {
     Linear {
         name: String,
-        rms_1: RmsNorm,
+        rms_1_weight: Tensor,
+        rms_2_weight: Tensor,
+        rms_eps: f32,
         attn: GatedDeltaNet,
-        rms_2: RmsNorm,
         mlp: MLP,
     },
     Full {
         name: String,
-        rms_1: RmsNorm,
+        rms_1_weight: Tensor,
+        rms_2_weight: Tensor,
+        rms_eps: f32,
         attn: Qwen3_5FullAttention,
-        rms_2: RmsNorm,
         mlp: MLP,
     },
 }
@@ -66,32 +67,35 @@ impl Forwarder for Qwen3_5Block {
             .map(|s| s.as_str())
             .unwrap_or("linear_attention");
 
-        let rms_1 = crate::models::common::load_rms_norm(
-            cfg.hidden_size, cfg.rms_norm_eps, cfg.residual_rms_norm,
+        let rms_1_weight = load_rms_norm_weight(
+            cfg.hidden_size, cfg.residual_rms_norm,
             vb.pp("input_layernorm"),
         )?;
-        let rms_2 = crate::models::common::load_rms_norm(
-            cfg.hidden_size, cfg.rms_norm_eps, cfg.residual_rms_norm,
+        let rms_2_weight = load_rms_norm_weight(
+            cfg.hidden_size, cfg.residual_rms_norm,
             vb.pp("post_attention_layernorm"),
         )?;
+        let rms_eps = cfg.rms_norm_eps as f32;
         let mlp = MLP::load(vb.pp("mlp"), cfg, ctx.backend.clone())?;
 
         if layer_type == "full_attention" {
             let attn = Qwen3_5FullAttention::load(vb.pp("self_attn"), cfg, ctx.backend.clone())?;
             Ok(Box::new(Qwen3_5Block::Full {
                 name,
-                rms_1,
+                rms_1_weight,
+                rms_2_weight,
+                rms_eps,
                 attn,
-                rms_2,
                 mlp,
             }))
         } else {
             let attn = GatedDeltaNet::load(vb.pp("linear_attn"), cfg, ctx.backend.clone())?;
             Ok(Box::new(Qwen3_5Block::Linear {
                 name,
-                rms_1,
+                rms_1_weight,
+                rms_2_weight,
+                rms_eps,
                 attn,
-                rms_2,
                 mlp,
             }))
         }
@@ -106,10 +110,11 @@ impl Forwarder for Qwen3_5Block {
     ) -> Result<Tensor> {
         match self {
             Qwen3_5Block::Linear {
-                rms_1, attn, rms_2, mlp, ..
+                rms_1_weight, rms_2_weight, rms_eps, attn, mlp, ..
             } => {
                 let residual = x;
-                let x = rms_1.forward(x).map_err(|e| anyhow!("rms_1: {e}"))?;
+                let x = ctx.backend.rms_norm(x, rms_1_weight, *rms_eps)
+                    .map_err(|e| anyhow!("rms_1: {e}"))?;
                 let x = (attn.forward(
                     &x,
                     block_idx,
@@ -117,16 +122,18 @@ impl Forwarder for Qwen3_5Block {
                 )? + residual)
                     .map_err(|e| anyhow!("residual: {e}"))?;
                 let residual = &x;
-                let x = rms_2.forward(&x).map_err(|e| anyhow!("rms_2: {e}"))?;
+                let x = ctx.backend.rms_norm(&x, rms_2_weight, *rms_eps)
+                    .map_err(|e| anyhow!("rms_2: {e}"))?;
                 let x = (mlp.forward(&x).map_err(|e| anyhow!("mlp: {e}"))? + residual)
                     .map_err(|e| anyhow!("mlp residual: {e}"))?;
                 Ok(x)
             }
             Qwen3_5Block::Full {
-                rms_1, attn, rms_2, mlp, ..
+                rms_1_weight, rms_2_weight, rms_eps, attn, mlp, ..
             } => {
                 let residual = x;
-                let x = rms_1.forward(x).map_err(|e| anyhow!("rms_1: {e}"))?;
+                let x = ctx.backend.rms_norm(x, rms_1_weight, *rms_eps)
+                    .map_err(|e| anyhow!("rms_1: {e}"))?;
                 let x = (attn.forward(
                     &x,
                     index_pos,
@@ -135,7 +142,8 @@ impl Forwarder for Qwen3_5Block {
                 )? + residual)
                     .map_err(|e| anyhow!("residual: {e}"))?;
                 let residual = &x;
-                let x = rms_2.forward(&x).map_err(|e| anyhow!("rms_2: {e}"))?;
+                let x = ctx.backend.rms_norm(&x, rms_2_weight, *rms_eps)
+                    .map_err(|e| anyhow!("rms_2: {e}"))?;
                 let x = (mlp.forward(&x).map_err(|e| anyhow!("mlp: {e}"))? + residual)
                     .map_err(|e| anyhow!("mlp residual: {e}"))?;
                 Ok(x)

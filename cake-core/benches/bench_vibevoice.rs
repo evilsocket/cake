@@ -89,7 +89,7 @@ fn acoustic_connector_forward(bencher: divan::Bencher) {
     map.insert("fc2.weight".into(), make_tensor(&[hidden, hidden], 3));
     map.insert("fc2.bias".into(), make_tensor(&[hidden], 4));
     let vb = VarBuilder::from_tensors(map, DType::F32, &Device::Cpu);
-    let conn = cake_core::models::vibevoice::acoustic_connector::AcousticConnector::load(vb, vae_dim, hidden, 1e-5).unwrap();
+    let conn = cake_core::models::vibevoice::acoustic_connector::AcousticConnector::load(vb, vae_dim, hidden, 1e-5, cake_core::backends::create_backend(&Device::Cpu)).unwrap();
     let x = make_tensor(&[1, vae_dim], 10);
     bencher.bench_local(|| conn.forward(&x).unwrap());
 }
@@ -107,7 +107,7 @@ fn acoustic_connector_1_5b_forward(bencher: divan::Bencher) {
     map.insert("fc2.weight".into(), make_tensor(&[hidden, hidden], 3));
     map.insert("fc2.bias".into(), make_tensor(&[hidden], 4));
     let vb = VarBuilder::from_tensors(map, DType::F32, &Device::Cpu);
-    let conn = cake_core::models::vibevoice::acoustic_connector::AcousticConnector::load(vb, vae_dim, hidden, 1e-6).unwrap();
+    let conn = cake_core::models::vibevoice::acoustic_connector::AcousticConnector::load(vb, vae_dim, hidden, 1e-6, cake_core::backends::create_backend(&Device::Cpu)).unwrap();
     let x = make_tensor(&[1, vae_dim], 10);
     bencher.bench_local(|| conn.forward(&x).unwrap());
 }
@@ -125,7 +125,7 @@ fn semantic_connector_1_5b_forward(bencher: divan::Bencher) {
     map.insert("fc2.weight".into(), make_tensor(&[hidden, hidden], 3));
     map.insert("fc2.bias".into(), make_tensor(&[hidden], 4));
     let vb = VarBuilder::from_tensors(map, DType::F32, &Device::Cpu);
-    let conn = cake_core::models::vibevoice::acoustic_connector::AcousticConnector::load(vb, vae_dim, hidden, 1e-6).unwrap();
+    let conn = cake_core::models::vibevoice::acoustic_connector::AcousticConnector::load(vb, vae_dim, hidden, 1e-6, cake_core::backends::create_backend(&Device::Cpu)).unwrap();
     let x = make_tensor(&[1, 1, vae_dim], 10); // (batch, 1 frame, 128)
     bencher.bench_local(|| conn.forward(&x).unwrap());
 }

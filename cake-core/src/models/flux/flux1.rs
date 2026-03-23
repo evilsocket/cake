@@ -292,7 +292,7 @@ impl ImageGenerator for Flux1Gen {
                 )?
             };
             let vb = vb.pp(flux1_prefixes::TRANSFORMER);
-            let t = Flux1Transformer::new(&cfg, vb)?;
+            let t = Flux1Transformer::new(&cfg, vb, self.context.backend.clone())?;
             info!(
                 "Transformer loaded locally ({} double + {} single blocks)",
                 cfg.depth, cfg.depth_single_blocks

@@ -4,7 +4,6 @@ use anyhow::Result;
 #[cfg(feature = "cuda")]
 use candle_core::Device;
 use candle_core::{IndexOp, Tensor};
-use candle_nn::{linear_no_bias as linear, Embedding, Linear, Module, RmsNorm};
 use candle_transformers::generation::{LogitsProcessor, Sampling};
 use tokenizers::Tokenizer;
 
@@ -127,7 +126,7 @@ pub struct TextModelBase {
     pub ctx: Context,
 
     pub tokenizer: Tokenizer,
-    pub embedding: Embedding,
+    pub embed_weight: Tensor,
     pub eos_token_id: Option<EosTokenId>,
     pub index_pos: usize,
     pub generated: usize,
@@ -135,8 +134,9 @@ pub struct TextModelBase {
 
     pub blocks: Vec<Box<dyn Forwarder>>,
 
-    pub ln_f: RmsNorm,
-    pub lm_head: Linear,
+    pub ln_f_weight: Tensor,
+    pub ln_f_eps: f32,
+    pub lm_head_weight: Tensor,
 
     pub logits_processor: LogitsProcessor,
 
@@ -156,39 +156,34 @@ impl TextModelBase {
         let prefix = &config.model_prefix;
 
         log::info!("loading embeddings (prefix={}) ...", prefix);
-        let embedding: Embedding = candle_nn::embedding(
-            config.vocab_size,
-            config.hidden_size,
-            var_builder.pp(format!("{prefix}.embed_tokens")),
-        )?;
+        let embed_weight = var_builder
+            .pp(format!("{prefix}.embed_tokens"))
+            .get((config.vocab_size, config.hidden_size), "weight")?;
 
         log::info!("loading lm_head ...");
-        let lm_head = if config.tie_word_embeddings {
+        let lm_head_weight = if config.tie_word_embeddings {
             log::info!("  using tied word embeddings (lm_head = embed_tokens)");
-            Linear::new(embedding.embeddings().clone(), None)
+            embed_weight.clone()
         } else {
             // Try root-level lm_head first (LLaMA/Qwen2), then prefixed (Qwen3.5)
-            match linear(
-                config.hidden_size,
-                config.vocab_size,
-                var_builder.pp("lm_head"),
-            ) {
-                Ok(l) => l,
-                Err(_) => linear(
-                    config.hidden_size,
-                    config.vocab_size,
-                    var_builder.pp(format!("{prefix}.lm_head")),
-                )?,
+            match var_builder
+                .pp("lm_head")
+                .get((config.vocab_size, config.hidden_size), "weight")
+            {
+                Ok(w) => w,
+                Err(_) => var_builder
+                    .pp(format!("{prefix}.lm_head"))
+                    .get((config.vocab_size, config.hidden_size), "weight")?,
             }
         };
 
         log::info!("loading {prefix}.norm ...");
-        let ln_f = crate::models::common::load_rms_norm(
+        let ln_f_weight = crate::models::common::load_rms_norm_weight(
             config.hidden_size,
-            config.rms_norm_eps,
             config.residual_rms_norm,
             var_builder.pp(format!("{prefix}.norm")),
         )?;
+        let ln_f_eps = config.rms_norm_eps as f32;
 
         log::info!("loading {} blocks ...", config.num_hidden_layers);
 
@@ -251,10 +246,11 @@ impl TextModelBase {
             index_pos,
             prompt_len: 0,
             ctx: ctx.clone(),
-            embedding,
+            embed_weight,
             blocks,
-            ln_f,
-            lm_head,
+            ln_f_weight,
+            ln_f_eps,
+            lm_head_weight,
             logits_processor,
         })
     }
@@ -265,7 +261,8 @@ impl TextModelBase {
         let (_batch_size, seq_len) = x.dims2()?;
 
         let emb_start = std::time::Instant::now();
-        let mut x = self.embedding.forward(x)?;
+        let mut x = self.ctx.backend.embedding(x, &self.embed_weight)
+            .map_err(|e| anyhow!("error in embedding: {e}"))?;
         // Apply embedding scale if configured (Gemma scales by sqrt(hidden_size)).
         if let Some(scale) = self.ctx.config.as_ref().and_then(|c| c.embed_scale) {
             x = (x * scale as f64)?;
@@ -329,8 +326,9 @@ impl TextModelBase {
 
         let head_start = std::time::Instant::now();
         let x = self
-            .ln_f
-            .forward(&x)
+            .ctx
+            .backend
+            .rms_norm(&x, &self.ln_f_weight, self.ln_f_eps)
             .map_err(|e| anyhow!("error in ln_f.forward: {e}"))?;
 
         let x = x
@@ -340,8 +338,9 @@ impl TextModelBase {
             .map_err(|e| anyhow!("error in x.i.contiguous: {e}"))?;
 
         let logits = self
-            .lm_head
-            .forward(&x)
+            .ctx
+            .backend
+            .linear_forward(&x, &self.lm_head_weight, None)
             .map_err(|e| anyhow!("error in lm_head.forward: {e}"))?;
         // Note: no explicit sync needed here — the CPU-side logits sampling
         // (to_vec1 in LogitsProcessor) implicitly synchronizes the Metal command buffer.

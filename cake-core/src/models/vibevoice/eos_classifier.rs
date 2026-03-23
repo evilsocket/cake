@@ -3,33 +3,41 @@
 //! 2-layer MLP that detects when the model should stop generating speech frames.
 //! Input: LLM hidden state → sigmoid → probability of EOS.
 
-use candle_core::{Module, Result, Tensor};
-use candle_nn::{Linear, VarBuilder};
+use std::sync::Arc;
+
+use candle_core::Result;
+use candle_core::Tensor;
+use candle_nn::VarBuilder;
+
+use crate::backends::ComputeBackend;
 
 #[derive(Debug, Clone)]
 pub struct EosClassifier {
-    fc1: Linear,
-    fc2: Linear,
+    fc1_weight: Tensor,
+    fc1_bias: Option<Tensor>,
+    fc2_weight: Tensor,
+    fc2_bias: Option<Tensor>,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl EosClassifier {
-    pub fn load(vb: VarBuilder) -> Result<Self> {
+    pub fn load(vb: VarBuilder, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         // Weight shapes inferred from safetensors: fc1 + fc2
-        let fc1_w = vb.pp("fc1").get_unchecked("weight")?;
-        let fc1_b = vb.pp("fc1").get_unchecked("bias")?;
-        let fc1 = Linear::new(fc1_w, Some(fc1_b));
-        let fc2_w = vb.pp("fc2").get_unchecked("weight")?;
-        let fc2_b = vb.pp("fc2").get_unchecked("bias")?;
-        let fc2 = Linear::new(fc2_w, Some(fc2_b));
-        Ok(Self { fc1, fc2 })
+        let fc1_weight = vb.pp("fc1").get_unchecked("weight")?;
+        let fc1_bias = Some(vb.pp("fc1").get_unchecked("bias")?);
+        let fc2_weight = vb.pp("fc2").get_unchecked("weight")?;
+        let fc2_bias = Some(vb.pp("fc2").get_unchecked("bias")?);
+        Ok(Self { fc1_weight, fc1_bias, fc2_weight, fc2_bias, backend })
     }
 
     /// Predict EOS probability.
     /// Input: (batch, hidden_size) LLM hidden state.
     /// Output: (batch, 1) probability (after sigmoid).
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let h = candle_nn::ops::silu(&self.fc1.forward(x)?)?;
-        candle_nn::ops::sigmoid(&self.fc2.forward(&h)?)
+        let h = self.backend.linear_forward(x, &self.fc1_weight, self.fc1_bias.as_ref())?;
+        let h = self.backend.silu(&h)?;
+        let h = self.backend.linear_forward(&h, &self.fc2_weight, self.fc2_bias.as_ref())?;
+        self.backend.sigmoid(&h)
     }
 
     /// Check if generation should stop (probability > threshold).
@@ -67,8 +75,9 @@ mod tests {
         map.insert("fc2.weight".into(), make_tensor(&[1, mid], 3));
         map.insert("fc2.bias".into(), make_tensor(&[1], 4));
 
+        let backend = crate::backends::create_backend(&Device::Cpu);
         let vb = VarBuilder::from_tensors(map, DType::F32, &Device::Cpu);
-        let cls = EosClassifier::load(vb).unwrap();
+        let cls = EosClassifier::load(vb, backend).unwrap();
 
         let x = make_tensor(&[1, hidden], 10);
         let prob = cls.forward(&x).unwrap();

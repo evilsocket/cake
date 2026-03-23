@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use candle_core::{DType, Result, Tensor, D};
-use candle_nn::{ops::softmax_last_dim, Linear, Module, VarBuilder};
+use candle_nn::VarBuilder;
 
 use crate::backends::ComputeBackend;
 use crate::models::common::expert_provider::{SharedExpertProvider, StackedResidentProvider};
@@ -24,7 +24,7 @@ use crate::models::common::Config;
 #[derive(Debug)]
 pub struct SparseMoeMlp {
     /// Router weight: (num_experts, hidden_size).
-    gate: Linear,
+    gate_weight: Tensor,
     /// Expert weight provider (resident or disk-backed).
     expert_provider: SharedExpertProvider,
     num_experts: usize,
@@ -40,8 +40,7 @@ impl SparseMoeMlp {
         let n = cfg.num_experts;
 
         // Router: single linear, no bias.
-        let gate_w = vb.pp("gate").get((n, h), "weight")?;
-        let gate = Linear::new(gate_w, None);
+        let gate_weight = vb.pp("gate").get((n, h), "weight")?;
 
         // Load all expert weights and stack into batched tensors.
         let mut gate_ws = Vec::with_capacity(n);
@@ -63,7 +62,7 @@ impl SparseMoeMlp {
             Arc::new(StackedResidentProvider::new(gate_proj, up_proj, down_proj, n));
 
         Ok(Self {
-            gate,
+            gate_weight,
             expert_provider,
             num_experts: n,
             num_experts_per_tok: cfg.num_experts_per_tok,
@@ -75,7 +74,7 @@ impl SparseMoeMlp {
     /// Construct with a pre-built expert provider (for disk offloading).
     #[allow(clippy::too_many_arguments)]
     pub fn with_provider(
-        gate: Linear,
+        gate_weight: Tensor,
         expert_provider: SharedExpertProvider,
         num_experts: usize,
         num_experts_per_tok: usize,
@@ -83,7 +82,7 @@ impl SparseMoeMlp {
         backend: Arc<dyn ComputeBackend>,
     ) -> Self {
         Self {
-            gate,
+            gate_weight,
             expert_provider,
             num_experts,
             num_experts_per_tok,
@@ -101,19 +100,16 @@ impl SparseMoeMlp {
 
         // --- Router ---
         let router_logits = self
-            .gate
-            .forward(&x_flat)
+            .backend
+            .linear_forward(&x_flat, &self.gate_weight, None)
             .map_err(|e| anyhow!("moe router -> {e}"))?;
 
-        let router_probs = softmax_last_dim(&router_logits)
+        let last_dim = router_logits.rank() - 1;
+        let router_probs = self.backend.softmax(&router_logits, last_dim)
             .map_err(|e| anyhow!("moe softmax -> {e}"))?;
 
-        let (_, sorted_idx) = router_probs
-            .sort_last_dim(false)
-            .map_err(|e| anyhow!("moe sort -> {e}"))?;
-        let top_k_idx = sorted_idx
-            .narrow(D::Minus1, 0, self.num_experts_per_tok)
-            .map_err(|e| anyhow!("moe narrow topk -> {e}"))?;
+        let (_, top_k_idx) = self.backend.topk(&router_probs, self.num_experts_per_tok)
+            .map_err(|e| anyhow!("moe topk -> {e}"))?;
 
         let top_k_w = router_probs
             .contiguous()

@@ -14,7 +14,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use candle_core::{DType, Device, Tensor};
-use candle_nn::{Linear, Module, VarBuilder};
+use candle_nn::VarBuilder;
 
 use crate::cake::{Context, Forwarder};
 use crate::models::chat::Message;
@@ -71,7 +71,11 @@ fn simple_downsample(src: &Tensor, ds: usize, bias: &Tensor) -> Result<Tensor> {
     let src = src.reshape((batch, d_seq_len, ds, dim))?;
 
     // Softmax weights: bias [ds] -> softmax -> [1, 1, ds, 1]
-    let weights = candle_nn::ops::softmax(&bias.unsqueeze(0)?, 1)?; // [1, ds]
+    let b = bias.unsqueeze(0)?;
+    let max = b.max_keepdim(1)?;
+    let exp = b.broadcast_sub(&max)?.exp()?;
+    let sum = exp.sum_keepdim(1)?;
+    let weights = exp.broadcast_div(&sum)?; // [1, ds]
     let weights = weights.reshape((1, 1, ds, 1))?;
 
     // Weighted sum over ds dimension
@@ -99,13 +103,18 @@ pub struct LuxTTS {
     text_encoder: TextEncoder,
     vocos: Vocos,
     // FM decoder projections
-    fm_in_proj: Linear,
-    fm_out_proj: Linear,
+    fm_in_proj_weight: Tensor,
+    fm_in_proj_bias: Option<Tensor>,
+    fm_out_proj_weight: Tensor,
+    fm_out_proj_bias: Option<Tensor>,
     // Time embedding MLP: Linear -> SiLU -> Linear
-    time_embed_0: Linear,
-    time_embed_2: Linear,
+    time_embed_0_weight: Tensor,
+    time_embed_0_bias: Option<Tensor>,
+    time_embed_2_weight: Tensor,
+    time_embed_2_bias: Option<Tensor>,
     // Per-stack time embedding projections
-    stack_time_embs: Vec<Linear>,
+    stack_time_emb_weights: Vec<Tensor>,
+    stack_time_emb_biases: Vec<Option<Tensor>>,
     // Per-stack downsample bias (None for ds=1 stacks)
     downsample_biases: Vec<Option<Tensor>>,
     // Per-stack bypass combiner (None for ds=1 stacks)
@@ -156,9 +165,8 @@ impl Generator for LuxTTS {
         let vb = if let Some(ref vb) = ctx.var_builder {
             vb.clone()
         } else {
-            let tensors = candle_core::safetensors::load(&model_weights, &ctx.device)?;
-            let vb_data: std::collections::HashMap<String, Tensor> =
-                tensors.into_iter().collect();
+            let storage = crate::utils::tensor_storage::SafetensorsStorage::from_file(&model_weights)?;
+            let vb_data = storage.load_all(ctx.dtype, &ctx.device)?;
             VarBuilder::from_tensors(vb_data, ctx.dtype, &ctx.device)
         };
 
@@ -169,43 +177,30 @@ impl Generator for LuxTTS {
             m.text_encoder_dim
         );
         let text_encoder =
-            TextEncoder::load(&config, vb.clone(), vb.pp("text_encoder"))?;
+            TextEncoder::load(&config, vb.clone(), vb.pp("text_encoder"), ctx.backend.clone())?;
 
         // FM decoder projections
         // in_proj: [fm_dim, feat_dim*3] where 3 = noise + text_cond + speech_cond
-        let fm_in_proj = candle_nn::linear(
-            m.feat_dim * 3,
-            m.fm_decoder_dim,
-            vb.pp("fm_decoder.in_proj"),
-        )?;
-        let fm_out_proj = candle_nn::linear(
-            m.fm_decoder_dim,
-            m.feat_dim,
-            vb.pp("fm_decoder.out_proj"),
-        )?;
+        let fm_in_proj_weight = vb.pp("fm_decoder.in_proj").get((m.fm_decoder_dim, m.feat_dim * 3), "weight")?;
+        let fm_in_proj_bias = Some(vb.pp("fm_decoder.in_proj").get(m.fm_decoder_dim, "bias")?);
+        let fm_out_proj_weight = vb.pp("fm_decoder.out_proj").get((m.feat_dim, m.fm_decoder_dim), "weight")?;
+        let fm_out_proj_bias = Some(vb.pp("fm_decoder.out_proj").get(m.feat_dim, "bias")?);
 
         // Time embedding MLP: time_embed.0 and time_embed.2 (Sequential indices)
-        let time_embed_0 = candle_nn::linear(
-            m.time_embed_dim,
-            m.time_embed_dim * 2,
-            vb.pp("fm_decoder.time_embed.0"),
-        )?;
-        let time_embed_2 = candle_nn::linear(
-            m.time_embed_dim * 2,
-            m.time_embed_dim,
-            vb.pp("fm_decoder.time_embed.2"),
-        )?;
+        let time_embed_0_weight = vb.pp("fm_decoder.time_embed.0").get((m.time_embed_dim * 2, m.time_embed_dim), "weight")?;
+        let time_embed_0_bias = Some(vb.pp("fm_decoder.time_embed.0").get(m.time_embed_dim * 2, "bias")?);
+        let time_embed_2_weight = vb.pp("fm_decoder.time_embed.2").get((m.time_embed_dim, m.time_embed_dim * 2), "weight")?;
+        let time_embed_2_bias = Some(vb.pp("fm_decoder.time_embed.2").get(m.time_embed_dim, "bias")?);
 
         // Per-stack time embedding projections
         let num_stacks = m.fm_decoder_num_layers.len();
-        let mut stack_time_embs = Vec::with_capacity(num_stacks);
+        let mut stack_time_emb_weights = Vec::with_capacity(num_stacks);
+        let mut stack_time_emb_biases = Vec::with_capacity(num_stacks);
         for s in 0..num_stacks {
-            let proj = candle_nn::linear(
-                m.time_embed_dim,
-                m.fm_decoder_dim,
-                vb.pp(format!("fm_decoder.stack_time_emb.{s}.1")),
-            )?;
-            stack_time_embs.push(proj);
+            let w = vb.pp(format!("fm_decoder.stack_time_emb.{s}.1")).get((m.fm_decoder_dim, m.time_embed_dim), "weight")?;
+            let b = Some(vb.pp(format!("fm_decoder.stack_time_emb.{s}.1")).get(m.fm_decoder_dim, "bias")?);
+            stack_time_emb_weights.push(w);
+            stack_time_emb_biases.push(b);
         }
 
         // Per-stack downsample biases and bypass combiners
@@ -273,9 +268,8 @@ impl Generator for LuxTTS {
         log::info!("[LuxTTS] Loading Vocos vocoder...");
         let vocos_path = ctx.data_path.join("vocos.safetensors");
         let vocos_vb = if vocos_path.exists() {
-            let tensors = candle_core::safetensors::load(&vocos_path, &ctx.device)?;
-            let vb_data: std::collections::HashMap<String, Tensor> =
-                tensors.into_iter().collect();
+            let storage = crate::utils::tensor_storage::SafetensorsStorage::from_file(&vocos_path)?;
+            let vb_data = storage.load_all(ctx.dtype, &ctx.device)?;
             VarBuilder::from_tensors(vb_data, ctx.dtype, &ctx.device)
         } else {
             // Fall back to main weights (vocoder might be embedded)
@@ -287,6 +281,7 @@ impl Generator for LuxTTS {
             config.feature.n_fft,
             config.feature.hop_length,
             vocos_vb,
+            ctx.backend.clone(),
         )?;
 
         // Phonemizer
@@ -313,11 +308,16 @@ impl Generator for LuxTTS {
             phonemizer,
             text_encoder,
             vocos,
-            fm_in_proj,
-            fm_out_proj,
-            time_embed_0,
-            time_embed_2,
-            stack_time_embs,
+            fm_in_proj_weight,
+            fm_in_proj_bias,
+            fm_out_proj_weight,
+            fm_out_proj_bias,
+            time_embed_0_weight,
+            time_embed_0_bias,
+            time_embed_2_weight,
+            time_embed_2_bias,
+            stack_time_emb_weights,
+            stack_time_emb_biases,
             downsample_biases,
             out_combiners,
             fm_blocks,
@@ -461,15 +461,15 @@ impl LuxTTS {
             // Time embedding: sinusoidal -> MLP
             let time_emb = sinusoidal_time_embedding(t_cur, m.time_embed_dim, &device, dtype)?;
             // [1, time_embed_dim]
-            let time_emb = self.time_embed_0.forward(&time_emb)?; // [1, time_embed_dim*2]
+            let time_emb = self.ctx.backend.linear_forward(&time_emb, &self.time_embed_0_weight, self.time_embed_0_bias.as_ref())?; // [1, time_embed_dim*2]
             let time_emb = super::activations::swoosh_r(&time_emb)?;
-            let time_emb = self.time_embed_2.forward(&time_emb)?; // [1, time_embed_dim]
+            let time_emb = self.ctx.backend.linear_forward(&time_emb, &self.time_embed_2_weight, self.time_embed_2_bias.as_ref())?; // [1, time_embed_dim]
 
             // Concat [noise, text_cond, speech_cond] along feature dim -> [1, target_frames, feat_dim*3]
             let input = Tensor::cat(&[&x, &text_cond_expanded, &speech_cond], 2)?;
 
             // fm_decoder.in_proj -> [1, target_frames, fm_dim]
-            let mut hidden = self.fm_in_proj.forward(&input)?;
+            let mut hidden = self.ctx.backend.linear_forward(&input, &self.fm_in_proj_weight, self.fm_in_proj_bias.as_ref())?;
 
             // Forward through FM decoder blocks, stack by stack
             let mut flat_idx = 0;
@@ -497,7 +497,7 @@ impl LuxTTS {
 
                 // Per-stack time embedding: SwooshR -> Linear(192, 512)
                 let te_swooshed = super::activations::swoosh_r(&time_emb)?;
-                let stack_te = self.stack_time_embs[stack_idx].forward(&te_swooshed)?; // [1, fm_dim]
+                let stack_te = self.ctx.backend.linear_forward(&te_swooshed, &self.stack_time_emb_weights[stack_idx], self.stack_time_emb_biases[stack_idx].as_ref())?; // [1, fm_dim]
                 let stack_te = stack_te.unsqueeze(1)?; // [1, 1, fm_dim]
 
                 // Process layers in this stack
@@ -532,7 +532,7 @@ impl LuxTTS {
             }
 
             // fm_decoder.out_proj -> [1, target_frames, feat_dim] (velocity prediction)
-            let v = self.fm_out_proj.forward(&hidden)?;
+            let v = self.ctx.backend.linear_forward(&hidden, &self.fm_out_proj_weight, self.fm_out_proj_bias.as_ref())?;
 
             // Euler step
             x = EulerSolver::step(&x, &v, t_cur, t_next, is_last)?;

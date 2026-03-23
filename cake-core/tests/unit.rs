@@ -34,3 +34,5 @@ mod test_expert_provider;
 mod test_tensor_storage;
 #[path = "unit_tests/test_flash_moe.rs"]
 mod test_flash_moe;
+#[path = "unit_tests/test_backend_ops.rs"]
+mod test_backend_ops;

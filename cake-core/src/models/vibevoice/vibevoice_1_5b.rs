@@ -5,14 +5,16 @@
 //! Supports up to 4 distinct speakers with voice cloning from .wav files.
 
 use anyhow::Result;
-use candle_core::{DType, Device, IndexOp, Module, Shape, Tensor, D};
+use candle_core::{DType, Device, IndexOp, Shape, Tensor, D};
 use candle_nn::VarBuilder;
 use log::info;
 
-/// Backend that loads safetensors to CPU, casts to target dtype, then moves to device.
+/// Backend that loads safetensors to CPU via pread, casts to target dtype, then moves to device.
 /// Avoids BF16 CUDA kernel issues on GPUs older than Ampere (SM < 8.0).
+/// Uses SafetensorsStorage instead of candle's MmapedSafetensors for full decoupling.
+use crate::utils::tensor_storage::TensorStorageProvider as _;
 struct CpuCastBackend {
-    inner: candle_core::safetensors::MmapedSafetensors,
+    inner: crate::utils::tensor_storage::SafetensorsStorage,
     target_device: Device,
 }
 
@@ -25,9 +27,8 @@ impl candle_nn::var_builder::SimpleBackend for CpuCastBackend {
         dtype: DType,
         _dev: &Device,
     ) -> candle_core::Result<Tensor> {
-        let tensor = self.inner.load(name, &Device::Cpu)?
-            .to_dtype(dtype)?
-            .to_device(&self.target_device)?;
+        let tensor = self.inner.load_tensor(name, dtype, &self.target_device)
+            .map_err(|e| candle_core::Error::Msg(format!("{e}")))?;
         if tensor.shape() != &s {
             Err(candle_core::Error::UnexpectedShape {
                 msg: format!("shape mismatch for {name}"),
@@ -39,13 +40,12 @@ impl candle_nn::var_builder::SimpleBackend for CpuCastBackend {
     }
 
     fn get_unchecked(&self, name: &str, dtype: DType, _dev: &Device) -> candle_core::Result<Tensor> {
-        self.inner.load(name, &Device::Cpu)?
-            .to_dtype(dtype)?
-            .to_device(&self.target_device)
+        self.inner.load_tensor(name, dtype, &self.target_device)
+            .map_err(|e| candle_core::Error::Msg(format!("{e}")))
     }
 
     fn contains_tensor(&self, name: &str) -> bool {
-        self.inner.get(name).is_ok()
+        self.inner.has_tensor(name)
     }
 }
 
@@ -63,8 +63,9 @@ use super::vae_encoder::TokenizerEncoder;
 /// Non-LM components (prediction head, VAE, encoders) always stay on master.
 pub struct VibeVoice1_5B {
     // Single Qwen2 LM (28 layers) — each is either local Transformer or remote Client
-    embed_tokens: candle_nn::Embedding,
-    lm_norm: candle_nn::RmsNorm,
+    embed_tokens_weight: Tensor,
+    lm_norm_weight: Tensor,
+    lm_norm_eps: f32,
     layers: Vec<Box<dyn crate::cake::Forwarder>>,
     lm_head_weight: Tensor, // tied to embed_tokens
 
@@ -94,6 +95,7 @@ pub struct VibeVoice1_5B {
     dtype: DType,
     /// Lightweight context for forwarding through Forwarder trait (holds mutable cache).
     fwd_ctx: crate::cake::Context,
+    backend: std::sync::Arc<dyn crate::backends::ComputeBackend>,
 }
 
 impl VibeVoice1_5B {
@@ -111,12 +113,19 @@ impl VibeVoice1_5B {
         info!("Loading VibeVoice-1.5B...");
         let dtype = DType::F16;
 
-        let vb = unsafe {
+        let vb = {
             // Load via CPU to handle BF16→F16 cast (BF16 CUDA kernels need SM 8.0+).
-            // MmapedSafetensors loads BF16 on CPU, casts to F16, then moves to device.
-            let tensors = candle_core::safetensors::MmapedSafetensors::multi(weight_paths)?;
+            // SafetensorsStorage reads via pread to CPU, casts to F16, moves to device.
+            // Build storage index from all weight files (pread-based, no full mmap)
+            let storage = {
+                use crate::utils::tensor_storage::SafetensorsStorage;
+                // For multi-file models, try index.json first, then single file
+                let model_dir = weight_paths[0].parent().unwrap_or(std::path::Path::new("."));
+                SafetensorsStorage::from_model_path(model_dir)
+                    .or_else(|_| SafetensorsStorage::from_file(&weight_paths[0]))?
+            };
             let backend: Box<dyn candle_nn::var_builder::SimpleBackend> =
-                Box::new(CpuCastBackend { inner: tensors, target_device: device.clone() });
+                Box::new(CpuCastBackend { inner: storage, target_device: device.clone() });
             VarBuilder::from_backend(backend, dtype, device.clone())
         };
 
@@ -124,16 +133,12 @@ impl VibeVoice1_5B {
         let num_layers = config.decoder_config.num_hidden_layers;
         info!("  Loading LM ({num_layers} layers, hidden={})...", config.decoder_config.hidden_size);
         let lm_vb = vb.pp("model").pp("language_model");
-        let embed_tokens = candle_nn::embedding(
-            common_cfg.vocab_size,
-            common_cfg.hidden_size,
-            lm_vb.pp("embed_tokens"),
+        let embed_tokens_weight = lm_vb.pp("embed_tokens").get(
+            (common_cfg.vocab_size, common_cfg.hidden_size),
+            "weight",
         )?;
-        let lm_norm = candle_nn::rms_norm(
-            common_cfg.hidden_size,
-            common_cfg.rms_norm_eps,
-            lm_vb.pp("norm"),
-        )?;
+        let lm_norm_weight = lm_vb.pp("norm").get(common_cfg.hidden_size, "weight")?;
+        let lm_norm_eps = common_cfg.rms_norm_eps as f32;
 
         let mut layers: Vec<Box<dyn crate::cake::Forwarder>> = Vec::with_capacity(num_layers);
         for i in 0..num_layers {
@@ -161,7 +166,7 @@ impl VibeVoice1_5B {
         }
 
         // lm_head weight is tied to embed_tokens
-        let lm_head_weight = embed_tokens.embeddings().clone();
+        let lm_head_weight = embed_tokens_weight.clone();
 
         // Acoustic tokenizer (encoder + decoder)
         info!("  Loading acoustic tokenizer...");
@@ -207,12 +212,14 @@ impl VibeVoice1_5B {
             config.acoustic_vae_dim,
             hidden,
             rms_eps,
+            backend.clone(),
         )?;
         let semantic_connector = AcousticConnector::load(
             vb.pp("model").pp("semantic_connector"),
             config.semantic_vae_dim,
             hidden,
             rms_eps,
+            backend.clone(),
         )?;
 
         // Prediction head + scheduler
@@ -232,14 +239,16 @@ impl VibeVoice1_5B {
         info!("  DPM-Solver++: {steps} steps");
 
         // Pre-compute speech_diffusion embedding (reused every diffusion frame)
+        let backend = crate::backends::create_backend(device);
         let diff_token = Tensor::new(&[SPEECH_DIFFUSION_ID], device)?.unsqueeze(0)?;
-        let speech_diff_embed = embed_tokens.forward(&diff_token)?;
+        let speech_diff_embed = backend.embedding(&diff_token, &embed_tokens_weight)?;
 
         info!("VibeVoice-1.5B loaded!");
 
         Ok(Self {
-            embed_tokens,
-            lm_norm,
+            embed_tokens_weight,
+            lm_norm_weight,
+            lm_norm_eps,
             layers,
             lm_head_weight,
             acoustic_encoder,
@@ -256,6 +265,7 @@ impl VibeVoice1_5B {
             common_cfg: common_cfg.clone(),
             device: device.clone(),
             dtype,
+            backend: crate::backends::create_backend(device),
             fwd_ctx: crate::cake::Context {
                 args: Default::default(),
                 dtype,
@@ -293,7 +303,8 @@ impl VibeVoice1_5B {
         if let Some(updated) = self.fwd_ctx.cache.take() {
             *cache = updated;
         }
-        h = self.lm_norm.forward(&h).map_err(|e| anyhow::anyhow!("lm_norm: {e}"))?;
+        h = self.backend.rms_norm(&h, &self.lm_norm_weight, self.lm_norm_eps)
+            .map_err(|e| anyhow::anyhow!("lm_norm: {e}"))?;
         Ok(h)
     }
 
@@ -405,7 +416,7 @@ impl VibeVoice1_5B {
         // === PREFILL POSITIVE ===
         // Build input embeddings with speech spliced in
         let input_ids_t = Tensor::new(token_ids, &dev)?.unsqueeze(0)?;
-        let mut embeds = self.embed_tokens.forward(&input_ids_t)?;
+        let mut embeds = self.backend.embedding(&input_ids_t, &self.embed_tokens_weight)?;
 
         // Splice speech embeddings at marked positions
         let speech_positions: Vec<usize> = speech_input_mask
@@ -445,7 +456,7 @@ impl VibeVoice1_5B {
         // === PREFILL NEGATIVE ===
         // Negative prompt is just [speech_start_id]
         let neg_ids = Tensor::new(&[SPEECH_START_ID], &dev)?.unsqueeze(0)?;
-        let neg_embeds = self.embed_tokens.forward(&neg_ids)?;
+        let neg_embeds = self.backend.embedding(&neg_ids, &self.embed_tokens_weight)?;
         let _neg_hidden = self.forward_lm(&neg_embeds, 0, &mut neg_cache).await?;
         let mut neg_pos = 1usize;
 
@@ -506,7 +517,7 @@ impl VibeVoice1_5B {
                     &dev,
                 )?;
                 let neg_ids = Tensor::new(&[SPEECH_START_ID], &dev)?.unsqueeze(0)?;
-                let neg_embeds = self.embed_tokens.forward(&neg_ids)?;
+                let neg_embeds = self.backend.embedding(&neg_ids, &self.embed_tokens_weight)?;
                 let _neg_h = self.forward_lm(&neg_embeds, 0, &mut neg_cache).await?;
                 neg_pos = 1;
                 // Clear streaming caches
@@ -576,7 +587,7 @@ impl VibeVoice1_5B {
             } else {
                 // Non-diffusion token: embed normally, skip neg model (Python refresh_negative=True)
                 let tid = Tensor::new(&[next_token], &dev)?.unsqueeze(0)?;
-                next_embed = self.embed_tokens.forward(&tid)?;
+                next_embed = self.backend.embedding(&tid, &self.embed_tokens_weight)?;
             }
 
             // Forward through positive LM

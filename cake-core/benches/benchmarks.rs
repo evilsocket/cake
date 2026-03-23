@@ -23,5 +23,6 @@ mod bench_vibevoice;
 mod bench_luxtts;
 mod bench_expert_provider;
 mod bench_flash_moe;
+mod bench_backend_ops;
 #[cfg(feature = "vulkan")]
 mod bench_vulkan;

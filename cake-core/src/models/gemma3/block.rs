@@ -3,30 +3,30 @@
 //!
 //! Uses a 4-norm "sandwich" pattern per layer:
 //!   residual = x
-//!   x = input_layernorm(x) → attn(x) → post_attention_layernorm(x)
+//!   x = input_layernorm(x) -> attn(x) -> post_attention_layernorm(x)
 //!   x = residual + x
 //!   residual = x
-//!   x = pre_feedforward_layernorm(x) → mlp(x) → post_feedforward_layernorm(x)
+//!   x = pre_feedforward_layernorm(x) -> mlp(x) -> post_feedforward_layernorm(x)
 //!   x = residual + x
 
 use anyhow::Result;
 use candle_core::Tensor;
-use candle_nn::{Module, RmsNorm};
 
 use crate::cake::{Context, Forwarder};
-use crate::models::common::{load_rms_norm, CausalSelfAttention, MLP};
+use crate::models::common::{load_rms_norm_weight, CausalSelfAttention, MLP};
 use async_trait::async_trait;
 
 /// A Gemma 3 transformer block.
 #[derive(Debug, Clone)]
 pub struct Gemma3Block {
     name: String,
-    input_layernorm: RmsNorm,
+    input_layernorm_weight: Tensor,
+    post_attention_layernorm_weight: Tensor,
+    pre_feedforward_layernorm_weight: Tensor,
+    post_feedforward_layernorm_weight: Tensor,
+    rms_eps: f32,
     attn: CausalSelfAttention,
-    post_attention_layernorm: RmsNorm,
-    pre_feedforward_layernorm: RmsNorm,
     mlp: MLP,
-    post_feedforward_layernorm: RmsNorm,
 }
 
 impl std::fmt::Display for Gemma3Block {
@@ -75,27 +75,28 @@ impl Forwarder for Gemma3Block {
         )?;
         let mlp = MLP::load(vb.pp("mlp"), cfg, ctx.backend.clone())?;
 
-        let eps = cfg.rms_norm_eps;
         let h = cfg.hidden_size;
         let residual = cfg.residual_rms_norm; // Gemma3 uses (1+weight)*norm(x)
 
-        let input_layernorm =
-            load_rms_norm(h, eps, residual, vb.pp("input_layernorm"))?;
-        let post_attention_layernorm =
-            load_rms_norm(h, eps, residual, vb.pp("post_attention_layernorm"))?;
-        let pre_feedforward_layernorm =
-            load_rms_norm(h, eps, residual, vb.pp("pre_feedforward_layernorm"))?;
-        let post_feedforward_layernorm =
-            load_rms_norm(h, eps, residual, vb.pp("post_feedforward_layernorm"))?;
+        let input_layernorm_weight =
+            load_rms_norm_weight(h, residual, vb.pp("input_layernorm"))?;
+        let post_attention_layernorm_weight =
+            load_rms_norm_weight(h, residual, vb.pp("post_attention_layernorm"))?;
+        let pre_feedforward_layernorm_weight =
+            load_rms_norm_weight(h, residual, vb.pp("pre_feedforward_layernorm"))?;
+        let post_feedforward_layernorm_weight =
+            load_rms_norm_weight(h, residual, vb.pp("post_feedforward_layernorm"))?;
+        let rms_eps = cfg.rms_norm_eps as f32;
 
         Ok(Box::new(Self {
             name,
-            input_layernorm,
+            input_layernorm_weight,
+            post_attention_layernorm_weight,
+            pre_feedforward_layernorm_weight,
+            post_feedforward_layernorm_weight,
+            rms_eps,
             attn,
-            post_attention_layernorm,
-            pre_feedforward_layernorm,
             mlp,
-            post_feedforward_layernorm,
         }))
     }
 
@@ -108,7 +109,7 @@ impl Forwarder for Gemma3Block {
     ) -> Result<Tensor> {
         // --- Attention sublayer (sandwich norm) ---
         let residual = x;
-        let x = self.input_layernorm.forward(x)
+        let x = ctx.backend.rms_norm(x, &self.input_layernorm_weight, self.rms_eps)
             .map_err(|e| anyhow!("input_layernorm: {e}"))?;
         let x = self.attn.forward(
             &x,
@@ -116,17 +117,17 @@ impl Forwarder for Gemma3Block {
             block_idx,
             ctx.cache.as_mut().expect("No cache"),
         ).map_err(|e| anyhow!("attn: {e}"))?;
-        let x = self.post_attention_layernorm.forward(&x)
+        let x = ctx.backend.rms_norm(&x, &self.post_attention_layernorm_weight, self.rms_eps)
             .map_err(|e| anyhow!("post_attention_layernorm: {e}"))?;
         let x = (x + residual).map_err(|e| anyhow!("attn residual: {e}"))?;
 
         // --- MLP sublayer (sandwich norm) ---
         let residual = &x;
-        let x = self.pre_feedforward_layernorm.forward(&x)
+        let x = ctx.backend.rms_norm(&x, &self.pre_feedforward_layernorm_weight, self.rms_eps)
             .map_err(|e| anyhow!("pre_feedforward_layernorm: {e}"))?;
         let x = self.mlp.forward(&x)
             .map_err(|e| anyhow!("mlp: {e}"))?;
-        let x = self.post_feedforward_layernorm.forward(&x)
+        let x = ctx.backend.rms_norm(&x, &self.post_feedforward_layernorm_weight, self.rms_eps)
             .map_err(|e| anyhow!("post_feedforward_layernorm: {e}"))?;
         let x = (x + residual).map_err(|e| anyhow!("mlp residual: {e}"))?;
 

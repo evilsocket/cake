@@ -6,8 +6,8 @@
 
 use std::sync::Arc;
 
-use candle_core::{Module, Result, Tensor};
-use candle_nn::{Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, VarBuilder};
+use candle_core::{Result, Tensor};
+use candle_nn::VarBuilder;
 
 use crate::backends::ComputeBackend;
 
@@ -72,8 +72,10 @@ struct DecoderBlock {
     mixer_weight: Tensor,
     mixer_bias: Tensor,
     ffn_gamma: Tensor,
-    ffn_linear1: candle_nn::Linear,
-    ffn_linear2: candle_nn::Linear,
+    ffn_linear1_weight: Tensor,
+    ffn_linear1_bias: Option<Tensor>,
+    ffn_linear2_weight: Tensor,
+    ffn_linear2_bias: Option<Tensor>,
     backend: Arc<dyn ComputeBackend>,
 }
 
@@ -113,8 +115,10 @@ impl DecoderBlock {
 
         let ffn_norm_weight = vb.pp("ffn_norm").get(channels, "weight")?;
         let ffn_gamma = vb.get(channels, "ffn_gamma")?;
-        let ffn_linear1 = candle_nn::linear(channels, channels * 4, vb.pp("ffn").pp("linear1"))?;
-        let ffn_linear2 = candle_nn::linear(channels * 4, channels, vb.pp("ffn").pp("linear2"))?;
+        let ffn_linear1_weight = vb.pp("ffn").pp("linear1").get((channels * 4, channels), "weight")?;
+        let ffn_linear1_bias = vb.pp("ffn").pp("linear1").get(channels * 4, "bias").ok();
+        let ffn_linear2_weight = vb.pp("ffn").pp("linear2").get((channels, channels * 4), "weight")?;
+        let ffn_linear2_bias = vb.pp("ffn").pp("linear2").get(channels, "bias").ok();
 
         Ok(Self {
             norm_weight,
@@ -124,8 +128,10 @@ impl DecoderBlock {
             mixer_weight,
             mixer_bias,
             ffn_gamma,
-            ffn_linear1,
-            ffn_linear2,
+            ffn_linear1_weight,
+            ffn_linear1_bias,
+            ffn_linear2_weight,
+            ffn_linear2_bias,
             backend,
         })
     }
@@ -142,9 +148,9 @@ impl DecoderBlock {
 
         let h = self.backend.rms_norm_channel(&x, &self.ffn_norm_weight, self.eps)?;
         let h = h.transpose(1, 2)?;
-        let h = self.ffn_linear1.forward(&h)?;
-        let h = h.gelu()?;
-        let h = self.ffn_linear2.forward(&h)?;
+        let h = self.backend.linear_forward(&h, &self.ffn_linear1_weight, self.ffn_linear1_bias.as_ref())?;
+        let h = self.backend.gelu(&h)?;
+        let h = self.backend.linear_forward(&h, &self.ffn_linear2_weight, self.ffn_linear2_bias.as_ref())?;
         let h = h.transpose(1, 2)?;
         self.backend.add_scaled(&x, &h, &self.ffn_gamma)
     }
@@ -180,9 +186,9 @@ impl DecoderBlock {
 
         let h = self.backend.rms_norm_channel(&x, &self.ffn_norm_weight, self.eps)?;
         let h = h.transpose(1, 2)?;
-        let h = self.ffn_linear1.forward(&h)?;
-        let h = h.gelu()?;
-        let h = self.ffn_linear2.forward(&h)?;
+        let h = self.backend.linear_forward(&h, &self.ffn_linear1_weight, self.ffn_linear1_bias.as_ref())?;
+        let h = self.backend.gelu(&h)?;
+        let h = self.backend.linear_forward(&h, &self.ffn_linear2_weight, self.ffn_linear2_bias.as_ref())?;
         let h = h.transpose(1, 2)?;
         self.backend.add_scaled(&x, &h, &self.ffn_gamma)
     }
@@ -220,18 +226,41 @@ impl DecoderStage {
     }
 }
 
+/// Raw Conv1d stored as weight + optional bias + config params.
+#[derive(Debug, Clone)]
+struct RawConv1d {
+    weight: Tensor,
+    bias: Option<Tensor>,
+    padding: usize,
+    stride: usize,
+    dilation: usize,
+    groups: usize,
+}
+
+/// Raw ConvTranspose1d stored as weight + optional bias + config params.
+#[derive(Debug, Clone)]
+struct RawConvTranspose1d {
+    weight: Tensor,
+    bias: Option<Tensor>,
+    padding: usize,
+    output_padding: usize,
+    stride: usize,
+    dilation: usize,
+    groups: usize,
+}
+
 /// Upsample layer: either Conv1d (first) or ConvTranspose1d (rest).
 #[derive(Debug, Clone)]
 enum UpsampleLayer {
-    Conv(Conv1d),
-    ConvTranspose(ConvTranspose1d),
+    Conv(RawConv1d),
+    ConvTranspose(RawConvTranspose1d),
 }
 
 impl UpsampleLayer {
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+    fn forward(&self, x: &Tensor, backend: &dyn ComputeBackend) -> Result<Tensor> {
         match self {
-            Self::Conv(c) => c.forward(x),
-            Self::ConvTranspose(ct) => ct.forward(x),
+            Self::Conv(c) => backend.conv1d(x, &c.weight, c.bias.as_ref(), c.padding, c.stride, c.dilation, c.groups),
+            Self::ConvTranspose(ct) => backend.conv_transpose1d(x, &ct.weight, ct.bias.as_ref(), ct.padding, ct.output_padding, ct.stride, ct.dilation, ct.groups),
         }
     }
 }
@@ -241,9 +270,10 @@ impl UpsampleLayer {
 pub struct AcousticVaeDecoder {
     upsample_layers: Vec<UpsampleLayer>,
     stages: Vec<DecoderStage>,
-    head_conv: Conv1d,
+    head_conv: RawConv1d,
     /// Upsample ratios per stage (0 for first Conv1d stage).
     ratios: Vec<usize>,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl AcousticVaeDecoder {
@@ -267,14 +297,13 @@ impl AcousticVaeDecoder {
         let mut upsample_layers = Vec::with_capacity(num_stages);
 
         // First upsample: Conv1d (vae_dim → first_channels, kernel=7, NO padding — causal model)
-        let first_up = candle_nn::conv1d(
-            cfg.vae_dim,
-            channels[0],
-            7,
-            Conv1dConfig::default(), // padding=0, stride=1
-            vb.pp("upsample_layers").pp("0").pp("0").pp("conv").pp("conv"),
-        )?;
-        upsample_layers.push(UpsampleLayer::Conv(first_up));
+        let first_up_vb = vb.pp("upsample_layers").pp("0").pp("0").pp("conv").pp("conv");
+        let first_up_weight = first_up_vb.get((channels[0], cfg.vae_dim, 7), "weight")?;
+        let first_up_bias = first_up_vb.get(channels[0], "bias").ok();
+        upsample_layers.push(UpsampleLayer::Conv(RawConv1d {
+            weight: first_up_weight, bias: first_up_bias,
+            padding: 0, stride: 1, dilation: 1, groups: 1,
+        }));
 
         // Remaining upsamples: ConvTranspose1d
         for (i, &ratio) in ratios.iter().enumerate() {
@@ -282,17 +311,14 @@ impl AcousticVaeDecoder {
             let out_ch = channels[i + 1];
             let kernel = ratio * 2;
             // ConvTranspose1d with NO padding (causal model handles padding externally)
-            let ct = candle_nn::conv_transpose1d(
-                in_ch,
-                out_ch,
-                kernel,
-                ConvTranspose1dConfig {
-                    stride: ratio,
-                    ..Default::default() // padding=0, output_padding=0
-                },
-                vb.pp("upsample_layers").pp(i + 1).pp("0").pp("convtr").pp("convtr"),
-            )?;
-            upsample_layers.push(UpsampleLayer::ConvTranspose(ct));
+            // ConvTranspose1d weight shape: (in_channels, out_channels/groups, kernel_size)
+            let ct_vb = vb.pp("upsample_layers").pp(i + 1).pp("0").pp("convtr").pp("convtr");
+            let ct_weight = ct_vb.get((in_ch, out_ch, kernel), "weight")?;
+            let ct_bias = ct_vb.get(out_ch, "bias").ok();
+            upsample_layers.push(UpsampleLayer::ConvTranspose(RawConvTranspose1d {
+                weight: ct_weight, bias: ct_bias,
+                padding: 0, output_padding: 0, stride: ratio, dilation: 1, groups: 1,
+            }));
         }
 
         // Stages (each follows its corresponding upsample)
@@ -310,19 +336,19 @@ impl AcousticVaeDecoder {
         }
 
         // Head conv: final channels → 1 (mono audio), NO padding (causal)
-        let head_conv = candle_nn::conv1d(
-            channels[num_stages - 1],
-            1,
-            7,
-            Conv1dConfig::default(), // padding=0
-            vb.pp("head").pp("conv").pp("conv"),
-        )?;
+        let head_vb = vb.pp("head").pp("conv").pp("conv");
+        let head_weight = head_vb.get((1, channels[num_stages - 1], 7), "weight")?;
+        let head_bias = head_vb.get(1usize, "bias").ok();
+        let head_conv = RawConv1d {
+            weight: head_weight, bias: head_bias,
+            padding: 0, stride: 1, dilation: 1, groups: 1,
+        };
 
         // Build ratios vec: 0 for first Conv1d, then the actual ratios
         let mut ratios_vec = vec![0usize];
         ratios_vec.extend_from_slice(ratios);
 
-        Ok(Self { upsample_layers, stages, head_conv, ratios: ratios_vec })
+        Ok(Self { upsample_layers, stages, head_conv, ratios: ratios_vec, backend })
     }
 
     fn parse_depths(cfg: &super::config::AcousticTokenizerConfig, num_stages: usize) -> Vec<usize> {
@@ -384,7 +410,7 @@ impl AcousticVaeDecoder {
                 // First layer: Conv1d kernel=7, causal left-pad 6
                 h = Self::causal_pad(&h, 6)?;
             }
-            h = upsample.forward(&h)?;
+            h = upsample.forward(&h, &*self.backend)?;
             if i > 0 {
                 // ConvTranspose1d: trim extra samples from right
                 h = Self::causal_trim(&h, self.ratios[i])?;
@@ -394,7 +420,7 @@ impl AcousticVaeDecoder {
 
         // Head conv: kernel=7, causal left-pad 6
         h = Self::causal_pad(&h, 6)?;
-        self.head_conv.forward(&h)
+        self.backend.conv1d(&h, &self.head_conv.weight, self.head_conv.bias.as_ref(), self.head_conv.padding, self.head_conv.stride, self.head_conv.dilation, self.head_conv.groups)
     }
 
     /// Streaming decode: uses cache for correct context between frames.
@@ -424,7 +450,7 @@ impl AcousticVaeDecoder {
                 let padded = Tensor::cat(&[&ctx, &h], 2)?;
                 let plen = padded.dim(2)?;
                 cache.set(slot, padded.narrow(2, plen.saturating_sub(6), 6.min(plen))?);
-                h = upsample.forward(&padded)?;
+                h = upsample.forward(&padded, &*self.backend)?;
             } else {
                 // ConvTranspose1d: cache input history for context
                 let kernel_size = self.ratios[i] * 2;
@@ -441,7 +467,7 @@ impl AcousticVaeDecoder {
                     Tensor::cat(&[cached, &h], 2)?
                 };
 
-                let full_output = upsample.forward(&full_input)?;
+                let full_output = upsample.forward(&full_input, &*self.backend)?;
                 let full_output = Self::causal_trim(&full_output, stride)?;
 
                 h = if is_first {
@@ -489,7 +515,7 @@ impl AcousticVaeDecoder {
         let padded = Tensor::cat(&[&ctx, &h], 2)?;
         let plen = padded.dim(2)?;
         cache.set(slot, padded.narrow(2, plen.saturating_sub(6), 6.min(plen))?);
-        self.head_conv.forward(&padded)
+        self.backend.conv1d(&padded, &self.head_conv.weight, self.head_conv.bias.as_ref(), self.head_conv.padding, self.head_conv.stride, self.head_conv.dilation, self.head_conv.groups)
     }
 }
 

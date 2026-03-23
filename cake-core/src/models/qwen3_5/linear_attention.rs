@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use candle_core::{DType, Result, Tensor, D};
-use candle_nn::{Linear, Module, VarBuilder};
+use candle_nn::VarBuilder;
 
 use crate::backends::ComputeBackend;
 use crate::models::common::{Cache, Config};
@@ -47,11 +47,13 @@ impl RmsNormGated {
 /// Gated DeltaNet linear attention block with fused input projections.
 #[derive(Debug, Clone)]
 pub struct GatedDeltaNet {
-    /// Fused projection: QKV + A + B + Z in a single matmul
-    in_proj: Linear,
+    /// Fused projection weight: QKV + A + B + Z in a single matmul
+    in_proj_weight: Tensor,
+    /// Fused projection bias (dt_bias absorbed into A slot)
+    in_proj_bias: Tensor,
     conv1d_weight: Tensor,
     norm: RmsNormGated,
-    out_proj: Linear,
+    out_proj_weight: Tensor,
 
     // Precomputed constants (F32, avoids per-call recomputation)
     neg_a_exp_f32: Tensor,
@@ -96,7 +98,7 @@ impl GatedDeltaNet {
         let a_w = vb.pp("in_proj_a").get((num_heads, h_size), "weight")?;
         let b_w = vb.pp("in_proj_b").get((num_heads, h_size), "weight")?;
         let z_w = vb.pp("in_proj_z").get((value_dim, h_size), "weight")?;
-        let fused_w = Tensor::cat(&[&qkv_w, &a_w, &b_w, &z_w], 0)?;
+        let in_proj_weight = Tensor::cat(&[&qkv_w, &a_w, &b_w, &z_w], 0)?;
 
         // Absorb dt_bias into the projection bias so `a` output already includes it.
         // Bias layout: [zeros for QKV | dt_bias for A | zeros for B | zeros for Z]
@@ -105,13 +107,11 @@ impl GatedDeltaNet {
         let dt_bias_vec = dt_bias.to_dtype(DType::F32)?.to_vec1::<f32>()?;
         let mut bias_data = vec![0.0f32; total_out];
         bias_data[conv_dim..(num_heads + conv_dim)].copy_from_slice(&dt_bias_vec[..num_heads]);
-        let dev_for_bias = fused_w.device().clone();
-        let fused_bias = Tensor::from_slice(&bias_data, total_out, &dev_for_bias)?
-            .to_dtype(fused_w.dtype())?;
-        let in_proj = Linear::new(fused_w, Some(fused_bias));
+        let dev_for_bias = in_proj_weight.device().clone();
+        let in_proj_bias = Tensor::from_slice(&bias_data, total_out, &dev_for_bias)?
+            .to_dtype(in_proj_weight.dtype())?;
 
-        let out_w = vb.pp("out_proj").get((h_size, value_dim), "weight")?;
-        let out_proj = Linear::new(out_w, None);
+        let out_proj_weight = vb.pp("out_proj").get((h_size, value_dim), "weight")?;
 
         // Conv1d weight: stored as F32 (matches post-projection F32 data path).
         let conv1d_weight = vb.get((conv_dim, 1, la.conv_kernel_dim), "conv1d.weight")?
@@ -124,9 +124,9 @@ impl GatedDeltaNet {
         let neg_a_exp_f32 = a_log.to_dtype(DType::F32)?.exp()?.neg()?;
 
         // Precompute alpha vectors for fused L2 normalization via rms_norm.
-        // rms_norm(x, alpha, eps/N) = x / sqrt(mean(x²) + eps/N) * alpha
-        //                            = x / sqrt((sum(x²)+eps)/N) * alpha
-        //                            = x * sqrt(N) / sqrt(sum(x²)+eps) * alpha
+        // rms_norm(x, alpha, eps/N) = x / sqrt(mean(x^2) + eps/N) * alpha
+        //                            = x / sqrt((sum(x^2)+eps)/N) * alpha
+        //                            = x * sqrt(N) / sqrt(sum(x^2)+eps) * alpha
         // Setting alpha = 1/sqrt(N): gives L2_normalize(x)
         // Setting alpha = 1/N:       gives L2_normalize(x) * 1/sqrt(N) = L2_normalize(x) * q_scale
         let dev = neg_a_exp_f32.device().clone();
@@ -143,10 +143,11 @@ impl GatedDeltaNet {
         let norm = RmsNormGated::load(value_head_dim, cfg.rms_norm_eps, vb.pp("norm"), backend.clone())?;
 
         Ok(Self {
-            in_proj,
+            in_proj_weight,
+            in_proj_bias,
             conv1d_weight,
             norm,
-            out_proj,
+            out_proj_weight,
             neg_a_exp_f32,
             l2_alpha_q,
             l2_alpha_k,
@@ -223,7 +224,7 @@ impl GatedDeltaNet {
         let y = y.transpose(1, 2)?.contiguous()?;
 
         // SiLU activation
-        let y = candle_nn::ops::silu(&y)?;
+        let y = self.backend.silu(&y)?;
 
         // Save conv state: last (kernel_size-1) timesteps of input
         let conv_state = if seq_len >= pad {
@@ -305,7 +306,7 @@ impl GatedDeltaNet {
         // section under ~25 commands. No-op on CPU/CUDA.
 
         // Single fused projection: QKV + A + B + Z (with dt_bias absorbed into A bias)
-        let proj = self.in_proj.forward(x)
+        let proj = self.backend.linear_forward(x, &self.in_proj_weight, Some(&self.in_proj_bias))
             .map_err(|e| anyhow!("in_proj: {e}"))?;
 
         // Bulk F32 conversion: one kernel instead of 5 individual to_dtype calls.
@@ -385,10 +386,10 @@ impl GatedDeltaNet {
         // L2-normalize Q and K using fused rms_norm kernel (1 kernel each).
         // Q and K are already F32 from bulk conversion — no individual to_dtype needed.
         // rms_norm(x, alpha=1/N, eps/N) = L2_normalize(x) * q_scale (for Q)
-        // rms_norm(x, alpha=1/√N, eps/N) = L2_normalize(x) (for K)
-        let q = candle_nn::ops::rms_norm(&q.contiguous()?, &self.l2_alpha_q, self.l2_norm_eps)
+        // rms_norm(x, alpha=1/sqrt(N), eps/N) = L2_normalize(x) (for K)
+        let q = self.backend.rms_norm(&q.contiguous()?, &self.l2_alpha_q, self.l2_norm_eps)
             .map_err(|e| anyhow!("q l2norm: {e}"))?;
-        let k = candle_nn::ops::rms_norm(&k.contiguous()?, &self.l2_alpha_k, self.l2_norm_eps)
+        let k = self.backend.rms_norm(&k.contiguous()?, &self.l2_alpha_k, self.l2_norm_eps)
             .map_err(|e| anyhow!("k l2norm: {e}"))?;
         // v is already F32 from bulk conversion
 
@@ -399,7 +400,7 @@ impl GatedDeltaNet {
             .map_err(|e| anyhow!("g compute: {e}"))?;
 
         // beta = sigmoid(b) — already F32 from bulk conversion
-        let beta = candle_nn::ops::sigmoid(&b)
+        let beta = self.backend.sigmoid(&b)
             .map_err(|e| anyhow!("sigmoid: {e}"))?;
 
         // Get or initialize recurrent state (always F32)
@@ -460,7 +461,7 @@ impl GatedDeltaNet {
             .map_err(|e| anyhow!("output reshape: {e}"))?;
 
         // Project output
-        let output = self.out_proj.forward(&output)
+        let output = self.backend.linear_forward(&output, &self.out_proj_weight, None)
             .map_err(|e| anyhow!("out_proj: {e}"))?;
 
         // Flush Metal commands — needed for prefill (many accumulated commands),

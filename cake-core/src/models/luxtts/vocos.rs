@@ -10,7 +10,11 @@
 
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
-use candle_nn::{Linear, Module, VarBuilder};
+use std::sync::Arc;
+
+use candle_nn::VarBuilder;
+
+use crate::backends::ComputeBackend;
 use rustfft::{num_complex::Complex, FftPlanner};
 
 const NUM_CONVNEXT_LAYERS: usize = 8;
@@ -23,33 +27,41 @@ struct ConvNeXtBlock {
     gamma: Tensor,         // [dim] -- learned scale
     norm_weight: Tensor,   // [dim]
     norm_bias: Tensor,     // [dim]
-    pwconv1: Linear,       // [ff_dim, dim]
-    pwconv2: Linear,       // [dim, ff_dim]
+    pwconv1_weight: Tensor, // [ff_dim, dim]
+    pwconv1_bias: Option<Tensor>,
+    pwconv2_weight: Tensor, // [dim, ff_dim]
+    pwconv2_bias: Option<Tensor>,
     kernel_size: usize,
     #[allow(dead_code)]
     dim: usize,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl ConvNeXtBlock {
-    fn load(dim: usize, ff_mult: usize, kernel_size: usize, vb: VarBuilder) -> Result<Self> {
+    fn load(dim: usize, ff_mult: usize, kernel_size: usize, vb: VarBuilder, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let ff_dim = dim * ff_mult;
         let dwconv_weight = vb.get((dim, 1, kernel_size), "dwconv.weight")?;
         let dwconv_bias = vb.get(dim, "dwconv.bias")?;
         let gamma = vb.get(dim, "gamma")?;
         let norm_weight = vb.get(dim, "norm.weight")?;
         let norm_bias = vb.get(dim, "norm.bias")?;
-        let pwconv1 = candle_nn::linear(dim, ff_dim, vb.pp("pwconv1"))?;
-        let pwconv2 = candle_nn::linear(ff_dim, dim, vb.pp("pwconv2"))?;
+        let pwconv1_weight = vb.pp("pwconv1").get((ff_dim, dim), "weight")?;
+        let pwconv1_bias = Some(vb.pp("pwconv1").get(ff_dim, "bias")?);
+        let pwconv2_weight = vb.pp("pwconv2").get((dim, ff_dim), "weight")?;
+        let pwconv2_bias = Some(vb.pp("pwconv2").get(dim, "bias")?);
         Ok(Self {
             dwconv_weight,
             dwconv_bias,
             gamma,
             norm_weight,
             norm_bias,
-            pwconv1,
-            pwconv2,
+            pwconv1_weight,
+            pwconv1_bias,
+            pwconv2_weight,
+            pwconv2_bias,
             kernel_size,
             dim,
+            backend,
         })
     }
 
@@ -67,9 +79,9 @@ impl ConvNeXtBlock {
         let x = self.layer_norm(&x)?;
 
         // Pointwise convolutions with GELU activation
-        let x = self.pwconv1.forward(&x)?;
+        let x = self.backend.linear_forward(&x, &self.pwconv1_weight, self.pwconv1_bias.as_ref())?;
         let x = x.gelu_erf()?;
-        let x = self.pwconv2.forward(&x)?;
+        let x = self.backend.linear_forward(&x, &self.pwconv2_weight, self.pwconv2_bias.as_ref())?;
 
         // Apply gamma (channel-wise scale)
         let x = x.broadcast_mul(&self.gamma)?;
@@ -132,13 +144,15 @@ pub struct Vocos {
     final_norm_weight: Tensor,
     final_norm_bias: Tensor,
     // ISTFT head: single Linear [n_freq*2, backbone_dim]
-    head_out: Linear,
+    head_out_weight: Tensor,
+    head_out_bias: Option<Tensor>,
     // ISTFT window
     istft_window: Vec<f32>,
     // Config
     n_fft: usize,
     hop_length: usize,
     backbone_dim: usize,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl Vocos {
@@ -148,6 +162,7 @@ impl Vocos {
         n_fft: usize,
         hop_length: usize,
         vb: VarBuilder,
+        backend: Arc<dyn ComputeBackend>,
     ) -> Result<Self> {
         let n_freq = n_fft / 2 + 1;
         let embed_kernel = 7;
@@ -171,6 +186,7 @@ impl Vocos {
                 3, // ff_mult
                 7, // kernel_size
                 vb.pp(format!("backbone.convnext.{i}")),
+                backend.clone(),
             )?;
             convnext.push(block);
         }
@@ -180,7 +196,8 @@ impl Vocos {
         let final_norm_bias = vb.get(backbone_dim, "backbone.final_layer_norm.bias")?;
 
         // head.out: Linear [n_freq*2, backbone_dim]
-        let head_out = candle_nn::linear(backbone_dim, n_freq * 2, vb.pp("head.out"))?;
+        let head_out_weight = vb.pp("head.out").get((n_freq * 2, backbone_dim), "weight")?;
+        let head_out_bias = Some(vb.pp("head.out").get(n_freq * 2, "bias")?);
 
         // head.istft.window
         let window_tensor = vb.get(n_fft, "head.istft.window")?;
@@ -198,11 +215,13 @@ impl Vocos {
             convnext,
             final_norm_weight,
             final_norm_bias,
-            head_out,
+            head_out_weight,
+            head_out_bias,
             istft_window,
             n_fft,
             hop_length,
             backbone_dim,
+            backend,
         })
     }
 
@@ -227,7 +246,7 @@ impl Vocos {
         let x = self.layer_norm(&x, &self.final_norm_weight, &self.final_norm_bias)?;
 
         // Head: predict mag and phase via single linear
-        let out = self.head_out.forward(&x)?; // [batch, time, n_freq*2]
+        let out = self.backend.linear_forward(&x, &self.head_out_weight, self.head_out_bias.as_ref())?; // [batch, time, n_freq*2]
         let n_freq = self.n_fft / 2 + 1;
         let mag = out.narrow(candle_core::D::Minus1, 0, n_freq)?;
         let phase = out.narrow(candle_core::D::Minus1, n_freq, n_freq)?;

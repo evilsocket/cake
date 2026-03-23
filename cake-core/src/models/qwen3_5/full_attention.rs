@@ -4,10 +4,10 @@
 use std::sync::Arc;
 
 use candle_core::{Result, Tensor, D};
-use candle_nn::{Linear, Module, RmsNorm, VarBuilder};
+use candle_nn::VarBuilder;
 
 use crate::backends::ComputeBackend;
-use crate::models::common::{Cache, Config};
+use crate::models::common::{load_rms_norm_weight, Cache, Config};
 
 #[inline]
 fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> Result<Tensor> {
@@ -22,10 +22,11 @@ fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> Result<Tensor>
 /// Full attention with fused QKV, Q/K RMS norms, partial RoPE, and output gating.
 #[derive(Debug, Clone)]
 pub struct Qwen3_5FullAttention {
-    qkv_proj: Linear, // fused: Q (num_heads * head_dim * 2) + K + V
-    o_proj: Linear,
-    q_norm: RmsNorm,
-    k_norm: RmsNorm,
+    qkv_proj_weight: Tensor, // fused: Q (num_heads * head_dim * 2) + K + V
+    o_proj_weight: Tensor,
+    q_norm_weight: Tensor,
+    k_norm_weight: Tensor,
+    qk_norm_eps: f32,
 
     num_attention_heads: usize,
     num_key_value_heads: usize,
@@ -48,29 +49,29 @@ impl Qwen3_5FullAttention {
         let q_size = cfg.num_attention_heads * head_dim * 2;
         let kv_size = cfg.num_key_value_heads * head_dim;
 
-        // Fuse Q, K, V projections into a single Linear
+        // Fuse Q, K, V projections into a single weight
         let q_w = vb.pp("q_proj").get((q_size, h_size), "weight")?;
         let k_w = vb.pp("k_proj").get((kv_size, h_size), "weight")?;
         let v_w = vb.pp("v_proj").get((kv_size, h_size), "weight")?;
-        let fused_w = Tensor::cat(&[&q_w, &k_w, &v_w], 0)?;
-        let qkv_proj = Linear::new(fused_w, None);
+        let qkv_proj_weight = Tensor::cat(&[&q_w, &k_w, &v_w], 0)?;
 
         let o_size = cfg.num_attention_heads * head_dim;
-        let o_w = vb.pp("o_proj").get((h_size, o_size), "weight")?;
-        let o_proj = Linear::new(o_w, None);
+        let o_proj_weight = vb.pp("o_proj").get((h_size, o_size), "weight")?;
 
-        let q_norm = crate::models::common::load_rms_norm(
-            head_dim, cfg.rms_norm_eps, cfg.residual_rms_norm, vb.pp("q_norm"),
+        let q_norm_weight = load_rms_norm_weight(
+            head_dim, cfg.residual_rms_norm, vb.pp("q_norm"),
         )?;
-        let k_norm = crate::models::common::load_rms_norm(
-            head_dim, cfg.rms_norm_eps, cfg.residual_rms_norm, vb.pp("k_norm"),
+        let k_norm_weight = load_rms_norm_weight(
+            head_dim, cfg.residual_rms_norm, vb.pp("k_norm"),
         )?;
+        let qk_norm_eps = cfg.rms_norm_eps as f32;
 
         Ok(Self {
-            qkv_proj,
-            o_proj,
-            q_norm,
-            k_norm,
+            qkv_proj_weight,
+            o_proj_weight,
+            q_norm_weight,
+            k_norm_weight,
+            qk_norm_eps,
             num_attention_heads: cfg.num_attention_heads,
             num_key_value_heads: cfg.num_key_value_heads,
             head_dim,
@@ -94,13 +95,13 @@ impl Qwen3_5FullAttention {
 
         if self.rotary_dim == self.head_dim {
             // Full rotation
-            candle_nn::rotary_emb::rope(x, &cos, &sin)
+            self.backend.rope(x, &cos, &sin)
         } else {
             // Partial: split at rotary_dim, rotate first part, concat back
             let x_rot = x.narrow(D::Minus1, 0, self.rotary_dim)?.contiguous()?;
             let x_pass = x.narrow(D::Minus1, self.rotary_dim, self.head_dim - self.rotary_dim)?.contiguous()?;
 
-            let x_rot = candle_nn::rotary_emb::rope(&x_rot, &cos, &sin)?;
+            let x_rot = self.backend.rope(&x_rot, &cos, &sin)?;
             Tensor::cat(&[&x_rot, &x_pass], D::Minus1)
         }
     }
@@ -125,7 +126,7 @@ impl Qwen3_5FullAttention {
         // Periodic GPU command buffer flushes (see linear_attention.rs).
 
         // Single fused QKV projection
-        let qkv = self.qkv_proj.forward(x)
+        let qkv = self.backend.linear_forward(x, &self.qkv_proj_weight, None)
             .map_err(|e| anyhow!("qkv_proj: {e}"))?;
 
         // Flush GPU commands after QKV matmul (always needed — full attention
@@ -158,8 +159,12 @@ impl Qwen3_5FullAttention {
             .map_err(|e| anyhow!("v reshape: {e}"))?;
 
         // Apply Q/K RMS norms (per-head)
-        let q = self.q_norm.forward(&query).map_err(|e| anyhow!("q_norm: {e}"))?;
-        let k = self.k_norm.forward(&k).map_err(|e| anyhow!("k_norm: {e}"))?;
+        let q = self.backend.rms_norm(&query.contiguous()
+            .map_err(|e| anyhow!("q contiguous: {e}"))?, &self.q_norm_weight, self.qk_norm_eps)
+            .map_err(|e| anyhow!("q_norm: {e}"))?;
+        let k = self.backend.rms_norm(&k.contiguous()
+            .map_err(|e| anyhow!("k contiguous: {e}"))?, &self.k_norm_weight, self.qk_norm_eps)
+            .map_err(|e| anyhow!("k_norm: {e}"))?;
 
         // Transpose to (batch, heads, seq, head_dim) for attention.
         // For seq_len=1, squeeze+unsqueeze is zero-copy (avoids contiguous copy kernel)
@@ -210,7 +215,7 @@ impl Qwen3_5FullAttention {
                         .map_err(|e| anyhow!("mask broadcast: {e}"))?;
                     (att + mask).map_err(|e| anyhow!("mask add: {e}"))?
                 };
-                let att = candle_nn::ops::softmax_last_dim(&att)?;
+                let att = self.backend.softmax(&att, att.rank() - 1)?;
                 let att = att.to_dtype(v.dtype())?;
                 break 'attn att.matmul(&v.contiguous()?)
                     .map_err(|e| anyhow!("att matmul v: {e}"))?;
@@ -231,7 +236,7 @@ impl Qwen3_5FullAttention {
                 masked_fill(&att, &mask, f32::NEG_INFINITY)
                     .map_err(|e| anyhow!("masked_fill: {e}"))?
             };
-            let att = candle_nn::ops::softmax_last_dim(&att)?;
+            let att = self.backend.softmax(&att, att.rank() - 1)?;
             att.matmul(&v.contiguous()?)?
         };
 
@@ -243,11 +248,12 @@ impl Qwen3_5FullAttention {
             .map_err(|e| anyhow!("y to_dtype: {e}"))?;
 
         // Output gating: y * sigmoid(gate)
-        let gate = candle_nn::ops::sigmoid(&gate).map_err(|e| anyhow!("sigmoid gate: {e}"))?;
+        let gate = self.backend.sigmoid(&gate).map_err(|e| anyhow!("sigmoid gate: {e}"))?;
         let y = (y * gate).map_err(|e| anyhow!("gating: {e}"))?;
 
         // Final projection
-        let y = self.o_proj.forward(&y).map_err(|e| anyhow!("o_proj: {e}"))?;
+        let y = self.backend.linear_forward(&y, &self.o_proj_weight, None)
+            .map_err(|e| anyhow!("o_proj: {e}"))?;
 
         // Flush GPU commands — needed for prefill, skip for generation
         if seq_len > 1 {

@@ -7,7 +7,6 @@
 
 use anyhow::Result;
 use candle_core::Tensor;
-use candle_nn::{Module, RmsNorm};
 
 use crate::cake::{Context, Forwarder};
 use crate::models::common::{CausalSelfAttention, MLP};
@@ -16,9 +15,10 @@ use async_trait::async_trait;
 #[derive(Debug, Clone)]
 pub struct EXAONE4Block {
     name: String,
-    input_layernorm: RmsNorm,
+    input_layernorm_weight: Tensor,
+    post_attention_layernorm_weight: Tensor,
+    rms_eps: f32,
     attn: CausalSelfAttention,
-    post_attention_layernorm: RmsNorm,
     mlp: MLP,
 }
 
@@ -69,19 +69,20 @@ impl Forwarder for EXAONE4Block {
         )?;
         let mlp = MLP::load(vb.pp("mlp"), cfg, ctx.backend.clone())?;
 
-        let eps = cfg.rms_norm_eps;
         let h = cfg.hidden_size;
 
-        let input_layernorm =
-            candle_nn::rms_norm(h, eps, vb.pp("input_layernorm"))?;
-        let post_attention_layernorm =
-            candle_nn::rms_norm(h, eps, vb.pp("post_attention_layernorm"))?;
+        let input_layernorm_weight =
+            vb.pp("input_layernorm").get(h, "weight")?;
+        let post_attention_layernorm_weight =
+            vb.pp("post_attention_layernorm").get(h, "weight")?;
+        let rms_eps = cfg.rms_norm_eps as f32;
 
         Ok(Box::new(Self {
             name,
-            input_layernorm,
+            input_layernorm_weight,
             attn,
-            post_attention_layernorm,
+            post_attention_layernorm_weight,
+            rms_eps,
             mlp,
         }))
     }
@@ -94,7 +95,7 @@ impl Forwarder for EXAONE4Block {
         ctx: &mut Context,
     ) -> Result<Tensor> {
         let residual = x;
-        let x = self.input_layernorm.forward(x)
+        let x = ctx.backend.rms_norm(x, &self.input_layernorm_weight, self.rms_eps)
             .map_err(|e| anyhow!("input_layernorm: {e}"))?;
         let x = (self.attn.forward(
             &x,
@@ -105,7 +106,7 @@ impl Forwarder for EXAONE4Block {
             .map_err(|e| anyhow!("attn residual: {e}"))?;
 
         let residual = &x;
-        let x = self.post_attention_layernorm.forward(&x)
+        let x = ctx.backend.rms_norm(&x, &self.post_attention_layernorm_weight, self.rms_eps)
             .map_err(|e| anyhow!("post_attention_layernorm: {e}"))?;
         let x = (self.mlp.forward(&x)
             .map_err(|e| anyhow!("mlp: {e}"))? + residual)

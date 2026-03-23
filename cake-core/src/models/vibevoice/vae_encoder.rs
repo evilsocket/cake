@@ -9,8 +9,8 @@
 
 use std::sync::Arc;
 
-use candle_core::{Module, Result, Tensor};
-use candle_nn::{Conv1d, Conv1dConfig, VarBuilder};
+use candle_core::{Result, Tensor};
+use candle_nn::VarBuilder;
 
 use crate::backends::ComputeBackend;
 
@@ -25,8 +25,10 @@ struct EncoderBlock {
     mixer_weight: Tensor,
     mixer_bias: Tensor,
     ffn_gamma: Tensor,
-    ffn_linear1: candle_nn::Linear,
-    ffn_linear2: candle_nn::Linear,
+    ffn_linear1_weight: Tensor,
+    ffn_linear1_bias: Option<Tensor>,
+    ffn_linear2_weight: Tensor,
+    ffn_linear2_bias: Option<Tensor>,
     backend: Arc<dyn ComputeBackend>,
 }
 
@@ -41,13 +43,15 @@ impl EncoderBlock {
 
         let ffn_norm_weight = vb.pp("ffn_norm").get(channels, "weight")?;
         let ffn_gamma = vb.get(channels, "ffn_gamma")?;
-        let ffn_linear1 = candle_nn::linear(channels, channels * 4, vb.pp("ffn").pp("linear1"))?;
-        let ffn_linear2 = candle_nn::linear(channels * 4, channels, vb.pp("ffn").pp("linear2"))?;
+        let ffn_linear1_weight = vb.pp("ffn").pp("linear1").get((channels * 4, channels), "weight")?;
+        let ffn_linear1_bias = vb.pp("ffn").pp("linear1").get(channels * 4, "bias").ok();
+        let ffn_linear2_weight = vb.pp("ffn").pp("linear2").get((channels, channels * 4), "weight")?;
+        let ffn_linear2_bias = vb.pp("ffn").pp("linear2").get(channels, "bias").ok();
 
         Ok(Self {
             norm_weight, ffn_norm_weight, eps: eps as f32,
             gamma, mixer_weight, mixer_bias, ffn_gamma,
-            ffn_linear1, ffn_linear2,
+            ffn_linear1_weight, ffn_linear1_bias, ffn_linear2_weight, ffn_linear2_bias,
             backend,
         })
     }
@@ -64,9 +68,9 @@ impl EncoderBlock {
 
         let h = self.backend.rms_norm_channel(&x, &self.ffn_norm_weight, self.eps)?;
         let h = h.transpose(1, 2)?;
-        let h = self.ffn_linear1.forward(&h)?;
-        let h = h.gelu()?;
-        let h = self.ffn_linear2.forward(&h)?;
+        let h = self.backend.linear_forward(&h, &self.ffn_linear1_weight, self.ffn_linear1_bias.as_ref())?;
+        let h = self.backend.gelu(&h)?;
+        let h = self.backend.linear_forward(&h, &self.ffn_linear2_weight, self.ffn_linear2_bias.as_ref())?;
         let h = h.transpose(1, 2)?;
         self.backend.add_scaled(&x, &h, &self.ffn_gamma)
     }
@@ -104,9 +108,9 @@ impl EncoderBlock {
 
         let h = self.backend.rms_norm_channel(&x, &self.ffn_norm_weight, self.eps)?;
         let h = h.transpose(1, 2)?;
-        let h = self.ffn_linear1.forward(&h)?;
-        let h = h.gelu()?;
-        let h = self.ffn_linear2.forward(&h)?;
+        let h = self.backend.linear_forward(&h, &self.ffn_linear1_weight, self.ffn_linear1_bias.as_ref())?;
+        let h = self.backend.gelu(&h)?;
+        let h = self.backend.linear_forward(&h, &self.ffn_linear2_weight, self.ffn_linear2_bias.as_ref())?;
         let h = h.transpose(1, 2)?;
         self.backend.add_scaled(&x, &h, &self.ffn_gamma)
     }
@@ -148,12 +152,23 @@ impl EncoderStage {
     }
 }
 
+/// A raw Conv1d stored as weight + optional bias + config params.
+#[derive(Debug, Clone)]
+struct RawConv1d {
+    weight: Tensor,
+    bias: Option<Tensor>,
+    padding: usize,
+    stride: usize,
+    dilation: usize,
+    groups: usize,
+}
+
 /// Complete tokenizer encoder.
 /// Mirrors the decoder: downsample stages then head projection.
 #[derive(Debug, Clone)]
 pub struct TokenizerEncoder {
     /// Downsample layers: [stem Conv1d, stride Conv1d * N_ratios]
-    downsample_convs: Vec<Conv1d>,
+    downsample_convs: Vec<RawConv1d>,
     /// Stages: each contains N EncoderBlocks at corresponding channel width
     stages: Vec<EncoderStage>,
     /// Causal padding amounts for each downsample layer
@@ -161,10 +176,11 @@ pub struct TokenizerEncoder {
     /// Stride for each downsample layer (1 for stem, ratio for others)
     downsample_strides: Vec<usize>,
     /// Head conv: final channels → vae_dim
-    head_conv: Conv1d,
+    head_conv: RawConv1d,
     /// Channel count at each stage (for understanding the architecture)
     #[allow(dead_code)]
     channels: Vec<usize>,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl TokenizerEncoder {
@@ -200,14 +216,13 @@ impl TokenizerEncoder {
 
         // Stem: Conv1d(1 → n_filters, kernel=7, stride=1)
         // Causal padding = (kernel-1)*dilation - (stride-1) = 6
-        let stem = candle_nn::conv1d(
-            1, // mono audio input
-            channels[0],
-            7,
-            Conv1dConfig::default(),
-            vb.pp("downsample_layers").pp("0").pp("0").pp("conv").pp("conv"),
-        )?;
-        downsample_convs.push(stem);
+        let stem_vb = vb.pp("downsample_layers").pp("0").pp("0").pp("conv").pp("conv");
+        let stem_weight = stem_vb.get((channels[0], 1, 7), "weight")?;
+        let stem_bias = stem_vb.get(channels[0], "bias").ok();
+        downsample_convs.push(RawConv1d {
+            weight: stem_weight, bias: stem_bias,
+            padding: 0, stride: 1, dilation: 1, groups: 1,
+        });
         downsample_paddings.push(6); // (7-1) - (1-1) = 6
         downsample_strides.push(1);
 
@@ -217,21 +232,17 @@ impl TokenizerEncoder {
             let out_ch = channels[i + 1];
             let kernel = ratio * 2;
             // Causal padding = (kernel-1) - (stride-1) = kernel - stride = 2*ratio - ratio = ratio
-            let conv = candle_nn::conv1d(
-                in_ch,
-                out_ch,
-                kernel,
-                Conv1dConfig {
-                    stride: ratio,
-                    ..Default::default()
-                },
-                vb.pp("downsample_layers")
-                    .pp(i + 1)
-                    .pp("0")
-                    .pp("conv")
-                    .pp("conv"),
-            )?;
-            downsample_convs.push(conv);
+            let conv_vb = vb.pp("downsample_layers")
+                .pp(i + 1)
+                .pp("0")
+                .pp("conv")
+                .pp("conv");
+            let conv_weight = conv_vb.get((out_ch, in_ch, kernel), "weight")?;
+            let conv_bias = conv_vb.get(out_ch, "bias").ok();
+            downsample_convs.push(RawConv1d {
+                weight: conv_weight, bias: conv_bias,
+                padding: 0, stride: ratio, dilation: 1, groups: 1,
+            });
             downsample_paddings.push(kernel - ratio); // (2*ratio - 1) - (ratio - 1) = ratio
             downsample_strides.push(ratio);
         }
@@ -246,13 +257,13 @@ impl TokenizerEncoder {
 
         // Head conv: last_channels → vae_dim, kernel=7
         // Causal padding = 6
-        let head_conv = candle_nn::conv1d(
-            channels[num_stages - 1],
-            vae_dim,
-            7,
-            Conv1dConfig::default(),
-            vb.pp("head").pp("conv").pp("conv"),
-        )?;
+        let head_vb = vb.pp("head").pp("conv").pp("conv");
+        let head_weight = head_vb.get((vae_dim, channels[num_stages - 1], 7), "weight")?;
+        let head_bias = head_vb.get(vae_dim, "bias").ok();
+        let head_conv = RawConv1d {
+            weight: head_weight, bias: head_bias,
+            padding: 0, stride: 1, dilation: 1, groups: 1,
+        };
 
         Ok(Self {
             downsample_convs,
@@ -261,6 +272,7 @@ impl TokenizerEncoder {
             downsample_strides,
             head_conv,
             channels,
+            backend,
         })
     }
 
@@ -311,7 +323,7 @@ impl TokenizerEncoder {
 
             // For strided convolutions, add extra padding for alignment
             if self.downsample_strides[i] > 1 {
-                let kernel = conv.weight().dim(2)?;
+                let kernel = conv.weight.dim(2)?;
                 let stride = self.downsample_strides[i];
                 let length = h.dim(2)?;
                 let n_frames = (length - kernel) / stride + 1;
@@ -334,13 +346,13 @@ impl TokenizerEncoder {
                 }
             }
 
-            h = conv.forward(&h)?;
+            h = self.backend.conv1d(&h, &conv.weight, conv.bias.as_ref(), conv.padding, conv.stride, conv.dilation, conv.groups)?;
             h = stage.forward(&h)?;
         }
 
         // Head conv: causal left-pad 6
         h = Self::causal_pad(&h, 6)?;
-        h = self.head_conv.forward(&h)?;
+        h = self.backend.conv1d(&h, &self.head_conv.weight, self.head_conv.bias.as_ref(), self.head_conv.padding, self.head_conv.stride, self.head_conv.dilation, self.head_conv.groups)?;
 
         // Return as (batch, frames, vae_dim)
         h.transpose(1, 2)
@@ -382,7 +394,7 @@ impl TokenizerEncoder {
             let start = plen.saturating_sub(ctx_size);
             cache.set(slot, padded.narrow(2, start, plen - start)?);
 
-            h = conv.forward(&padded)?;
+            h = self.backend.conv1d(&padded, &conv.weight, conv.bias.as_ref(), conv.padding, conv.stride, conv.dilation, conv.groups)?;
             h = stage.forward_cached(&h, cache)?;
         }
 
@@ -396,7 +408,7 @@ impl TokenizerEncoder {
         let padded = Tensor::cat(&[&ctx, &h], 2)?;
         let plen = padded.dim(2)?;
         cache.set(slot, padded.narrow(2, plen.saturating_sub(6), 6.min(plen))?);
-        h = self.head_conv.forward(&padded)?;
+        h = self.backend.conv1d(&padded, &self.head_conv.weight, self.head_conv.bias.as_ref(), self.head_conv.padding, self.head_conv.stride, self.head_conv.dilation, self.head_conv.groups)?;
 
         h.transpose(1, 2)
     }

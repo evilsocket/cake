@@ -1,5 +1,6 @@
 //! FLUX.2-klein MMDiT transformer Forwarder.
 
+use crate::backends::ComputeBackend;
 use crate::cake::{Context, Forwarder};
 use crate::models::sd::util::{pack_tensors, unpack_tensors};
 use async_trait::async_trait;
@@ -7,6 +8,7 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use log::info;
 use std::fmt::{Debug, Display, Formatter};
+use std::sync::Arc;
 
 use super::config::FluxModelFile;
 use super::flux2_model::{Flux2Config, Flux2Transformer};
@@ -28,7 +30,7 @@ impl Forwarder for FluxTransformerForwarder {
     where
         Self: Sized,
     {
-        Self::load_model(&ctx.device, ctx.dtype, &ctx.args.model)
+        Self::load_model(&ctx.device, ctx.dtype, &ctx.args.model, ctx.backend.clone())
     }
 
     async fn forward(
@@ -81,6 +83,7 @@ impl FluxTransformerForwarder {
         device: &Device,
         _dtype: DType,
         model_repo: &str,
+        backend: Arc<dyn ComputeBackend>,
     ) -> anyhow::Result<Box<Self>> {
         let cfg = Flux2Config::klein_4b();
 
@@ -97,7 +100,7 @@ impl FluxTransformerForwarder {
             VarBuilder::from_mmaped_safetensors(&[weights_path], DType::BF16, device)?
         };
 
-        let model = Flux2Transformer::load(vb, &cfg)?;
+        let model = Flux2Transformer::load(vb, &cfg, backend)?;
         info!("FLUX transformer loaded ({} double + {} single blocks)", cfg.depth, cfg.depth_single);
 
         Ok(Box::new(Self { model }))

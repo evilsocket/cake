@@ -5,7 +5,10 @@
 //! Weight names follow the BFL convention (double_blocks, single_blocks, etc.).
 
 use candle_core::{DType, IndexOp, Module, Result, Tensor, D};
-use candle_nn::{LayerNorm, RmsNorm, VarBuilder};
+use candle_nn::VarBuilder;
+use std::sync::Arc;
+
+use crate::backends::ComputeBackend;
 
 // ── Config ─────────────────────────────────────────────────────────────────────
 
@@ -68,6 +71,11 @@ fn flux_fp8_linear_b(_in_d: usize, _out_d: usize, bias: bool, vb: VarBuilder) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backends::CpuBackend;
+
+    fn test_backend() -> Arc<dyn ComputeBackend> {
+        Arc::new(CpuBackend::new())
+    }
 
     #[test]
     fn test_fp8_linear_f32_roundtrip() {
@@ -129,19 +137,21 @@ mod tests {
 
     #[test]
     fn test_scaled_dot_product_attention_shape() {
+        let backend = test_backend();
         let q = Tensor::randn(0f32, 1., (1, 4, 16, 32), &candle_core::Device::Cpu).unwrap();
         let k = Tensor::randn(0f32, 1., (1, 4, 16, 32), &candle_core::Device::Cpu).unwrap();
         let v = Tensor::randn(0f32, 1., (1, 4, 16, 32), &candle_core::Device::Cpu).unwrap();
-        let out = scaled_dot_product_attention(&q, &k, &v).unwrap();
+        let out = scaled_dot_product_attention(&q, &k, &v, &*backend).unwrap();
         assert_eq!(out.dims(), &[1, 4, 16, 32]);
     }
 
     #[test]
     fn test_scaled_dot_product_attention_different_seq() {
+        let backend = test_backend();
         let q = Tensor::randn(0f32, 1., (1, 2, 8, 16), &candle_core::Device::Cpu).unwrap();
         let k = Tensor::randn(0f32, 1., (1, 2, 12, 16), &candle_core::Device::Cpu).unwrap();
         let v = Tensor::randn(0f32, 1., (1, 2, 12, 16), &candle_core::Device::Cpu).unwrap();
-        let out = scaled_dot_product_attention(&q, &k, &v).unwrap();
+        let out = scaled_dot_product_attention(&q, &k, &v, &*backend).unwrap();
         assert_eq!(out.dims(), &[1, 2, 8, 16]); // seq follows q
     }
 
@@ -172,12 +182,13 @@ mod tests {
 
     #[test]
     fn test_attention_full_pipeline() {
+        let backend = test_backend();
         let q = Tensor::randn(0f32, 1., (1, 4, 8, 32), &candle_core::Device::Cpu).unwrap();
         let k = Tensor::randn(0f32, 1., (1, 4, 8, 32), &candle_core::Device::Cpu).unwrap();
         let v = Tensor::randn(0f32, 1., (1, 4, 8, 32), &candle_core::Device::Cpu).unwrap();
         let pos = Tensor::randn(0f32, 1., (1, 8), &candle_core::Device::Cpu).unwrap();
         let pe = rope(&pos, 32, 10000).unwrap();
-        let out = attention(&q, &k, &v, &pe).unwrap();
+        let out = attention(&q, &k, &v, &pe, &*backend).unwrap();
         assert_eq!(out.dims(), &[1, 8, 128]); // seq_len=8, 4 heads × 32 dim = 128
     }
 
@@ -215,11 +226,12 @@ mod tests {
 
     #[test]
     fn test_sdpa_deterministic() {
+        let backend = test_backend();
         let q = Tensor::randn(0f32, 1., (1, 2, 4, 16), &candle_core::Device::Cpu).unwrap();
         let k = q.clone();
         let v = Tensor::ones((1, 2, 4, 16), DType::F32, &candle_core::Device::Cpu).unwrap();
-        let o1 = scaled_dot_product_attention(&q, &k, &v).unwrap();
-        let o2 = scaled_dot_product_attention(&q, &k, &v).unwrap();
+        let o1 = scaled_dot_product_attention(&q, &k, &v, &*backend).unwrap();
+        let o2 = scaled_dot_product_attention(&q, &k, &v, &*backend).unwrap();
         let diff: f32 = (o1 - o2).unwrap().abs().unwrap().sum_all().unwrap().to_scalar().unwrap();
         assert!(diff < 1e-6);
     }
@@ -247,13 +259,7 @@ mod tests {
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
-fn layer_norm(dim: usize, vb: VarBuilder) -> Result<LayerNorm> {
-    // Use BF16 weights to match the BF16 compute dtype
-    let ws = Tensor::ones(dim, DType::BF16, vb.device())?;
-    Ok(LayerNorm::new_no_bias(ws, 1e-6))
-}
-
-fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
+fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor, backend: &dyn ComputeBackend) -> Result<Tensor> {
     let dim = q.dim(D::Minus1)?;
     let scale_factor = 1.0 / (dim as f64).sqrt();
     let mut batch_dims = q.dims().to_vec();
@@ -278,7 +284,7 @@ fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Te
         let q32 = q.to_dtype(DType::F32)?;
         let k32 = k.to_dtype(DType::F32)?;
         let v32 = v.to_dtype(DType::F32)?;
-        if let Ok(attn) = candle_nn::ops::sdpa(&q32, &k32, &v32, None, false, scale_factor as f32, 1.0) {
+        if let Ok(attn) = backend.sdpa(&q32, &k32, &v32, None, false, scale_factor as f32) {
             return Ok(attn.to_dtype(q.dtype())?);
         }
     }
@@ -289,7 +295,8 @@ fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Te
     let k = k.flatten_to(batch_dims.len() - 1)?.to_dtype(DType::F32)?;
     let v = v.flatten_to(batch_dims.len() - 1)?.to_dtype(DType::F32)?;
     let attn_weights = (q.matmul(&k.t()?)? * scale_factor)?;
-    let attn_scores = candle_nn::ops::softmax_last_dim(&attn_weights)?.matmul(&v)?
+    let last_dim = attn_weights.rank() - 1;
+    let attn_scores = backend.softmax(&attn_weights, last_dim)?.matmul(&v)?
         .to_dtype(in_dtype)?;
     batch_dims.push(attn_scores.dim(D::Minus2)?);
     batch_dims.push(attn_scores.dim(D::Minus1)?);
@@ -329,10 +336,10 @@ fn apply_rope(x: &Tensor, freq_cis: &Tensor) -> Result<Tensor> {
     (fr0.broadcast_mul(&x0)? + fr1.broadcast_mul(&x1)?)?.reshape(dims.to_vec())
 }
 
-fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe: &Tensor) -> Result<Tensor> {
+fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe: &Tensor, backend: &dyn ComputeBackend) -> Result<Tensor> {
     let q = apply_rope(q, pe)?.contiguous()?;
     let k = apply_rope(k, pe)?.contiguous()?;
-    let x = scaled_dot_product_attention(&q, &k, v)?;
+    let x = scaled_dot_product_attention(&q, &k, v, backend)?;
     x.transpose(1, 2)?.flatten_from(2)
 }
 
@@ -403,20 +410,23 @@ impl Module for EmbedNd {
 pub struct MlpEmbedder {
     in_layer: Fp8Linear,
     out_layer: Fp8Linear,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl MlpEmbedder {
-    fn new(in_sz: usize, h_sz: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(in_sz: usize, h_sz: usize, vb: VarBuilder, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let in_layer = flux_fp8_linear(in_sz, h_sz, vb.pp("in_layer"))?;
         let out_layer = flux_fp8_linear(h_sz, h_sz, vb.pp("out_layer"))?;
         Ok(Self {
             in_layer,
             out_layer,
+            backend,
         })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        self.out_layer.forward(&self.in_layer.forward(xs)?.silu()?)
+        let h = self.in_layer.forward(xs)?;
+        self.out_layer.forward(&self.backend.silu(&h)?)
     }
 }
 
@@ -424,19 +434,21 @@ impl MlpEmbedder {
 
 #[derive(Debug, Clone)]
 pub struct QkNorm {
-    query_norm: RmsNorm,
-    key_norm: RmsNorm,
+    query_norm_weight: Tensor,
+    key_norm_weight: Tensor,
+    rms_norm_eps: f32,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl QkNorm {
-    fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
-        let query_norm = vb.get(dim, "query_norm.scale")?.to_dtype(DType::BF16)?;
-        let query_norm = RmsNorm::new(query_norm, 1e-6);
-        let key_norm = vb.get(dim, "key_norm.scale")?.to_dtype(DType::BF16)?;
-        let key_norm = RmsNorm::new(key_norm, 1e-6);
+    fn new(dim: usize, vb: VarBuilder, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
+        let query_norm_weight = vb.get(dim, "query_norm.scale")?.to_dtype(DType::BF16)?;
+        let key_norm_weight = vb.get(dim, "key_norm.scale")?.to_dtype(DType::BF16)?;
         Ok(Self {
-            query_norm,
-            key_norm,
+            query_norm_weight,
+            key_norm_weight,
+            rms_norm_eps: 1e-6,
+            backend,
         })
     }
 }
@@ -463,18 +475,19 @@ impl ModulationOut {
 #[derive(Debug, Clone)]
 struct Modulation1 {
     lin: Fp8Linear,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl Modulation1 {
-    fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, vb: VarBuilder, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let lin = flux_fp8_linear(dim, 3 * dim, vb.pp("lin"))?;
-        Ok(Self { lin })
+        Ok(Self { lin, backend })
     }
 
     fn forward(&self, vec_: &Tensor) -> Result<ModulationOut> {
         let ys = self
             .lin
-            .forward(&vec_.silu()?)?
+            .forward(&self.backend.silu(vec_)?)?
             .unsqueeze(1)?
             .chunk(3, D::Minus1)?;
         if ys.len() != 3 {
@@ -491,18 +504,19 @@ impl Modulation1 {
 #[derive(Debug, Clone)]
 struct Modulation2 {
     lin: Fp8Linear,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl Modulation2 {
-    fn new(dim: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, vb: VarBuilder, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let lin = flux_fp8_linear(dim, 6 * dim, vb.pp("lin"))?;
-        Ok(Self { lin })
+        Ok(Self { lin, backend })
     }
 
     fn forward(&self, vec_: &Tensor) -> Result<(ModulationOut, ModulationOut)> {
         let ys = self
             .lin
-            .forward(&vec_.silu()?)?
+            .forward(&self.backend.silu(vec_)?)?
             .unsqueeze(1)?
             .chunk(6, D::Minus1)?;
         if ys.len() != 6 {
@@ -533,10 +547,10 @@ pub struct SelfAttention {
 }
 
 impl SelfAttention {
-    fn new(dim: usize, num_heads: usize, qkv_bias: bool, vb: VarBuilder) -> Result<Self> {
+    fn new(dim: usize, num_heads: usize, qkv_bias: bool, vb: VarBuilder, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let head_dim = dim / num_heads;
         let qkv = flux_fp8_linear_b(dim, dim * 3, qkv_bias, vb.pp("qkv"))?;
-        let norm = QkNorm::new(head_dim, vb.pp("norm"))?;
+        let norm = QkNorm::new(head_dim, vb.pp("norm"), backend)?;
         let proj = flux_fp8_linear(dim, dim, vb.pp("proj"))?;
         Ok(Self {
             qkv,
@@ -553,8 +567,8 @@ impl SelfAttention {
         let q = qkv.i((.., .., 0))?.transpose(1, 2)?;
         let k = qkv.i((.., .., 1))?.transpose(1, 2)?;
         let v = qkv.i((.., .., 2))?.transpose(1, 2)?;
-        let q = q.apply(&self.norm.query_norm)?;
-        let k = k.apply(&self.norm.key_norm)?;
+        let q = self.norm.backend.rms_norm(&q, &self.norm.query_norm_weight, self.norm.rms_norm_eps)?;
+        let k = self.norm.backend.rms_norm(&k, &self.norm.key_norm_weight, self.norm.rms_norm_eps)?;
         Ok((q, k, v))
     }
 }
@@ -565,17 +579,19 @@ impl SelfAttention {
 struct Mlp {
     lin1: Fp8Linear,
     lin2: Fp8Linear,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl Mlp {
-    fn new(in_sz: usize, mlp_sz: usize, vb: VarBuilder) -> Result<Self> {
+    fn new(in_sz: usize, mlp_sz: usize, vb: VarBuilder, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let lin1 = flux_fp8_linear(in_sz, mlp_sz, vb.pp("0"))?;
         let lin2 = flux_fp8_linear(mlp_sz, in_sz, vb.pp("2"))?;
-        Ok(Self { lin1, lin2 })
+        Ok(Self { lin1, lin2, backend })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        self.lin2.forward(&self.lin1.forward(xs)?.gelu()?)
+        let h = self.lin1.forward(xs)?;
+        self.lin2.forward(&self.backend.gelu(&h)?)
     }
 }
 
@@ -584,44 +600,48 @@ impl Mlp {
 #[derive(Debug, Clone)]
 pub struct DoubleStreamBlock {
     img_mod: Modulation2,
-    img_norm1: LayerNorm,
+    img_norm1_weight: Tensor,
     img_attn: SelfAttention,
-    img_norm2: LayerNorm,
+    img_norm2_weight: Tensor,
     img_mlp: Mlp,
     txt_mod: Modulation2,
-    txt_norm1: LayerNorm,
+    txt_norm1_weight: Tensor,
     txt_attn: SelfAttention,
-    txt_norm2: LayerNorm,
+    txt_norm2_weight: Tensor,
     txt_mlp: Mlp,
+    layer_norm_eps: f32,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl DoubleStreamBlock {
-    fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &Config, vb: VarBuilder, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let h_sz = cfg.hidden_size;
         let mlp_sz = (h_sz as f64 * cfg.mlp_ratio) as usize;
-        let img_mod = Modulation2::new(h_sz, vb.pp("img_mod"))?;
-        let img_norm1 = layer_norm(h_sz, vb.pp("img_norm1"))?;
+        let img_mod = Modulation2::new(h_sz, vb.pp("img_mod"), backend.clone())?;
+        let img_norm1_weight = Tensor::ones(h_sz, DType::BF16, vb.device())?;
         let img_attn =
-            SelfAttention::new(h_sz, cfg.num_heads, cfg.qkv_bias, vb.pp("img_attn"))?;
-        let img_norm2 = layer_norm(h_sz, vb.pp("img_norm2"))?;
-        let img_mlp = Mlp::new(h_sz, mlp_sz, vb.pp("img_mlp"))?;
-        let txt_mod = Modulation2::new(h_sz, vb.pp("txt_mod"))?;
-        let txt_norm1 = layer_norm(h_sz, vb.pp("txt_norm1"))?;
+            SelfAttention::new(h_sz, cfg.num_heads, cfg.qkv_bias, vb.pp("img_attn"), backend.clone())?;
+        let img_norm2_weight = Tensor::ones(h_sz, DType::BF16, vb.device())?;
+        let img_mlp = Mlp::new(h_sz, mlp_sz, vb.pp("img_mlp"), backend.clone())?;
+        let txt_mod = Modulation2::new(h_sz, vb.pp("txt_mod"), backend.clone())?;
+        let txt_norm1_weight = Tensor::ones(h_sz, DType::BF16, vb.device())?;
         let txt_attn =
-            SelfAttention::new(h_sz, cfg.num_heads, cfg.qkv_bias, vb.pp("txt_attn"))?;
-        let txt_norm2 = layer_norm(h_sz, vb.pp("txt_norm2"))?;
-        let txt_mlp = Mlp::new(h_sz, mlp_sz, vb.pp("txt_mlp"))?;
+            SelfAttention::new(h_sz, cfg.num_heads, cfg.qkv_bias, vb.pp("txt_attn"), backend.clone())?;
+        let txt_norm2_weight = Tensor::ones(h_sz, DType::BF16, vb.device())?;
+        let txt_mlp = Mlp::new(h_sz, mlp_sz, vb.pp("txt_mlp"), backend.clone())?;
         Ok(Self {
             img_mod,
-            img_norm1,
+            img_norm1_weight,
             img_attn,
-            img_norm2,
+            img_norm2_weight,
             img_mlp,
             txt_mod,
-            txt_norm1,
+            txt_norm1_weight,
             txt_attn,
-            txt_norm2,
+            txt_norm2_weight,
             txt_mlp,
+            layer_norm_eps: 1e-6,
+            backend,
         })
     }
 
@@ -634,11 +654,11 @@ impl DoubleStreamBlock {
     ) -> Result<(Tensor, Tensor)> {
         let (img_mod1, img_mod2) = self.img_mod.forward(vec_)?;
         let (txt_mod1, txt_mod2) = self.txt_mod.forward(vec_)?;
-        let img_modulated = img.apply(&self.img_norm1)?;
+        let img_modulated = self.backend.layer_norm(img, &self.img_norm1_weight, None, self.layer_norm_eps)?;
         let img_modulated = img_mod1.scale_shift(&img_modulated)?;
         let (img_q, img_k, img_v) = self.img_attn.qkv(&img_modulated)?;
 
-        let txt_modulated = txt.apply(&self.txt_norm1)?;
+        let txt_modulated = self.backend.layer_norm(txt, &self.txt_norm1_weight, None, self.layer_norm_eps)?;
         let txt_modulated = txt_mod1.scale_shift(&txt_modulated)?;
         let (txt_q, txt_k, txt_v) = self.txt_attn.qkv(&txt_modulated)?;
 
@@ -646,24 +666,26 @@ impl DoubleStreamBlock {
         let k = Tensor::cat(&[txt_k, img_k], 2)?;
         let v = Tensor::cat(&[txt_v, img_v], 2)?;
 
-        let attn = attention(&q, &k, &v, pe)?;
+        let attn = attention(&q, &k, &v, pe, &*self.backend)?;
         let txt_attn = attn.narrow(1, 0, txt.dim(1)?)?;
         let img_attn = attn.narrow(1, txt.dim(1)?, attn.dim(1)? - txt.dim(1)?)?;
 
         let img = (img + img_mod1.gate(&self.img_attn.proj.forward(&img_attn)?)?)?;
+        let img_norm2 = self.backend.layer_norm(&img, &self.img_norm2_weight, None, self.layer_norm_eps)?;
         let img = (&img
             + img_mod2.gate(
                 &self
                     .img_mlp
-                    .forward(&img_mod2.scale_shift(&img.apply(&self.img_norm2)?)?)?,
+                    .forward(&img_mod2.scale_shift(&img_norm2)?)?,
             )?)?;
 
         let txt = (txt + txt_mod1.gate(&self.txt_attn.proj.forward(&txt_attn)?)?)?;
+        let txt_norm2 = self.backend.layer_norm(&txt, &self.txt_norm2_weight, None, self.layer_norm_eps)?;
         let txt = (&txt
             + txt_mod2.gate(
                 &self
                     .txt_mlp
-                    .forward(&txt_mod2.scale_shift(&txt.apply(&self.txt_norm2)?)?)?,
+                    .forward(&txt_mod2.scale_shift(&txt_norm2)?)?,
             )?)?;
 
         Ok((img, txt))
@@ -677,38 +699,42 @@ pub struct SingleStreamBlock {
     linear1: Fp8Linear,
     linear2: Fp8Linear,
     norm: QkNorm,
-    pre_norm: LayerNorm,
+    pre_norm_weight: Tensor,
+    pre_norm_eps: f32,
     modulation: Modulation1,
     h_sz: usize,
     mlp_sz: usize,
     num_heads: usize,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl SingleStreamBlock {
-    fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
+    fn new(cfg: &Config, vb: VarBuilder, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let h_sz = cfg.hidden_size;
         let mlp_sz = (h_sz as f64 * cfg.mlp_ratio) as usize;
         let head_dim = h_sz / cfg.num_heads;
         let linear1 = flux_fp8_linear(h_sz, h_sz * 3 + mlp_sz, vb.pp("linear1"))?;
         let linear2 = flux_fp8_linear(h_sz + mlp_sz, h_sz, vb.pp("linear2"))?;
-        let norm = QkNorm::new(head_dim, vb.pp("norm"))?;
-        let pre_norm = layer_norm(h_sz, vb.pp("pre_norm"))?;
-        let modulation = Modulation1::new(h_sz, vb.pp("modulation"))?;
+        let norm = QkNorm::new(head_dim, vb.pp("norm"), backend.clone())?;
+        let pre_norm_weight = Tensor::ones(h_sz, DType::BF16, vb.device())?;
+        let modulation = Modulation1::new(h_sz, vb.pp("modulation"), backend.clone())?;
         Ok(Self {
             linear1,
             linear2,
             norm,
-            pre_norm,
+            pre_norm_weight,
+            pre_norm_eps: 1e-6,
             modulation,
             h_sz,
             mlp_sz,
             num_heads: cfg.num_heads,
+            backend,
         })
     }
 
     fn forward(&self, xs: &Tensor, vec_: &Tensor, pe: &Tensor) -> Result<Tensor> {
         let mod_ = self.modulation.forward(vec_)?;
-        let x_mod = mod_.scale_shift(&xs.apply(&self.pre_norm)?)?;
+        let x_mod = mod_.scale_shift(&self.backend.layer_norm(xs, &self.pre_norm_weight, None, self.pre_norm_eps)?)?;
         let x_mod = self.linear1.forward(&x_mod)?;
         let qkv = x_mod.narrow(D::Minus1, 0, 3 * self.h_sz)?;
         let (b, l, _khd) = qkv.dims3()?;
@@ -717,11 +743,12 @@ impl SingleStreamBlock {
         let k = qkv.i((.., .., 1))?.transpose(1, 2)?;
         let v = qkv.i((.., .., 2))?.transpose(1, 2)?;
         let mlp = x_mod.narrow(D::Minus1, 3 * self.h_sz, self.mlp_sz)?;
-        let q = q.apply(&self.norm.query_norm)?;
-        let k = k.apply(&self.norm.key_norm)?;
-        let attn = attention(&q, &k, &v, pe)?;
+        let q = self.norm.backend.rms_norm(&q, &self.norm.query_norm_weight, self.norm.rms_norm_eps)?;
+        let k = self.norm.backend.rms_norm(&k, &self.norm.key_norm_weight, self.norm.rms_norm_eps)?;
+        let attn = attention(&q, &k, &v, pe, &*self.backend)?;
+        let mlp_act = self.backend.gelu(&mlp)?;
         let output =
-            Tensor::cat(&[attn, mlp.gelu()?], 2).and_then(|t| self.linear2.forward(&t))?;
+            Tensor::cat(&[attn, mlp_act], 2).and_then(|t| self.linear2.forward(&t))?;
         xs + mod_.gate(&output)
     }
 }
@@ -730,31 +757,34 @@ impl SingleStreamBlock {
 
 #[derive(Debug, Clone)]
 pub struct LastLayer {
-    norm_final: LayerNorm,
+    norm_final_weight: Tensor,
+    norm_final_eps: f32,
     linear: Fp8Linear,
     ada_ln_modulation: Fp8Linear,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl LastLayer {
-    fn new(h_sz: usize, p_sz: usize, out_c: usize, vb: VarBuilder) -> Result<Self> {
-        let norm_final = layer_norm(h_sz, vb.pp("norm_final"))?;
+    fn new(h_sz: usize, p_sz: usize, out_c: usize, vb: VarBuilder, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
+        let norm_final_weight = Tensor::ones(h_sz, DType::BF16, vb.device())?;
         let linear = flux_fp8_linear(h_sz, p_sz * p_sz * out_c, vb.pp("linear"))?;
         let ada_ln_modulation = flux_fp8_linear(h_sz, 2 * h_sz, vb.pp("adaLN_modulation.1"))?;
         Ok(Self {
-            norm_final,
+            norm_final_weight,
+            norm_final_eps: 1e-6,
             linear,
             ada_ln_modulation,
+            backend,
         })
     }
 
     fn forward(&self, xs: &Tensor, vec: &Tensor) -> Result<Tensor> {
         let chunks = self
             .ada_ln_modulation
-            .forward(&vec.silu()?)?
+            .forward(&self.backend.silu(vec)?)?
             .chunk(2, 1)?;
         let (shift, scale) = (&chunks[0], &chunks[1]);
-        let xs = xs
-            .apply(&self.norm_final)?
+        let xs = self.backend.layer_norm(xs, &self.norm_final_weight, None, self.norm_final_eps)?
             .broadcast_mul(&(scale.unsqueeze(1)? + 1.0)?)?
             .broadcast_add(&shift.unsqueeze(1)?)?;
         self.linear.forward(&xs)
@@ -774,34 +804,36 @@ pub struct Flux1Transformer {
     double_blocks: Vec<DoubleStreamBlock>,
     single_blocks: Vec<SingleStreamBlock>,
     final_layer: LastLayer,
+    #[allow(dead_code)]
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl Flux1Transformer {
-    pub fn new(cfg: &Config, vb: VarBuilder) -> Result<Self> {
+    pub fn new(cfg: &Config, vb: VarBuilder, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let img_in = flux_fp8_linear(cfg.in_channels, cfg.hidden_size, vb.pp("img_in"))?;
         let txt_in = flux_fp8_linear(cfg.context_in_dim, cfg.hidden_size, vb.pp("txt_in"))?;
         let mut double_blocks = Vec::with_capacity(cfg.depth);
         let vb_d = vb.pp("double_blocks");
         for idx in 0..cfg.depth {
-            let db = DoubleStreamBlock::new(cfg, vb_d.pp(idx))?;
+            let db = DoubleStreamBlock::new(cfg, vb_d.pp(idx), backend.clone())?;
             double_blocks.push(db)
         }
         let mut single_blocks = Vec::with_capacity(cfg.depth_single_blocks);
         let vb_s = vb.pp("single_blocks");
         for idx in 0..cfg.depth_single_blocks {
-            let sb = SingleStreamBlock::new(cfg, vb_s.pp(idx))?;
+            let sb = SingleStreamBlock::new(cfg, vb_s.pp(idx), backend.clone())?;
             single_blocks.push(sb)
         }
-        let time_in = MlpEmbedder::new(256, cfg.hidden_size, vb.pp("time_in"))?;
-        let vector_in = MlpEmbedder::new(cfg.vec_in_dim, cfg.hidden_size, vb.pp("vector_in"))?;
+        let time_in = MlpEmbedder::new(256, cfg.hidden_size, vb.pp("time_in"), backend.clone())?;
+        let vector_in = MlpEmbedder::new(cfg.vec_in_dim, cfg.hidden_size, vb.pp("vector_in"), backend.clone())?;
         let guidance_in = if cfg.guidance_embed {
-            let mlp = MlpEmbedder::new(256, cfg.hidden_size, vb.pp("guidance_in"))?;
+            let mlp = MlpEmbedder::new(256, cfg.hidden_size, vb.pp("guidance_in"), backend.clone())?;
             Some(mlp)
         } else {
             None
         };
         let final_layer =
-            LastLayer::new(cfg.hidden_size, 1, cfg.in_channels, vb.pp("final_layer"))?;
+            LastLayer::new(cfg.hidden_size, 1, cfg.in_channels, vb.pp("final_layer"), backend.clone())?;
         let pe_dim = cfg.hidden_size / cfg.num_heads;
         let pe_embedder = EmbedNd::new(cfg.theta, cfg.axes_dim.to_vec());
         let _ = pe_dim;
@@ -815,6 +847,7 @@ impl Flux1Transformer {
             double_blocks,
             single_blocks,
             final_layer,
+            backend,
         })
     }
 
@@ -911,7 +944,7 @@ impl crate::cake::Forwarder for Flux1TransformerForwarder {
             )?
         };
         let vb = vb.pp(super::config::flux1_prefixes::TRANSFORMER);
-        let model = Flux1Transformer::new(&cfg, vb)?;
+        let model = Flux1Transformer::new(&cfg, vb, ctx.backend.clone())?;
         Ok(Box::new(Self { model, name }))
     }
 

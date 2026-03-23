@@ -5,7 +5,7 @@
 //! positive (base LM + TTS LM) and negative (unconditional).
 
 use anyhow::Result;
-use candle_core::{DType, Device, Module, Tensor};
+use candle_core::{DType, Device, Tensor};
 use candle_nn::VarBuilder;
 use log::info;
 
@@ -27,18 +27,20 @@ const TTS_SPEECH_WINDOW_SIZE: usize = 6;
 /// VibeVoice TTS model with voice cloning support.
 pub struct VibeVoiceTTS {
     // Base LM (4 layers) — each local Transformer or remote Client
-    base_embed: candle_nn::Embedding,
-    base_norm: candle_nn::RmsNorm,
+    base_embed_weight: Tensor,
+    base_norm_weight: Tensor,
+    base_norm_eps: f32,
     base_layers: Vec<Box<dyn crate::cake::Forwarder>>,
 
     // TTS LM (20 layers) — each local Transformer or remote Client
     #[allow(dead_code)]
-    tts_embed: candle_nn::Embedding,
-    tts_norm: candle_nn::RmsNorm,
+    tts_embed_weight: Tensor,
+    tts_norm_weight: Tensor,
+    tts_norm_eps: f32,
     tts_layers: Vec<Box<dyn crate::cake::Forwarder>>,
 
     // Type embedding: 0=speech, 1=text
-    tts_input_types: candle_nn::Embedding,
+    tts_input_types_weight: Tensor,
 
     // Diffusion + decoding
     prediction_head: PredictionHead,
@@ -55,6 +57,7 @@ pub struct VibeVoiceTTS {
     device: Device,
     dtype: DType,
     fwd_ctx: crate::cake::Context,
+    backend: std::sync::Arc<dyn crate::backends::ComputeBackend>,
 }
 
 impl VibeVoiceTTS {
@@ -81,10 +84,10 @@ impl VibeVoiceTTS {
         // Base LM (4 layers)
         info!("  Loading base LM (4 layers)...");
         let base_vb = vb.pp("model").pp("language_model");
-        let base_embed = candle_nn::embedding(common_cfg.vocab_size, common_cfg.hidden_size, base_vb.pp("embed_tokens"))?;
+        let base_embed_weight = base_vb.pp("embed_tokens").get((common_cfg.vocab_size, common_cfg.hidden_size), "weight")?;
         // Base LM norm: not in checkpoint (initialized to ones, matching Qwen2Model default)
-        let base_norm_w = Tensor::ones(common_cfg.hidden_size, dtype, device)?;
-        let base_norm = candle_nn::RmsNorm::new(base_norm_w, common_cfg.rms_norm_eps);
+        let base_norm_weight = Tensor::ones(common_cfg.hidden_size, dtype, device)?;
+        let base_norm_eps = common_cfg.rms_norm_eps as f32;
         let mut base_layers: Vec<Box<dyn crate::cake::Forwarder>> = Vec::new();
         for i in 0..4 {
             let layer_name = format!("model.language_model.layers.{i}");
@@ -104,8 +107,9 @@ impl VibeVoiceTTS {
         let num_tts = config.tts_backbone_num_hidden_layers;
         info!("  Loading TTS LM ({num_tts} layers)...");
         let tts_vb = vb.pp("model").pp("tts_language_model");
-        let tts_embed = candle_nn::embedding(common_cfg.vocab_size, common_cfg.hidden_size, tts_vb.pp("embed_tokens"))?;
-        let tts_norm = candle_nn::rms_norm(common_cfg.hidden_size, common_cfg.rms_norm_eps, tts_vb.pp("norm"))?;
+        let tts_embed_weight = tts_vb.pp("embed_tokens").get((common_cfg.vocab_size, common_cfg.hidden_size), "weight")?;
+        let tts_norm_weight = tts_vb.pp("norm").get(common_cfg.hidden_size, "weight")?;
+        let tts_norm_eps = common_cfg.rms_norm_eps as f32;
         let mut tts_layers: Vec<Box<dyn crate::cake::Forwarder>> = Vec::new();
         for i in 0..num_tts {
             let layer_name = format!("model.tts_language_model.layers.{i}");
@@ -121,7 +125,7 @@ impl VibeVoiceTTS {
             }
         }
 
-        let tts_input_types = candle_nn::embedding(2, common_cfg.hidden_size, vb.pp("model").pp("tts_input_types"))?;
+        let tts_input_types_weight = vb.pp("model").pp("tts_input_types").get((2, common_cfg.hidden_size), "weight")?;
 
         info!("  Loading prediction head + VAE + connector...");
         let steps = diffusion_steps.unwrap_or(config.diffusion_head_config.ddpm_num_inference_steps);
@@ -130,8 +134,8 @@ impl VibeVoiceTTS {
         let backend = crate::backends::create_backend(device);
         let prediction_head = PredictionHead::load(vb.pp("model").pp("prediction_head"), &config.diffusion_head_config, scheduler.timesteps(), backend.clone())?;
         let vae_decoder = AcousticVaeDecoder::load(vb.pp("model").pp("acoustic_tokenizer").pp("decoder"), &config.acoustic_tokenizer_config, backend.clone())?;
-        let connector = AcousticConnector::load(vb.pp("model").pp("acoustic_connector"), config.acoustic_vae_dim, config.decoder_config.hidden_size, config.decoder_config.rms_norm_eps)?;
-        let eos_classifier = EosClassifier::load(vb.pp("tts_eos_classifier"))?;
+        let connector = AcousticConnector::load(vb.pp("model").pp("acoustic_connector"), config.acoustic_vae_dim, config.decoder_config.hidden_size, config.decoder_config.rms_norm_eps, backend.clone())?;
+        let eos_classifier = EosClassifier::load(vb.pp("tts_eos_classifier"), backend.clone())?;
 
         let speech_scaling_factor = vb.pp("model").get((), "speech_scaling_factor")?;
         let speech_bias_factor = vb.pp("model").get((), "speech_bias_factor")?;
@@ -139,12 +143,13 @@ impl VibeVoiceTTS {
         info!("VibeVoice loaded!");
 
         Ok(Self {
-            base_embed, base_norm, base_layers,
-            tts_embed, tts_norm, tts_layers,
-            tts_input_types,
+            base_embed_weight, base_norm_weight, base_norm_eps, base_layers,
+            tts_embed_weight, tts_norm_weight, tts_norm_eps, tts_layers,
+            tts_input_types_weight,
             prediction_head, scheduler, vae_decoder, connector, eos_classifier,
             speech_scaling_factor, speech_bias_factor,
             config, common_cfg: common_cfg.clone(), device: device.clone(), dtype,
+            backend: backend.clone(),
             fwd_ctx: crate::cake::Context {
                 args: Default::default(),
                 dtype,
@@ -166,11 +171,12 @@ impl VibeVoiceTTS {
     /// Forward through a set of transformer layers with a cache.
     async fn forward_layers(
         layers: &mut [Box<dyn crate::cake::Forwarder>],
-        norm: Option<&candle_nn::RmsNorm>,
+        norm: Option<(&Tensor, f32)>,
         embeds: &Tensor,
         index_pos: usize,
         cache: &mut crate::models::common::Cache,
         fwd_ctx: &mut crate::cake::Context,
+        backend: &dyn crate::backends::ComputeBackend,
     ) -> Result<Tensor> {
         fwd_ctx.cache = Some(cache.clone());
         let mut h = embeds.clone();
@@ -180,8 +186,9 @@ impl VibeVoiceTTS {
         if let Some(updated) = fwd_ctx.cache.take() {
             *cache = updated;
         }
-        if let Some(n) = norm {
-            h = n.forward(&h).map_err(|e| anyhow::anyhow!("norm: {e}"))?;
+        if let Some((weight, eps)) = norm {
+            h = backend.rms_norm(&h, weight, eps)
+                .map_err(|e| anyhow::anyhow!("norm: {e}"))?;
         }
         Ok(h)
     }
@@ -247,8 +254,8 @@ impl VibeVoiceTTS {
         let neg_tts_seq = voice_prompt.neg_tts_lm.seq_len;
 
         // Type embeddings
-        let text_type = self.tts_input_types.forward(&Tensor::new(&[1u32], &dev)?)?;
-        let speech_type = self.tts_input_types.forward(&Tensor::new(&[0u32], &dev)?)?;
+        let text_type = self.backend.embedding(&Tensor::new(&[1u32], &dev)?, &self.tts_input_types_weight)?;
+        let speech_type = self.backend.embedding(&Tensor::new(&[0u32], &dev)?, &self.tts_input_types_weight)?;
 
         let mut pos_base_pos = pos_base_seq;
         let mut pos_tts_pos = pos_tts_seq;
@@ -288,21 +295,21 @@ impl VibeVoiceTTS {
 
             if window_size > 0 {
                 let win_ids = Tensor::new(window_tokens, &dev)?.unsqueeze(0)?;
-                let win_embeds = self.base_embed.forward(&win_ids)?;
+                let win_embeds = self.backend.embedding(&win_ids, &self.base_embed_weight)?;
 
                 // Forward through base LM
                 let base_hidden = Self::forward_layers(
-                    &mut self.base_layers, Some(&self.base_norm), &win_embeds,
+                    &mut self.base_layers, Some((&self.base_norm_weight, self.base_norm_eps)), &win_embeds,
                     pos_base_pos, &mut pos_base_cache,
-                    &mut self.fwd_ctx,
+                    &mut self.fwd_ctx, &*self.backend,
                 ).await?;
                 pos_base_pos += window_size;
 
                 // Forward through TTS LM (base hidden + text type)
                 let tts_input = (base_hidden + text_type.broadcast_as(win_embeds.shape())?)?;
                 pos_last = Some(Self::forward_layers(
-                    &mut self.tts_layers, Some(&self.tts_norm), &tts_input,
-                    pos_tts_pos, &mut pos_tts_cache, &mut self.fwd_ctx,
+                    &mut self.tts_layers, Some((&self.tts_norm_weight, self.tts_norm_eps)), &tts_input,
+                    pos_tts_pos, &mut pos_tts_cache, &mut self.fwd_ctx, &*self.backend,
                 ).await?);
                 pos_tts_pos += window_size;
 
@@ -351,15 +358,15 @@ impl VibeVoiceTTS {
                     + speech_type.unsqueeze(0)?.broadcast_as((1, 1, hidden_size))?)?;
 
                 pos_last = Some(Self::forward_layers(
-                    &mut self.tts_layers, Some(&self.tts_norm), &speech_embed,
-                    pos_tts_pos, &mut pos_tts_cache, &mut self.fwd_ctx,
+                    &mut self.tts_layers, Some((&self.tts_norm_weight, self.tts_norm_eps)), &speech_embed,
+                    pos_tts_pos, &mut pos_tts_cache, &mut self.fwd_ctx, &*self.backend,
                 ).await?);
                 pos_tts_pos += 1;
 
                 let neg_out = Self::forward_layers(
-                    &mut self.tts_layers, Some(&self.tts_norm), &speech_embed,
+                    &mut self.tts_layers, Some((&self.tts_norm_weight, self.tts_norm_eps)), &speech_embed,
                     neg_tts_pos, &mut neg_tts_cache,
-                    &mut self.fwd_ctx,
+                    &mut self.fwd_ctx, &*self.backend,
                 ).await?;
                 neg_cond = neg_out.narrow(1, neg_out.dim(1)? - 1, 1)?.squeeze(1)?;
                 neg_tts_pos += 1;
@@ -396,15 +403,15 @@ impl VibeVoiceTTS {
                         + speech_type.unsqueeze(0)?.broadcast_as((1, 1, hidden_size))?)?;
 
                     pos_last = Some(Self::forward_layers(
-                        &mut self.tts_layers, Some(&self.tts_norm), &speech_embed,
-                        pos_tts_pos, &mut pos_tts_cache, &mut self.fwd_ctx,
+                        &mut self.tts_layers, Some((&self.tts_norm_weight, self.tts_norm_eps)), &speech_embed,
+                        pos_tts_pos, &mut pos_tts_cache, &mut self.fwd_ctx, &*self.backend,
                     ).await?);
                     pos_tts_pos += 1;
 
                     let neg_out = Self::forward_layers(
-                        &mut self.tts_layers, Some(&self.tts_norm), &speech_embed,
+                        &mut self.tts_layers, Some((&self.tts_norm_weight, self.tts_norm_eps)), &speech_embed,
                         neg_tts_pos, &mut neg_tts_cache,
-                        &mut self.fwd_ctx,
+                        &mut self.fwd_ctx, &*self.backend,
                 ).await?;
                     neg_cond = neg_out.narrow(1, neg_out.dim(1)? - 1, 1)?.squeeze(1)?;
                     neg_tts_pos += 1;

@@ -21,7 +21,7 @@ fn test_feedforward_load_and_forward() {
     let dim = 32;
     let ff_dim = 64;
     let vb = make_vb_feedforward(dim, ff_dim);
-    let ff = cake_core::models::luxtts::feedforward::FeedforwardModule::load(dim, ff_dim, vb).unwrap();
+    let ff = cake_core::models::luxtts::feedforward::FeedforwardModule::load(dim, ff_dim, vb, cake_core::backends::create_backend(&Device::Cpu)).unwrap();
 
     let x = make_tensor(&[1, 8, dim], 200);
     let out = ff.forward(&x).unwrap();
@@ -34,7 +34,7 @@ fn test_feedforward_different_batch() {
     let dim = 16;
     let ff_dim = 32;
     let vb = make_vb_feedforward(dim, ff_dim);
-    let ff = cake_core::models::luxtts::feedforward::FeedforwardModule::load(dim, ff_dim, vb).unwrap();
+    let ff = cake_core::models::luxtts::feedforward::FeedforwardModule::load(dim, ff_dim, vb, cake_core::backends::create_backend(&Device::Cpu)).unwrap();
 
     let x = make_tensor(&[4, 3, dim], 201);
     let out = ff.forward(&x).unwrap();
@@ -46,7 +46,7 @@ fn test_feedforward_nonzero_output() {
     let dim = 16;
     let ff_dim = 32;
     let vb = make_vb_feedforward(dim, ff_dim);
-    let ff = cake_core::models::luxtts::feedforward::FeedforwardModule::load(dim, ff_dim, vb).unwrap();
+    let ff = cake_core::models::luxtts::feedforward::FeedforwardModule::load(dim, ff_dim, vb, cake_core::backends::create_backend(&Device::Cpu)).unwrap();
 
     let x = Tensor::ones(&[1, 4, dim], DType::F32, &Device::Cpu).unwrap();
     let out = ff.forward(&x).unwrap();
@@ -79,7 +79,7 @@ fn test_convolution_module_load_and_forward() {
     let kernel_size = 3;
     let vb = make_vb_convolution(dim, kernel_size);
     let conv =
-        cake_core::models::luxtts::convolution_module::ConvolutionModule::load(dim, kernel_size, vb).unwrap();
+        cake_core::models::luxtts::convolution_module::ConvolutionModule::load(dim, kernel_size, vb, cake_core::backends::create_backend(&Device::Cpu)).unwrap();
 
     let x = make_tensor(&[1, 8, dim], 400);
     let out = conv.forward(&x).unwrap();
@@ -93,7 +93,7 @@ fn test_convolution_module_preserves_seq_len() {
     let kernel_size = 5;
     let vb = make_vb_convolution(dim, kernel_size);
     let conv =
-        cake_core::models::luxtts::convolution_module::ConvolutionModule::load(dim, kernel_size, vb).unwrap();
+        cake_core::models::luxtts::convolution_module::ConvolutionModule::load(dim, kernel_size, vb, cake_core::backends::create_backend(&Device::Cpu)).unwrap();
 
     // Convolution with padding should preserve sequence length
     let x = make_tensor(&[2, 12, dim], 401);
@@ -107,7 +107,7 @@ fn test_convolution_module_kernel_1() {
     let kernel_size = 1;
     let vb = make_vb_convolution(dim, kernel_size);
     let conv =
-        cake_core::models::luxtts::convolution_module::ConvolutionModule::load(dim, kernel_size, vb).unwrap();
+        cake_core::models::luxtts::convolution_module::ConvolutionModule::load(dim, kernel_size, vb, cake_core::backends::create_backend(&Device::Cpu)).unwrap();
 
     let x = make_tensor(&[1, 4, dim], 402);
     let out = conv.forward(&x).unwrap();
@@ -120,7 +120,7 @@ fn test_convolution_module_nonzero_output() {
     let kernel_size = 3;
     let vb = make_vb_convolution(dim, kernel_size);
     let conv =
-        cake_core::models::luxtts::convolution_module::ConvolutionModule::load(dim, kernel_size, vb).unwrap();
+        cake_core::models::luxtts::convolution_module::ConvolutionModule::load(dim, kernel_size, vb, cake_core::backends::create_backend(&Device::Cpu)).unwrap();
 
     let x = Tensor::ones(&[1, 6, dim], DType::F32, &Device::Cpu).unwrap();
     let out = conv.forward(&x).unwrap();

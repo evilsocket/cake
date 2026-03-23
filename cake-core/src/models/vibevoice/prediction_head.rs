@@ -6,23 +6,24 @@
 
 use std::sync::Arc;
 
-use candle_core::{DType, Module, Result, Tensor, D};
-use candle_nn::{linear_no_bias as linear, Linear, VarBuilder};
+use candle_core::{DType, Result, Tensor, D};
+use candle_nn::VarBuilder;
 
 use crate::backends::ComputeBackend;
 
 /// Sinusoidal timestep embedding → MLP.
 #[derive(Debug, Clone)]
 pub struct TimestepEmbedder {
-    mlp_0: Linear,
-    mlp_2: Linear,
+    mlp_0_weight: Tensor,
+    mlp_2_weight: Tensor,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl TimestepEmbedder {
-    pub fn load(vb: VarBuilder, hidden_size: usize) -> Result<Self> {
-        let mlp_0 = linear(256, hidden_size, vb.pp("mlp").pp("0"))?;
-        let mlp_2 = linear(hidden_size, hidden_size, vb.pp("mlp").pp("2"))?;
-        Ok(Self { mlp_0, mlp_2 })
+    pub fn load(vb: VarBuilder, hidden_size: usize, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
+        let mlp_0_weight = vb.pp("mlp").pp("0").get((hidden_size, 256), "weight")?;
+        let mlp_2_weight = vb.pp("mlp").pp("2").get((hidden_size, hidden_size), "weight")?;
+        Ok(Self { mlp_0_weight, mlp_2_weight, backend })
     }
 
     pub fn forward(&self, t: &Tensor) -> Result<Tensor> {
@@ -38,34 +39,35 @@ impl TimestepEmbedder {
             Tensor::cat(&[args.cos()?, args.sin()?], D::Minus1)?.to_dtype(t.dtype())?
         };
         // MLP: 256 → hidden → hidden with SiLU
-        let h = candle_nn::ops::silu(&self.mlp_0.forward(&emb)?)?;
-        self.mlp_2.forward(&h)
+        let h = self.backend.linear_forward(&emb, &self.mlp_0_weight, None)?;
+        let h = self.backend.silu(&h)?;
+        self.backend.linear_forward(&h, &self.mlp_2_weight, None)
     }
 }
 
 /// SwiGLU feed-forward network.
 #[derive(Debug, Clone)]
 struct FeedForward {
-    gate_proj: Linear,
-    up_proj: Linear,
-    down_proj: Linear,
+    gate_proj_weight: Tensor,
+    up_proj_weight: Tensor,
+    down_proj_weight: Tensor,
     backend: Arc<dyn ComputeBackend>,
 }
 
 impl FeedForward {
     fn load(vb: VarBuilder, hidden: usize, intermediate: usize, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
-        let gate_proj = linear(hidden, intermediate, vb.pp("gate_proj"))?;
-        let up_proj = linear(hidden, intermediate, vb.pp("up_proj"))?;
-        let down_proj = linear(intermediate, hidden, vb.pp("down_proj"))?;
-        Ok(Self { gate_proj, up_proj, down_proj, backend })
+        let gate_proj_weight = vb.pp("gate_proj").get((intermediate, hidden), "weight")?;
+        let up_proj_weight = vb.pp("up_proj").get((intermediate, hidden), "weight")?;
+        let down_proj_weight = vb.pp("down_proj").get((hidden, intermediate), "weight")?;
+        Ok(Self { gate_proj_weight, up_proj_weight, down_proj_weight, backend })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let gate = self.gate_proj.forward(x)?;
-        let up = self.up_proj.forward(x)?;
+        let gate = self.backend.linear_forward(x, &self.gate_proj_weight, None)?;
+        let up = self.backend.linear_forward(x, &self.up_proj_weight, None)?;
         // Fused silu(gate) * up — 1 kernel instead of 2
         let gated = self.backend.silu_mul(&gate, &up)?;
-        self.down_proj.forward(&gated)
+        self.backend.linear_forward(&gated, &self.down_proj_weight, None)
     }
 }
 
@@ -75,7 +77,7 @@ struct DiffusionBlock {
     norm_weight: Tensor,
     eps: f32,
     ffn: FeedForward,
-    ada_ln: Linear,
+    ada_ln_weight: Tensor,
     backend: Arc<dyn ComputeBackend>,
 }
 
@@ -83,19 +85,19 @@ impl DiffusionBlock {
     fn load(vb: VarBuilder, hidden: usize, intermediate: usize, eps: f64, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let norm_weight = vb.pp("norm").get(hidden, "weight")?;
         let ffn = FeedForward::load(vb.pp("ffn"), hidden, intermediate, backend.clone())?;
-        let ada_ln = linear(hidden, 3 * hidden, vb.pp("adaLN_modulation").pp("1"))?;
+        let ada_ln_weight = vb.pp("adaLN_modulation").pp("1").get((3 * hidden, hidden), "weight")?;
         Ok(Self {
             norm_weight,
             eps: eps as f32,
             ffn,
-            ada_ln,
+            ada_ln_weight,
             backend,
         })
     }
 
     fn forward(&self, x: &Tensor, cond: &Tensor) -> Result<Tensor> {
-        let modulation = candle_nn::ops::silu(cond)
-            .and_then(|c| self.ada_ln.forward(&c))?;
+        let modulation = self.backend.silu(cond)
+            .and_then(|c| self.backend.linear_forward(&c, &self.ada_ln_weight, None))?;
         let chunks = modulation.chunk(3, D::Minus1)?;
         let (shift, scale, gate) = (&chunks[0], &chunks[1], &chunks[2]);
 
@@ -106,7 +108,7 @@ impl DiffusionBlock {
 
     /// Forward with pre-computed silu(cond).
     fn forward_with_silu_cond(&self, x: &Tensor, silu_cond: &Tensor) -> Result<Tensor> {
-        let modulation = self.ada_ln.forward(silu_cond)?;
+        let modulation = self.backend.linear_forward(silu_cond, &self.ada_ln_weight, None)?;
         let chunks = modulation.chunk(3, D::Minus1)?;
         let (shift, scale, gate) = (&chunks[0], &chunks[1], &chunks[2]);
 
@@ -121,8 +123,8 @@ impl DiffusionBlock {
 struct FinalLayer {
     norm_weight: Tensor,
     eps: f32,
-    ada_ln: Linear,
-    linear: Linear,
+    ada_ln_weight: Tensor,
+    linear_weight: Tensor,
     backend: Arc<dyn ComputeBackend>,
 }
 
@@ -131,32 +133,32 @@ impl FinalLayer {
         // norm_final is RMSNorm with elementwise_affine=False — use weight=ones
         let norm_weight = Tensor::ones(hidden, candle_core::DType::F32, vb.device())?
             .to_dtype(vb.dtype())?;
-        let ada_ln = linear(hidden, 2 * hidden, vb.pp("adaLN_modulation").pp("1"))?;
-        let linear_proj = linear(hidden, latent, vb.pp("linear"))?;
+        let ada_ln_weight = vb.pp("adaLN_modulation").pp("1").get((2 * hidden, hidden), "weight")?;
+        let linear_weight = vb.pp("linear").get((latent, hidden), "weight")?;
         Ok(Self {
             norm_weight,
             eps: eps as f32,
-            ada_ln,
-            linear: linear_proj,
+            ada_ln_weight,
+            linear_weight,
             backend,
         })
     }
 
     fn forward(&self, x: &Tensor, cond: &Tensor) -> Result<Tensor> {
-        let modulation = candle_nn::ops::silu(cond)
-            .and_then(|c| self.ada_ln.forward(&c))?;
+        let modulation = self.backend.silu(cond)
+            .and_then(|c| self.backend.linear_forward(&c, &self.ada_ln_weight, None))?;
         let chunks = modulation.chunk(2, D::Minus1)?;
         let (shift, scale) = (&chunks[0], &chunks[1]);
         let h = self.backend.adaln_modulate(x, &self.norm_weight, scale, shift, self.eps)?;
-        self.linear.forward(&h)
+        self.backend.linear_forward(&h, &self.linear_weight, None)
     }
 
     fn forward_with_silu_cond(&self, x: &Tensor, silu_cond: &Tensor) -> Result<Tensor> {
-        let modulation = self.ada_ln.forward(silu_cond)?;
+        let modulation = self.backend.linear_forward(silu_cond, &self.ada_ln_weight, None)?;
         let chunks = modulation.chunk(2, D::Minus1)?;
         let (shift, scale) = (&chunks[0], &chunks[1]);
         let h = self.backend.adaln_modulate(x, &self.norm_weight, scale, shift, self.eps)?;
-        self.linear.forward(&h)
+        self.backend.linear_forward(&h, &self.linear_weight, None)
     }
 }
 
@@ -164,12 +166,13 @@ impl FinalLayer {
 #[derive(Debug, Clone)]
 pub struct PredictionHead {
     t_embedder: TimestepEmbedder,
-    noisy_images_proj: Linear,
-    cond_proj: Linear,
+    noisy_images_proj_weight: Tensor,
+    cond_proj_weight: Tensor,
     layers: Vec<DiffusionBlock>,
     final_layer: FinalLayer,
     /// Pre-computed timestep embeddings (one per inference step).
     pre_t_embeddings: Vec<Tensor>,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl PredictionHead {
@@ -183,9 +186,9 @@ impl PredictionHead {
         let latent = cfg.latent_size;
         let intermediate = (h as f64 * cfg.head_ffn_ratio) as usize;
 
-        let t_embedder = TimestepEmbedder::load(vb.pp("t_embedder"), h)?;
-        let noisy_images_proj = linear(latent, h, vb.pp("noisy_images_proj"))?;
-        let cond_proj = linear(h, h, vb.pp("cond_proj"))?;
+        let t_embedder = TimestepEmbedder::load(vb.pp("t_embedder"), h, backend.clone())?;
+        let noisy_images_proj_weight = vb.pp("noisy_images_proj").get((h, latent), "weight")?;
+        let cond_proj_weight = vb.pp("cond_proj").get((h, h), "weight")?;
 
         let mut layers = Vec::with_capacity(cfg.head_layers);
         for i in 0..cfg.head_layers {
@@ -198,7 +201,7 @@ impl PredictionHead {
             )?);
         }
 
-        let final_layer = FinalLayer::load(vb.pp("final_layer"), h, latent, cfg.rms_norm_eps, backend)?;
+        let final_layer = FinalLayer::load(vb.pp("final_layer"), h, latent, cfg.rms_norm_eps, backend.clone())?;
 
         // Pre-compute timestep embeddings for all inference steps (avoids ~12 kernels/step)
         let pre_t_embeddings: Vec<Tensor> = timesteps
@@ -215,11 +218,12 @@ impl PredictionHead {
 
         Ok(Self {
             t_embedder,
-            noisy_images_proj,
-            cond_proj,
+            noisy_images_proj_weight,
+            cond_proj_weight,
             layers,
             final_layer,
             pre_t_embeddings,
+            backend,
         })
     }
 
@@ -228,9 +232,9 @@ impl PredictionHead {
     /// t: (batch,) timestep scalars
     /// condition: (batch, hidden_size) LLM hidden states
     pub fn forward(&self, x: &Tensor, t: &Tensor, condition: &Tensor) -> Result<Tensor> {
-        let mut h = self.noisy_images_proj.forward(x)?;
+        let mut h = self.backend.linear_forward(x, &self.noisy_images_proj_weight, None)?;
         let t_emb = self.t_embedder.forward(t)?;
-        let c_proj = self.cond_proj.forward(condition)?;
+        let c_proj = self.backend.linear_forward(condition, &self.cond_proj_weight, None)?;
         let c = (c_proj + t_emb)?;
 
         for layer in &self.layers {
@@ -243,7 +247,7 @@ impl PredictionHead {
     /// Project condition once per frame (constant across all diffusion steps).
     /// Returns the projected condition to be reused.
     pub fn project_condition(&self, condition: &Tensor) -> Result<Tensor> {
-        self.cond_proj.forward(condition)
+        self.backend.linear_forward(condition, &self.cond_proj_weight, None)
     }
 
     /// Optimized forward using pre-computed timestep embedding and projected condition.
@@ -254,14 +258,14 @@ impl PredictionHead {
         step_idx: usize,
         cond_proj: &Tensor,
     ) -> Result<Tensor> {
-        let mut h = self.noisy_images_proj.forward(x)?;
+        let mut h = self.backend.linear_forward(x, &self.noisy_images_proj_weight, None)?;
 
         // Use pre-computed timestep embedding (saves ~12 kernel launches)
         let t_emb = &self.pre_t_embeddings[step_idx];
         let c = (cond_proj + t_emb)?;
 
         // Compute silu(c) once, reuse across all blocks (saves 4 silu kernels)
-        let silu_c = candle_nn::ops::silu(&c)?;
+        let silu_c = self.backend.silu(&c)?;
 
         for layer in &self.layers {
             h = layer.forward_with_silu_cond(&h, &silu_c)?;
@@ -351,7 +355,8 @@ mod tests {
         map.insert("mlp.2.weight".into(), make_tensor(&[32, 32], 2));
         let vb = VarBuilder::from_tensors(map, DType::F32, &Device::Cpu);
 
-        let emb = TimestepEmbedder::load(vb, 32).unwrap();
+        let backend = crate::backends::create_backend(&Device::Cpu);
+        let emb = TimestepEmbedder::load(vb, 32, backend).unwrap();
         let t = Tensor::new(&[0.5f32, 0.8], &Device::Cpu).unwrap();
         let out = emb.forward(&t).unwrap();
         assert_eq!(out.dims(), &[2, 32]);

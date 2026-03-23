@@ -3,75 +3,85 @@
 //! Loads the Qwen3 model in encoder mode: full bidirectional attention,
 //! no KV cache, returns hidden states (not logits).
 
+use crate::backends::ComputeBackend;
 use crate::cake::{Context, Forwarder};
 use crate::models::sd::util::pack_tensors;
 use async_trait::async_trait;
-use candle_core::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{linear_no_bias, Embedding, Linear, RmsNorm, VarBuilder};
+use candle_core::{DType, Device, Result, Tensor, D};
+use candle_nn::VarBuilder;
 use log::info;
 use std::fmt::{Debug, Display, Formatter};
+use std::sync::Arc;
 
 use super::config::FluxModelFile;
 
 /// Qwen3 transformer block for encoder mode (bidirectional attention, no KV cache).
 #[derive(Debug, Clone)]
 struct EncoderBlock {
-    rms_1: RmsNorm,
-    rms_2: RmsNorm,
+    rms_1_weight: Tensor,
+    rms_2_weight: Tensor,
+    rms_eps: f32,
     // Attention
-    q_proj: Linear,
-    k_proj: Linear,
-    v_proj: Linear,
-    o_proj: Linear,
-    q_norm: RmsNorm,
-    k_norm: RmsNorm,
+    q_proj_weight: Tensor,
+    k_proj_weight: Tensor,
+    v_proj_weight: Tensor,
+    o_proj_weight: Tensor,
+    q_norm_weight: Tensor,
+    k_norm_weight: Tensor,
+    qk_norm_eps: f32,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
     // MLP
-    gate_proj: Linear,
-    up_proj: Linear,
-    down_proj: Linear,
+    gate_proj_weight: Tensor,
+    up_proj_weight: Tensor,
+    down_proj_weight: Tensor,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl EncoderBlock {
-    fn load(vb: VarBuilder, cfg: &EncoderConfig) -> Result<Self> {
+    fn load(vb: VarBuilder, cfg: &EncoderConfig, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let h = cfg.hidden_size;
         let i = cfg.intermediate_size;
         let size_q = cfg.num_heads * cfg.head_dim;
         let size_kv = cfg.num_kv_heads * cfg.head_dim;
 
         let attn = vb.pp("self_attn");
-        let q_proj = linear_no_bias(h, size_q, attn.pp("q_proj"))?;
-        let k_proj = linear_no_bias(h, size_kv, attn.pp("k_proj"))?;
-        let v_proj = linear_no_bias(h, size_kv, attn.pp("v_proj"))?;
-        let o_proj = linear_no_bias(size_q, h, attn.pp("o_proj"))?;
-        let q_norm = candle_nn::rms_norm(cfg.head_dim, cfg.rms_norm_eps, attn.pp("q_norm"))?;
-        let k_norm = candle_nn::rms_norm(cfg.head_dim, cfg.rms_norm_eps, attn.pp("k_norm"))?;
+        let q_proj_weight = attn.pp("q_proj").get((size_q, h), "weight")?;
+        let k_proj_weight = attn.pp("k_proj").get((size_kv, h), "weight")?;
+        let v_proj_weight = attn.pp("v_proj").get((size_kv, h), "weight")?;
+        let o_proj_weight = attn.pp("o_proj").get((h, size_q), "weight")?;
+        let q_norm_weight = attn.pp("q_norm").get(cfg.head_dim, "weight")?;
+        let k_norm_weight = attn.pp("k_norm").get(cfg.head_dim, "weight")?;
+        let qk_norm_eps = cfg.rms_norm_eps as f32;
 
         let mlp = vb.pp("mlp");
-        let gate_proj = linear_no_bias(h, i, mlp.pp("gate_proj"))?;
-        let up_proj = linear_no_bias(h, i, mlp.pp("up_proj"))?;
-        let down_proj = linear_no_bias(i, h, mlp.pp("down_proj"))?;
+        let gate_proj_weight = mlp.pp("gate_proj").get((i, h), "weight")?;
+        let up_proj_weight = mlp.pp("up_proj").get((i, h), "weight")?;
+        let down_proj_weight = mlp.pp("down_proj").get((h, i), "weight")?;
 
-        let rms_1 = candle_nn::rms_norm(h, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
-        let rms_2 = candle_nn::rms_norm(h, cfg.rms_norm_eps, vb.pp("post_attention_layernorm"))?;
+        let rms_1_weight = vb.pp("input_layernorm").get(h, "weight")?;
+        let rms_2_weight = vb.pp("post_attention_layernorm").get(h, "weight")?;
+        let rms_eps = cfg.rms_norm_eps as f32;
 
         Ok(Self {
-            rms_1,
-            rms_2,
-            q_proj,
-            k_proj,
-            v_proj,
-            o_proj,
-            q_norm,
-            k_norm,
+            rms_1_weight,
+            rms_2_weight,
+            rms_eps,
+            q_proj_weight,
+            k_proj_weight,
+            v_proj_weight,
+            o_proj_weight,
+            q_norm_weight,
+            k_norm_weight,
+            qk_norm_eps,
             num_heads: cfg.num_heads,
             num_kv_heads: cfg.num_kv_heads,
             head_dim: cfg.head_dim,
-            gate_proj,
-            up_proj,
-            down_proj,
+            gate_proj_weight,
+            up_proj_weight,
+            down_proj_weight,
+            backend,
         })
     }
 
@@ -81,12 +91,12 @@ impl EncoderBlock {
 
         // Pre-norm + attention
         let residual = x;
-        let x = self.rms_1.forward(x)?;
+        let x = self.backend.rms_norm(x, &self.rms_1_weight, self.rms_eps)?;
 
         // QKV projections
-        let q = self.q_proj.forward(&x)?;
-        let k = self.k_proj.forward(&x)?;
-        let v = self.v_proj.forward(&x)?;
+        let q = self.backend.linear_forward(&x, &self.q_proj_weight, None)?;
+        let k = self.backend.linear_forward(&x, &self.k_proj_weight, None)?;
+        let v = self.backend.linear_forward(&x, &self.v_proj_weight, None)?;
 
         // Reshape to (b, seq, heads, head_dim)
         let q = q.reshape((b, seq, self.num_heads, self.head_dim))?;
@@ -94,8 +104,8 @@ impl EncoderBlock {
         let v = v.reshape((b, seq, self.num_kv_heads, self.head_dim))?;
 
         // QK-norm (per-head)
-        let q = self.q_norm.forward(&q)?;
-        let k = self.k_norm.forward(&k)?;
+        let q = self.backend.rms_norm(&q, &self.q_norm_weight, self.qk_norm_eps)?;
+        let k = self.backend.rms_norm(&k, &self.k_norm_weight, self.qk_norm_eps)?;
 
         // Transpose to (b, heads, seq, head_dim)
         let q = q.transpose(1, 2)?.contiguous()?;
@@ -178,21 +188,22 @@ impl EncoderBlock {
         } else {
             att
         };
-        let att = candle_nn::ops::softmax_last_dim(&att)?;
+        let last_dim = att.rank() - 1;
+        let att = self.backend.softmax(&att, last_dim)?;
         let y = att.matmul(&v.contiguous()?)?;
 
         // Reshape back
         let y = y.transpose(1, 2)?;
         let y = y.reshape((b, seq, self.num_heads * self.head_dim))?;
-        let x = (self.o_proj.forward(&y)? + residual)?;
+        let x = (self.backend.linear_forward(&y, &self.o_proj_weight, None)? + residual)?;
 
         // Pre-norm + MLP
         let residual = &x;
-        let h = self.rms_2.forward(&x)?;
-        let gate_out = self.gate_proj.forward(&h)?;
-        let gate = candle_nn::ops::silu(&gate_out)?.to_dtype(gate_out.dtype())?;
-        let up = self.up_proj.forward(&h)?;
-        let x = self.down_proj.forward(&(gate * up)?)?;
+        let h = self.backend.rms_norm(&x, &self.rms_2_weight, self.rms_eps)?;
+        let gate_out = self.backend.linear_forward(&h, &self.gate_proj_weight, None)?;
+        let gate = self.backend.silu(&gate_out)?.to_dtype(gate_out.dtype())?;
+        let up = self.backend.linear_forward(&h, &self.up_proj_weight, None)?;
+        let x = self.backend.linear_forward(&(gate * up)?, &self.down_proj_weight, None)?;
         x + residual
     }
 }
@@ -229,12 +240,16 @@ impl EncoderConfig {
 /// Qwen3 text encoder for FLUX — extracts hidden states, not logits.
 #[derive(Debug)]
 pub struct FluxTextEncoder {
-    embeddings: Embedding,
+    embeddings_weight: Tensor,
     blocks: Vec<EncoderBlock>,
     #[allow(dead_code)]
-    final_norm: RmsNorm,
+    final_norm_weight: Tensor,
+    #[allow(dead_code)]
+    final_norm_eps: f32,
     #[allow(dead_code)]
     cfg: EncoderConfig,
+    #[allow(dead_code)]
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl Display for FluxTextEncoder {
@@ -249,7 +264,7 @@ impl Forwarder for FluxTextEncoder {
     where
         Self: Sized,
     {
-        Self::load_model(&ctx.device, ctx.dtype, &ctx.args.model)
+        Self::load_model(&ctx.device, ctx.dtype, &ctx.args.model, ctx.backend.clone())
     }
 
     async fn forward(
@@ -300,6 +315,7 @@ impl FluxTextEncoder {
         device: &Device,
         dtype: DType,
         model_repo: &str,
+        backend: Arc<dyn ComputeBackend>,
     ) -> anyhow::Result<Box<Self>> {
         let cfg = EncoderConfig::flux2_klein();
 
@@ -330,32 +346,27 @@ impl FluxTextEncoder {
         // Weights are prefixed with "model." in the text_encoder safetensors
         let vb_model = vb.pp("model");
 
-        let embeddings = candle_nn::embedding(
-            cfg.vocab_size,
-            cfg.hidden_size,
-            vb_model.pp("embed_tokens"),
-        )?;
+        let embeddings_weight = vb_model.pp("embed_tokens").get((cfg.vocab_size, cfg.hidden_size), "weight")?;
 
         let mut blocks = Vec::with_capacity(cfg.num_hidden_layers);
         let vb_layers = vb_model.pp("layers");
         for i in 0..cfg.num_hidden_layers {
-            let block = EncoderBlock::load(vb_layers.pp(i), &cfg)?;
+            let block = EncoderBlock::load(vb_layers.pp(i), &cfg, backend.clone())?;
             blocks.push(block);
         }
 
-        let final_norm = candle_nn::rms_norm(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            vb_model.pp("norm"),
-        )?;
+        let final_norm_weight = vb_model.pp("norm").get(cfg.hidden_size, "weight")?;
+        let final_norm_eps = cfg.rms_norm_eps as f32;
 
         info!("FLUX text encoder loaded ({} layers)", cfg.num_hidden_layers);
 
         Ok(Box::new(Self {
-            embeddings,
+            embeddings_weight,
             blocks,
-            final_norm,
+            final_norm_weight,
+            final_norm_eps,
             cfg,
+            backend,
         }))
     }
 
@@ -367,7 +378,7 @@ impl FluxTextEncoder {
     pub fn encode(&self, token_ids: &Tensor, attn_mask: Option<&Tensor>) -> Result<Tensor> {
         const OUTPUT_LAYERS: [usize; 3] = [8, 17, 26];
 
-        let mut x = self.embeddings.forward(token_ids)?;
+        let mut x = self.backend.embedding(token_ids, &self.embeddings_weight)?;
         let mut layer_outputs: Vec<Tensor> = Vec::new();
 
         for (i, block) in self.blocks.iter().enumerate() {

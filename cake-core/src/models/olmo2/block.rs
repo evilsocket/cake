@@ -12,7 +12,6 @@
 
 use anyhow::Result;
 use candle_core::Tensor;
-use candle_nn::{Module, RmsNorm};
 
 use crate::cake::{Context, Forwarder};
 use crate::models::common::{CausalSelfAttention, MLP};
@@ -22,9 +21,10 @@ use async_trait::async_trait;
 pub struct OLMo2Block {
     name: String,
     attn: CausalSelfAttention,
-    post_attention_layernorm: RmsNorm,
+    post_attention_layernorm_weight: Tensor,
     mlp: MLP,
-    post_feedforward_layernorm: RmsNorm,
+    post_feedforward_layernorm_weight: Tensor,
+    rms_eps: f32,
 }
 
 impl std::fmt::Display for OLMo2Block {
@@ -46,20 +46,21 @@ impl Forwarder for OLMo2Block {
         let attn = CausalSelfAttention::load(vb.pp("self_attn"), cfg, ctx.backend.clone())?;
         let mlp = MLP::load(vb.pp("mlp"), cfg, ctx.backend.clone())?;
 
-        let eps = cfg.rms_norm_eps;
         let h = cfg.hidden_size;
 
-        let post_attention_layernorm =
-            candle_nn::rms_norm(h, eps, vb.pp("post_attention_layernorm"))?;
-        let post_feedforward_layernorm =
-            candle_nn::rms_norm(h, eps, vb.pp("post_feedforward_layernorm"))?;
+        let post_attention_layernorm_weight =
+            vb.pp("post_attention_layernorm").get(h, "weight")?;
+        let post_feedforward_layernorm_weight =
+            vb.pp("post_feedforward_layernorm").get(h, "weight")?;
+        let rms_eps = cfg.rms_norm_eps as f32;
 
         Ok(Box::new(Self {
             name,
             attn,
-            post_attention_layernorm,
+            post_attention_layernorm_weight,
             mlp,
-            post_feedforward_layernorm,
+            post_feedforward_layernorm_weight,
+            rms_eps,
         }))
     }
 
@@ -78,7 +79,7 @@ impl Forwarder for OLMo2Block {
             block_idx,
             ctx.cache.as_mut().expect("No cache"),
         ).map_err(|e| anyhow!("attn: {e}"))?;
-        let attn_out = self.post_attention_layernorm.forward(&attn_out)
+        let attn_out = ctx.backend.rms_norm(&attn_out, &self.post_attention_layernorm_weight, self.rms_eps)
             .map_err(|e| anyhow!("post_attention_layernorm: {e}"))?;
         let x = (residual + attn_out).map_err(|e| anyhow!("attn residual: {e}"))?;
 
@@ -86,7 +87,7 @@ impl Forwarder for OLMo2Block {
         let residual = &x;
         let mlp_out = self.mlp.forward(&x)
             .map_err(|e| anyhow!("mlp: {e}"))?;
-        let mlp_out = self.post_feedforward_layernorm.forward(&mlp_out)
+        let mlp_out = ctx.backend.rms_norm(&mlp_out, &self.post_feedforward_layernorm_weight, self.rms_eps)
             .map_err(|e| anyhow!("post_feedforward_layernorm: {e}"))?;
         let x = (residual + mlp_out).map_err(|e| anyhow!("mlp residual: {e}"))?;
 

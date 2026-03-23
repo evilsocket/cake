@@ -8,29 +8,41 @@
 //!   x = x * y  (output gating)
 //!   x = out_proj(x)
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use candle_core::Tensor;
-use candle_nn::{Linear, Module, VarBuilder};
+use candle_nn::VarBuilder;
+
+use crate::backends::ComputeBackend;
 
 #[derive(Debug, Clone)]
 pub struct NonlinAttention {
-    in_proj: Linear,
-    out_proj: Linear,
+    in_proj_weight: Tensor,
+    in_proj_bias: Option<Tensor>,
+    out_proj_weight: Tensor,
+    out_proj_bias: Option<Tensor>,
     hidden: usize,
     num_heads: usize,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl NonlinAttention {
-    pub fn load(dim: usize, num_heads: usize, vb: VarBuilder) -> Result<Self> {
+    pub fn load(dim: usize, num_heads: usize, vb: VarBuilder, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let hidden = 3 * dim / 4;
-        let in_proj = candle_nn::linear(dim, 3 * hidden, vb.pp("in_proj"))?;
-        let out_proj = candle_nn::linear(hidden, dim, vb.pp("out_proj"))?;
+        let in_proj_weight = vb.pp("in_proj").get((3 * hidden, dim), "weight")?;
+        let in_proj_bias = Some(vb.pp("in_proj").get(3 * hidden, "bias")?);
+        let out_proj_weight = vb.pp("out_proj").get((dim, hidden), "weight")?;
+        let out_proj_bias = Some(vb.pp("out_proj").get(dim, "bias")?);
 
         Ok(Self {
-            in_proj,
-            out_proj,
+            in_proj_weight,
+            in_proj_bias,
+            out_proj_weight,
+            out_proj_bias,
             hidden,
             num_heads,
+            backend,
         })
     }
 
@@ -41,7 +53,7 @@ impl NonlinAttention {
         let head_dim = self.hidden / self.num_heads;
 
         // Project to 3 * hidden
-        let projected = self.in_proj.forward(x)?; // [batch, seq, 3*hidden]
+        let projected = self.backend.linear_forward(x, &self.in_proj_weight, self.in_proj_bias.as_ref())?; // [batch, seq, 3*hidden]
 
         // Split into s, x_val, y
         let s = projected.narrow(candle_core::D::Minus1, 0, self.hidden)?;
@@ -73,7 +85,7 @@ impl NonlinAttention {
         // Output gating: x = x * y
         let x_out = (x_attn * y)?;
 
-        let x_out = self.out_proj.forward(&x_out)?;
+        let x_out = self.backend.linear_forward(&x_out, &self.out_proj_weight, self.out_proj_bias.as_ref())?;
         Ok(x_out)
     }
 }

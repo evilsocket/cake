@@ -4,8 +4,11 @@
 //! matching the `Flux2Transformer2DModel` from diffusers. Weight names follow
 //! the diffusers convention (not the BFL FLUX.1 convention).
 
-use candle_core::{DType, Result, Tensor, D, Module};
-use candle_nn::{Linear, VarBuilder};
+use candle_core::{DType, Result, Tensor, D};
+use candle_nn::VarBuilder;
+use std::sync::Arc;
+
+use crate::backends::ComputeBackend;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -116,12 +119,12 @@ fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
 /// Linear projection that ensures inputs match weight dtype.
 /// This is needed because modulate() returns in the input dtype which might be F32
 /// from layer_norm, but the weight is BF16.
-fn linear_matched(linear: &Linear, x: &Tensor) -> Result<Tensor> {
-    let w_dtype = linear.weight().dtype();
-    Module::forward(linear, &x.to_dtype(w_dtype)?)
+fn linear_matched(backend: &dyn ComputeBackend, weight: &Tensor, bias: Option<&Tensor>, x: &Tensor) -> Result<Tensor> {
+    let w_dtype = weight.dtype();
+    backend.linear_forward(&x.to_dtype(w_dtype)?, weight, bias)
 }
 
-fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe_cos: &Tensor, pe_sin: &Tensor) -> Result<Tensor> {
+fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe_cos: &Tensor, pe_sin: &Tensor, backend: &dyn ComputeBackend) -> Result<Tensor> {
     let w_dtype = q.dtype();
     let q = apply_rope(q, pe_cos, pe_sin)?.contiguous()?;
     let k = apply_rope(k, pe_cos, pe_sin)?.contiguous()?;
@@ -147,7 +150,7 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe_cos: &Tensor, pe_sin: &Tenso
         let q32 = q.to_dtype(DType::F32)?;
         let k32 = k.to_dtype(DType::F32)?;
         let v32 = v.to_dtype(DType::F32)?;
-        if let Ok(attn) = candle_nn::ops::sdpa(&q32, &k32, &v32, None, false, scale as f32, 1.0) {
+        if let Ok(attn) = backend.sdpa(&q32, &k32, &v32, None, false, scale as f32) {
             return attn.to_dtype(w_dtype)?.transpose(1, 2)?.flatten_from(2);
         }
         // Fallback to manual if SDPA fails (threadgroup memory exceeded)
@@ -161,7 +164,8 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe_cos: &Tensor, pe_sin: &Tenso
     let k = k.flatten_to(batch_dims.len() - 1)?.to_dtype(DType::F32)?;
     let v = v.flatten_to(batch_dims.len() - 1)?.to_dtype(DType::F32)?;
     let attn_weights = (q.matmul(&k.t()?)? * scale)?;
-    let attn_scores = candle_nn::ops::softmax_last_dim(&attn_weights)?
+    let last_dim = attn_weights.rank() - 1;
+    let attn_scores = backend.softmax(&attn_weights, last_dim)?
         .matmul(&v)?
         .to_dtype(w_dtype)?;
     batch_dims.push(attn_scores.dim(D::Minus2)?);
@@ -197,25 +201,26 @@ impl QkNorm {
 
 #[derive(Debug, Clone)]
 pub struct GatedMLP {
-    linear_in: Linear,  // fused gate + up: (hidden, 2*mlp_hidden)
-    linear_out: Linear, // down: (mlp_hidden, hidden)
+    linear_in_weight: Tensor,  // fused gate + up: (2*mlp_hidden, hidden)
+    linear_out_weight: Tensor, // down: (hidden, mlp_hidden)
     mlp_hidden: usize,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl GatedMLP {
-    fn load(vb: VarBuilder, hidden: usize, mlp_hidden: usize) -> Result<Self> {
-        let linear_in = candle_nn::linear_no_bias(hidden, 2 * mlp_hidden, vb.pp("linear_in"))?;
-        let linear_out = candle_nn::linear_no_bias(mlp_hidden, hidden, vb.pp("linear_out"))?;
-        Ok(Self { linear_in, linear_out, mlp_hidden })
+    fn load(vb: VarBuilder, hidden: usize, mlp_hidden: usize, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
+        let linear_in_weight = vb.pp("linear_in").get((2 * mlp_hidden, hidden), "weight")?;
+        let linear_out_weight = vb.pp("linear_out").get((hidden, mlp_hidden), "weight")?;
+        Ok(Self { linear_in_weight, linear_out_weight, mlp_hidden, backend })
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let fused = linear_matched(&self.linear_in, x)?;
+        let fused = linear_matched(&*self.backend, &self.linear_in_weight, None, x)?;
 
         let gate = fused.narrow(D::Minus1, 0, self.mlp_hidden)?;
         let up = fused.narrow(D::Minus1, self.mlp_hidden, self.mlp_hidden)?;
-        let x = (gate.silu()? * up)?;
-        linear_matched(&self.linear_out, &x)
+        let x = self.backend.silu_mul(&gate, &up)?;
+        linear_matched(&*self.backend, &self.linear_out_weight, None, &x)
     }
 }
 
@@ -224,47 +229,49 @@ impl GatedMLP {
 #[derive(Debug, Clone)]
 pub struct DoubleStreamBlock {
     // Image attention
-    to_q: Linear,
-    to_k: Linear,
-    to_v: Linear,
-    to_out: Linear,
+    to_q_weight: Tensor,
+    to_k_weight: Tensor,
+    to_v_weight: Tensor,
+    to_out_weight: Tensor,
     norm_q: QkNorm,
     norm_k: QkNorm,
     // Text attention
-    add_q_proj: Linear,
-    add_k_proj: Linear,
-    add_v_proj: Linear,
-    to_add_out: Linear,
+    add_q_proj_weight: Tensor,
+    add_k_proj_weight: Tensor,
+    add_v_proj_weight: Tensor,
+    to_add_out_weight: Tensor,
     norm_added_q: QkNorm,
     norm_added_k: QkNorm,
     // MLPs
     ff: GatedMLP,
     ff_context: GatedMLP,
     num_heads: usize,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl DoubleStreamBlock {
-    fn load(vb: VarBuilder, cfg: &Flux2Config) -> Result<Self> {
+    fn load(vb: VarBuilder, cfg: &Flux2Config, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let h = cfg.hidden_size;
         let mlp_hidden = (h as f64 * cfg.mlp_ratio) as usize;
         let attn = vb.pp("attn");
 
         Ok(Self {
-            to_q: candle_nn::linear_no_bias(h, h, attn.pp("to_q"))?,
-            to_k: candle_nn::linear_no_bias(h, h, attn.pp("to_k"))?,
-            to_v: candle_nn::linear_no_bias(h, h, attn.pp("to_v"))?,
-            to_out: candle_nn::linear_no_bias(h, h, attn.pp("to_out").pp("0"))?,
+            to_q_weight: attn.pp("to_q").get((h, h), "weight")?,
+            to_k_weight: attn.pp("to_k").get((h, h), "weight")?,
+            to_v_weight: attn.pp("to_v").get((h, h), "weight")?,
+            to_out_weight: attn.pp("to_out").pp("0").get((h, h), "weight")?,
             norm_q: QkNorm::load(cfg.head_dim, 1e-6, attn.pp("norm_q"))?,
             norm_k: QkNorm::load(cfg.head_dim, 1e-6, attn.pp("norm_k"))?,
-            add_q_proj: candle_nn::linear_no_bias(h, h, attn.pp("add_q_proj"))?,
-            add_k_proj: candle_nn::linear_no_bias(h, h, attn.pp("add_k_proj"))?,
-            add_v_proj: candle_nn::linear_no_bias(h, h, attn.pp("add_v_proj"))?,
-            to_add_out: candle_nn::linear_no_bias(h, h, attn.pp("to_add_out"))?,
+            add_q_proj_weight: attn.pp("add_q_proj").get((h, h), "weight")?,
+            add_k_proj_weight: attn.pp("add_k_proj").get((h, h), "weight")?,
+            add_v_proj_weight: attn.pp("add_v_proj").get((h, h), "weight")?,
+            to_add_out_weight: attn.pp("to_add_out").get((h, h), "weight")?,
             norm_added_q: QkNorm::load(cfg.head_dim, 1e-6, attn.pp("norm_added_q"))?,
             norm_added_k: QkNorm::load(cfg.head_dim, 1e-6, attn.pp("norm_added_k"))?,
-            ff: GatedMLP::load(vb.pp("ff"), h, mlp_hidden)?,
-            ff_context: GatedMLP::load(vb.pp("ff_context"), h, mlp_hidden)?,
+            ff: GatedMLP::load(vb.pp("ff"), h, mlp_hidden, backend.clone())?,
+            ff_context: GatedMLP::load(vb.pp("ff_context"), h, mlp_hidden, backend.clone())?,
             num_heads: cfg.num_heads,
+            backend,
         })
     }
 
@@ -284,12 +291,12 @@ impl DoubleStreamBlock {
         let txt_norm = modulate(txt, &txt_mod[0], &txt_mod[1])?;
 
         // Q/K/V projections (linear_matched ensures dtype compatibility)
-        let img_q = linear_matched(&self.to_q, &img_norm)?;
-        let img_k = linear_matched(&self.to_k, &img_norm)?;
-        let img_v = linear_matched(&self.to_v, &img_norm)?;
-        let txt_q = linear_matched(&self.add_q_proj, &txt_norm)?;
-        let txt_k = linear_matched(&self.add_k_proj, &txt_norm)?;
-        let txt_v = linear_matched(&self.add_v_proj, &txt_norm)?;
+        let img_q = linear_matched(&*self.backend, &self.to_q_weight, None, &img_norm)?;
+        let img_k = linear_matched(&*self.backend, &self.to_k_weight, None, &img_norm)?;
+        let img_v = linear_matched(&*self.backend, &self.to_v_weight, None, &img_norm)?;
+        let txt_q = linear_matched(&*self.backend, &self.add_q_proj_weight, None, &txt_norm)?;
+        let txt_k = linear_matched(&*self.backend, &self.add_k_proj_weight, None, &txt_norm)?;
+        let txt_v = linear_matched(&*self.backend, &self.add_v_proj_weight, None, &txt_norm)?;
 
         // Reshape + QK-norm
         let (b, img_seq, _) = img_q.dims3()?;
@@ -311,14 +318,14 @@ impl DoubleStreamBlock {
         let q = Tensor::cat(&[&txt_q, &img_q], 2)?;
         let k = Tensor::cat(&[&txt_k, &img_k], 2)?;
         let v = Tensor::cat(&[&txt_v, &img_v], 2)?;
-        let attn_out = attention(&q, &k, &v, pe_cos, pe_sin)?;
+        let attn_out = attention(&q, &k, &v, pe_cos, pe_sin, &*self.backend)?;
 
         // Split + output projections + gated residual
         let txt_attn = attn_out.narrow(1, 0, txt_seq)?;
         let img_attn = attn_out.narrow(1, txt_seq, img_seq)?;
 
-        let img = (img + img_mod[2].unsqueeze(1)?.broadcast_mul(&linear_matched(&self.to_out, &img_attn)?)?)?;
-        let txt = (txt + txt_mod[2].unsqueeze(1)?.broadcast_mul(&linear_matched(&self.to_add_out, &txt_attn)?)?)?;
+        let img = (img + img_mod[2].unsqueeze(1)?.broadcast_mul(&linear_matched(&*self.backend, &self.to_out_weight, None, &img_attn)?)?)?;
+        let txt = (txt + txt_mod[2].unsqueeze(1)?.broadcast_mul(&linear_matched(&*self.backend, &self.to_add_out_weight, None, &txt_attn)?)?)?;
 
         // MLP with modulation
         let img_ff = self.ff.forward(&modulate(&img, &img_mod[3], &img_mod[4])?)?;
@@ -335,17 +342,18 @@ impl DoubleStreamBlock {
 
 #[derive(Debug, Clone)]
 pub struct SingleStreamBlock {
-    to_qkv_mlp_proj: Linear,
-    to_out: Linear,
+    to_qkv_mlp_proj_weight: Tensor,
+    to_out_weight: Tensor,
     norm_q: QkNorm,
     norm_k: QkNorm,
     num_heads: usize,
     hidden_size: usize,
     mlp_hidden: usize,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl SingleStreamBlock {
-    fn load(vb: VarBuilder, cfg: &Flux2Config) -> Result<Self> {
+    fn load(vb: VarBuilder, cfg: &Flux2Config, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let h = cfg.hidden_size;
         let mlp_hidden = (h as f64 * cfg.mlp_ratio) as usize;
         let attn = vb.pp("attn");
@@ -354,13 +362,14 @@ impl SingleStreamBlock {
         let out_dim = h + mlp_hidden; // attention_out + mlp_out
 
         Ok(Self {
-            to_qkv_mlp_proj: candle_nn::linear_no_bias(h, qkv_mlp_dim, attn.pp("to_qkv_mlp_proj"))?,
-            to_out: candle_nn::linear_no_bias(out_dim, h, attn.pp("to_out"))?,
+            to_qkv_mlp_proj_weight: attn.pp("to_qkv_mlp_proj").get((qkv_mlp_dim, h), "weight")?,
+            to_out_weight: attn.pp("to_out").get((h, out_dim), "weight")?,
             norm_q: QkNorm::load(cfg.head_dim, 1e-6, attn.pp("norm_q"))?,
             norm_k: QkNorm::load(cfg.head_dim, 1e-6, attn.pp("norm_k"))?,
             num_heads: cfg.num_heads,
             hidden_size: h,
             mlp_hidden,
+            backend,
         })
     }
 
@@ -375,7 +384,7 @@ impl SingleStreamBlock {
         let head_dim = self.hidden_size / self.num_heads;
 
         let x_norm = modulate(x, &mod_tensors[0], &mod_tensors[1])?;
-        let fused = linear_matched(&self.to_qkv_mlp_proj, &x_norm)?;
+        let fused = linear_matched(&*self.backend, &self.to_qkv_mlp_proj_weight, None, &x_norm)?;
 
         let h = self.hidden_size;
         let q = fused.narrow(D::Minus1, 0, h)?;
@@ -389,14 +398,14 @@ impl SingleStreamBlock {
         let k = self.norm_k.forward(&k)?.transpose(1, 2)?;
         let v = v.reshape((b, seq, self.num_heads, head_dim))?.transpose(1, 2)?;
 
-        let attn_out = attention(&q, &k, &v, pe_cos, pe_sin)?;
+        let attn_out = attention(&q, &k, &v, pe_cos, pe_sin, &*self.backend)?;
 
         let gate = mlp_fused.narrow(D::Minus1, 0, self.mlp_hidden)?;
         let up = mlp_fused.narrow(D::Minus1, self.mlp_hidden, self.mlp_hidden)?;
-        let mlp_out = (gate.silu()? * up)?;
+        let mlp_out = self.backend.silu_mul(&gate, &up)?;
 
         let combined = Tensor::cat(&[&attn_out, &mlp_out], D::Minus1)?;
-        let out = linear_matched(&self.to_out, &combined)?;
+        let out = linear_matched(&*self.backend, &self.to_out_weight, None, &combined)?;
 
         x + mod_tensors[2].unsqueeze(1)?.broadcast_mul(&out)?
     }
@@ -428,19 +437,22 @@ fn layer_norm_forward(x: &Tensor) -> Result<Tensor> {
 
 #[derive(Debug, Clone)]
 pub struct MlpEmbedder {
-    linear_1: Linear,
-    linear_2: Linear,
+    linear_1_weight: Tensor,
+    linear_2_weight: Tensor,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl MlpEmbedder {
-    pub fn load(vb: VarBuilder) -> Result<Self> {
-        let linear_1 = candle_nn::linear_no_bias(256, 3072, vb.pp("linear_1"))?;
-        let linear_2 = candle_nn::linear_no_bias(3072, 3072, vb.pp("linear_2"))?;
-        Ok(Self { linear_1, linear_2 })
+    pub fn load(vb: VarBuilder, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
+        let linear_1_weight = vb.pp("linear_1").get((3072, 256), "weight")?;
+        let linear_2_weight = vb.pp("linear_2").get((3072, 3072), "weight")?;
+        Ok(Self { linear_1_weight, linear_2_weight, backend })
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        x.apply(&self.linear_1)?.silu()?.apply(&self.linear_2)
+        let h = self.backend.linear_forward(x, &self.linear_1_weight, None)?;
+        let h = self.backend.silu(&h)?;
+        self.backend.linear_forward(&h, &self.linear_2_weight, None)
     }
 }
 
@@ -481,66 +493,68 @@ impl Flux2Config {
 /// FLUX.2-klein MMDiT transformer.
 #[derive(Debug, Clone)]
 pub struct Flux2Transformer {
-    pub x_embedder: Linear,
-    pub context_embedder: Linear,
+    pub x_embedder_weight: Tensor,
+    pub context_embedder_weight: Tensor,
     pub time_embedder: MlpEmbedder,
     pub pe_embedder: Flux2PosEmbed,
-    pub double_mod_img: Linear,
-    pub double_mod_txt: Linear,
-    pub single_mod: Linear,
+    pub double_mod_img_weight: Tensor,
+    pub double_mod_txt_weight: Tensor,
+    pub single_mod_weight: Tensor,
     pub double_blocks: Vec<DoubleStreamBlock>,
     pub single_blocks: Vec<SingleStreamBlock>,
-    pub norm_out: Linear,
-    pub proj_out: Linear,
+    pub norm_out_weight: Tensor,
+    pub proj_out_weight: Tensor,
     pub cfg: Flux2Config,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl Flux2Transformer {
-    pub fn load(vb: VarBuilder, cfg: &Flux2Config) -> Result<Self> {
+    pub fn load(vb: VarBuilder, cfg: &Flux2Config, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
         let h = cfg.hidden_size;
 
-        let x_embedder = candle_nn::linear_no_bias(cfg.in_channels, h, vb.pp("x_embedder"))?;
-        let context_embedder = candle_nn::linear_no_bias(cfg.context_in_dim, h, vb.pp("context_embedder"))?;
-        let time_embedder = MlpEmbedder::load(vb.pp("time_guidance_embed").pp("timestep_embedder"))?;
+        let x_embedder_weight = vb.pp("x_embedder").get((h, cfg.in_channels), "weight")?;
+        let context_embedder_weight = vb.pp("context_embedder").get((h, cfg.context_in_dim), "weight")?;
+        let time_embedder = MlpEmbedder::load(vb.pp("time_guidance_embed").pp("timestep_embedder"), backend.clone())?;
 
         let pe_embedder = Flux2PosEmbed::new(cfg.theta, cfg.axes_dim.clone());
 
         // Shared modulation layers
-        let double_mod_img = candle_nn::linear_no_bias(h, 6 * h, vb.pp("double_stream_modulation_img").pp("linear"))?;
-        let double_mod_txt = candle_nn::linear_no_bias(h, 6 * h, vb.pp("double_stream_modulation_txt").pp("linear"))?;
-        let single_mod = candle_nn::linear_no_bias(h, 3 * h, vb.pp("single_stream_modulation").pp("linear"))?;
+        let double_mod_img_weight = vb.pp("double_stream_modulation_img").pp("linear").get((6 * h, h), "weight")?;
+        let double_mod_txt_weight = vb.pp("double_stream_modulation_txt").pp("linear").get((6 * h, h), "weight")?;
+        let single_mod_weight = vb.pp("single_stream_modulation").pp("linear").get((3 * h, h), "weight")?;
 
         // Double blocks
         let mut double_blocks = Vec::with_capacity(cfg.depth);
         let vb_d = vb.pp("transformer_blocks");
         for i in 0..cfg.depth {
-            double_blocks.push(DoubleStreamBlock::load(vb_d.pp(i), cfg)?);
+            double_blocks.push(DoubleStreamBlock::load(vb_d.pp(i), cfg, backend.clone())?);
         }
 
         // Single blocks
         let mut single_blocks = Vec::with_capacity(cfg.depth_single);
         let vb_s = vb.pp("single_transformer_blocks");
         for i in 0..cfg.depth_single {
-            single_blocks.push(SingleStreamBlock::load(vb_s.pp(i), cfg)?);
+            single_blocks.push(SingleStreamBlock::load(vb_s.pp(i), cfg, backend.clone())?);
         }
 
         // Final layer
-        let norm_out = candle_nn::linear_no_bias(h, 2 * h, vb.pp("norm_out").pp("linear"))?;
-        let proj_out = candle_nn::linear_no_bias(h, cfg.in_channels, vb.pp("proj_out"))?;
+        let norm_out_weight = vb.pp("norm_out").pp("linear").get((2 * h, h), "weight")?;
+        let proj_out_weight = vb.pp("proj_out").get((cfg.in_channels, h), "weight")?;
 
         Ok(Self {
-            x_embedder,
-            context_embedder,
+            x_embedder_weight,
+            context_embedder_weight,
             time_embedder,
             pe_embedder,
-            double_mod_img,
-            double_mod_txt,
-            single_mod,
+            double_mod_img_weight,
+            double_mod_txt_weight,
+            single_mod_weight,
             double_blocks,
             single_blocks,
-            norm_out,
-            proj_out,
+            norm_out_weight,
+            proj_out_weight,
             cfg: cfg.clone(),
+            backend,
         })
     }
 
@@ -553,15 +567,15 @@ impl Flux2Transformer {
         timesteps: &Tensor,  // (b,)
     ) -> Result<Tensor> {
         // Determine weight dtype from first weight tensor
-        let w_dtype = self.x_embedder.weight().dtype();
+        let w_dtype = self.x_embedder_weight.dtype();
 
         // Cast inputs to match weight dtype for matmul compatibility
         let img = img.to_dtype(w_dtype)?;
         let txt = txt.to_dtype(w_dtype)?;
 
         // Embed inputs (F32 for precision)
-        let mut img = linear_matched(&self.x_embedder, &img)?;
-        let mut txt = linear_matched(&self.context_embedder, &txt)?;
+        let mut img = linear_matched(&*self.backend, &self.x_embedder_weight, None, &img)?;
+        let mut txt = linear_matched(&*self.backend, &self.context_embedder_weight, None, &txt)?;
 
         // Timestep conditioning (compute in F32, cast back)
         let vec = timestep_embedding(&timesteps.to_dtype(DType::F32)?, 256, DType::F32)?
@@ -577,10 +591,10 @@ impl Flux2Transformer {
         let pe_sin = Tensor::cat(&[&txt_sin, &img_sin], 0)?.to_dtype(w_dtype)?;
 
         // Compute shared modulations (F32 for precision)
-        let vec_silu = vec.silu()?;
-        let img_mod_all = linear_matched(&self.double_mod_img, &vec_silu)?;
-        let txt_mod_all = linear_matched(&self.double_mod_txt, &vec_silu)?;
-        let single_mod_all = linear_matched(&self.single_mod, &vec_silu)?;
+        let vec_silu = self.backend.silu(&vec)?;
+        let img_mod_all = linear_matched(&*self.backend, &self.double_mod_img_weight, None, &vec_silu)?;
+        let txt_mod_all = linear_matched(&*self.backend, &self.double_mod_txt_weight, None, &vec_silu)?;
+        let single_mod_all = linear_matched(&*self.backend, &self.single_mod_weight, None, &vec_silu)?;
 
         // Split modulations into chunks
         let img_mods = img_mod_all.chunk(6, D::Minus1)?;
@@ -605,9 +619,9 @@ impl Flux2Transformer {
         let img = merged.narrow(1, txt_seq, merged.dim(1)? - txt_seq)?;
 
         // Final layer: adaptive norm + projection (F32 for precision)
-        let final_mod = linear_matched(&self.norm_out, &vec.silu()?)?;
+        let final_mod = linear_matched(&*self.backend, &self.norm_out_weight, None, &self.backend.silu(&vec)?)?;
         let final_chunks = final_mod.chunk(2, D::Minus1)?;
         let img = modulate(&img, &final_chunks[0], &final_chunks[1])?;
-        linear_matched(&self.proj_out, &img)
+        linear_matched(&*self.backend, &self.proj_out_weight, None, &img)
     }
 }

@@ -6,10 +6,9 @@
 
 use anyhow::Result;
 use candle_core::Tensor;
-use candle_nn::{Module, RmsNorm};
 
 use crate::cake::{Context, Forwarder};
-use crate::models::common::{load_rms_norm, CausalSelfAttention};
+use crate::models::common::CausalSelfAttention;
 use async_trait::async_trait;
 
 use super::moe::SparseMoeMlp;
@@ -18,9 +17,10 @@ use super::moe::SparseMoeMlp;
 #[derive(Debug)]
 pub struct Qwen3MoeBlock {
     name: String,
-    input_layernorm: RmsNorm,
+    input_layernorm_weight: Tensor,
+    post_attention_layernorm_weight: Tensor,
+    rms_eps: f32,
     attn: CausalSelfAttention,
-    post_attention_layernorm: RmsNorm,
     moe: SparseMoeMlp,
 }
 
@@ -54,27 +54,27 @@ impl Forwarder for Qwen3MoeBlock {
                     ctx.dtype,
                 ));
             // Load router gate from VarBuilder (it's small, stays in RAM)
-            let gate_w = vb.pp("mlp").pp("gate").get((cfg.num_experts, cfg.hidden_size), "weight")?;
-            let gate = candle_nn::Linear::new(gate_w, None);
+            let gate_weight = vb.pp("mlp").pp("gate").get((cfg.num_experts, cfg.hidden_size), "weight")?;
             SparseMoeMlp::with_provider(
-                gate, provider, cfg.num_experts, cfg.num_experts_per_tok,
+                gate_weight, provider, cfg.num_experts, cfg.num_experts_per_tok,
                 cfg.norm_topk_prob, ctx.backend.clone(),
             )
         } else {
             SparseMoeMlp::load(vb.pp("mlp"), cfg, ctx.backend.clone())?
         };
 
-        let eps = cfg.rms_norm_eps;
         let h = cfg.hidden_size;
-        let input_layernorm = load_rms_norm(h, eps, false, vb.pp("input_layernorm"))?;
-        let post_attention_layernorm =
-            load_rms_norm(h, eps, false, vb.pp("post_attention_layernorm"))?;
+        let input_layernorm_weight = vb.pp("input_layernorm").get(h, "weight")?;
+        let post_attention_layernorm_weight =
+            vb.pp("post_attention_layernorm").get(h, "weight")?;
+        let rms_eps = cfg.rms_norm_eps as f32;
 
         Ok(Box::new(Self {
             name,
-            input_layernorm,
+            input_layernorm_weight,
             attn,
-            post_attention_layernorm,
+            post_attention_layernorm_weight,
+            rms_eps,
             moe,
         }))
     }
@@ -88,9 +88,7 @@ impl Forwarder for Qwen3MoeBlock {
     ) -> Result<Tensor> {
         // Attention sublayer (pre-norm, standard residual).
         let residual = x;
-        let x = self
-            .input_layernorm
-            .forward(x)
+        let x = ctx.backend.rms_norm(x, &self.input_layernorm_weight, self.rms_eps)
             .map_err(|e| anyhow!("input_layernorm: {e}"))?;
         let x = self
             .attn
@@ -100,9 +98,7 @@ impl Forwarder for Qwen3MoeBlock {
 
         // MoE sublayer (pre-norm, standard residual).
         let residual = &x;
-        let x = self
-            .post_attention_layernorm
-            .forward(&x)
+        let x = ctx.backend.rms_norm(&x, &self.post_attention_layernorm_weight, self.rms_eps)
             .map_err(|e| anyhow!("post_attention_layernorm: {e}"))?;
         let x = self.moe.forward(&x).map_err(|e| anyhow!("moe: {e}"))?;
         let x = (x + residual).map_err(|e| anyhow!("moe residual: {e}"))?;

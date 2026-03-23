@@ -1,7 +1,9 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use candle_core::Tensor;
-use candle_nn::{Module, RmsNorm};
 
+use crate::backends::ComputeBackend;
 use crate::cake::{Context, Forwarder};
 use async_trait::async_trait;
 
@@ -11,10 +13,12 @@ use super::{CausalSelfAttention, MLP};
 #[derive(Debug, Clone)]
 pub struct Transformer {
     name: String,
-    rms_1: RmsNorm,
+    rms_1_weight: Tensor,
+    rms_2_weight: Tensor,
+    rms_eps: f32,
     attn: CausalSelfAttention,
-    rms_2: RmsNorm,
     mlp: MLP,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl Transformer {
@@ -23,18 +27,21 @@ impl Transformer {
     pub fn load_for_vibevoice(
         vb: candle_nn::VarBuilder,
         cfg: &super::Config,
-        backend: std::sync::Arc<dyn crate::backends::ComputeBackend>,
+        backend: Arc<dyn ComputeBackend>,
     ) -> candle_core::Result<Self> {
         let attn = super::CausalSelfAttention::load(vb.pp("self_attn"), cfg, backend.clone())?;
-        let mlp = super::MLP::load(vb.pp("mlp"), cfg, backend)?;
-        let rms_1 = candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
-        let rms_2 = candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("post_attention_layernorm"))?;
+        let mlp = super::MLP::load(vb.pp("mlp"), cfg, backend.clone())?;
+        let rms_1_weight = vb.pp("input_layernorm").get(cfg.hidden_size, "weight")?;
+        let rms_2_weight = vb.pp("post_attention_layernorm").get(cfg.hidden_size, "weight")?;
+        let rms_eps = cfg.rms_norm_eps as f32;
         Ok(Self {
             name: String::new(),
-            rms_1,
+            rms_1_weight,
+            rms_2_weight,
+            rms_eps,
             attn,
-            rms_2,
             mlp,
+            backend,
         })
     }
 
@@ -47,12 +54,14 @@ impl Transformer {
         cache: &mut super::Cache,
     ) -> anyhow::Result<Tensor> {
         let residual = x;
-        let h = self.rms_1.forward(x).map_err(|e| anyhow!("rms_1: {e}"))?;
+        let h = self.backend.rms_norm(x, &self.rms_1_weight, self.rms_eps)
+            .map_err(|e| anyhow!("rms_1: {e}"))?;
         let h = (self.attn.forward(&h, index_pos, block_idx, cache)
             .map_err(|e| anyhow!("attn: {e}"))? + residual)
             .map_err(|e| anyhow!("residual: {e}"))?;
         let residual = &h;
-        let h = self.rms_2.forward(&h).map_err(|e| anyhow!("rms_2: {e}"))?;
+        let h = self.backend.rms_norm(&h, &self.rms_2_weight, self.rms_eps)
+            .map_err(|e| anyhow!("rms_2: {e}"))?;
         let h = (self.mlp.forward(&h).map_err(|e| anyhow!("mlp: {e}"))? + residual)
             .map_err(|e| anyhow!("mlp_residual: {e}"))?;
         Ok(h)
@@ -77,19 +86,17 @@ impl Forwarder for Transformer {
 
         let attn = super::CausalSelfAttention::load(vb.pp("self_attn"), cfg, ctx.backend.clone())?;
         let mlp = super::MLP::load(vb.pp("mlp"), cfg, ctx.backend.clone())?;
-        let rms_1 =
-            candle_nn::rms_norm(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?;
-        let rms_2 = candle_nn::rms_norm(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            vb.pp("post_attention_layernorm"),
-        )?;
+        let rms_1_weight = vb.pp("input_layernorm").get(cfg.hidden_size, "weight")?;
+        let rms_2_weight = vb.pp("post_attention_layernorm").get(cfg.hidden_size, "weight")?;
+        let rms_eps = cfg.rms_norm_eps as f32;
         Ok(Box::new(Self {
             name,
-            rms_1,
+            rms_1_weight,
+            rms_2_weight,
+            rms_eps,
             attn,
-            rms_2,
             mlp,
+            backend: ctx.backend.clone(),
         }))
     }
 
@@ -102,7 +109,8 @@ impl Forwarder for Transformer {
     ) -> Result<Tensor> {
         let residual = x;
 
-        let x = self.rms_1.forward(x).map_err(|e| anyhow!("rms_1: {e}"))?;
+        let x = ctx.backend.rms_norm(x, &self.rms_1_weight, self.rms_eps)
+            .map_err(|e| anyhow!("rms_1: {e}"))?;
         let x = (self
             .attn
             .forward(
@@ -118,7 +126,8 @@ impl Forwarder for Transformer {
         // >25 command accumulation (no-op on CPU/CUDA)
         let _ = ctx.backend.synchronize();
         let residual = &x;
-        let x = self.rms_2.forward(&x).map_err(|e| anyhow!("rms_2: {e}"))?;
+        let x = ctx.backend.rms_norm(&x, &self.rms_2_weight, self.rms_eps)
+            .map_err(|e| anyhow!("rms_2: {e}"))?;
         let x = (self.mlp.forward(&x).map_err(|e| anyhow!("mlp: {e}"))? + residual)
             .map_err(|e| anyhow!("mlp residual: {e}"))?;
 

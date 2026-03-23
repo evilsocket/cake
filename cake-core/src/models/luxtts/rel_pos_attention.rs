@@ -4,9 +4,13 @@
 //! - `RelPositionMultiheadAttentionWeights`: computes attention weight matrices
 //! - `SelfAttention`: applies those weights to value projections
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use candle_core::Tensor;
-use candle_nn::{Linear, Module, VarBuilder};
+use candle_nn::VarBuilder;
+
+use crate::backends::ComputeBackend;
 
 /// Computes attention weight matrices from input + positional embeddings.
 ///
@@ -16,11 +20,13 @@ use candle_nn::{Linear, Module, VarBuilder};
 /// - `linear_pos` [num_heads*pos_head_dim, pos_dim] = [16, 48]
 #[derive(Debug, Clone)]
 pub struct RelPositionMultiheadAttentionWeights {
-    in_proj: Linear,
+    in_proj_weight: Tensor,
+    in_proj_bias: Option<Tensor>,
     linear_pos: Tensor, // no bias
     num_heads: usize,
     query_head_dim: usize,
     pos_head_dim: usize,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl RelPositionMultiheadAttentionWeights {
@@ -31,17 +37,21 @@ impl RelPositionMultiheadAttentionWeights {
         pos_head_dim: usize,
         pos_dim: usize,
         vb: VarBuilder,
+        backend: Arc<dyn ComputeBackend>,
     ) -> Result<Self> {
         // in_proj output size = num_heads * (query_head_dim + key_head_dim + pos_head_dim)
         // where key_head_dim == query_head_dim
         let proj_dim = num_heads * (query_head_dim + query_head_dim + pos_head_dim);
-        let in_proj = candle_nn::linear(dim, proj_dim, vb.pp("in_proj"))?;
+        let in_proj_weight = vb.pp("in_proj").get((proj_dim, dim), "weight")?;
+        let in_proj_bias = Some(vb.pp("in_proj").get(proj_dim, "bias")?);
         let linear_pos = vb.get((num_heads * pos_head_dim, pos_dim), "linear_pos.weight")?;
 
         Ok(Self {
-            in_proj,
+            in_proj_weight,
+            in_proj_bias,
             linear_pos,
             num_heads,
+            backend,
             query_head_dim,
             pos_head_dim,
         })
@@ -57,7 +67,7 @@ impl RelPositionMultiheadAttentionWeights {
         let phd = self.pos_head_dim;
 
         // Project to Q, K, pos
-        let projected = self.in_proj.forward(x)?; // [batch, seq, proj_dim]
+        let projected = self.backend.linear_forward(x, &self.in_proj_weight, self.in_proj_bias.as_ref())?; // [batch, seq, proj_dim]
         // Split: Q [nh*qhd], K [nh*qhd], pos [nh*phd]
         let q = projected.narrow(candle_core::D::Minus1, 0, nh * qhd)?;
         let k = projected.narrow(candle_core::D::Minus1, nh * qhd, nh * qhd)?;
@@ -96,7 +106,7 @@ impl RelPositionMultiheadAttentionWeights {
 
         // Combined attention weights
         let attn = (content_attn + pos_attn)?;
-        let attn = candle_nn::ops::softmax_last_dim(&attn)?;
+        let attn = self.backend.softmax(&attn, attn.rank() - 1)?;
         Ok(attn)
     }
 
@@ -132,10 +142,13 @@ impl RelPositionMultiheadAttentionWeights {
 /// - `out_proj` [dim, num_heads * value_head_dim] = [512, 48]
 #[derive(Debug, Clone)]
 pub struct SelfAttention {
-    in_proj: Linear,
-    out_proj: Linear,
+    in_proj_weight: Tensor,
+    in_proj_bias: Option<Tensor>,
+    out_proj_weight: Tensor,
+    out_proj_bias: Option<Tensor>,
     num_heads: usize,
     value_head_dim: usize,
+    backend: Arc<dyn ComputeBackend>,
 }
 
 impl SelfAttention {
@@ -144,15 +157,21 @@ impl SelfAttention {
         num_heads: usize,
         value_head_dim: usize,
         vb: VarBuilder,
+        backend: Arc<dyn ComputeBackend>,
     ) -> Result<Self> {
         let v_dim = num_heads * value_head_dim;
-        let in_proj = candle_nn::linear(dim, v_dim, vb.pp("in_proj"))?;
-        let out_proj = candle_nn::linear(v_dim, dim, vb.pp("out_proj"))?;
+        let in_proj_weight = vb.pp("in_proj").get((v_dim, dim), "weight")?;
+        let in_proj_bias = Some(vb.pp("in_proj").get(v_dim, "bias")?);
+        let out_proj_weight = vb.pp("out_proj").get((dim, v_dim), "weight")?;
+        let out_proj_bias = Some(vb.pp("out_proj").get(dim, "bias")?);
         Ok(Self {
-            in_proj,
-            out_proj,
+            in_proj_weight,
+            in_proj_bias,
+            out_proj_weight,
+            out_proj_bias,
             num_heads,
             value_head_dim,
+            backend,
         })
     }
 
@@ -163,7 +182,7 @@ impl SelfAttention {
         let (batch, seq_len, _) = x.dims3()?;
 
         // Value projection
-        let v = self.in_proj.forward(x)?; // [batch, seq, nh*vhd]
+        let v = self.backend.linear_forward(x, &self.in_proj_weight, self.in_proj_bias.as_ref())?; // [batch, seq, nh*vhd]
         let v = v
             .reshape((batch, seq_len, self.num_heads, self.value_head_dim))?
             .transpose(1, 2)?; // [batch, nh, seq, vhd]
@@ -174,7 +193,7 @@ impl SelfAttention {
             .transpose(1, 2)?
             .reshape((batch, seq_len, self.num_heads * self.value_head_dim))?;
 
-        let out = self.out_proj.forward(&out)?;
+        let out = self.backend.linear_forward(&out, &self.out_proj_weight, self.out_proj_bias.as_ref())?;
         Ok(out)
     }
 }

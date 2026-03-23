@@ -6,34 +6,40 @@
 //! - `text_encoder.layers.{i}.{component}` -- Zipformer layers
 //! - `text_encoder.out_proj` [feat_dim, dim]
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
-use candle_nn::{Embedding, Linear, Module, VarBuilder};
+use candle_nn::VarBuilder;
 
 use super::config::LuxTTSConfig;
 use super::zipformer_layer::ZipformerEncoderLayer;
 
 #[derive(Debug, Clone)]
 pub struct TextEncoder {
-    embedding: Embedding,
-    in_proj: Linear,
+    embed_weight: Tensor,
+    in_proj_weight: Tensor,
+    in_proj_bias: Option<Tensor>,
     layers: Vec<ZipformerEncoderLayer>,
-    out_proj: Linear,
+    out_proj_weight: Tensor,
+    out_proj_bias: Option<Tensor>,
     #[allow(dead_code)]
     dim: usize,
     pos_dim: usize,
+    backend: Arc<dyn crate::backends::ComputeBackend>,
 }
 
 impl TextEncoder {
-    pub fn load(config: &LuxTTSConfig, embed_vb: VarBuilder, enc_vb: VarBuilder) -> Result<Self> {
+    pub fn load(config: &LuxTTSConfig, embed_vb: VarBuilder, enc_vb: VarBuilder, backend: Arc<dyn crate::backends::ComputeBackend>) -> Result<Self> {
         let m = &config.model;
         let dim = m.text_encoder_dim;
 
         // embed.weight is at top level
-        let embedding = candle_nn::embedding(m.vocab_size, dim, embed_vb.pp("embed"))?;
+        let embed_weight = embed_vb.pp("embed").get((m.vocab_size, dim), "weight")?;
 
         // text_encoder.in_proj
-        let in_proj = candle_nn::linear(dim, dim, enc_vb.pp("in_proj"))?;
+        let in_proj_weight = enc_vb.pp("in_proj").get((dim, dim), "weight")?;
+        let in_proj_bias = Some(enc_vb.pp("in_proj").get(dim, "bias")?);
 
         // text_encoder.layers
         let mut layers = Vec::new();
@@ -48,27 +54,32 @@ impl TextEncoder {
                 m.pos_head_dim,
                 m.text_encoder_cnn_module_kernel,
                 enc_vb.pp(format!("layers.{i}")),
+                backend.clone(),
             )?;
             layers.push(layer);
         }
 
         // text_encoder.out_proj
-        let out_proj = candle_nn::linear(dim, m.feat_dim, enc_vb.pp("out_proj"))?;
+        let out_proj_weight = enc_vb.pp("out_proj").get((m.feat_dim, dim), "weight")?;
+        let out_proj_bias = Some(enc_vb.pp("out_proj").get(m.feat_dim, "bias")?);
 
         Ok(Self {
-            embedding,
-            in_proj,
+            embed_weight,
+            in_proj_weight,
+            in_proj_bias,
             layers,
-            out_proj,
+            out_proj_weight,
+            out_proj_bias,
             dim,
             pos_dim: m.pos_dim,
+            backend,
         })
     }
 
     /// Forward pass: token_ids [batch, seq] -> [batch, seq, feat_dim].
     pub fn forward(&self, token_ids: &Tensor) -> Result<Tensor> {
-        let x = self.embedding.forward(token_ids)?;
-        let x = self.in_proj.forward(&x)?;
+        let x = self.backend.embedding(token_ids, &self.embed_weight)?;
+        let x = self.backend.linear_forward(&x, &self.in_proj_weight, self.in_proj_bias.as_ref())?;
 
         let seq_len = x.dim(1)?;
         let pos_emb = self.make_pos_emb(seq_len, x.device(), x.dtype())?;
@@ -78,7 +89,7 @@ impl TextEncoder {
             x = layer.forward(&x, &pos_emb, None)?;
         }
 
-        let x = self.out_proj.forward(&x)?;
+        let x = self.backend.linear_forward(&x, &self.out_proj_weight, self.out_proj_bias.as_ref())?;
         Ok(x)
     }
 

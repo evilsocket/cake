@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use candle_core::{DType, Result, Tensor, D};
-use candle_nn::{linear_no_bias as linear, ops::softmax_last_dim, Linear, Module, VarBuilder};
+use candle_nn::VarBuilder;
 
 use crate::backends::ComputeBackend;
 use crate::models::common::expert_provider::{IndividualResidentProvider, SharedExpertProvider};
@@ -27,18 +27,18 @@ use crate::models::common::Config;
 /// Sparse MoE FFN block with shared expert (Qwen3.5 MoE).
 #[derive(Debug, Clone)]
 pub struct Qwen3_5MoeSparseMlp {
-    /// Router: (num_experts, hidden_size)
-    gate: Linear,
+    /// Router weight: (num_experts, hidden_size)
+    gate_weight: Tensor,
     /// Per-expert weights accessed via provider trait
     expert_provider: SharedExpertProvider,
-    /// Shared expert gate projection (hidden_size → shared_intermediate_size)
-    shared_gate_proj: Linear,
-    /// Shared expert up projection (hidden_size → shared_intermediate_size)
-    shared_up_proj: Linear,
-    /// Shared expert down projection (shared_intermediate_size → hidden_size)
-    shared_down_proj: Linear,
-    /// Scalar sigmoid gate for the shared expert output: (1, hidden_size)
-    shared_expert_gate: Linear,
+    /// Shared expert gate projection weight (hidden_size -> shared_intermediate_size)
+    shared_gate_proj_weight: Tensor,
+    /// Shared expert up projection weight (hidden_size -> shared_intermediate_size)
+    shared_up_proj_weight: Tensor,
+    /// Shared expert down projection weight (shared_intermediate_size -> hidden_size)
+    shared_down_proj_weight: Tensor,
+    /// Scalar sigmoid gate weight for the shared expert output: (1, hidden_size)
+    shared_expert_gate_weight: Tensor,
 
     num_experts: usize,
     num_experts_per_tok: usize,
@@ -53,47 +53,42 @@ impl Qwen3_5MoeSparseMlp {
         let n = cfg.num_experts;
 
         // Router
-        let gate_w = vb.pp("gate").get((n, h), "weight")?;
-        let gate = Linear::new(gate_w, None);
+        let gate_weight = vb.pp("gate").get((n, h), "weight")?;
 
         // Per-expert projections — GPTQ backend transparently dequantizes
         // each *.weight request by looking for *.qweight + *.scales + *.qzeros.
-        let mut experts_gate = Vec::with_capacity(n);
-        let mut experts_up = Vec::with_capacity(n);
-        let mut experts_down = Vec::with_capacity(n);
+        let mut expert_gate_weights = Vec::with_capacity(n);
+        let mut expert_up_weights = Vec::with_capacity(n);
+        let mut expert_down_weights = Vec::with_capacity(n);
         let experts_vb = vb.pp("experts");
         for j in 0..n {
             let evb = experts_vb.pp(j.to_string());
-            experts_gate.push(linear(h, i, evb.pp("gate_proj"))?);
-            experts_up.push(linear(h, i, evb.pp("up_proj"))?);
-            experts_down.push(linear(i, h, evb.pp("down_proj"))?);
+            expert_gate_weights.push(evb.pp("gate_proj").get((i, h), "weight")?);
+            expert_up_weights.push(evb.pp("up_proj").get((i, h), "weight")?);
+            expert_down_weights.push(evb.pp("down_proj").get((h, i), "weight")?);
         }
 
         // Wrap loaded weights in IndividualResidentProvider
-        let gate_weights: Vec<Tensor> = experts_gate.iter().map(|l| l.weight().clone()).collect();
-        let up_weights: Vec<Tensor> = experts_up.iter().map(|l| l.weight().clone()).collect();
-        let down_weights: Vec<Tensor> = experts_down.iter().map(|l| l.weight().clone()).collect();
         let expert_provider: SharedExpertProvider = Arc::new(
-            IndividualResidentProvider::new(gate_weights, up_weights, down_weights),
+            IndividualResidentProvider::new(expert_gate_weights, expert_up_weights, expert_down_weights),
         );
 
         // Shared expert (standard SwiGLU MLP, not quantized)
         let se = vb.pp("shared_expert");
-        let shared_gate_proj = linear(h, si, se.pp("gate_proj"))?;
-        let shared_up_proj = linear(h, si, se.pp("up_proj"))?;
-        let shared_down_proj = linear(si, h, se.pp("down_proj"))?;
+        let shared_gate_proj_weight = se.pp("gate_proj").get((si, h), "weight")?;
+        let shared_up_proj_weight = se.pp("up_proj").get((si, h), "weight")?;
+        let shared_down_proj_weight = se.pp("down_proj").get((h, si), "weight")?;
 
         // Scalar sigmoid gate for the shared expert contribution
-        let shared_expert_gate_w = vb.pp("shared_expert_gate").get((1, h), "weight")?;
-        let shared_expert_gate = Linear::new(shared_expert_gate_w, None);
+        let shared_expert_gate_weight = vb.pp("shared_expert_gate").get((1, h), "weight")?;
 
         Ok(Self {
-            gate,
+            gate_weight,
             expert_provider,
-            shared_gate_proj,
-            shared_up_proj,
-            shared_down_proj,
-            shared_expert_gate,
+            shared_gate_proj_weight,
+            shared_up_proj_weight,
+            shared_down_proj_weight,
+            shared_expert_gate_weight,
             num_experts: n,
             num_experts_per_tok: cfg.num_experts_per_tok,
             backend,
@@ -104,23 +99,23 @@ impl Qwen3_5MoeSparseMlp {
     /// Shared expert + router are loaded from VarBuilder (stay in RAM).
     #[allow(clippy::too_many_arguments)]
     pub fn with_provider(
-        gate: Linear,
+        gate_weight: Tensor,
         expert_provider: SharedExpertProvider,
-        shared_gate_proj: Linear,
-        shared_up_proj: Linear,
-        shared_down_proj: Linear,
-        shared_expert_gate: Linear,
+        shared_gate_proj_weight: Tensor,
+        shared_up_proj_weight: Tensor,
+        shared_down_proj_weight: Tensor,
+        shared_expert_gate_weight: Tensor,
         num_experts: usize,
         num_experts_per_tok: usize,
         backend: Arc<dyn ComputeBackend>,
     ) -> Self {
         Self {
-            gate,
+            gate_weight,
             expert_provider,
-            shared_gate_proj,
-            shared_up_proj,
-            shared_down_proj,
-            shared_expert_gate,
+            shared_gate_proj_weight,
+            shared_up_proj_weight,
+            shared_down_proj_weight,
+            shared_expert_gate_weight,
             num_experts,
             num_experts_per_tok,
             backend,
@@ -137,29 +132,29 @@ impl Qwen3_5MoeSparseMlp {
         // --- Shared expert (always computed) ---
         let shared_out = {
             let gate = self
-                .shared_gate_proj
-                .forward(&x_flat)
+                .backend
+                .linear_forward(&x_flat, &self.shared_gate_proj_weight, None)
                 .map_err(|e| anyhow!("shared gate_proj: {e}"))?;
             let up = self
-                .shared_up_proj
-                .forward(&x_flat)
+                .backend
+                .linear_forward(&x_flat, &self.shared_up_proj_weight, None)
                 .map_err(|e| anyhow!("shared up_proj: {e}"))?;
             let hidden = self.backend.silu_mul(
                 &gate,
                 &up,
             )
             .map_err(|e| anyhow!("shared silu_mul: {e}"))?;
-            self.shared_down_proj
-                .forward(&hidden)
+            self.backend
+                .linear_forward(&hidden, &self.shared_down_proj_weight, None)
                 .map_err(|e| anyhow!("shared down_proj: {e}"))?
         };
 
         // sigmoid gate on shared expert output: (n_tok, 1) broadcast to (n_tok, h)
         let gate_scalar = self
-            .shared_expert_gate
-            .forward(&x_flat)
+            .backend
+            .linear_forward(&x_flat, &self.shared_expert_gate_weight, None)
             .map_err(|e| anyhow!("shared_expert_gate: {e}"))?; // (n_tok, 1)
-        let gate_scalar = candle_nn::ops::sigmoid(&gate_scalar)
+        let gate_scalar = self.backend.sigmoid(&gate_scalar)
             .map_err(|e| anyhow!("shared gate sigmoid: {e}"))?;
         let shared_out = shared_out
             .broadcast_mul(&gate_scalar)
@@ -167,18 +162,15 @@ impl Qwen3_5MoeSparseMlp {
 
         // --- Router ---
         let router_logits = self
-            .gate
-            .forward(&x_flat)
+            .backend
+            .linear_forward(&x_flat, &self.gate_weight, None)
             .map_err(|e| anyhow!("router: {e}"))?;
-        let router_probs = softmax_last_dim(&router_logits)
+        let last_dim = router_logits.rank() - 1;
+        let router_probs = self.backend.softmax(&router_logits, last_dim)
             .map_err(|e| anyhow!("router softmax: {e}"))?;
 
-        let (_, sorted_idx) = router_probs
-            .sort_last_dim(false)
-            .map_err(|e| anyhow!("router sort: {e}"))?;
-        let top_k_idx = sorted_idx
-            .narrow(D::Minus1, 0, self.num_experts_per_tok)
-            .map_err(|e| anyhow!("router topk narrow: {e}"))?; // (n_tok, k)
+        let (_, top_k_idx) = self.backend.topk(&router_probs, self.num_experts_per_tok)
+            .map_err(|e| anyhow!("router topk: {e}"))?; // (n_tok, k)
 
         let top_k_w = router_probs
             .contiguous()

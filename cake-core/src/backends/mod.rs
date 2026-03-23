@@ -7,7 +7,7 @@
 //! Models call `ctx.backend().method()` instead of backend-specific code paths,
 //! making it trivial to add new GPU backends.
 
-use candle_core::{Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor};
 use std::sync::Arc;
 
 mod cpu;
@@ -60,6 +60,21 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
         scale: f32,
         causal: bool,
     ) -> Result<Tensor>;
+
+    /// Fused scaled dot-product attention (Metal SDPA, Flash-Attn style).
+    /// Returns `softmax(Q @ K^T * scale + mask) @ V`.
+    /// Default: delegates to `candle_nn::ops::sdpa`.
+    fn sdpa(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        mask: Option<&Tensor>,
+        causal: bool,
+        scale: f32,
+    ) -> Result<Tensor> {
+        candle_nn::ops::sdpa(q, k, v, mask, causal, scale, 1.0)
+    }
 
     // ── Fused activations ────────────────────────────────────────────
 
@@ -177,6 +192,287 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
     /// Default: returns the weight as-is.
     fn preprocess_linear_weight(&self, weight: &Tensor) -> Result<Tensor> {
         Ok(weight.clone())
+    }
+
+    // ── Inference primitives ──────────────────────────────────────────
+
+    /// Linear layer forward: `x @ weight^T + bias`.
+    ///
+    /// Matches candle_nn::Linear::forward() semantics exactly:
+    /// - For contiguous 3D/4D inputs: reshape to 2D → matmul → reshape back
+    ///   (avoids slow broadcast_matmul on CUDA/CPU)
+    /// - For non-contiguous 3D+: uses broadcast_left on weight
+    /// - No dtype conversion (caller is responsible)
+    fn linear_forward(
+        &self,
+        x: &Tensor,
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+    ) -> Result<Tensor> {
+        let out = match x.dims() {
+            [b1, b2, m, k] => {
+                if x.is_contiguous() {
+                    let w = weight.t()?;
+                    x.reshape((b1 * b2 * m, *k))?
+                        .matmul(&w)?
+                        .reshape((*b1, *b2, *m, ()))?
+                } else {
+                    let w = weight.broadcast_left((*b1, *b2))?.t()?;
+                    x.matmul(&w)?
+                }
+            }
+            [bsize, m, k] => {
+                if x.is_contiguous() {
+                    let w = weight.t()?;
+                    x.reshape((bsize * m, *k))?
+                        .matmul(&w)?
+                        .reshape((*bsize, *m, ()))?
+                } else {
+                    let w = weight.broadcast_left(*bsize)?.t()?;
+                    x.matmul(&w)?
+                }
+            }
+            _ => x.matmul(&weight.t()?)?,
+        };
+        match bias {
+            Some(b) => out.broadcast_add(b),
+            None => Ok(out),
+        }
+    }
+
+    /// RMS normalization: `x * weight / sqrt(mean(x^2) + eps)`.
+    fn rms_norm(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+        candle_nn::ops::rms_norm(x, weight, eps)
+    }
+
+    /// Layer normalization: `(x - mean) / sqrt(var + eps) * weight + bias`.
+    /// Matches candle_nn::LayerNorm::forward() — uses fused kernel when contiguous + has bias,
+    /// otherwise falls back to manual F32 computation with dtype promotion for F16/BF16.
+    fn layer_norm(
+        &self,
+        x: &Tensor,
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+        eps: f32,
+    ) -> Result<Tensor> {
+        use candle_core::{DType, D};
+        // Fast path: contiguous input with bias → fused kernel
+        if x.is_contiguous() {
+            if let Some(b) = bias {
+                return candle_nn::ops::layer_norm(x, weight, b, eps);
+            }
+        }
+        // Slow path: manual computation with F32 promotion
+        let x_dtype = x.dtype();
+        let internal_dtype = match x_dtype {
+            DType::F16 | DType::BF16 => DType::F32,
+            d => d,
+        };
+        let hidden_size = x.dim(D::Minus1)?;
+        let x = x.to_dtype(internal_dtype)?;
+        let mean_x = (x.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
+        let x = x.broadcast_sub(&mean_x)?;
+        let norm_x = (x.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
+        let x_normed = x.broadcast_div(&(norm_x + eps as f64)?.sqrt()?)?;
+        let x = x_normed.to_dtype(x_dtype)?.broadcast_mul(weight)?;
+        match bias {
+            Some(b) => x.broadcast_add(b),
+            None => Ok(x),
+        }
+    }
+
+    /// Group normalization: `(x - mean) / sqrt(var + eps) * weight + bias` per group.
+    /// Matches candle_nn::GroupNorm::forward() — F32 promotion for F16/BF16.
+    /// Input: `(batch, channels, ...)`, weight/bias: `(channels,)`.
+    fn group_norm(
+        &self,
+        x: &Tensor,
+        weight: &Tensor,
+        bias: &Tensor,
+        num_groups: usize,
+        eps: f32,
+    ) -> Result<Tensor> {
+        use candle_core::DType;
+        let x_shape = x.dims();
+        let (b_sz, n_channels) = (x_shape[0], x_shape[1]);
+        let hidden_size = x_shape[2..].iter().product::<usize>() * n_channels / num_groups;
+        let x_dtype = x.dtype();
+        let internal_dtype = match x_dtype {
+            DType::F16 | DType::BF16 => DType::F32,
+            d => d,
+        };
+        let x = x.reshape((b_sz, num_groups, hidden_size))?;
+        let x = x.to_dtype(internal_dtype)?;
+        let mean_x = (x.sum_keepdim(2)? / hidden_size as f64)?;
+        let x = x.broadcast_sub(&mean_x)?;
+        let norm_x = (x.sqr()?.sum_keepdim(2)? / hidden_size as f64)?;
+        let x_normed = x.broadcast_div(&(norm_x + eps as f64)?.sqrt()?)?;
+        let mut w_dims = vec![1; x_shape.len()];
+        w_dims[1] = n_channels;
+        let weight = weight.reshape(w_dims.clone())?;
+        let bias = bias.reshape(w_dims)?;
+        x_normed
+            .to_dtype(x_dtype)?
+            .reshape(x_shape)?
+            .broadcast_mul(&weight)?
+            .broadcast_add(&bias)
+    }
+
+    /// Softmax over the given dimension.
+    /// Uses fused CustomOp for last dimension (faster), generic path otherwise.
+    fn softmax(&self, x: &Tensor, dim: usize) -> Result<Tensor> {
+        if dim == x.rank() - 1 {
+            candle_nn::ops::softmax_last_dim(x)
+        } else {
+            let max = x.max_keepdim(dim)?;
+            let exp = x.broadcast_sub(&max)?.exp()?;
+            let sum = exp.sum_keepdim(dim)?;
+            exp.broadcast_div(&sum)
+        }
+    }
+
+    /// Rotary position embedding: apply cos/sin rotation to tensor.
+    /// `cos` and `sin` have shape `(seq_len, head_dim/2)` or compatible broadcast shape.
+    fn rope(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+        candle_nn::rotary_emb::rope(x, cos, sin)
+    }
+
+    /// SiLU (Swish) activation: `x * sigmoid(x)`.
+    fn silu(&self, x: &Tensor) -> Result<Tensor> {
+        candle_nn::ops::silu(x)
+    }
+
+    /// GELU activation function.
+    fn gelu(&self, x: &Tensor) -> Result<Tensor> {
+        x.gelu()
+    }
+
+    /// Sigmoid activation: `1 / (1 + exp(-x))`.
+    fn sigmoid(&self, x: &Tensor) -> Result<Tensor> {
+        candle_nn::ops::sigmoid(x)
+    }
+
+    /// Embedding lookup: select rows from weight matrix by token IDs.
+    fn embedding(&self, ids: &Tensor, weight: &Tensor) -> Result<Tensor> {
+        let hidden_size = weight.dim(1)?;
+        let storage = ids.storage_and_layout();
+        let ids_shape = storage.1.shape();
+        let flat_ids = ids.reshape(ids_shape.elem_count())?;
+        let selected = weight.index_select(&flat_ids, 0)?;
+        let mut out_shape = ids_shape.dims().to_vec();
+        out_shape.push(hidden_size);
+        selected.reshape(out_shape.as_slice())
+    }
+
+    /// Create a causal attention mask. Returns a U8 tensor of shape `(seq_len, kv_len)`
+    /// where 1 = masked (future position), 0 = attend.
+    /// Callers use `masked_fill` or `where_cond` to apply the mask.
+    fn causal_mask(
+        &self,
+        seq_len: usize,
+        kv_len: usize,
+        device: &Device,
+    ) -> Result<Tensor> {
+        if seq_len == 1 {
+            return Tensor::zeros((1, kv_len), DType::U8, device);
+        }
+        // Build lower-triangular mask: j > i means future position (masked)
+        let mask: Vec<u8> = (0..seq_len)
+            .flat_map(|i| (0..seq_len).map(move |j| u8::from(j > i)))
+            .collect();
+        let mask = Tensor::from_slice(&mask, (seq_len, seq_len), device)?;
+        if kv_len > seq_len {
+            // Prepend zeros: all positions attend to cached KV prefix
+            let pad = Tensor::zeros((seq_len, kv_len - seq_len), DType::U8, device)?;
+            Tensor::cat(&[&pad, &mask], 1)
+        } else {
+            Ok(mask)
+        }
+    }
+
+    /// Top-K selection: returns `(values, indices)` for the largest K elements
+    /// along the last dimension. More efficient than full sort for large N.
+    fn topk(&self, x: &Tensor, k: usize) -> Result<(Tensor, Tensor)> {
+        // Default: full sort then narrow (O(N log N))
+        let last_dim = x.rank() - 1;
+        let (sorted, indices) = x.sort_last_dim(false)?;
+        let top_vals = sorted.narrow(last_dim, 0, k)?;
+        let top_idx = indices.narrow(last_dim, 0, k)?;
+        Ok((top_vals, top_idx))
+    }
+
+    // ── Convolutions ──────────────────────────────────────────────────
+
+    /// 1D convolution: `conv1d(x, weight) + bias`.
+    /// Matches candle_nn::Conv1d::forward() semantics.
+    /// Input: `(batch, in_channels, length)`, weight: `(out_channels, in_channels/groups, kernel_size)`.
+    #[allow(clippy::too_many_arguments)]
+    fn conv1d(
+        &self,
+        x: &Tensor,
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+        padding: usize,
+        stride: usize,
+        dilation: usize,
+        groups: usize,
+    ) -> Result<Tensor> {
+        let out = x.conv1d(weight, padding, stride, dilation, groups)?;
+        match bias {
+            Some(b) => {
+                let b = b.reshape((1, b.dim(0)?, 1))?;
+                out.broadcast_add(&b)
+            }
+            None => Ok(out),
+        }
+    }
+
+    /// Transposed 1D convolution: `conv_transpose1d(x, weight) + bias`.
+    /// Matches candle_nn::ConvTranspose1d::forward() semantics.
+    #[allow(clippy::too_many_arguments)]
+    fn conv_transpose1d(
+        &self,
+        x: &Tensor,
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+        padding: usize,
+        output_padding: usize,
+        stride: usize,
+        dilation: usize,
+        groups: usize,
+    ) -> Result<Tensor> {
+        let out = x.conv_transpose1d(weight, padding, output_padding, stride, dilation, groups)?;
+        match bias {
+            Some(b) => {
+                let b = b.reshape((1, b.dim(0)?, 1))?;
+                out.broadcast_add(&b)
+            }
+            None => Ok(out),
+        }
+    }
+
+    /// 2D convolution: `conv2d(x, weight) + bias`.
+    /// Matches candle_nn::Conv2d::forward() semantics.
+    /// Input: `(batch, in_channels, height, width)`, weight: `(out_channels, in_channels/groups, kH, kW)`.
+    #[allow(clippy::too_many_arguments)]
+    fn conv2d(
+        &self,
+        x: &Tensor,
+        weight: &Tensor,
+        bias: Option<&Tensor>,
+        padding: usize,
+        stride: usize,
+        dilation: usize,
+        groups: usize,
+    ) -> Result<Tensor> {
+        let out = x.conv2d(weight, padding, stride, dilation, groups)?;
+        match bias {
+            Some(b) => {
+                let b = b.reshape((1, b.dim(0)?, 1, 1))?;
+                out.broadcast_add(&b)
+            }
+            None => Ok(out),
+        }
     }
 
     // ── Device control ───────────────────────────────────────────────
