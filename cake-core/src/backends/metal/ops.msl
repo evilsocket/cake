@@ -536,21 +536,19 @@ kernel void fused_vector_attention_f16(
 
     if (d >= head_dim) return;
 
-    // Load query element for this head
-    float q_val = float(q[bh * head_dim + d]);
+    // Pre-scale query to avoid per-step multiply
+    float q_val = float(q[bh * head_dim + d]) * scale;
 
     // Online softmax: process KV positions in streaming fashion
     float max_score = -1e30f;
     float sum_exp = 0.0f;
-    float acc = 0.0f;  // weighted sum of V
+    float acc = 0.0f;
 
+    uint kv_base = bkv * kv_len * head_dim;
     for (uint t = 0; t < kv_len; t++) {
-        // Compute dot(Q, K[t]) across head_dim using SIMD reduction
-        uint k_base = bkv * kv_len * head_dim + t * head_dim;
-        float qk = q_val * float(k[k_base + d]);
-        // Reduce across head_dim threads to get the full dot product
+        uint kt = kv_base + t * head_dim;
+        float qk = q_val * float(k[kt + d]);
         float score = simd_sum(qk);
-        // For head_dim > 32, need cross-SIMD reduction
         threadgroup float partial[32];
         if (head_dim > 32) {
             if (lane == 0) partial[simd_id] = score;
@@ -563,10 +561,8 @@ kernel void fused_vector_attention_f16(
             threadgroup_barrier(mem_flags::mem_threadgroup);
             score = partial[0];
         }
-        score *= scale;
 
-        // Online softmax update
-        float v_val = float(v[bkv * kv_len * head_dim + t * head_dim + d]);
+        float v_val = float(v[kt + d]);
         if (score > max_score) {
             float correction = fast::exp(max_score - score);
             sum_exp = fma(sum_exp, correction, 1.0f);
@@ -579,7 +575,6 @@ kernel void fused_vector_attention_f16(
         }
     }
 
-    // Normalize
     output[bh * head_dim + d] = half(acc / sum_exp);
 }
 
@@ -648,15 +643,16 @@ kernel void fused_vector_attention_f32(
 
     if (d >= head_dim) return;
 
-    float q_val = q[bh * head_dim + d];
+    float q_val = q[bh * head_dim + d] * scale;
 
     float max_score = -1e30f;
     float sum_exp = 0.0f;
     float acc = 0.0f;
 
+    uint kv_base = bkv * kv_len * head_dim;
     for (uint t = 0; t < kv_len; t++) {
-        uint k_base = bkv * kv_len * head_dim + t * head_dim;
-        float qk = q_val * k[k_base + d];
+        uint kt = kv_base + t * head_dim;
+        float qk = q_val * k[kt + d];
         float score = simd_sum(qk);
         threadgroup float partial[32];
         if (head_dim > 32) {
@@ -670,9 +666,8 @@ kernel void fused_vector_attention_f32(
             threadgroup_barrier(mem_flags::mem_threadgroup);
             score = partial[0];
         }
-        score *= scale;
 
-        float v_val = v[bkv * kv_len * head_dim + t * head_dim + d];
+        float v_val = v[kt + d];
         if (score > max_score) {
             float correction = fast::exp(max_score - score);
             sum_exp = fma(sum_exp, correction, 1.0f);
