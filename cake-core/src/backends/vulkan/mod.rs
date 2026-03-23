@@ -1128,10 +1128,8 @@ impl ComputeBackend for VulkanBackend {
         let m = a_dims[a_dims.len() - 2];
         let k = a_dims[a_dims.len() - 1];
         let n = b_dims[b_dims.len() - 1];
-        if m <= 1 {
-            log::debug!("matmul CPU: M={m} K={k} N={n} (M<=1, generation)");
-            return a.matmul(b);
-        }
+        // Use GPU for all sizes including M=1 (GEMV).
+        // On UMA (Steam Deck), zero-copy buffers make GPU GEMV competitive with CPU.
         log::debug!("matmul GPU: M={m} K={k} N={n}");
         let orig_dtype = a.dtype();
         let result = self.tensor_matmul(a, b)?;
