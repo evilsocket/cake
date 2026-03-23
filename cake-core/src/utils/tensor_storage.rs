@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{bail, Result};
 use candle_core::DType;
@@ -80,8 +80,8 @@ impl InlineShape {
 /// Metadata for a single tensor within a safetensors shard file.
 #[derive(Debug, Clone)]
 struct TensorMeta {
-    /// Path to the shard file containing this tensor.
-    shard_path: PathBuf,
+    /// Index into `SafetensorsStorage::files` Vec for the shard containing this tensor.
+    shard_idx: u16,
     /// Absolute byte offset in the shard file (8 + header_len + data_offset).
     abs_offset: u64,
     /// Size in bytes.
@@ -101,10 +101,10 @@ struct TensorMeta {
 /// On NVMe SSDs, sequential `pread()` achieves near-peak bandwidth. The OS page cache
 /// provides transparent caching of frequently-accessed expert weights.
 pub struct SafetensorsStorage {
-    /// Tensor name → metadata (shard file, offset, size, dtype, shape).
+    /// Tensor name → metadata (shard index, offset, size, dtype, shape).
     index: HashMap<String, TensorMeta>,
-    /// Open file handles per shard (kept open for pread lifetime).
-    files: HashMap<PathBuf, File>,
+    /// Open file handles per shard (indexed by shard_idx in TensorMeta).
+    files: Vec<File>,
 }
 
 impl SafetensorsStorage {
@@ -198,13 +198,14 @@ impl SafetensorsStorage {
         }
 
         let mut index = HashMap::with_capacity(weight_map.len());
-        let mut files = HashMap::with_capacity(shard_tensors.len());
+        let mut files = Vec::with_capacity(shard_tensors.len());
 
         for shard_name in shard_tensors.keys() {
             let shard_path = parent.join(shard_name);
             let (header_len, header) = Self::parse_shard_header(&shard_path)?;
+            let shard_idx = files.len() as u16;
             let f = File::open(&shard_path)?;
-            files.insert(shard_path.clone(), f);
+            files.push(f);
 
             let obj = header
                 .as_object()
@@ -214,7 +215,7 @@ impl SafetensorsStorage {
                 if name == "__metadata__" {
                     continue;
                 }
-                if let Some(tm) = Self::parse_tensor_meta(name, meta, &shard_path, header_len)? {
+                if let Some(tm) = Self::parse_tensor_meta(name, meta, shard_idx, header_len)? {
                     index.insert(name.clone(), tm);
                 }
             }
@@ -233,7 +234,7 @@ impl SafetensorsStorage {
     fn from_single_file(path: &Path) -> Result<Self> {
         let (header_len, header) = Self::parse_shard_header(path)?;
         let f = File::open(path)?;
-        let path_buf = path.to_path_buf();
+        let shard_idx = 0u16;
 
         let obj = header
             .as_object()
@@ -244,13 +245,12 @@ impl SafetensorsStorage {
             if name == "__metadata__" {
                 continue;
             }
-            if let Some(tm) = Self::parse_tensor_meta(name, meta, &path_buf, header_len)? {
+            if let Some(tm) = Self::parse_tensor_meta(name, meta, shard_idx, header_len)? {
                 index.insert(name.clone(), tm);
             }
         }
 
-        let mut files = HashMap::new();
-        files.insert(path_buf, f);
+        let files = vec![f];
 
         log::info!("SafetensorsStorage: indexed {} tensors from single file", index.len());
 
@@ -279,7 +279,7 @@ impl SafetensorsStorage {
     fn parse_tensor_meta(
         name: &str,
         meta: &serde_json::Value,
-        shard_path: &Path,
+        shard_idx: u16,
         header_len: usize,
     ) -> Result<Option<TensorMeta>> {
         let offsets = match meta.get("data_offsets").and_then(|v| v.as_array()) {
@@ -325,7 +325,7 @@ impl SafetensorsStorage {
             .unwrap_or_default();
 
         Ok(Some(TensorMeta {
-            shard_path: shard_path.to_path_buf(),
+            shard_idx,
             abs_offset,
             byte_size,
             dtype,
@@ -343,8 +343,8 @@ impl TensorStorageProvider for SafetensorsStorage {
 
         let file = self
             .files
-            .get(&meta.shard_path)
-            .ok_or_else(|| anyhow::anyhow!("shard file not open: {:?}", meta.shard_path))?;
+            .get(meta.shard_idx as usize)
+            .ok_or_else(|| anyhow::anyhow!("shard index {} out of range", meta.shard_idx))?;
 
         let size = meta.byte_size as usize;
         // SAFETY: allocate without zeroing — pread will fill the entire buffer.
@@ -395,7 +395,7 @@ impl TensorStorageProvider for SafetensorsStorage {
             .collect::<Result<_>>()?;
 
         // Check if all tensors are in the same shard and contiguous
-        let same_shard = metas.windows(2).all(|w| w[0].shard_path == w[1].shard_path);
+        let same_shard = metas.windows(2).all(|w| w[0].shard_idx == w[1].shard_idx);
         let contiguous = same_shard
             && metas
                 .windows(2)
@@ -409,8 +409,8 @@ impl TensorStorageProvider for SafetensorsStorage {
 
             let file = self
                 .files
-                .get(&first.shard_path)
-                .ok_or_else(|| anyhow::anyhow!("shard file not open: {:?}", first.shard_path))?;
+                .get(first.shard_idx as usize)
+                .ok_or_else(|| anyhow::anyhow!("shard index {} out of range", first.shard_idx))?;
 
             // SAFETY: allocate without zeroing — pread fills the entire buffer.
             let mut buf = Vec::with_capacity(total_size);
@@ -487,7 +487,7 @@ mod tests {
             "data_offsets": [0, 1048576]
         });
         let result =
-            SafetensorsStorage::parse_tensor_meta("test", &meta_json, Path::new("/tmp/x.safetensors"), 200)
+            SafetensorsStorage::parse_tensor_meta("test", &meta_json, 0, 200)
                 .unwrap();
         let tm = result.unwrap();
         assert_eq!(tm.abs_offset, 8 + 200);
@@ -502,7 +502,7 @@ mod tests {
             "format": "pt"
         });
         let result =
-            SafetensorsStorage::parse_tensor_meta("__metadata__", &meta_json, Path::new("/tmp/x"), 100)
+            SafetensorsStorage::parse_tensor_meta("__metadata__", &meta_json, 0, 100)
                 .unwrap();
         // No data_offsets → None
         assert!(result.is_none());
@@ -516,7 +516,7 @@ mod tests {
                 m.insert(
                     "weight".to_string(),
                     TensorMeta {
-                        shard_path: PathBuf::from("/tmp/test"),
+                        shard_idx: 0,
                         abs_offset: 108,
                         byte_size: 1024,
                         dtype: DType::F32,
@@ -525,7 +525,7 @@ mod tests {
                 );
                 m
             },
-            files: HashMap::new(),
+            files: Vec::new(),
         };
         assert!(storage.has_tensor("weight"));
         assert!(!storage.has_tensor("missing"));
