@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn test_legacy_image_request_default_format_is_b64() {
-        let json = r#"{"image_args": {"sd-image-prompt": "test"}}"#;
+        let json = r#"{"image_args": {"prompt": "test"}}"#;
         let req: ImageRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.response_format, "b64_json");
     }

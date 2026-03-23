@@ -169,8 +169,8 @@ pub struct Args {
     /// Topology file.
     #[arg(long)]
     pub topology: Option<String>,
-    /// The initial prompt.
-    #[arg(long, default_value = "The sky is blue because ")]
+    /// The initial prompt (set from positional argument in `run` subcommand).
+    #[arg(skip = String::from("The sky is blue because "))]
     pub prompt: String,
     /// The system prompt.
     #[arg(long, default_value = "You are a helpful AI assistant.")]
@@ -372,10 +372,10 @@ fn default_img2img_strength() -> f64 {
 pub struct ImageGenerationArgs {
     /// The prompt to be used for image generation.
     #[arg(
-        long = "sd-image-prompt",
+        long = "prompt",
         default_value = "A very realistic photo of a rusty robot walking on a sandy beach"
     )]
-    #[serde(rename(deserialize = "sd-image-prompt"), default = "default_prompt")]
+    #[serde(rename(deserialize = "prompt"), default = "default_prompt")]
     image_prompt: String,
 
     #[arg(long = "sd-uncond-prompt", default_value = "")]

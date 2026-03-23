@@ -257,7 +257,7 @@ async fn test_legacy_image_no_model_loaded() {
         .uri("/api/v1/image")
         .set_json(serde_json::json!({
             "image_args": {
-                "sd-image-prompt": "test"
+                "prompt": "test"
             }
         }))
         .to_request();
@@ -355,7 +355,7 @@ async fn test_all_endpoints_404_when_no_models() {
     // Image (legacy)
     let req = test::TestRequest::post()
         .uri("/api/v1/image")
-        .set_json(serde_json::json!({"image_args": {"sd-image-prompt": "hi"}}))
+        .set_json(serde_json::json!({"image_args": {"prompt": "hi"}}))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), 404);
