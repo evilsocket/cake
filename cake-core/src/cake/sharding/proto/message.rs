@@ -220,6 +220,7 @@ impl Message {
         Self::Tensor(RawTensor::from_tensor(x))
     }
 
+
     /// Create a Message::Batch message.
     pub fn from_batch(x: &Tensor, batch: Vec<(String, usize, usize)>) -> Self {
         Self::Batch {
@@ -233,7 +234,25 @@ impl Message {
 
     /// Serializes the message to raw bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        Ok(self.write_to_vec_with_ctx(BigEndian::default())?)
+        // Pre-allocate based on expected size to avoid Vec reallocations.
+        let hint = self.serialized_size_hint();
+        let mut buf = Vec::with_capacity(hint);
+        self.write_to_stream_with_ctx(BigEndian::default(), &mut buf)?;
+        Ok(buf)
+    }
+
+    /// Estimate serialized size to pre-allocate output buffers.
+    fn serialized_size_hint(&self) -> usize {
+        match self {
+            // Tensor messages: enum tag + dtype + shape overhead + data length
+            Self::Tensor(raw) => 32 + raw.data.len(),
+            Self::SingleOp { x, layer_name, .. } => 64 + layer_name.len() + x.data.len(),
+            Self::Batch { x, batch } => {
+                64 + x.data.len() + batch.len() * 40
+            }
+            // Small messages: speedy overhead is minimal
+            _ => 128,
+        }
     }
 
     /// Serializes the message into a reusable buffer, avoiding allocation.
