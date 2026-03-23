@@ -117,9 +117,10 @@ pub struct VulkanBackend {
     // Memory
     allocator: Mutex<Option<gpu_allocator::vulkan::Allocator>>,
     uma_memory_type: Option<u32>,
-    // Pipelines: entry_point -> (pipeline, pipeline_layout, descriptor_set_layout, num_bindings)
-    pipelines: HashMap<String, (vk::Pipeline, vk::PipelineLayout, vk::DescriptorSetLayout, u32)>,
-    descriptor_pool: vk::DescriptorPool,
+    // Pipelines: entry_point -> (pipeline, pipeline_layout, descriptor_set, num_bindings)
+    // Descriptor sets are pre-allocated at init (one per pipeline, reused across dispatches).
+    pipelines: HashMap<String, (vk::Pipeline, vk::PipelineLayout, vk::DescriptorSet, u32)>,
+    _descriptor_pool: vk::DescriptorPool, // kept alive, descriptor sets freed implicitly on drop
     // Params uniform buffer (16 bytes, persistently mapped)
     params_buf: MappedBuffer,
     // Buffer management
@@ -256,13 +257,12 @@ impl VulkanBackend {
         }];
         let dp_ci = vk::DescriptorPoolCreateInfo::default()
             .max_sets(64)
-            .pool_sizes(&pool_sizes)
-            .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET);
+            .pool_sizes(&pool_sizes);
         let descriptor_pool = vk_device
             .create_descriptor_pool(&dp_ci, None)
             .map_err(|e| format!("create_descriptor_pool: {e}"))?;
 
-        // 10. Create pipelines from SPIR-V modules
+        // 10. Create pipelines from SPIR-V modules, pre-allocate one descriptor set each
         let mut pipelines = HashMap::new();
         for &(name, spv_bytes) in SPIRV_MODULES {
             let spv_words: Vec<u32> = spv_bytes
@@ -302,7 +302,15 @@ impl VulkanBackend {
                 .create_descriptor_set_layout(&dsl_ci, None)
                 .map_err(|e| format!("create_descriptor_set_layout({name}): {e}"))?;
 
-            // Pipeline layout (no push constants for now — using uniform buffer)
+            // Pre-allocate descriptor set (reused across all dispatches for this pipeline)
+            let ds_alloc_info = vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(descriptor_pool)
+                .set_layouts(std::slice::from_ref(&ds_layout));
+            let descriptor_set = vk_device
+                .allocate_descriptor_sets(&ds_alloc_info)
+                .map_err(|e| format!("allocate_descriptor_sets({name}): {e}"))?[0];
+
+            // Pipeline layout
             let pl_ci = vk::PipelineLayoutCreateInfo::default()
                 .set_layouts(std::slice::from_ref(&ds_layout));
             let pipe_layout = vk_device
@@ -323,7 +331,7 @@ impl VulkanBackend {
                 .map_err(|e| format!("create_compute_pipeline({name}): {e:?}"))?[0];
 
             vk_device.destroy_shader_module(shader_module, None);
-            pipelines.insert(name.to_string(), (pipeline, pipe_layout, ds_layout, num_bindings));
+            pipelines.insert(name.to_string(), (pipeline, pipe_layout, descriptor_set, num_bindings));
         }
 
         // 11. Params uniform buffer (16 bytes)
@@ -347,7 +355,7 @@ impl VulkanBackend {
             allocator: Mutex::new(Some(allocator)),
             uma_memory_type,
             pipelines,
-            descriptor_pool,
+            _descriptor_pool: descriptor_pool,
             params_buf,
             weight_cache: Mutex::new(WeightCache::new()),
             buffer_pool: Mutex::new(BufferPool::new()),
@@ -503,22 +511,14 @@ impl VulkanBackend {
         workgroups: (u32, u32, u32),
     ) -> Vec<f32> {
         let _lock = self.dispatch_lock.lock().unwrap();
-        let (pipeline, pipe_layout, ds_layout, _num_bindings) =
+        let (pipeline, pipe_layout, descriptor_set, _num_bindings) =
             self.pipelines.get(entry).unwrap_or_else(|| panic!("unknown pipeline: {entry}"));
+        let descriptor_set = *descriptor_set;
 
         // Write params
         self.params_buf.write_u32(params);
 
         unsafe {
-            // Allocate descriptor set
-            let ds_alloc = vk::DescriptorSetAllocateInfo::default()
-                .descriptor_pool(self.descriptor_pool)
-                .set_layouts(std::slice::from_ref(ds_layout));
-            let descriptor_set = self
-                .vk_device
-                .allocate_descriptor_sets(&ds_alloc)
-                .expect("allocate_descriptor_sets")[0];
-
             // Build descriptor writes — pre-allocate all buffer infos first
             let num_storage = storage_buffers.len();
             let mut buf_infos: Vec<vk::DescriptorBufferInfo> =
@@ -625,11 +625,6 @@ impl VulkanBackend {
             self.vk_device
                 .wait_for_fences(&[self.fence], true, u64::MAX)
                 .expect("wait_for_fences");
-
-            // Free descriptor set
-            self.vk_device
-                .free_descriptor_sets(self.descriptor_pool, &[descriptor_set])
-                .expect("free_descriptor_sets");
         }
 
         // Read output directly from mapped pointer
@@ -842,15 +837,13 @@ impl Drop for VulkanBackend {
         #[allow(unreachable_code)]
         unsafe {
             let _ = self.vk_device.device_wait_idle();
-            // Pipelines
-            for (pipeline, layout, ds_layout, _) in self.pipelines.values() {
+            // Pipelines (descriptor sets freed implicitly with pool)
+            for (pipeline, layout, _ds, _) in self.pipelines.values() {
                 self.vk_device.destroy_pipeline(*pipeline, None);
                 self.vk_device.destroy_pipeline_layout(*layout, None);
-                self.vk_device
-                    .destroy_descriptor_set_layout(*ds_layout, None);
             }
             self.vk_device
-                .destroy_descriptor_pool(self.descriptor_pool, None);
+                .destroy_descriptor_pool(self._descriptor_pool, None);
 
             // Free all allocations via gpu-allocator before destroying device.
             // We must free allocations before destroying buffers.
