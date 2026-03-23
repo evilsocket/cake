@@ -6,7 +6,7 @@
 [![Release](https://img.shields.io/github/release/evilsocket/cake.svg?style=flat-square)](https://github.com/evilsocket/cake/releases/latest)
 [![Rust Report](https://rust-reportcard.xuri.me/badge/github.com/evilsocket/cake)](https://rust-reportcard.xuri.me/report/github.com/evilsocket/cake)
 [![CI](https://img.shields.io/github/actions/workflow/status/evilsocket/cake/ci.yml)](https://github.com/evilsocket/cake/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-GPL3-brightgreen.svg?style=flat-square)](https://github.com/evilsocket/cake/blob/master/LICENSE.md)
+[![License](https://img.shields.io/badge/license-FAIR%20v1.0.0-blue.svg?style=flat-square)](https://github.com/evilsocket/cake/blob/main/LICENSE)
 
 </div>
 
@@ -101,4 +101,10 @@ For the full usage guide and API reference, [check the project documentation](do
 
 ## License
 
-Released under the GPL 3 license. To see the licenses of the project dependencies, install cargo license with `cargo install cargo-license` and then run `cargo license`.
+Released under the [FAIR License (Free for Attribution and Individual Rights) v1.0.0](LICENSE).
+
+- **Non-commercial use** (personal, educational, research, non-profit) is freely permitted under the terms of the license.
+- **Commercial use** (SaaS, paid apps, any monetization) requires visible attribution to the project and its author. See the [license](LICENSE) for details.
+- **Business use** (any use by or on behalf of a business entity) requires a signed commercial agreement with the author. Contact `evilsocket@gmail.com` for inquiries.
+
+To see the licenses of the project dependencies, install cargo license with `cargo install cargo-license` and then run `cargo license`.

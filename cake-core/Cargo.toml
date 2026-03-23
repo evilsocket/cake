@@ -7,7 +7,7 @@ description.workspace = true
 repository.workspace = true
 keywords.workspace = true
 authors.workspace = true
-license.workspace = true
+license-file.workspace = true
 readme.workspace = true
 categories.workspace = true
 
