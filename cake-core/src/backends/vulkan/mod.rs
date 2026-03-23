@@ -922,7 +922,7 @@ impl VulkanBackend {
     ) -> (Vec<f32>, MappedBuffer) {
         let buf_c = self.alloc_output(m * n);
         // Use small-M kernel (16×64 tile) for M<=16, large kernel (32×64) otherwise
-        let (entry, wg_m, wg_n) = if m <= 16 {
+        let (entry, wg_m, wg_n) = if m <= 8 {
             ("matmul_small", (m as u32).div_ceil(8), (n as u32).div_ceil(64))
         } else {
             ("matmul", (m as u32).div_ceil(32), (n as u32).div_ceil(64))
@@ -1015,7 +1015,7 @@ impl VulkanBackend {
 
         // Determine pipeline and workgroup dims
         let is_gemv = m == 1;
-        let entry = if is_gemv { "gemv" } else if m <= 16 { "matmul_small" } else { "matmul" };
+        let entry = if is_gemv { "gemv" } else if m <= 8 { "matmul_small" } else { "matmul" };
         let params: [u32; 4] = if is_gemv {
             [n as u32, k as u32, 0, 0]
         } else {
@@ -1023,7 +1023,7 @@ impl VulkanBackend {
         };
         let workgroups = if is_gemv {
             ((n as u32).div_ceil(256), 1, 1)
-        } else if m <= 16 {
+        } else if m <= 8 {
             ((m as u32).div_ceil(8), (n as u32).div_ceil(64), 1)
         } else {
             ((m as u32).div_ceil(32), (n as u32).div_ceil(64), 1)
