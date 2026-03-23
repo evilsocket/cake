@@ -113,6 +113,7 @@ jobs:
           cuda: ${{ matrix.cuda }}
           method: local
           linux-local-args: '["--toolkit"]'
+          log-file-suffix: '${{ matrix.name }}.txt'
 
       - name: Build release binary (native, default features)
         if: matrix.target == '' && matrix.features == ''

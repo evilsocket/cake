@@ -218,6 +218,7 @@ jobs:
           cuda: ${{ matrix.cuda }}
           method: local
           linux-local-args: '["--toolkit"]'
+          log-file-suffix: '${{ matrix.name }}.txt'
 
       - name: Cache cargo registry & build
         uses: actions/cache@v4
