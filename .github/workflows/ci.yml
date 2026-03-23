@@ -47,8 +47,8 @@ jobs:
       - name: Protocol tests
         run: cargo test -p cake-core --test protocol
 
-  build-android:
-    name: Build (Android aarch64)
+  test-android:
+    name: Test (Android aarch64)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -101,23 +101,17 @@ jobs:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: cargo ndk -t aarch64-linux-android clippy -p cake-core --lib --no-default-features --features "llama,qwen2,qwen3_5" -p cake-mobile -- -D warnings
 
-      - name: Compile tests (cake-core lib, Android)
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: cargo ndk -t aarch64-linux-android test -p cake-core --lib --no-default-features --features "llama,qwen2,qwen3_5,qwen3,qwen3_moe,qwen3_5_moe,phi4,mistral,gemma3,falcon3,olmo2,exaone4,flux,vibevoice,luxtts" --no-run
+      - name: Unit tests (cake-core lib)
+        run: cargo test -p cake-core --lib
 
-      - name: Compile tests (cake-core unit, Android)
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: cargo ndk -t aarch64-linux-android test -p cake-core --test unit --no-default-features --features "llama,qwen2,qwen3_5,qwen3,qwen3_moe,qwen3_5_moe,phi4,mistral,gemma3,falcon3,olmo2,exaone4,flux,vibevoice,luxtts" --no-run
+      - name: Unit tests (cake-core external)
+        run: cargo test -p cake-core --test unit
 
-      - name: Compile tests (cake-core protocol, Android)
-        env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: cargo ndk -t aarch64-linux-android test -p cake-core --test protocol --no-default-features --features "llama,qwen2,qwen3_5,qwen3,qwen3_moe,qwen3_5_moe,phi4,mistral,gemma3,falcon3,olmo2,exaone4,flux,vibevoice,luxtts" --no-run
+      - name: Protocol tests
+        run: cargo test -p cake-core --test protocol
 
-  build-ios:
-    name: Build (iOS arm64)
+  test-ios:
+    name: Test (iOS arm64)
     runs-on: macos-latest
     permissions:
       contents: read
@@ -150,20 +144,14 @@ jobs:
           IPHONEOS_DEPLOYMENT_TARGET: "16.0"
         run: cargo clippy --target=aarch64-apple-ios -p cake-core --lib --no-default-features --features "llama,qwen2,qwen3_5,metal" -p cake-mobile --features metal -- -D warnings
 
-      - name: Compile tests (cake-core lib, iOS)
-        env:
-          IPHONEOS_DEPLOYMENT_TARGET: "16.0"
-        run: cargo test --target=aarch64-apple-ios -p cake-core --lib --no-default-features --features "llama,qwen2,qwen3_5,qwen3,qwen3_moe,qwen3_5_moe,phi4,mistral,gemma3,falcon3,olmo2,exaone4,flux,vibevoice,luxtts,metal" --no-run
+      - name: Unit tests (cake-core lib, Metal)
+        run: cargo test -p cake-core --lib --features metal
 
-      - name: Compile tests (cake-core unit, iOS)
-        env:
-          IPHONEOS_DEPLOYMENT_TARGET: "16.0"
-        run: cargo test --target=aarch64-apple-ios -p cake-core --test unit --no-default-features --features "llama,qwen2,qwen3_5,qwen3,qwen3_moe,qwen3_5_moe,phi4,mistral,gemma3,falcon3,olmo2,exaone4,flux,vibevoice,luxtts,metal" --no-run
+      - name: Unit tests (cake-core external, Metal)
+        run: cargo test -p cake-core --test unit --features metal
 
-      - name: Compile tests (cake-core protocol, iOS)
-        env:
-          IPHONEOS_DEPLOYMENT_TARGET: "16.0"
-        run: cargo test --target=aarch64-apple-ios -p cake-core --test protocol --no-default-features --features "llama,qwen2,qwen3_5,qwen3,qwen3_moe,qwen3_5_moe,phi4,mistral,gemma3,falcon3,olmo2,exaone4,flux,vibevoice,luxtts,metal" --no-run
+      - name: Protocol tests (Metal)
+        run: cargo test -p cake-core --test protocol --features metal
 
   test-features:
     name: Test (${{ matrix.name }})
