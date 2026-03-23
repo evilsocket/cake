@@ -1046,10 +1046,11 @@ pub async fn run_local(ctx: &mut Context) -> Result<()> {
         anyhow::bail!("local server did not start within 60 seconds");
     }
 
-    eprintln!("model loaded, starting chat TUI...\n");
-
-    // NOW suppress logs — the TUI takes ownership of the terminal
+    // Suppress logs and take over terminal for TUI
     ::log::set_max_level(::log::LevelFilter::Off);
+
+    // Clear any log output before entering TUI
+    eprint!("\x1b[2J\x1b[H"); // clear screen + home cursor
 
     run_remote(&server_url).await
 }
