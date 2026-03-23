@@ -186,20 +186,18 @@ __device__ __forceinline__ float stable_softplus_fwd<float>(float x) {
 template<>
 __device__ __forceinline__ __half stable_softplus_fwd<__half>(__half x) {
     float fx = __half2float(x);
-    float clamped = fminf(fx, 88.0f);
-    float sp = log1pf(__expf(clamped));
-    float result = fmaxf(fx, sp);
-    return __float2half(result);
+    if (fx > 20.0f) return x;
+    if (fx < -10.0f) return __float2half(__expf(fx));
+    return __float2half(log1pf(__expf(fx)));
 }
 #endif
 #if __CUDA_ARCH__ >= 800
 template<>
 __device__ __forceinline__ __nv_bfloat16 stable_softplus_fwd<__nv_bfloat16>(__nv_bfloat16 x) {
     float fx = __bfloat162float(x);
-    float clamped = fminf(fx, 88.0f);
-    float sp = log1pf(__expf(clamped));
-    float result = fmaxf(fx, sp);
-    return __float2bfloat16(result);
+    if (fx > 20.0f) return x;
+    if (fx < -10.0f) return __float2bfloat16(__expf(fx));
+    return __float2bfloat16(log1pf(__expf(fx)));
 }
 #endif
 
