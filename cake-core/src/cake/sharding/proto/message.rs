@@ -266,12 +266,12 @@ impl Message {
         let mut header = [0u8; 8];
         reader.read_exact(&mut header).await?;
 
-        let magic = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
+        let magic = u32::from_be_bytes(header[..4].try_into().unwrap());
         if magic != super::PROTO_MAGIC {
             return Err(anyhow!("invalid magic value: {magic}"));
         }
 
-        let req_size = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+        let req_size = u32::from_be_bytes(header[4..8].try_into().unwrap());
         if req_size > super::MESSAGE_MAX_SIZE {
             return Err(anyhow!("request size {req_size} > MESSAGE_MAX_SIZE"));
         }
