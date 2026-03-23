@@ -676,47 +676,36 @@ impl VulkanBackend {
         self.params_buf.write_u32(params);
 
         unsafe {
-            // Build descriptor writes — pre-allocate all buffer infos first
+            // Build descriptor writes with stack-allocated arrays (max 5 storage + 1 uniform = 6)
             let num_storage = storage_buffers.len();
-            let mut buf_infos: Vec<vk::DescriptorBufferInfo> =
-                Vec::with_capacity(num_storage + 1);
-            for &buf in storage_buffers {
-                buf_infos.push(
-                    vk::DescriptorBufferInfo::default()
-                        .buffer(buf)
-                        .offset(0)
-                        .range(vk::WHOLE_SIZE),
-                );
-            }
-            // Uniform buffer info
-            buf_infos.push(
-                vk::DescriptorBufferInfo::default()
-                    .buffer(self.params_buf.buffer)
+            let mut buf_infos: [vk::DescriptorBufferInfo; 6] = Default::default();
+            for (i, &buf) in storage_buffers.iter().enumerate() {
+                buf_infos[i] = vk::DescriptorBufferInfo::default()
+                    .buffer(buf)
                     .offset(0)
-                    .range(16),
-            );
-
-            // Now build writes referencing the stable buf_infos
-            let mut writes: Vec<vk::WriteDescriptorSet> = Vec::with_capacity(num_storage + 1);
-            for (i, info) in buf_infos[..num_storage].iter().enumerate() {
-                let binding = if i == 3 { 4 } else { i as u32 };
-                writes.push(
-                    vk::WriteDescriptorSet::default()
-                        .dst_set(descriptor_set)
-                        .dst_binding(binding)
-                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                        .buffer_info(std::slice::from_ref(info)),
-                );
+                    .range(vk::WHOLE_SIZE);
             }
-            writes.push(
-                vk::WriteDescriptorSet::default()
-                    .dst_set(descriptor_set)
-                    .dst_binding(3)
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                    .buffer_info(std::slice::from_ref(&buf_infos[num_storage])),
-            );
+            buf_infos[num_storage] = vk::DescriptorBufferInfo::default()
+                .buffer(self.params_buf.buffer)
+                .offset(0)
+                .range(16);
 
-            self.vk_device.update_descriptor_sets(&writes, &[]);
+            let mut writes: [vk::WriteDescriptorSet; 6] = Default::default();
+            for i in 0..num_storage {
+                let binding = if i == 3 { 4 } else { i as u32 };
+                writes[i] = vk::WriteDescriptorSet::default()
+                    .dst_set(descriptor_set)
+                    .dst_binding(binding)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(std::slice::from_ref(&buf_infos[i]));
+            }
+            writes[num_storage] = vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(3)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(std::slice::from_ref(&buf_infos[num_storage]));
+
+            self.vk_device.update_descriptor_sets(&writes[..num_storage + 1], &[]);
 
             // Reset fence + command buffer.
             // Fence is always signaled here: either from SIGNALED init flag (first call)
