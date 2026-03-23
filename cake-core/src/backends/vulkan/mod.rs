@@ -501,8 +501,11 @@ impl VulkanBackend {
                 return Ok(buf.clone());
             }
         }
-        let data = Self::to_f32_vec(tensor)?;
-        let bytes = (data.len() * 4) as u64;
+        // Fast path: copy directly from tensor storage to mapped buffer (avoid Vec allocation)
+        let tensor = if tensor.dtype() == DType::F32 { tensor.clone() } else { tensor.to_dtype(DType::F32)? };
+        let tensor = if tensor.is_contiguous() { tensor } else { tensor.contiguous()? };
+        let n = tensor.elem_count();
+        let bytes = (n * 4) as u64;
         let mut alloc_guard = self.allocator.lock().unwrap();
         let alloc = alloc_guard.as_mut().unwrap();
         let buf = Self::alloc_mapped_buffer(
@@ -513,7 +516,17 @@ impl VulkanBackend {
             self.uma_memory_type,
         )
         .map_err(candle_core::Error::Msg)?;
-        buf.write_f32(&data);
+        // Write directly from tensor storage — avoids intermediate Vec allocation
+        let (storage, layout) = tensor.storage_and_layout();
+        if let candle_core::Storage::Cpu(cpu) = &*storage {
+            let slice: &[f32] = cpu.as_slice()?;
+            let offset = layout.start_offset();
+            buf.write_f32(&slice[offset..offset + n]);
+        } else {
+            drop(storage);
+            let data = Self::to_f32_vec(&tensor)?;
+            buf.write_f32(&data);
+        }
         let buf = Arc::new(buf);
         let mut cache = self.weight_cache.lock().unwrap();
         cache.buffers.insert(id, buf.clone());
