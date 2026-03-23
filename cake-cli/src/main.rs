@@ -66,9 +66,6 @@ enum Commands {
         /// Server URL for remote chat mode.
         #[arg(long, default_value = "http://localhost:8080")]
         server: String,
-        /// Flatten common model args for local mode.
-        #[command(flatten)]
-        args: Args,
     },
     /// Split a model into per-worker bundles
     Split {
@@ -161,11 +158,14 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Commands::Chat { model, server, mut args } => {
+        Commands::Chat { model, server } => {
             if let Some(model_name) = model {
                 // Local chat: load model, run TUI with local inference
-                args.model = model_name;
-                args.mode = cake_core::cake::Mode::Master;
+                let args = Args {
+                    model: model_name,
+                    mode: cake_core::cake::Mode::Master,
+                    ..Args::default()
+                };
                 let mut ctx = cake_core::cake::Context::from_args(args)?;
                 chat::run_local(&mut ctx).await
             } else {
