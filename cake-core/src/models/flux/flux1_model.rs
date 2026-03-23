@@ -427,9 +427,7 @@ struct ModulationOut {
 
 impl ModulationOut {
     fn scale_shift(&self, xs: &Tensor) -> Result<Tensor> {
-        // Use ones_like to avoid F32 scalar promotion when scale is BF16
-        let one = Tensor::ones_like(&self.scale)?;
-        xs.broadcast_mul(&(&self.scale + one)?)?
+        xs.broadcast_mul(&(&self.scale + 1.0)?)?
             .broadcast_add(&self.shift)
     }
 
@@ -733,7 +731,7 @@ impl LastLayer {
         let (shift, scale) = (&chunks[0], &chunks[1]);
         let xs = xs
             .apply(&self.norm_final)?
-            .broadcast_mul(&(scale.unsqueeze(1)? + Tensor::ones_like(scale)?.unsqueeze(1)?)?)?
+            .broadcast_mul(&(scale.unsqueeze(1)? + 1.0)?)?
             .broadcast_add(&shift.unsqueeze(1)?)?;
         self.linear.forward(&xs)
     }
