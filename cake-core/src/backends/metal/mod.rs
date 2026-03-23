@@ -567,8 +567,8 @@ impl ComputeBackend for MetalBackend {
 
     fn attention(&self, q: &Tensor, k: &Tensor, v: &Tensor, scale: f32, causal: bool) -> Result<Tensor> {
         let q_dims = q.dims();
-        // Generation case: seq_len=1 → use fused MSL kernel (F32 internal precision)
-        if q_dims.len() == 4 && q_dims[2] == 1 && matches!(q.dtype(), DType::F16 | DType::F32) && !causal {
+        // Generation case: seq_len=1 → use fused MSL kernel (causal is trivially satisfied for 1 query)
+        if q_dims.len() == 4 && q_dims[2] == 1 && matches!(q.dtype(), DType::F16 | DType::F32) {
             let (batch, heads, _, head_dim) = (q_dims[0], q_dims[1], q_dims[2], q_dims[3]);
             let k_dims = k.dims();
             let kv_heads = k_dims[1];
