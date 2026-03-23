@@ -6,3 +6,8 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 004	2026-03-23T07:05:00	44f7c4c	-	PASS	PASS	keep	Remove dead_code allow (all structs active)
 005	2026-03-23T07:15:00	3ebe25f	55621655040	PASS	PASS	keep	Remove redundant inter-block sync (blocks sync internally)
 006	2026-03-23T07:30:00	95f4c12	384158976	PASS	PASS	keep	Use fast::exp in exp_mul; 384ms cached Metal runtime
+007	2026-03-23T07:40:00	ba33ed1	50370919168	PASS	PASS	keep	Use fast::rsqrt in norm kernels (model verified)
+008	2026-03-23T07:50:00	ac5e9e6	56221574912	PASS	PASS	keep	Use fast::exp in silu_mul, softplus, conv_silu (keep std exp in norms)
+009	2026-03-23T08:00:00	f744fbc	-	PASS	PASS	keep	Simplify attention F32 promotion
+010	2026-03-23T08:10:00	9a3332a	53269377024	PASS	PASS	keep	Wire F8E4M3 dequant MSL kernels (GPU-side, no CPU roundtrip)
+---	Metal: 25.65 tok/s vs CPU: 23.77 tok/s (+8%) on Qwen3.5-0.8B (M3 Pro)
