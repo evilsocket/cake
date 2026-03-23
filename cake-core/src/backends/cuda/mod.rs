@@ -50,18 +50,22 @@ impl ComputeBackend for CudaBackend {
         let attn = q.matmul(&k.t()?)?;
         let attn = if causal {
             let seq_len = q.dim(2)?;
-            let kv_len = k.dim(2)?;
-            let offset = kv_len.saturating_sub(seq_len);
-            // Build causal mask via u8 comparison (u32 arange → compare → where_cond)
-            let rows = Tensor::arange(0u32, seq_len as u32, q.device())?
-                .reshape((1, 1, seq_len, 1))?;
-            let cols = Tensor::arange(0u32, kv_len as u32, q.device())?
-                .reshape((1, 1, 1, kv_len))?;
-            // mask[i,j] = (i + offset >= j) — true where attention is allowed
-            let mask = (rows + offset as f64)?.broadcast_ge(&cols)?;
-            let mask = mask.broadcast_as(attn.shape())?;
-            let neg_large = Tensor::full(-1e9f32, attn.shape(), q.device())?;
-            mask.where_cond(&attn, &neg_large)?
+            if seq_len == 1 {
+                // Single-token generation: causal mask is all-true, no masking needed
+                attn
+            } else {
+                let kv_len = k.dim(2)?;
+                let offset = kv_len.saturating_sub(seq_len);
+                // Build causal mask via u32 comparison
+                let rows = Tensor::arange(0u32, seq_len as u32, q.device())?
+                    .reshape((1, 1, seq_len, 1))?;
+                let cols = Tensor::arange(0u32, kv_len as u32, q.device())?
+                    .reshape((1, 1, 1, kv_len))?;
+                let mask = (rows + offset as f64)?.broadcast_ge(&cols)?;
+                let mask = mask.broadcast_as(attn.shape())?;
+                let neg_large = Tensor::full(-1e9f32, attn.shape(), q.device())?;
+                mask.where_cond(&attn, &neg_large)?
+            }
         } else {
             attn
         };
