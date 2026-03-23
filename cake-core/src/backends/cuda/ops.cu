@@ -405,9 +405,8 @@ extern "C" __global__ void FN_NAME( \
     for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; \
          i < numel; i += blockDim.x * gridDim.x) { \
         int chan = i % channels; \
-        int batch_idx = i / channels; \
         float acc = 0.0f; \
-        int w_off = batch_idx * channels * kernel_size + chan * kernel_size; \
+        int w_off = i * kernel_size; \
         int wt_off = chan * kernel_size; \
         _Pragma("unroll 8") \
         for (int k = 0; k < kernel_size; k++) { \
@@ -451,11 +450,10 @@ extern "C" __global__ void FN_NAME( \
     for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; \
          i < numel; i += blockDim.x * gridDim.x) { \
         int t = i % out_len; \
-        int temp = i / out_len; \
-        int c = temp % channels; \
-        int b = temp / channels; \
+        int bc = i / out_len; /* combined batch*channels index */ \
+        int c = bc % channels; \
         float acc = 0.0f; \
-        int in_off = (b * channels + c) * input_len + t; \
+        int in_off = bc * input_len + t; \
         int wt_off = c * kernel_size; \
         _Pragma("unroll 8") \
         for (int k = 0; k < kernel_size; k++) { \
@@ -499,9 +497,8 @@ extern "C" __global__ void FN_NAME( \
     for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; \
          i < numel; i += blockDim.x * gridDim.x) { \
         int t = i % time_len; \
-        int temp = i / time_len; \
-        int c = temp % channels; \
-        int b = temp / channels; \
+        int bc = i / time_len; /* combined batch*channels index */ \
+        int c = bc % channels; \
         float acc = 0.0f; \
         int wt_off = c * kernel_size; \
         /* Virtual position in [ctx, input]: t + k, where ctx occupies [0, ctx_len) */ \
@@ -510,9 +507,9 @@ extern "C" __global__ void FN_NAME( \
             int pos = t + k; /* position in virtual [ctx, input] */ \
             float v; \
             if (pos < ctx_len) { \
-                v = static_cast<float>(ctx[(b * channels + c) * ctx_len + pos]); \
+                v = static_cast<float>(ctx[bc * ctx_len + pos]); \
             } else { \
-                v = static_cast<float>(input[(b * channels + c) * time_len + (pos - ctx_len)]); \
+                v = static_cast<float>(input[bc * time_len + (pos - ctx_len)]); \
             } \
             acc = fmaf(v, static_cast<float>(weight[wt_off + k]), acc); \
         } \
