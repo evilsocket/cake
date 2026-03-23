@@ -77,25 +77,31 @@ impl Client {
     }
 
     async fn forward_request(&mut self, req: Message) -> Result<Tensor> {
-        let send_start = std::time::Instant::now();
+        // Only measure timing when debug logging is active — avoids Instant::now() overhead.
+        let send_start = log::log_enabled!(log::Level::Debug)
+            .then(std::time::Instant::now);
+
         req.to_writer_buf(&mut self.stream, &mut self.write_buf)
             .await
             .map_err(|e| anyhow!("error sending message {:?}: {}", req, e))?;
-        let send_elapsed = send_start.elapsed();
+        let send_elapsed = send_start.map(|s| s.elapsed());
 
-        let recv_start = std::time::Instant::now();
+        let recv_start = log::log_enabled!(log::Level::Debug)
+            .then(std::time::Instant::now);
+
         let (resp_size, msg) = Message::from_reader_buf(&mut self.stream, &mut self.read_buf)
             .await
             .map_err(|e| anyhow!("error receiving response for {:?}: {}", req, e))?;
-        let recv_elapsed = recv_start.elapsed();
 
-        log::debug!(
-            "    {} send={:.1}ms recv={:.1}ms ({})",
-            &self.address,
-            send_elapsed.as_secs_f64() * 1000.0,
-            recv_elapsed.as_secs_f64() * 1000.0,
-            human_bytes::human_bytes(resp_size as f64),
-        );
+        if let (Some(se), Some(rs)) = (send_elapsed, recv_start) {
+            log::debug!(
+                "    {} send={:.1}ms recv={:.1}ms ({})",
+                &self.address,
+                se.as_secs_f64() * 1000.0,
+                rs.elapsed().as_secs_f64() * 1000.0,
+                human_bytes::human_bytes(resp_size as f64),
+            );
+        }
 
         match msg {
             Message::Tensor(raw) => Ok(raw.into_tensor(&self.device)?),
