@@ -189,6 +189,13 @@ impl Message {
         Ok(self.write_to_vec_with_ctx(BigEndian::default())?)
     }
 
+    /// Serializes the message into a reusable buffer, avoiding allocation.
+    pub fn to_bytes_buf(&self, buf: &mut Vec<u8>) -> Result<()> {
+        buf.truncate(0);
+        self.write_to_stream_with_ctx(BigEndian::default(), &mut *buf)?;
+        Ok(())
+    }
+
     /// Deserializes a Message from raw bytes.
     pub fn from_bytes(raw: &[u8]) -> Result<Self> {
         Ok(Self::read_from_buffer_with_ctx(BigEndian::default(), raw)?)
