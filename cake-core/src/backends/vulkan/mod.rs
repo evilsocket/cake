@@ -761,17 +761,23 @@ impl ComputeBackend for VulkanBackend {
     // GPU dispatch overhead (~50µs) only pays off for tensors > 8K elements.
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-        if gate.elem_count() > 32768 {
+        let n = gate.elem_count();
+        if n > 32768 {
+            log::debug!("silu_mul GPU: {n} elements");
             self.dispatch_binary_vec4(gate, up, "silu_mul")
         } else {
+            log::debug!("silu_mul CPU: {n} elements (<=32768)");
             (candle_nn::ops::silu(&gate.contiguous()?)? * up.contiguous()?)?.contiguous()
         }
     }
 
     fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
-        if x.elem_count() > 32768 {
+        let n = x.elem_count();
+        if n > 32768 {
+            log::debug!("stable_softplus GPU: {n} elements");
             self.dispatch_unary_vec4(x, "stable_softplus")
         } else {
+            log::debug!("stable_softplus CPU: {n} elements (<=32768)");
             let t88 = Tensor::full(88.0f32, x.shape(), x.device())?.to_dtype(x.dtype())?;
             let clamped = x.minimum(&t88)?;
             let sp = (clamped.exp()? + 1.0)?.log()?;
@@ -780,25 +786,34 @@ impl ComputeBackend for VulkanBackend {
     }
 
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        if a.elem_count() > 32768 {
+        let n = a.elem_count();
+        if n > 32768 {
+            log::debug!("add3 GPU: {n} elements");
             self.dispatch_ternary_vec4(a, b, c, "add3")
         } else {
+            log::debug!("add3 CPU: {n} elements (<=32768)");
             ((a + b)? + c)?.contiguous()
         }
     }
 
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
-        if x.elem_count() > 32768 {
+        let n = x.elem_count();
+        if n > 32768 {
+            log::debug!("exp_mul GPU: {n} elements");
             self.dispatch_binary_vec4(x, y, "exp_mul")
         } else {
+            log::debug!("exp_mul CPU: {n} elements (<=32768)");
             (x * y.exp()?)?.contiguous()
         }
     }
 
     fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        if a.elem_count() > 32768 {
+        let n = a.elem_count();
+        if n > 32768 {
+            log::debug!("sub_mul GPU: {n} elements");
             self.dispatch_ternary_vec4(a, b, c, "sub_mul")
         } else {
+            log::debug!("sub_mul CPU: {n} elements (<=32768)");
             ((a - b)? * c)?.contiguous()
         }
     }
@@ -808,10 +823,16 @@ impl ComputeBackend for VulkanBackend {
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         // GPU dispatch overhead (~175µs on Steam Deck) makes CPU faster for
         // generation (M=1). GPU beneficial for prefill (M>1) with cached weights.
-        let m = a.dims()[a.dims().len() - 2];
+        let a_dims = a.dims();
+        let b_dims = b.dims();
+        let m = a_dims[a_dims.len() - 2];
+        let k = a_dims[a_dims.len() - 1];
+        let n = b_dims[b_dims.len() - 1];
         if m <= 1 {
+            log::debug!("matmul CPU: M={m} K={k} N={n} (M<=1, generation)");
             return a.matmul(b);
         }
+        log::debug!("matmul GPU: M={m} K={k} N={n}");
         let orig_dtype = a.dtype();
         let result = self.tensor_matmul(a, b)?;
         result.to_dtype(orig_dtype)
