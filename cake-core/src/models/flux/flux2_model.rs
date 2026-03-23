@@ -31,24 +31,28 @@ pub fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor
 #[derive(Debug, Clone)]
 pub struct Flux2PosEmbed {
     axes_dim: Vec<usize>,
-    /// Precomputed inverse frequency tables per axis, each shape (1, dim/2).
-    /// Stored as F64 tensors on CPU; moved to device lazily on first forward.
-    inv_freq_tables: Vec<Vec<f64>>,
+    /// Precomputed inverse frequency tensors per axis, each shape (1, dim/2) in F64 on CPU.
+    inv_freq_tensors: Vec<Tensor>,
 }
 
 impl Flux2PosEmbed {
     fn new(theta: usize, axes_dim: Vec<usize>) -> Self {
         let theta_f = theta as f64;
-        let inv_freq_tables: Vec<Vec<f64>> = axes_dim
+        let inv_freq_tensors: Vec<Tensor> = axes_dim
             .iter()
             .map(|&dim| {
-                (0..dim)
+                let half = dim / 2;
+                let data: Vec<f64> = (0..dim)
                     .step_by(2)
                     .map(|j| 1.0 / theta_f.powf(j as f64 / dim as f64))
-                    .collect()
+                    .collect();
+                Tensor::new(data.as_slice(), &candle_core::Device::Cpu)
+                    .unwrap()
+                    .reshape((1, half))
+                    .unwrap()
             })
             .collect();
-        Self { axes_dim, inv_freq_tables }
+        Self { axes_dim, inv_freq_tensors }
     }
 
     /// Public constructor for testing.
@@ -58,8 +62,8 @@ impl Flux2PosEmbed {
 
     /// Compute (cos, sin) PE for given position IDs [S, num_axes].
     pub fn forward(&self, ids: &Tensor) -> Result<(Tensor, Tensor)> {
-        let mut all_cos = Vec::new();
-        let mut all_sin = Vec::new();
+        let mut all_cos = Vec::with_capacity(self.axes_dim.len());
+        let mut all_sin = Vec::with_capacity(self.axes_dim.len());
         let pos = ids.to_dtype(DType::F64)?;
         let seq_len = ids.dim(0)?;
 
@@ -67,9 +71,12 @@ impl Flux2PosEmbed {
             let half = dim / 2;
             let p = pos.get_on_dim(D::Minus1, i)?; // [S]
 
-            // Use precomputed inv_freq table (no powf per call, just clone the Vec)
-            let inv_freq = Tensor::new(self.inv_freq_tables[i].as_slice(), ids.device())?
-                .reshape((1, half))?;
+            // Use precomputed inv_freq tensor (cheap clone for CPU, device transfer for GPU)
+            let inv_freq = if ids.device().is_cpu() {
+                self.inv_freq_tensors[i].clone()
+            } else {
+                self.inv_freq_tensors[i].to_device(ids.device())?
+            };
 
             let freqs = p.unsqueeze(1)?.broadcast_mul(&inv_freq)?; // [S, half]
             let cos = freqs.cos()?.to_dtype(DType::F32)?;
