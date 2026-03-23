@@ -236,11 +236,11 @@ struct MatmulParams {
 @group(0) @binding(3) var<uniform> mat_params: MatmulParams;
 
 const TILE_OUT: u32 = 32;  // output tile M and N dimension
-const TILE_K: u32 = 32;    // K dimension tile
-const TILE_A_STRIDE: u32 = 33;  // padded stride to avoid bank conflicts
+const TILE_K: u32 = 64;    // K dimension tile (large for fewer iterations)
+const TILE_A_STRIDE: u32 = 65;  // padded stride to avoid bank conflicts
 const TILE_B_STRIDE: u32 = 33;  // padded stride for tile_b (32+1)
-var<workgroup> tile_a: array<f32, 1056>;  // [32, 33] padded
-var<workgroup> tile_b: array<f32, 1056>;  // [32, 33] padded
+var<workgroup> tile_a: array<f32, 2080>;  // [32, 65] padded
+var<workgroup> tile_b: array<f32, 2112>;  // [64, 33] padded
 
 @compute @workgroup_size(16, 16)
 fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -270,9 +270,9 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
     for (var t: u32 = 0u; t < num_tiles; t++) {
         let tk = t * TILE_K;
 
-        // Cooperative load tile_a[32, 32]: 256 threads, 4 elements each
-        for (var i: u32 = 0u; i < 4u; i++) {
-            let idx = lin * 4u + i;
+        // Cooperative load tile_a[32, 64]: 256 threads, 8 elements each
+        for (var i: u32 = 0u; i < 8u; i++) {
+            let idx = lin * 8u + i;
             let tr = idx / TILE_K;
             let tc = idx % TILE_K;
             let a_row = wg_row + tr;
@@ -284,9 +284,9 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
             }
         }
 
-        // Cooperative load tile_b[32, 32]: 256 threads, 4 elements each
-        for (var i: u32 = 0u; i < 4u; i++) {
-            let idx = lin * 4u + i;
+        // Cooperative load tile_b[64, 32]: 256 threads, 8 elements each
+        for (var i: u32 = 0u; i < 8u; i++) {
+            let idx = lin * 8u + i;
             let tr = idx / TILE_OUT;
             let tc = idx % TILE_OUT;
             let b_row = tk + tr;
