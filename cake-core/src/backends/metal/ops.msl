@@ -250,6 +250,101 @@ kernel void depthwise_conv1d_bias_f16(
     output[idx] = half(acc + float(bias[c]));
 }
 
+// ─── rms_norm_gated: rms_norm(x, weight, eps) * silu(z) ─────────────
+// x, z: (batch, seq, hidden), weight: (hidden,)
+// Each threadgroup handles one (batch, seq) row.
+// Step 1: compute sum_sq = sum(x[i]^2) via SIMD group reduction
+// Step 2: rms = rsqrt(sum_sq / hidden + eps)
+// Step 3: out[i] = x[i] * rms * weight[i] * silu(z[i])
+kernel void rms_norm_gated_f32(
+    device const float* x [[buffer(0)]],
+    device const float* z [[buffer(1)]],
+    device const float* weight [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& hidden [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    // gid.y = row index (batch*seq), gid.x = element within hidden
+    uint row = gid.y;
+    uint col = gid.x;
+    if (col >= hidden) return;
+
+    uint base = row * hidden;
+    float val = x[base + col];
+
+    // Compute partial sum of squares within this SIMD group
+    float sq = val * val;
+    float sum_sq = simd_sum(sq);
+
+    // Only lane 0 of each SIMD group has the full partial sum
+    // For hidden <= 32 (SIMD width), sum_sq is already the full sum
+    // For larger hidden sizes, we need threadgroup reduction
+    threadgroup float partial_sums[32]; // max 32 SIMD groups per threadgroup
+    if (lane == 0) {
+        partial_sums[simd_id] = sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Final reduction across SIMD groups (done by first SIMD group)
+    uint num_simd_groups = (hidden + 31) / 32;
+    float total = 0.0f;
+    if (simd_id == 0 && lane < num_simd_groups) {
+        total = partial_sums[lane];
+    }
+    total = simd_sum(total);
+
+    float rms = rsqrt(total / float(hidden) + eps);
+
+    // Compute output: x * rms * weight * silu(z)
+    float zv = z[base + col];
+    float sig = 1.0f / (1.0f + exp(-zv));
+    float gate = zv * sig;
+    output[base + col] = val * rms * weight[col] * gate;
+}
+
+kernel void rms_norm_gated_f16(
+    device const half* x [[buffer(0)]],
+    device const half* z [[buffer(1)]],
+    device const half* weight [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& hidden [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    if (col >= hidden) return;
+
+    uint base = row * hidden;
+    float val = float(x[base + col]);
+    float sq = val * val;
+    float sum_sq = simd_sum(sq);
+
+    threadgroup float partial_sums[32];
+    if (lane == 0) {
+        partial_sums[simd_id] = sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint num_simd_groups = (hidden + 31) / 32;
+    float total = 0.0f;
+    if (simd_id == 0 && lane < num_simd_groups) {
+        total = partial_sums[lane];
+    }
+    total = simd_sum(total);
+
+    float rms = rsqrt(total / float(hidden) + eps);
+    float zv = float(z[base + col]);
+    float sig = 1.0f / (1.0f + exp(-zv));
+    float gate = zv * sig;
+    output[base + col] = half(val * rms * float(weight[col]) * gate);
+}
+
 kernel void sub_mul_f16(
     device const half* a [[buffer(0)]],
     device const half* b [[buffer(1)]],
