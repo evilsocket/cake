@@ -605,25 +605,26 @@ async fn push_model_data(
 
         while offset < total_size {
             let to_read = ((total_size - offset) as usize).min(MODEL_DATA_CHUNK_SIZE);
-            let raw_chunk = if let Some(ref data) = small_data {
+            // Get a slice to the raw chunk data without copying
+            let raw_slice: &[u8] = if let Some(ref data) = small_data {
                 // Small files (config, tokenizer, index): already in memory
-                data[offset as usize..offset as usize + to_read].to_vec()
+                &data[offset as usize..offset as usize + to_read]
             } else {
-                // Large files (safetensors): stream from disk
+                // Large files (safetensors): stream from disk into reusable buffer
                 use std::io::Read;
                 let fh = file_handle.as_mut().unwrap();
                 fh.read_exact(&mut read_buf[..to_read])
                     .map_err(|e| anyhow!("read error at offset {offset}: {e}"))?;
-                read_buf[..to_read].to_vec()
+                &read_buf[..to_read]
             };
 
             // Compress with zstd level 1 (only if it saves space)
-            let compressed_data = zstd::encode_all(raw_chunk.as_slice(), 1)
-                .unwrap_or_else(|_| raw_chunk.clone());
-            let (data, is_compressed) = if compressed_data.len() < raw_chunk.len() {
+            let compressed_data = zstd::encode_all(raw_slice, 1)
+                .unwrap_or_else(|_| raw_slice.to_vec());
+            let (data, is_compressed) = if compressed_data.len() < raw_slice.len() {
                 (compressed_data, true)
             } else {
-                (raw_chunk, false)
+                (raw_slice.to_vec(), false)
             };
 
             // CRC32 checksum of wire data (after compression)
