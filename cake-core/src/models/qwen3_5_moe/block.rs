@@ -89,6 +89,7 @@ impl Forwarder for Qwen3_5MoeBlock {
             let provider: std::sync::Arc<dyn crate::models::common::expert_provider::ExpertProvider> =
                 std::sync::Arc::new(crate::models::common::disk_expert_provider::DiskExpertProvider::new(
                     storage.clone(), layer_prefix, cfg.num_experts, ctx.device.clone(), ctx.dtype,
+                    ctx.quant.gptq_group_size(),
                 ));
             let mlp_vb = vb.pp("mlp");
             let gate_weight = mlp_vb.pp("gate").get((cfg.num_experts, h), "weight")?;

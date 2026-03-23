@@ -44,6 +44,11 @@ pub trait Quantization: Send + Sync {
         device: &Device,
     ) -> Result<VarBuilder<'a>>;
 
+    /// Returns the GPTQ group size if this is GPTQ quantization, None otherwise.
+    fn gptq_group_size(&self) -> Option<usize> {
+        None
+    }
+
     /// Estimate in-memory layer size given on-disk size and target dtype bytes.
     /// Default: no expansion (on-disk size = in-memory size).
     fn estimate_layer_vram(&self, on_disk_bytes: u64, _dtype_bytes: u64) -> u64 {
@@ -102,6 +107,10 @@ pub struct GptqQuantization {
 impl Quantization for GptqQuantization {
     fn name(&self) -> &str {
         "gptq"
+    }
+
+    fn gptq_group_size(&self) -> Option<usize> {
+        Some(self.group_size)
     }
 
     unsafe fn load_var_builder<'a>(

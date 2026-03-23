@@ -303,6 +303,7 @@ impl SafetensorsStorage {
             "BF16" => DType::BF16,
             "F32" => DType::F32,
             "F64" => DType::F64,
+            "I32" => DType::I32,
             "I64" => DType::I64,
             "U32" => DType::U32,
             "U8" => DType::U8,

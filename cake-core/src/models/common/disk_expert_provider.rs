@@ -27,6 +27,10 @@ struct ExpertNames {
 ///
 /// Expert tensors are read from safetensors files by name, e.g.:
 /// `"{layer_prefix}.experts.{idx}.gate_proj.weight"`.
+///
+/// Supports GPTQ-quantized experts: when `gptq_group_size` is set, reads
+/// `{prefix}.qweight`, `{prefix}.scales`, `{prefix}.qzeros` and dequantizes
+/// on the fly using `dequantize_gptq_4bit`.
 pub struct DiskExpertProvider {
     storage: Arc<dyn TensorStorageProvider>,
     layer_prefix: String,
@@ -39,6 +43,8 @@ pub struct DiskExpertProvider {
     needs_device_transfer: bool,
     /// Pre-computed: whether F32 zero-copy path can be used (storage and target both F32).
     use_f32_zerocopy: bool,
+    /// GPTQ group size — when Some, experts are GPTQ-quantized and need dequantization.
+    gptq_group_size: Option<usize>,
 }
 
 impl std::fmt::Debug for DiskExpertProvider {
@@ -59,12 +65,14 @@ impl DiskExpertProvider {
     /// - `num_experts`: total number of experts in this layer
     /// - `device`: target device (CPU for inference, or GPU for transfer)
     /// - `dtype`: target dtype for the loaded tensors
+    /// - `gptq_group_size`: if Some, experts are GPTQ-quantized and will be dequantized on read
     pub fn new(
         storage: Arc<dyn TensorStorageProvider>,
         layer_prefix: String,
         num_experts: usize,
         device: Device,
         dtype: DType,
+        gptq_group_size: Option<usize>,
     ) -> Self {
         let expert_names: Vec<ExpertNames> = (0..num_experts)
             .map(|idx| {
@@ -77,16 +85,30 @@ impl DiskExpertProvider {
             })
             .collect();
         let needs_device_transfer = !device.is_cpu();
-        // Detect storage dtype from first expert's gate_proj (all experts share dtype)
-        let storage_dtype = expert_names
-            .first()
-            .and_then(|names| {
-                storage
-                    .read_tensor(&names.gate_proj)
-                    .ok()
-                    .map(|d| d.dtype)
-            });
-        let use_f32_zerocopy = dtype == DType::F32
+        // Auto-detect GPTQ: if caller says GPTQ, verify first expert has qweight.
+        let gptq_group_size = if let Some(gs) = gptq_group_size {
+            let qw_name = format!("{}.experts.0.gate_proj.qweight", layer_prefix);
+            if storage.has_tensor(&qw_name) {
+                log::info!("expert offload: GPTQ 4-bit detected (group_size={gs})");
+                Some(gs)
+            } else {
+                log::info!("expert offload: GPTQ requested but no qweight found, using plain weights");
+                None
+            }
+        } else {
+            None
+        };
+        // Detect storage dtype from first expert (skip for GPTQ — qweight is int32, not weights)
+        let storage_dtype = if gptq_group_size.is_none() {
+            expert_names
+                .first()
+                .and_then(|names| storage.read_tensor(&names.gate_proj).ok().map(|d| d.dtype))
+        } else {
+            None
+        };
+        // For GPTQ experts, disable F32 zerocopy (qweight is int32, not F32)
+        let use_f32_zerocopy = gptq_group_size.is_none()
+            && dtype == DType::F32
             && storage_dtype.is_some_and(|sd| sd == DType::F32);
         Self {
             storage,
@@ -97,6 +119,7 @@ impl DiskExpertProvider {
             dtype,
             needs_device_transfer,
             use_f32_zerocopy,
+            gptq_group_size,
         }
     }
 
@@ -118,6 +141,41 @@ impl DiskExpertProvider {
         // satisfying f32's alignment of 4. Length and capacity are adjusted
         // from u8 to f32 units. Data is valid F32 from safetensors.
         unsafe { Vec::from_raw_parts(ptr as *mut f32, f32_len, cap / 4) }
+    }
+
+    /// Read an expert weight, handling GPTQ dequantization if needed.
+    fn read_expert_weight(&self, weight_name: &str) -> Result<Tensor> {
+        if let Some(group_size) = self.gptq_group_size {
+            let prefix = weight_name.strip_suffix(".weight").unwrap_or(weight_name);
+            let qw_name = format!("{prefix}.qweight");
+            if self.storage.has_tensor(&qw_name) {
+                let sc_name = format!("{prefix}.scales");
+                let qz_name = format!("{prefix}.qzeros");
+                // Read the GPTQ triplet
+                let qw_data = self.storage.read_tensor(&qw_name)
+                    .map_err(|e| candle_core::Error::Msg(format!("read qweight: {e}")))?;
+                let sc_data = self.storage.read_tensor(&sc_name)
+                    .map_err(|e| candle_core::Error::Msg(format!("read scales: {e}")))?;
+                let qz_data = self.storage.read_tensor(&qz_name)
+                    .map_err(|e| candle_core::Error::Msg(format!("read qzeros: {e}")))?;
+                // Materialize to CPU tensors
+                let qw = Tensor::from_raw_buffer(&qw_data.bytes, qw_data.dtype, &qw_data.shape, &Device::Cpu)?;
+                let sc = Tensor::from_raw_buffer(&sc_data.bytes, sc_data.dtype, &sc_data.shape, &Device::Cpu)?;
+                let qz = Tensor::from_raw_buffer(&qz_data.bytes, qz_data.dtype, &qz_data.shape, &Device::Cpu)?;
+                // Dequantize
+                let weight = crate::utils::gptq::dequantize_gptq_4bit(&qw, &sc, &qz, group_size)?;
+                let weight = weight.to_dtype(self.dtype)?;
+                return if self.needs_device_transfer {
+                    weight.to_device(&self.device)
+                } else {
+                    Ok(weight)
+                };
+            }
+        }
+        // Non-GPTQ: read plain weight tensor
+        let data = self.storage.read_tensor(weight_name)
+            .map_err(|e| candle_core::Error::Msg(format!("read_tensor: {e}")))?;
+        self.materialize(data)
     }
 
     /// Convert raw TensorData to a candle Tensor with target dtype/device.
@@ -162,6 +220,16 @@ impl ExpertProvider for DiskExpertProvider {
 
         let names = &self.expert_names[idx];
 
+        // GPTQ path: read and dequantize each weight individually
+        if self.gptq_group_size.is_some() {
+            return Ok(ExpertWeights {
+                gate_proj: self.read_expert_weight(&names.gate_proj)?,
+                up_proj: self.read_expert_weight(&names.up_proj)?,
+                down_proj: self.read_expert_weight(&names.down_proj)?,
+            });
+        }
+
+        // Non-GPTQ: optimized batch read paths
         // For F32→F32 (zero-copy path), individual reads are faster than
         // batch+split since each read's buffer transfers directly into the
         // Tensor without copying. The batch path would add 3 memcpys to split
@@ -285,6 +353,7 @@ mod tests {
             4,
             Device::Cpu,
             DType::F32,
+            None,
         );
 
         assert_eq!(provider.num_experts(), 4);
@@ -304,6 +373,7 @@ mod tests {
             8,
             Device::Cpu,
             DType::F32,
+            None,
         );
 
         for i in 0..8 {
@@ -321,6 +391,7 @@ mod tests {
             4,
             Device::Cpu,
             DType::F32,
+            None,
         );
 
         assert!(provider.get_expert(4).is_err());

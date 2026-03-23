@@ -49,7 +49,7 @@ fn make_disk_provider(n: usize, i: usize, h: usize) -> (
 
     let storage = Arc::new(SafetensorsStorage::from_model_path(dir.path()).unwrap());
     let provider = cake_core::models::common::disk_expert_provider::DiskExpertProvider::new(
-        storage, "mlp".to_string(), n, Device::Cpu, DType::F32,
+        storage, "mlp".to_string(), n, Device::Cpu, DType::F32, None,
     );
     (dir, provider)
 }

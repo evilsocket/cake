@@ -51,7 +51,7 @@ fn flash_moe_disk_values_match_originals() {
     let originals = make_test_safetensors(dir.path(), "mlp", n, i, h);
 
     let storage = Arc::new(SafetensorsStorage::from_model_path(dir.path()).unwrap());
-    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32);
+    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32, None);
 
     for e in 0..n {
         let ew = provider.get_expert(e).unwrap();
@@ -108,7 +108,7 @@ fn flash_moe_f16_to_f32_preserves_values() {
     candle_core::safetensors::save(&tensors, &path).unwrap();
 
     let storage = Arc::new(SafetensorsStorage::from_model_path(dir.path()).unwrap());
-    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32);
+    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32, None);
 
     for e in 0..n {
         let ew = provider.get_expert(e).unwrap();
@@ -162,7 +162,7 @@ fn flash_moe_bf16_to_f32_preserves_values() {
     candle_core::safetensors::save(&tensors, &path).unwrap();
 
     let storage = Arc::new(SafetensorsStorage::from_model_path(dir.path()).unwrap());
-    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32);
+    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32, None);
 
     for e in 0..n {
         let ew = provider.get_expert(e).unwrap();
@@ -219,7 +219,7 @@ fn flash_moe_multi_shard_experts() {
         .unwrap();
 
     let storage = Arc::new(SafetensorsStorage::from_model_path(dir.path()).unwrap());
-    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32);
+    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32, None);
 
     // Verify all experts across both shards are accessible
     for e in 0..n {
@@ -238,7 +238,7 @@ fn flash_moe_repeated_reads_deterministic() {
     make_test_safetensors(dir.path(), "mlp", n, i, h);
 
     let storage = Arc::new(SafetensorsStorage::from_model_path(dir.path()).unwrap());
-    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32);
+    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32, None);
 
     // Read same expert twice, values must match
     let ew1 = provider.get_expert(2).unwrap();
@@ -270,6 +270,7 @@ fn flash_moe_concurrent_reads() {
                     n,
                     Device::Cpu,
                     DType::F32,
+                    None,
                 );
                 // Each thread reads 2 different experts
                 let e1 = t * 2;
@@ -302,6 +303,7 @@ fn flash_moe_disk_provider_as_trait_object() {
         n,
         Device::Cpu,
         DType::F32,
+        None,
     ));
 
     assert_eq!(provider.num_experts(), n);
@@ -323,7 +325,7 @@ fn flash_moe_zero_experts() {
     candle_core::safetensors::save(&empty, &path).unwrap();
 
     let storage = Arc::new(SafetensorsStorage::from_model_path(dir.path()).unwrap());
-    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), 0, Device::Cpu, DType::F32);
+    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), 0, Device::Cpu, DType::F32, None);
 
     assert_eq!(provider.num_experts(), 0);
     assert!(provider.get_expert(0).is_err());
@@ -336,7 +338,7 @@ fn flash_moe_missing_tensor_gives_error() {
     make_test_safetensors(dir.path(), "mlp", 2, 16, 8);
 
     let storage = Arc::new(SafetensorsStorage::from_model_path(dir.path()).unwrap());
-    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), 4, Device::Cpu, DType::F32);
+    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), 4, Device::Cpu, DType::F32, None);
 
     // First 2 work
     assert!(provider.get_expert(0).is_ok());
@@ -384,9 +386,110 @@ fn flash_moe_many_experts() {
     make_test_safetensors(dir.path(), "mlp", n, i, h);
 
     let storage = Arc::new(SafetensorsStorage::from_model_path(dir.path()).unwrap());
-    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32);
+    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32, None);
 
     // Read all experts
+    for e in 0..n {
+        let ew = provider.get_expert(e).unwrap();
+        assert_eq!(ew.gate_proj.dims(), &[i, h]);
+    }
+}
+
+// ── GPTQ expert offloading ────────────────────────────────────────────
+
+/// Create GPTQ-quantized expert tensors in safetensors format.
+/// Each expert has qweight (int32 packed), scales (f16), qzeros (int32 packed).
+fn make_gptq_expert_safetensors(
+    dir: &std::path::Path,
+    prefix: &str,
+    n: usize,
+    intermediate: usize,
+    hidden: usize,
+    group_size: usize,
+) -> HashMap<String, Tensor> {
+    let path = dir.join("model.safetensors");
+    let mut tensors = HashMap::new();
+    let packed_rows = hidden / 8; // 8 x 4-bit values per int32
+    let groups = hidden / group_size;
+    let zero_cols = intermediate / 8;
+
+    for e in 0..n {
+        for proj in &["gate_proj", "up_proj"] {
+            // qweight: (packed_rows, intermediate) in I32
+            let qw_data: Vec<i32> = (0..packed_rows * intermediate).map(|i| (i as i32) & 0x77777777).collect();
+            tensors.insert(
+                format!("{prefix}.experts.{e}.{proj}.qweight"),
+                Tensor::from_vec(qw_data, (packed_rows, intermediate), &Device::Cpu).unwrap(),
+            );
+            // scales: (groups, intermediate) in F16
+            let sc_data: Vec<f32> = (0..groups * intermediate).map(|_| 0.01).collect();
+            let sc = Tensor::from_vec(sc_data, (groups, intermediate), &Device::Cpu).unwrap().to_dtype(DType::F16).unwrap();
+            tensors.insert(format!("{prefix}.experts.{e}.{proj}.scales"), sc);
+            // qzeros: (groups, zero_cols) in I32
+            let qz_data: Vec<i32> = vec![0x08080808i32; groups * zero_cols];
+            tensors.insert(
+                format!("{prefix}.experts.{e}.{proj}.qzeros"),
+                Tensor::from_vec(qz_data, (groups, zero_cols), &Device::Cpu).unwrap(),
+            );
+        }
+        // down_proj: (packed_cols, hidden) where packed_cols = intermediate / 8
+        let packed_cols = intermediate / 8;
+        let down_groups = intermediate / group_size;
+        let down_zero_cols = hidden / 8;
+        let qw_data: Vec<i32> = (0..packed_cols * hidden).map(|i| (i as i32) & 0x77777777).collect();
+        tensors.insert(
+            format!("{prefix}.experts.{e}.down_proj.qweight"),
+            Tensor::from_vec(qw_data, (packed_cols, hidden), &Device::Cpu).unwrap(),
+        );
+        let sc_data: Vec<f32> = (0..down_groups * hidden).map(|_| 0.01).collect();
+        let sc = Tensor::from_vec(sc_data, (down_groups, hidden), &Device::Cpu).unwrap().to_dtype(DType::F16).unwrap();
+        tensors.insert(format!("{prefix}.experts.{e}.down_proj.scales"), sc);
+        let qz_data: Vec<i32> = vec![0x08080808i32; down_groups * down_zero_cols];
+        tensors.insert(
+            format!("{prefix}.experts.{e}.down_proj.qzeros"),
+            Tensor::from_vec(qz_data, (down_groups, down_zero_cols), &Device::Cpu).unwrap(),
+        );
+    }
+    candle_core::safetensors::save(&tensors, &path).unwrap();
+    tensors
+}
+
+#[test]
+fn flash_moe_gptq_expert_offload() {
+    let dir = tempfile::tempdir().unwrap();
+    let (n, intermediate, hidden, group_size) = (4, 64, 32, 8);
+    make_gptq_expert_safetensors(dir.path(), "mlp", n, intermediate, hidden, group_size);
+
+    let storage = Arc::new(SafetensorsStorage::from_model_path(dir.path()).unwrap());
+    let provider = DiskExpertProvider::new(
+        storage, "mlp".to_string(), n, Device::Cpu, DType::F32, Some(group_size),
+    );
+
+    // Verify all experts can be loaded and dequantized
+    for e in 0..n {
+        let ew = provider.get_expert(e).unwrap();
+        // gate_proj/up_proj: dequantized shape is (intermediate, hidden)
+        assert_eq!(ew.gate_proj.dims(), &[intermediate, hidden]);
+        assert_eq!(ew.up_proj.dims(), &[intermediate, hidden]);
+        // down_proj: dequantized shape is (hidden, intermediate)
+        assert_eq!(ew.down_proj.dims(), &[hidden, intermediate]);
+        assert_eq!(ew.gate_proj.dtype(), DType::F32);
+    }
+}
+
+#[test]
+fn flash_moe_gptq_no_qweight_falls_through() {
+    // When gptq_group_size is set but tensors are plain (no qweight), should still work
+    let dir = tempfile::tempdir().unwrap();
+    let (n, i, h) = (2, 16, 8);
+    make_test_safetensors(dir.path(), "mlp", n, i, h);
+
+    let storage = Arc::new(SafetensorsStorage::from_model_path(dir.path()).unwrap());
+    // Pass GPTQ group_size, but tensors are plain — should auto-detect and fall back
+    let provider = DiskExpertProvider::new(
+        storage, "mlp".to_string(), n, Device::Cpu, DType::F32, Some(64),
+    );
+
     for e in 0..n {
         let ew = provider.get_expert(e).unwrap();
         assert_eq!(ew.gate_proj.dims(), &[i, h]);

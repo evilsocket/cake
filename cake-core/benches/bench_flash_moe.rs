@@ -110,7 +110,7 @@ fn flash_moe_single_expert_read(bencher: divan::Bencher, intermediate: usize) {
     let n = 16;
     make_expert_safetensors(dir.path(), "mlp", n, intermediate, hidden, DType::F32);
     let storage = Arc::new(SafetensorsStorage::from_model_path(dir.path()).unwrap());
-    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32);
+    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32, None);
 
     // Warm page cache
     for i in 0..n {
@@ -132,7 +132,7 @@ fn flash_moe_topk_experts(bencher: divan::Bencher, k: usize) {
     let (n, intermediate, hidden) = (64, 128, 64);
     make_expert_safetensors(dir.path(), "mlp", n, intermediate, hidden, DType::F32);
     let storage = Arc::new(SafetensorsStorage::from_model_path(dir.path()).unwrap());
-    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32);
+    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32, None);
 
     // Warm page cache
     for i in 0..n {
@@ -155,7 +155,7 @@ fn flash_moe_f16_to_f32_conversion(bencher: divan::Bencher, intermediate: usize)
     // Store as F16, load as F32 — measures conversion overhead
     make_expert_safetensors(dir.path(), "mlp", n, intermediate, hidden, DType::F16);
     let storage = Arc::new(SafetensorsStorage::from_model_path(dir.path()).unwrap());
-    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32);
+    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32, None);
 
     // Warm page cache
     for i in 0..n {
@@ -175,7 +175,7 @@ fn flash_moe_bf16_to_f32_conversion(bencher: divan::Bencher, intermediate: usize
     let (n, hidden) = (8, 32);
     make_expert_safetensors(dir.path(), "mlp", n, intermediate, hidden, DType::BF16);
     let storage = Arc::new(SafetensorsStorage::from_model_path(dir.path()).unwrap());
-    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32);
+    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32, None);
 
     for i in 0..n {
         let _ = provider.get_expert(i).unwrap();
@@ -196,7 +196,7 @@ fn flash_moe_multi_shard_read(bencher: divan::Bencher, k: usize) {
     let (n, intermediate, hidden) = (32, 64, 32);
     make_sharded_expert_safetensors(dir.path(), "mlp", n, intermediate, hidden);
     let storage = Arc::new(SafetensorsStorage::from_model_path(dir.path()).unwrap());
-    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32);
+    let provider = DiskExpertProvider::new(storage, "mlp".to_string(), n, Device::Cpu, DType::F32, None);
 
     // Warm page cache — experts span both shards
     for i in 0..n {
@@ -239,6 +239,7 @@ fn flash_moe_disk_vs_stacked_resident(bencher: divan::Bencher, num_experts: usiz
         num_experts,
         Device::Cpu,
         DType::F32,
+        None,
     );
 
     // Warm

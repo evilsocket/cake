@@ -142,7 +142,7 @@ fn disk_provider_via_mock() {
     let storage: Arc<dyn cake_core::utils::tensor_storage::TensorStorageProvider> =
         Arc::new(MockStorage(tensors));
     let provider = cake_core::models::common::disk_expert_provider::DiskExpertProvider::new(
-        storage, "layer.mlp".to_string(), 3, Device::Cpu, DType::F32,
+        storage, "layer.mlp".to_string(), 3, Device::Cpu, DType::F32, None,
     );
 
     assert_eq!(provider.num_experts(), 3);

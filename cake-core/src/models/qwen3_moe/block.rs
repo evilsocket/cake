@@ -52,6 +52,7 @@ impl Forwarder for Qwen3MoeBlock {
                     cfg.num_experts,
                     ctx.device.clone(),
                     ctx.dtype,
+                    ctx.quant.gptq_group_size(),
                 ));
             // Load router gate from VarBuilder (it's small, stays in RAM)
             let gate_weight = vb.pp("mlp").pp("gate").get((cfg.num_experts, cfg.hidden_size), "weight")?;
