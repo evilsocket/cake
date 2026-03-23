@@ -460,6 +460,43 @@ impl candle_core::CustomOp1 for MetalF8ToF16 {
     }
 }
 
+struct MetalFusedVectorAttention { scale: f32, gqa_ratio: u32 }
+impl candle_core::CustomOp3 for MetalFusedVectorAttention {
+    fn name(&self) -> &'static str { "metal_fused_vector_attention" }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalFusedVectorAttention: expected Metal device") }
+    #[allow(clippy::too_many_arguments)]
+    fn metal_fwd(&self, s_q: &candle_core::MetalStorage, l_q: &Layout, s_k: &candle_core::MetalStorage, l_k: &Layout, s_v: &candle_core::MetalStorage, l_v: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
+        // Q: (batch*heads, head_dim), K/V: (batch*kv_heads, kv_len, head_dim)
+        let device = s_q.device();
+        let q_dims = l_q.shape().dims();
+        let k_dims = l_k.shape().dims();
+        let (bh, head_dim) = (q_dims[0], q_dims[1]);
+        let kv_len = k_dims[1];
+        let pipeline = PIPELINE_CACHE.get_or_create(device, "fused_vector_attention_f16")?;
+        let output = device.new_buffer(bh * head_dim, DType::F16, "fused_vec_attn")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let off_q = l_q.start_offset() * s_q.dtype().size_in_bytes();
+        let off_k = l_k.start_offset() * s_k.dtype().size_in_bytes();
+        let off_v = l_v.start_offset() * s_v.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s_q.buffer(), off_q));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (s_k.buffer(), off_k));
+        candle_metal_kernels::utils::set_param(&encoder, 2, (s_v.buffer(), off_v));
+        candle_metal_kernels::utils::set_param(&encoder, 3, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 4, head_dim as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 5, kv_len as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 6, self.scale);
+        candle_metal_kernels::utils::set_param(&encoder, 7, self.gqa_ratio);
+        // Grid: (head_dim, batch*heads) — one column per head_dim element, one row per head
+        let max_threads = pipeline.max_total_threads_per_threadgroup();
+        let tg_width = head_dim.min(max_threads);
+        let grid = objc2_metal::MTLSize { width: head_dim, height: bh, depth: 1 };
+        let group = objc2_metal::MTLSize { width: tg_width, height: 1, depth: 1 };
+        encoder.dispatch_threads(grid, group);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), bh * head_dim, DType::F16), Shape::from(vec![bh, head_dim])))
+    }
+}
+
 // ─── MetalBackend ────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -481,6 +518,21 @@ impl ComputeBackend for MetalBackend {
     fn device(&self) -> &Device { &self.device }
 
     fn attention(&self, q: &Tensor, k: &Tensor, v: &Tensor, scale: f32, causal: bool) -> Result<Tensor> {
+        let q_dims = q.dims();
+        // Generation case: seq_len=1 + F16 → use fused MSL kernel (F32 internal precision)
+        if q_dims.len() == 4 && q_dims[2] == 1 && q.dtype() == DType::F16 && !causal {
+            let (batch, heads, _, head_dim) = (q_dims[0], q_dims[1], q_dims[2], q_dims[3]);
+            let k_dims = k.dims();
+            let kv_heads = k_dims[1];
+            let gqa_ratio = (heads / kv_heads) as u32;
+            // Flatten Q: (batch, heads, 1, head_dim) → (batch*heads, head_dim)
+            let q_flat = q.contiguous()?.reshape((batch * heads, head_dim))?;
+            // Flatten K/V: (batch, kv_heads, kv_len, head_dim) → (batch*kv_heads, kv_len, head_dim)
+            let k_flat = k.contiguous()?.reshape((batch * kv_heads, k_dims[2], head_dim))?;
+            let v_flat = v.contiguous()?.reshape((batch * kv_heads, k_dims[2], head_dim))?;
+            let out = q_flat.apply_op3_no_bwd(&k_flat, &v_flat, &MetalFusedVectorAttention { scale, gqa_ratio })?;
+            return out.reshape((batch, heads, 1, head_dim));
+        }
         // Promote to F32 if needed (F16 SDPA produces imprecise results on Metal)
         let q = q.to_dtype(DType::F32)?; // no-op if already F32
         let k = k.to_dtype(DType::F32)?;
