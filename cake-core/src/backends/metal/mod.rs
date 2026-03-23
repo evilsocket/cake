@@ -1,3 +1,6 @@
+// MSL CustomOp structs and helpers are compiled but temporarily unused while
+// ops are reverted to candle tensor ops for correctness validation.
+#![allow(dead_code)]
 //! Metal compute backend with MSL shaders + candle tensor op fallbacks.
 //!
 //! Self-contained: owns the MSL shader source and CustomOp structs for the
