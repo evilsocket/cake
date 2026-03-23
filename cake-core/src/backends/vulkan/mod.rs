@@ -201,11 +201,25 @@ impl VulkanBackend {
             source: wgpu::ShaderSource::Wgsl(WGSL_SOURCE.into()),
         });
 
+        // Pre-compile all compute pipelines to avoid first-call compilation stalls
+        let mut pipelines = HashMap::new();
+        for entry in &["silu_mul", "stable_softplus", "add3", "exp_mul", "sub_mul", "gemv", "matmul"] {
+            let pipeline = gpu.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some(entry),
+                layout: None,
+                module: &module,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            pipelines.insert(entry.to_string(), pipeline);
+        }
+
         Ok(Self {
             device: Device::Cpu,
             gpu,
             queue,
-            pipelines: Mutex::new(HashMap::new()),
+            pipelines: Mutex::new(pipelines),
             module,
             buffer_cache: Mutex::new(GpuBufferCache::new()),
             buffer_pool: Mutex::new(BufferPool::new()),
