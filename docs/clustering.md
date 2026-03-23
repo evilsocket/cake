@@ -48,7 +48,7 @@ For full control over layer placement, use a topology file.
 Run a worker node:
 
 ```sh
-cake run --model /path/to/Meta-Llama-3-8B \
+cake run /path/to/Meta-Llama-3-8B \
             --name worker0 \
             --topology topology.yml \
             --address 0.0.0.0:10128

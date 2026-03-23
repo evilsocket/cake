@@ -2,7 +2,7 @@
 
 ## Downloading Models
 
-You can pass a HuggingFace repo ID as the `--model` argument and Cake will download the model automatically (with progress bars). Files are cached in `~/.cache/huggingface/hub/` — subsequent runs skip the download.
+You can pass a HuggingFace repo ID as the model argument and Cake will download the model automatically (with progress bars). Files are cached in `~/.cache/huggingface/hub/` — subsequent runs skip the download.
 
 ```sh
 cake serve evilsocket/Qwen2.5-Coder-1.5B-Instruct
@@ -99,7 +99,7 @@ The Chat tab shows streaming responses with real-time tokens/second stats. Model
 
 ## API
 
-Cake exposes an OpenAI-compatible REST API when running with `--api`, supporting chat completion, audio/TTS, and image generation. All endpoints are served from the same server; only the loaded model type produces results — others return `404`.
+Cake exposes an OpenAI-compatible REST API when using `cake serve`, supporting chat completion, audio/TTS, and image generation. All endpoints are served from the same server; only the loaded model type produces results — others return `404`.
 
 ```sh
 cake serve evilsocket/Qwen2.5-Coder-1.5B-Instruct
@@ -120,11 +120,25 @@ See the full [REST API Reference](api.md) for all endpoints, request/response fo
 
 ## CLI Arguments
 
+### Subcommands
+
+| Command | Positional Args | Description |
+|---------|----------------|-------------|
+| `cake run <model> [prompt]` | `model` (optional), `prompt` (optional) | Run inference, cluster master, or worker |
+| `cake serve <model>` | `model` (required) | Start OpenAI-compatible API server |
+| `cake pull <model>` | `model` (required) | Download model from HuggingFace |
+| `cake list` | - | List locally available models |
+| `cake chat [model]` | `model` (optional) | Interactive TUI chat (local or remote) |
+| `cake rm <model>` | `model` (required) | Delete a cached model |
+| `cake split` | - | Split model into per-worker bundles |
+
+### Flags
+
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--model` | - | Model path or HuggingFace repo ID |
+| `--name` | - | Worker name (used with manual topology or zero-config) |
+| `--address` | `0.0.0.0:10128` | Worker bind address and port |
 | `--system-prompt` | `"You are a helpful AI assistant."` | System prompt |
-| `--api` | - | API bind address (e.g. `0.0.0.0:8080`) |
 | `--topology` | - | Topology file for manual cluster setup |
 | `-n` / `--sample-len` | `2048` | Max tokens to generate |
 | `--temperature` | `1.0` | Sampling temperature (0 = greedy) |
@@ -136,10 +150,13 @@ See the full [REST API Reference](api.md) for all endpoints, request/response fo
 | `--device` | `0` | GPU device index |
 | `--cpu` | `false` | Force CPU inference |
 | `--dtype` | - | Override dtype (default: f16) |
-| `--text-model-arch` | `auto` | Force model architecture (`auto`, `llama`, `qwen2`, `qwen3`, `qwen3-moe`, `qwen3-5`, `phi4`, `mistral`, `gemma3`, `falcon3`, `ol-mo2`, `exaone4`, `lux-tts`) |
+| `--text-model-arch` | `auto` | Force model architecture (`auto`, `llama`, `qwen2`, `qwen3`, `qwen3-moe`, `qwen3-5`, `qwen3-5-moe`, `phi4`, `mistral`, `gemma3`, `falcon3`, `ol-mo2`, `exaone4`, `lux-tts`) |
 | `--cluster-key` | - | Zero-config cluster key (or `CAKE_CLUSTER_KEY` env) |
 | `--discovery-timeout` | `10` | Worker discovery timeout in seconds |
+| `--min-workers` | `0` | Stop discovery once this many workers found (0 = wait full timeout) |
 | `--ui-auth` | - | Basic auth for web UI (`user:pass`) |
+| `--model-type` | `text-model` | Model type (`text-model`, `image-model`, `audio-model`) |
+| `--expert-offload` | `false` | Offload MoE expert weights to disk |
 | `--tts-reference-audio` | - | WAV file for LuxTTS voice cloning (24kHz mono) |
 | `--tts-t-shift` | `1.0` | LuxTTS flow matching time shift |
 | `--tts-speed` | `1.0` | LuxTTS speed factor (lower = longer audio) |

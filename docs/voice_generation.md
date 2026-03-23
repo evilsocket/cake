@@ -58,7 +58,7 @@ print(' '.join(str(i) for i in ids))
 
 # Generate audio using pre-computed tokens
 cake run evilsocket/luxtts \
-  --prompt "Hello world" \
+  "Hello world" \
   --tts-token-ids token_ids.txt \
   --tts-speed 0.16 \
   --tts-diffusion-steps 4 \
@@ -70,7 +70,7 @@ cake run evilsocket/luxtts \
 
 ```sh
 cake run evilsocket/luxtts \
-  --prompt "Hello world, this is a test." \
+  "Hello world, this is a test." \
   --audio-output output.wav \
   --tts-speed 0.16 \
   --tts-diffusion-steps 4 \
@@ -83,7 +83,7 @@ Provide a 24kHz mono WAV reference audio for voice cloning:
 
 ```sh
 cake run evilsocket/luxtts \
-  --prompt "Hello world" \
+  "Hello world" \
   --tts-reference-audio voice_sample.wav \
   --audio-output output.wav \
   --tts-speed 0.16 --tts-diffusion-steps 4 --dtype f32
@@ -111,12 +111,14 @@ worker1:
 
 ```sh
 # Worker
-cake run --model evilsocket/luxtts --name worker1 \
+cake run evilsocket/luxtts --name worker1 \
   --topology topology-luxtts.yml --address 0.0.0.0:10128
 
 # Master
-cake run evilsocket/luxtts --topology topology-luxtts.yml \
-  --prompt "Hello world" --audio-output output.wav \
+cake run evilsocket/luxtts \
+  "Hello world" \
+  --topology topology-luxtts.yml \
+  --audio-output output.wav \
   --tts-speed 0.16 --tts-diffusion-steps 4 --dtype f32
 ```
 
@@ -124,7 +126,7 @@ cake run evilsocket/luxtts --topology topology-luxtts.yml \
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `--prompt` | (required) | Text to synthesize |
+| `<prompt>` | (required) | Text to synthesize (positional argument to `cake run`) |
 | `--audio-output` | `output.wav` | Output WAV file path |
 | `--tts-diffusion-steps` | 10 | Euler solver steps (4 recommended for distilled LuxTTS) |
 | `--tts-speed` | 1.0 | Speed factor (lower = longer audio; 0.16 ≈ 6 frames/token) |
@@ -152,9 +154,10 @@ The recommended model. Supports multi-speaker voice cloning from raw .wav files.
 ### Basic Usage
 
 ```sh
-cake run evilsocket/VibeVoice-1.5B --model-type audio-model \
+cake run evilsocket/VibeVoice-1.5B \
+  "Hello world, this is a test of the voice cloning system." \
+  --model-type audio-model \
   --voice-prompt voice_reference.wav \
-  --prompt "Hello world, this is a test of the voice cloning system." \
   --audio-output output.wav
 ```
 
@@ -171,9 +174,11 @@ Pre-made voice presets are available in the [VibeVoice community repo](https://g
 wget https://raw.githubusercontent.com/vibevoice-community/VibeVoice/main/demo/voices/en-Alice_woman.wav
 
 # Use it
-cake run evilsocket/VibeVoice-1.5B --model-type audio-model \
+cake run evilsocket/VibeVoice-1.5B \
+  "Your text here" \
+  --model-type audio-model \
   --voice-prompt en-Alice_woman.wav \
-  --prompt "Your text here" --audio-output output.wav
+  --audio-output output.wav
 ```
 
 ### Arguments
@@ -181,7 +186,7 @@ cake run evilsocket/VibeVoice-1.5B --model-type audio-model \
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--voice-prompt` | (required) | Path to .wav voice reference file |
-| `--prompt` | (required) | Text to synthesize |
+| `<prompt>` | (required) | Text to synthesize (positional argument to `cake run`) |
 | `--audio-output` | `output.wav` | Output WAV file path |
 | `--tts-diffusion-steps` | 10 | Diffusion steps per speech frame (higher = better quality, slower) |
 | `--tts-cfg-scale` | 1.5 | Classifier-free guidance scale (1.0-3.0) |
@@ -205,9 +210,11 @@ A lightweight streaming variant optimized for real-time TTS. Uses a split LM arc
 ### Usage
 
 ```sh
-cake run evilsocket/VibeVoice-Realtime-0.5B --model-type audio-model \
+cake run evilsocket/VibeVoice-Realtime-0.5B \
+  "Hello world" \
+  --model-type audio-model \
   --voice-prompt voice_preset.safetensors \
-  --prompt "Hello world" --audio-output output.wav \
+  --audio-output output.wav \
   --tts-cfg-scale 1.5
 ```
 

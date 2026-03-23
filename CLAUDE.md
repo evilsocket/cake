@@ -53,12 +53,12 @@ cake rm Qwen3-0.6B                    # short name also works (suffix match)
 # Workers first (on each machine):
 # bahamut:
 LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64 ./target/release/cake run \
-  --model evilsocket/Qwen3.5-0.8B --name bahamut \
+  evilsocket/Qwen3.5-0.8B --name bahamut \
   --topology topology-0.8B.yml --address 0.0.0.0:10128
 
 # stevie:
 ./target/release/cake run \
-  --model evilsocket/Qwen3.5-0.8B --name stevie \
+  evilsocket/Qwen3.5-0.8B --name stevie \
   --topology topology-0.8B.yml --address 0.0.0.0:10128
 
 # Master (blade, local):
@@ -119,8 +119,8 @@ ssh stevie.local "cd ~/Lab/cake && git pull && cargo build --release --features 
 ### Run experiment pattern
 ```bash
 # Start workers (background SSH sessions)
-ssh bahamut.local "cd ~/Lab/cake && LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64 ./target/release/cake run --model evilsocket/Qwen3.5-0.8B --name bahamut --topology topology-0.8B.yml --address 0.0.0.0:10128"
-ssh stevie.local "cd ~/Lab/cake && ./target/release/cake run --model evilsocket/Qwen3.5-0.8B --name stevie --topology topology-0.8B.yml --address 0.0.0.0:10128"
+ssh bahamut.local "cd ~/Lab/cake && LD_LIBRARY_PATH=/usr/local/cuda-12.4/lib64 ./target/release/cake run evilsocket/Qwen3.5-0.8B --name bahamut --topology topology-0.8B.yml --address 0.0.0.0:10128"
+ssh stevie.local "cd ~/Lab/cake && ./target/release/cake run evilsocket/Qwen3.5-0.8B --name stevie --topology topology-0.8B.yml --address 0.0.0.0:10128"
 
 # Run master (blade, local)
 ./target/release/cake run evilsocket/Qwen3.5-0.8B "Explain quantum computing in simple terms" --topology topology-0.8B.yml
