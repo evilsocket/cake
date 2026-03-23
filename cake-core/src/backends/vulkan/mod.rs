@@ -923,7 +923,7 @@ impl VulkanBackend {
         let buf_c = self.alloc_output(m * n);
         // Use small-M kernel (16×64 tile) for M<=16, large kernel (32×64) otherwise
         let (entry, wg_m, wg_n) = if m <= 16 {
-            ("matmul_small", (m as u32).div_ceil(16), (n as u32).div_ceil(64))
+            ("matmul_small", (m as u32).div_ceil(8), (n as u32).div_ceil(64))
         } else {
             ("matmul", (m as u32).div_ceil(32), (n as u32).div_ceil(64))
         };
@@ -1024,7 +1024,7 @@ impl VulkanBackend {
         let workgroups = if is_gemv {
             ((n as u32).div_ceil(256), 1, 1)
         } else if m <= 16 {
-            ((m as u32).div_ceil(16), (n as u32).div_ceil(64), 1)
+            ((m as u32).div_ceil(8), (n as u32).div_ceil(64), 1)
         } else {
             ((m as u32).div_ceil(32), (n as u32).div_ceil(64), 1)
         };

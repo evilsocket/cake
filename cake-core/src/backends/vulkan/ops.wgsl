@@ -476,12 +476,12 @@ fn scaled_softmax(@builtin(workgroup_id) wid: vec3<u32>,
 @group(0) @binding(2) var<storage, read_write> smat_c: array<f32>;
 @group(0) @binding(3) var<uniform> smat_params: MatmulParams;
 
-const STILE_M: u32 = 16;
+const STILE_M: u32 = 8;
 const STILE_N: u32 = 64;
 const STILE_K: u32 = 32;
 const STILE_A_STRIDE: u32 = 33;
 const STILE_B_STRIDE: u32 = 65;
-var<workgroup> stile_a: array<f32, 528>;   // [16, 33]
+var<workgroup> stile_a: array<f32, 264>;   // [8, 33]
 var<workgroup> stile_b: array<f32, 2080>;  // [32, 65]
 
 @compute @workgroup_size(16, 16)
@@ -505,16 +505,15 @@ fn matmul_small(@builtin(global_invocation_id) gid: vec3<u32>,
     for (var t: u32 = 0u; t < num_tiles; t++) {
         let tk = t * STILE_K;
 
-        // Load tile_a[16, 32]: row-coalesced pattern.
-        // 256 threads cover 8 rows per iteration (32 threads/row), 2 iterations for 16 rows.
-        for (var r: u32 = 0u; r < 2u; r++) {
-            let tr = r * 8u + lin / 32u;
+        // Load tile_a[8, 32]: exactly 256 elements = 1 per thread.
+        {
+            let tr = lin / 32u;
             let tc = lin % 32u;
             let a_row = wg_row + tr;
             let a_col = tk + tc;
-            if (tr < STILE_M && a_row < M && a_col < K) {
+            if (a_row < M && a_col < K) {
                 stile_a[tr * STILE_A_STRIDE + tc] = smat_a[a_row * K + a_col];
-            } else if (tr < STILE_M) {
+            } else {
                 stile_a[tr * STILE_A_STRIDE + tc] = 0.0;
             }
         }
@@ -535,13 +534,16 @@ fn matmul_small(@builtin(global_invocation_id) gid: vec3<u32>,
 
         workgroupBarrier();
 
+        // Only threads with lr < STILE_M (8) compute; others just help with loading.
         let c0 = lc * 4u;
-        for (var k: u32 = 0u; k < STILE_K; k++) {
-            let a_val = stile_a[lr * STILE_A_STRIDE + k];
-            acc0 += a_val * stile_b[k * STILE_B_STRIDE + c0];
-            acc1 += a_val * stile_b[k * STILE_B_STRIDE + c0 + 1u];
-            acc2 += a_val * stile_b[k * STILE_B_STRIDE + c0 + 2u];
-            acc3 += a_val * stile_b[k * STILE_B_STRIDE + c0 + 3u];
+        if (lr < STILE_M) {
+            for (var k: u32 = 0u; k < STILE_K; k++) {
+                let a_val = stile_a[lr * STILE_A_STRIDE + k];
+                acc0 += a_val * stile_b[k * STILE_B_STRIDE + c0];
+                acc1 += a_val * stile_b[k * STILE_B_STRIDE + c0 + 1u];
+                acc2 += a_val * stile_b[k * STILE_B_STRIDE + c0 + 2u];
+                acc3 += a_val * stile_b[k * STILE_B_STRIDE + c0 + 3u];
+            }
         }
         workgroupBarrier();
     }
