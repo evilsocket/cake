@@ -218,9 +218,9 @@ fn gemv(@builtin(global_invocation_id) gid: vec3<u32>,
 
 // ═══════════════════════════════════════════════════════════════════
 // Tiled GEMM: C[M,N] = A[M,K] × B[K,N]  (for M > 1)
-// 16×16 output tile with 2×2 register tiling, K-tile = 32.
-// 8×8 workgroup (64 threads). Doubled K-tile halves the number of
-// tile iterations and barrier synchronizations.
+// 16×16 output tile, K-tile = 32. 16×16 workgroup (256 threads = 4
+// RDNA 2 wavefronts) with 1 output per thread. More threads means
+// better memory latency hiding and faster cooperative tile loading.
 // ═══════════════════════════════════════════════════════════════════
 
 struct MatmulParams {
@@ -236,18 +236,17 @@ struct MatmulParams {
 @group(0) @binding(3) var<uniform> mat_params: MatmulParams;
 
 const TILE_MN: u32 = 16;   // output tile M and N dimension
-const TILE_K: u32 = 32;    // K dimension tile (doubled for fewer iterations)
-const TILE_A_STRIDE: u32 = 33;  // padded stride to avoid bank conflicts (32 banks on RDNA 2)
+const TILE_K: u32 = 32;    // K dimension tile
+const TILE_A_STRIDE: u32 = 33;  // padded stride to avoid bank conflicts
 const TILE_B_STRIDE: u32 = 17;  // padded stride for tile_b
 var<workgroup> tile_a: array<f32, 528>;  // [16, 33] padded
 var<workgroup> tile_b: array<f32, 544>;  // [32, 17] padded
 
-@compute @workgroup_size(8, 8)
+@compute @workgroup_size(16, 16)
 fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
           @builtin(local_invocation_id) lid: vec3<u32>) {
-    // Each thread covers a 2×2 block of the output tile
-    let row0 = gid.x * 2u;
-    let col0 = gid.y * 2u;
+    let row = gid.x;
+    let col = gid.y;
     let lr = lid.x;
     let lc = lid.y;
     let M = mat_params.M;
@@ -255,27 +254,23 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
     let K = mat_params.K;
 
     // Workgroup base position
-    let wg_row = gid.x * 2u - lid.x * 2u;
-    let wg_col = gid.y * 2u - lid.y * 2u;
+    let wg_row = gid.x - lid.x;
+    let wg_col = gid.y - lid.y;
 
-    // 2×2 accumulators
-    var acc00: f32 = 0.0;
-    var acc01: f32 = 0.0;
-    var acc10: f32 = 0.0;
-    var acc11: f32 = 0.0;
+    var acc: f32 = 0.0;
     let num_tiles = (K + TILE_K - 1u) / TILE_K;
 
-    // Linear thread index (64 threads load 512 elements = 8 per thread)
-    let lin = lr * 8u + lc;
+    // Linear thread index (256 threads load 512 elements = 2 per thread)
+    let lin = lr * 16u + lc;
 
     for (var t: u32 = 0u; t < num_tiles; t++) {
         let tk = t * TILE_K;
 
-        // Cooperative load tile_a[16, 32] with padded stride: 64 threads, 8 elements each
-        for (var i: u32 = 0u; i < 8u; i++) {
-            let idx = lin * 8u + i;
-            let tr = idx / TILE_K;   // row 0..15
-            let tc = idx % TILE_K;   // col 0..31
+        // Cooperative load tile_a[16, 32]: 256 threads, 2 elements each
+        for (var i: u32 = 0u; i < 2u; i++) {
+            let idx = lin * 2u + i;
+            let tr = idx / TILE_K;
+            let tc = idx % TILE_K;
             let a_row = wg_row + tr;
             let a_col = tk + tc;
             if (a_row < M && a_col < K) {
@@ -285,11 +280,11 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
             }
         }
 
-        // Cooperative load tile_b[32, 16] with padded stride: 64 threads, 8 elements each
-        for (var i: u32 = 0u; i < 8u; i++) {
-            let idx = lin * 8u + i;
-            let tr = idx / TILE_MN;  // row 0..31
-            let tc = idx % TILE_MN;  // col 0..15
+        // Cooperative load tile_b[32, 16]: 256 threads, 2 elements each
+        for (var i: u32 = 0u; i < 2u; i++) {
+            let idx = lin * 2u + i;
+            let tr = idx / TILE_MN;
+            let tc = idx % TILE_MN;
             let b_row = tk + tr;
             let b_col = wg_col + tc;
             if (b_row < K && b_col < N) {
@@ -301,32 +296,13 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
 
         workgroupBarrier();
 
-        // Each thread accumulates its 2×2 block over K-tile of 32 (unrolled by 2)
-        let r0 = lr * 2u;
-        let r1 = r0 + 1u;
-        let c0 = lc * 2u;
-        let c1 = c0 + 1u;
-        for (var k: u32 = 0u; k < TILE_K; k += 2u) {
-            let a0k0 = tile_a[r0 * TILE_A_STRIDE + k];
-            let a1k0 = tile_a[r1 * TILE_A_STRIDE + k];
-            let bk00 = tile_b[k * TILE_B_STRIDE + c0];
-            let bk01 = tile_b[k * TILE_B_STRIDE + c1];
-            acc00 += a0k0 * bk00; acc01 += a0k0 * bk01;
-            acc10 += a1k0 * bk00; acc11 += a1k0 * bk01;
-
-            let a0k1 = tile_a[r0 * TILE_A_STRIDE + k + 1u];
-            let a1k1 = tile_a[r1 * TILE_A_STRIDE + k + 1u];
-            let bk10 = tile_b[(k + 1u) * TILE_B_STRIDE + c0];
-            let bk11 = tile_b[(k + 1u) * TILE_B_STRIDE + c1];
-            acc00 += a0k1 * bk10; acc01 += a0k1 * bk11;
-            acc10 += a1k1 * bk10; acc11 += a1k1 * bk11;
+        for (var k: u32 = 0u; k < TILE_K; k++) {
+            acc += tile_a[lr * TILE_A_STRIDE + k] * tile_b[k * TILE_B_STRIDE + lc];
         }
         workgroupBarrier();
     }
 
-    // Write 2×2 output block
-    if (row0 < M && col0 < N) { mat_c[row0 * N + col0] = acc00; }
-    if (row0 < M && col0 + 1u < N) { mat_c[row0 * N + col0 + 1u] = acc01; }
-    if (row0 + 1u < M && col0 < N) { mat_c[(row0 + 1u) * N + col0] = acc10; }
-    if (row0 + 1u < M && col0 + 1u < N) { mat_c[(row0 + 1u) * N + col0 + 1u] = acc11; }
+    if (row < M && col < N) {
+        mat_c[row * N + col] = acc;
+    }
 }
