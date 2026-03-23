@@ -279,6 +279,11 @@ impl VulkanBackend {
             .create_descriptor_pool(&dp_ci, None)
             .map_err(|e| format!("create_descriptor_pool: {e}"))?;
 
+        // 9.5. Pipeline cache — helps driver reuse compiled shader code across pipelines
+        let pipeline_cache = vk_device
+            .create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)
+            .map_err(|e| format!("create_descriptor_pool: {e}"))?;
+
         // 10. Create pipelines from SPIR-V modules, pre-allocate one descriptor set each
         let mut pipelines = HashMap::new();
         for &(name, spv_bytes) in SPIRV_MODULES {
@@ -344,7 +349,7 @@ impl VulkanBackend {
                 .stage(stage_ci)
                 .layout(pipe_layout);
             let pipeline = vk_device
-                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_ci], None)
+                .create_compute_pipelines(pipeline_cache, &[pipeline_ci], None)
                 .map_err(|e| format!("create_compute_pipeline({name}): {e:?}"))?[0];
 
             vk_device.destroy_shader_module(shader_module, None);
