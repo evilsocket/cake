@@ -86,6 +86,34 @@ kernel void stable_softplus_f16(
     output[idx] = max(x, sp);
 }
 
+// ─── gelu (tanh approximation) ──────────────────────────────────────
+constant float GELU_COEF = 0.7978845608028654f;  // sqrt(2/pi)
+constant float GELU_CUBIC = 0.044715f;
+
+kernel void gelu_f32(
+    device const float* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    float x = input[idx];
+    float inner = GELU_COEF * fma(GELU_CUBIC * x, x * x, x);
+    output[idx] = 0.5f * x * (1.0f + fast::tanh(inner));
+}
+
+kernel void gelu_f16(
+    device const half* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    float x = float(input[idx]);
+    float inner = GELU_COEF * fma(GELU_CUBIC * x, x * x, x);
+    output[idx] = half(0.5f * x * (1.0f + fast::tanh(inner)));
+}
+
 // ─── sigmoid ────────────────────────────────────────────────────────
 kernel void sigmoid_f32(
     device const float* input [[buffer(0)]],
