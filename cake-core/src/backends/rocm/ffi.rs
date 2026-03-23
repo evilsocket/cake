@@ -36,6 +36,16 @@ pub struct RocmFfi {
         *const f32, c_int,
         *const f32, *mut f32, c_int,
     ) -> c_int,
+    pub rocblas_sgemm_strided_batched: unsafe extern "C" fn(
+        *mut c_void, c_int, c_int,
+        c_int, c_int, c_int,
+        *const f32,
+        *const f32, c_int, i64,  // A, lda, stride_a
+        *const f32, c_int, i64,  // B, ldb, stride_b
+        *const f32,
+        *mut f32, c_int, i64,    // C, ldc, stride_c
+        c_int,                   // batch_count
+    ) -> c_int,
 }
 
 // dlopen'd libraries are safe to share across threads
@@ -86,6 +96,7 @@ impl RocmFfi {
                 rocblas_destroy_handle: sym!(blas_lib, b"rocblas_destroy_handle\0"),
                 rocblas_set_stream: sym!(blas_lib, b"rocblas_set_stream\0"),
                 rocblas_sgemm: sym!(blas_lib, b"rocblas_sgemm\0"),
+                rocblas_sgemm_strided_batched: sym!(blas_lib, b"rocblas_sgemm_strided_batched\0"),
 
                 _hip_lib: hip_lib,
                 _blas_lib: blas_lib,

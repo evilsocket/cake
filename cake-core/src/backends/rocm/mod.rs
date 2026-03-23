@@ -265,29 +265,46 @@ impl RocmBackend {
         // Upload entire A and B arrays at once — one H2D transfer per operand
         let a_gpu = self.gpu_upload(&ad_flat)?;
         let b_gpu = self.gpu_upload(&bd_flat)?;
-        // Pre-allocate output buffer for all batches
         let c_gpu = self.gpu_alloc(batch * mn)?;
         let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
-        for i in 0..batch {
-            let ao = if ab==1 {0} else {i*mk};
-            let bo = if bb==1 {0} else {i*kn};
-            let co = i * mn;
+        // Use strided batched GEMM when both operands have uniform strides
+        if ab == batch && bb == batch {
             let err = unsafe {
-                (self.ffi.rocblas_sgemm)(
+                (self.ffi.rocblas_sgemm_strided_batched)(
                     self.blas_handle,
                     ROCBLAS_OPERATION_NONE, ROCBLAS_OPERATION_NONE,
                     n as i32, m as i32, k as i32,
                     &alpha,
-                    b_gpu.as_ptr().add(bo), n as i32,
-                    a_gpu.as_ptr().add(ao), k as i32,
+                    b_gpu.as_ptr(), n as i32, kn as i64,
+                    a_gpu.as_ptr(), k as i32, mk as i64,
                     &beta,
-                    c_gpu.as_mut_ptr().add(co), n as i32,
+                    c_gpu.as_mut_ptr(), n as i32, mn as i64,
+                    batch as i32,
                 )
             };
-            if err != 0 { return Err(candle_core::Error::Msg(format!("rocblas_sgemm batch {i}: {err}"))); }
+            if err != 0 { return Err(candle_core::Error::Msg(format!("rocblas_sgemm_strided_batched: {err}"))); }
+        } else {
+            // Fallback: loop for broadcast batches (one operand has batch=1)
+            for i in 0..batch {
+                let ao = if ab==1 {0} else {i*mk};
+                let bo = if bb==1 {0} else {i*kn};
+                let co = i * mn;
+                let err = unsafe {
+                    (self.ffi.rocblas_sgemm)(
+                        self.blas_handle,
+                        ROCBLAS_OPERATION_NONE, ROCBLAS_OPERATION_NONE,
+                        n as i32, m as i32, k as i32,
+                        &alpha,
+                        b_gpu.as_ptr().add(bo), n as i32,
+                        a_gpu.as_ptr().add(ao), k as i32,
+                        &beta,
+                        c_gpu.as_mut_ptr().add(co), n as i32,
+                    )
+                };
+                if err != 0 { return Err(candle_core::Error::Msg(format!("rocblas_sgemm batch {i}: {err}"))); }
+            }
         }
-        // Single async download + stream sync for all batches
         let out = c_gpu.download_on_stream(self.stream).map_err(candle_core::Error::Msg)?;
         let mut s = ad[..ra-2].to_vec(); s.push(m); s.push(n);
         Tensor::from_vec(out, s.as_slice(), &Device::Cpu)
