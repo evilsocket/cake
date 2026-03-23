@@ -92,12 +92,16 @@ impl BufferPool {
 
 struct WeightCache {
     buffers: HashMap<TensorId, Arc<MappedBuffer>>,
+    /// View cache: keyed by (storage_ptr, offset, elem_count, contiguous_stride_hash).
+    /// Handles `weight.t()` which creates new TensorIds but shares the same storage.
+    views: HashMap<(usize, usize, usize, u64), Arc<MappedBuffer>>,
 }
 
 impl WeightCache {
     fn new() -> Self {
         Self {
             buffers: HashMap::new(),
+            views: HashMap::new(),
         }
     }
 }
@@ -517,6 +521,26 @@ impl VulkanBackend {
         act_cache.push((tensor_id, buf));
     }
 
+    /// Compute a stable view key from tensor storage identity + layout.
+    /// This survives `.t()` calls which create new TensorIds but share storage.
+    fn view_key(tensor: &Tensor) -> Option<(usize, usize, usize, u64)> {
+        let (storage, layout) = tensor.storage_and_layout();
+        if let candle_core::Storage::Cpu(cpu) = &*storage {
+            if let Ok(slice) = cpu.as_slice::<f32>() {
+                let ptr = slice.as_ptr() as usize;
+                let offset = layout.start_offset();
+                let count = layout.shape().elem_count();
+                // Hash the strides to distinguish transposed views
+                let strides = layout.stride();
+                let stride_hash = strides.iter().fold(0u64, |h, &s| {
+                    h.wrapping_mul(6364136223846793005).wrapping_add(s as u64)
+                });
+                return Some((ptr, offset, count, stride_hash));
+            }
+        }
+        None
+    }
+
     fn get_or_upload(&self, tensor: &Tensor) -> Result<Arc<MappedBuffer>> {
         let id = tensor.id();
         // Check activation cache first (ephemeral outputs from recent dispatches)
@@ -527,14 +551,22 @@ impl VulkanBackend {
                 return Ok(buf);
             }
         }
-        // Then check weight cache (persistent)
+        // Check weight cache by TensorId (fast path for stable tensors)
         {
             let cache = self.weight_cache.lock().unwrap();
             if let Some(buf) = cache.buffers.get(&id) {
                 return Ok(buf.clone());
             }
         }
-        // Fast path: copy directly from tensor storage to mapped buffer (avoid Vec allocation)
+        // Check view cache (handles weight.t() which creates new TensorIds)
+        let vk = Self::view_key(tensor);
+        if let Some(ref key) = vk {
+            let cache = self.weight_cache.lock().unwrap();
+            if let Some(buf) = cache.views.get(key) {
+                return Ok(buf.clone());
+            }
+        }
+        // Upload: convert to f32 contiguous, copy to GPU
         let tensor = if tensor.dtype() == DType::F32 { tensor.clone() } else { tensor.to_dtype(DType::F32)? };
         let tensor = if tensor.is_contiguous() { tensor } else { tensor.contiguous()? };
         let n = tensor.elem_count();
@@ -549,7 +581,6 @@ impl VulkanBackend {
             self.uma_memory_type,
         )
         .map_err(candle_core::Error::Msg)?;
-        // Write directly from tensor storage — avoids intermediate Vec allocation
         let (storage, layout) = tensor.storage_and_layout();
         if let candle_core::Storage::Cpu(cpu) = &*storage {
             let slice: &[f32] = cpu.as_slice()?;
@@ -562,7 +593,11 @@ impl VulkanBackend {
         }
         let buf = Arc::new(buf);
         let mut cache = self.weight_cache.lock().unwrap();
-        cache.buffers.insert(id, buf.clone());
+        cache.buffers.insert(tensor.id(), buf.clone());
+        // Also cache by view key for future .t() lookups
+        if let Some(key) = vk {
+            cache.views.insert(key, buf.clone());
+        }
         Ok(buf)
     }
 
@@ -1255,10 +1290,8 @@ impl ComputeBackend for VulkanBackend {
         let m = a_dims[a_dims.len() - 2];
         let k = a_dims[a_dims.len() - 1];
         let n = b_dims[b_dims.len() - 1];
-        if m <= 1 {
-            log::debug!("matmul CPU: M={m} K={k} N={n} (M<=1, generation)");
-            return a.matmul(b);
-        }
+        // GPU for all sizes: M=1 uses GEMV (batched cmd buffer for batch>1),
+        // view cache handles weight.t() without re-uploading.
         log::debug!("matmul GPU: M={m} K={k} N={n}");
         let orig_dtype = a.dtype();
         let result = self.tensor_matmul(a, b)?;
