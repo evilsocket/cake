@@ -287,8 +287,8 @@ impl TextModelBase {
                     .map_err(|e| {
                         anyhow!("error in forward operation of local block {block_idx}: {e}")
                     })?;
-                // Flush Metal command buffer between blocks
-                let _ = self.ctx.backend.synchronize();
+                // Note: blocks internally synchronize at strategic points
+                // (GDN: 4 syncs, full_attn: 2 syncs). No additional sync needed here.
                 local_elapsed += local_start.elapsed();
                 local_count += 1;
 
