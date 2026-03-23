@@ -313,10 +313,8 @@ impl GatedDeltaNet {
         let proj = proj.to_dtype(DType::F32)
             .map_err(|e| anyhow!("proj to_f32: {e}"))?;
 
-        // Flush GPU commands after the big in_proj matmul + dtype conversion
-        let _ = self.backend.synchronize();
-
         // Split fused output (all views on F32 tensor — zero cost)
+        // Note: sync deferred to after conv1d to reduce sync overhead
         let mixed_qkv = proj.narrow(2, 0, self.conv_dim)
             .map_err(|e| anyhow!("split qkv: {e}"))?;
         let a = proj.narrow(2, self.conv_dim, self.num_heads)
