@@ -24,12 +24,17 @@ const FUSED_OPS_MSL: &str = include_str!("ops.msl");
 // pipeline states keyed by kernel name to avoid recompilation on every op call.
 
 struct PipelineCache {
+    // Cache the compiled MSL library (compiled once from source) and individual pipelines
+    library: Mutex<Option<candle_metal_kernels::metal::Library>>,
     pipelines: Mutex<HashMap<&'static str, candle_metal_kernels::metal::ComputePipeline>>,
 }
 
 impl PipelineCache {
     fn new() -> Self {
-        Self { pipelines: Mutex::new(HashMap::new()) }
+        Self {
+            library: Mutex::new(None),
+            pipelines: Mutex::new(HashMap::new()),
+        }
     }
 
     fn get_or_create(
@@ -37,16 +42,29 @@ impl PipelineCache {
         device: &candle_core::MetalDevice,
         kernel_name: &'static str,
     ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
-        let mut cache = self.pipelines.lock().map_err(|e| candle_core::Error::Msg(format!("pipeline cache lock: {e}")))?;
-        if let Some(pipeline) = cache.get(kernel_name) {
-            return Ok(pipeline.clone());
+        // Fast path: check pipeline cache first
+        {
+            let cache = self.pipelines.lock().map_err(|e| candle_core::Error::Msg(format!("pipeline cache lock: {e}")))?;
+            if let Some(pipeline) = cache.get(kernel_name) {
+                return Ok(pipeline.clone());
+            }
         }
-        let lib = device.new_library_with_source(FUSED_OPS_MSL, None)
-            .map_err(|e| candle_core::Error::Msg(format!("metal shader compile: {e}")))?;
+        // Slow path: compile library (once) and create pipeline
+        let mut lib_guard = self.library.lock().map_err(|e| candle_core::Error::Msg(format!("library lock: {e}")))?;
+        let lib = match lib_guard.as_ref() {
+            Some(lib) => lib,
+            None => {
+                let compiled = device.new_library_with_source(FUSED_OPS_MSL, None)
+                    .map_err(|e| candle_core::Error::Msg(format!("metal shader compile: {e}")))?;
+                *lib_guard = Some(compiled);
+                lib_guard.as_ref().unwrap()
+            }
+        };
         let func = lib.get_function(kernel_name, None)
             .map_err(|e| candle_core::Error::Msg(format!("metal get_function: {e}")))?;
         let pipeline = device.new_compute_pipeline_state_with_function(&func)
             .map_err(|e| candle_core::Error::Msg(format!("metal pipeline: {e}")))?;
+        let mut cache = self.pipelines.lock().map_err(|e| candle_core::Error::Msg(format!("pipeline cache lock: {e}")))?;
         cache.insert(kernel_name, pipeline.clone());
         Ok(pipeline)
     }
