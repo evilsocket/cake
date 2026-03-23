@@ -425,7 +425,7 @@ fn metal_gdn_recurrent_step_matches_cpu() {
     let state = Tensor::zeros((1, 16, 4, 16), DType::F32, &Device::Cpu).unwrap();
 
     // Run on CPU
-    let (cpu_out, cpu_state) = {
+    let (cpu_out, _cpu_state) = {
         let decay = g.unsqueeze(D::Minus1).unwrap().unsqueeze(D::Minus1).unwrap().exp().unwrap();
         let s = state.broadcast_mul(&decay).unwrap();
         let k_4d = k.unsqueeze(D::Minus1).unwrap();
