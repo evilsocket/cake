@@ -166,63 +166,60 @@ var<workgroup> tile_a: array<f32, 256>;
 var<workgroup> tile_b: array<f32, 256>;
 
 @compute @workgroup_size(8, 8)
-fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
-          @builtin(local_invocation_id) lid: vec3<u32>) {
-    // Each thread covers a 2×2 block of the output tile
-    let row0 = gid.x * 2u;
-    let col0 = gid.y * 2u;
+fn matmul(@builtin(local_invocation_id) lid: vec3<u32>,
+          @builtin(workgroup_id) wid: vec3<u32>) {
     let lr = lid.x;
     let lc = lid.y;
     let M = mat_params.M;
     let N = mat_params.N;
     let K = mat_params.K;
 
+    // Workgroup base position in output
+    let wg_row = wid.x * TILE;
+    let wg_col = wid.y * TILE;
+
+    // This thread's 2×2 output block
+    let r0 = lr * 2u;
+    let r1 = r0 + 1u;
+    let c0 = lc * 2u;
+    let c1 = c0 + 1u;
+    let row0 = wg_row + r0;
+    let col0 = wg_col + c0;
+
     // 2×2 accumulators
     var acc00: f32 = 0.0;
     var acc01: f32 = 0.0;
     var acc10: f32 = 0.0;
     var acc11: f32 = 0.0;
-    let num_tiles = (K + TILE - 1) / TILE;
+    let num_tiles = (K + TILE - 1u) / TILE;
 
-    // Linear thread index for cooperative tile loading (64 threads load 256 elements = 4 each)
-    let lin = lr * 8u + lc;
+    for (var t: u32 = 0u; t < num_tiles; t++) {
+        let tk = t * TILE;
 
-    for (var t: u32 = 0; t < num_tiles; t++) {
-        let tile_k = t * TILE;
+        // Cooperative load: each thread loads its 2×2 block from both tiles
+        // No division/modulo — direct 2D mapping from thread position
+        let ar0 = wg_row + r0;
+        let ar1 = wg_row + r1;
+        let ac0 = tk + c0;
+        let ac1 = tk + c1;
+        tile_a[r0 * TILE + c0] = select(0.0, mat_a[ar0 * K + ac0], ar0 < M && ac0 < K);
+        tile_a[r0 * TILE + c1] = select(0.0, mat_a[ar0 * K + ac1], ar0 < M && ac1 < K);
+        tile_a[r1 * TILE + c0] = select(0.0, mat_a[ar1 * K + ac0], ar1 < M && ac0 < K);
+        tile_a[r1 * TILE + c1] = select(0.0, mat_a[ar1 * K + ac1], ar1 < M && ac1 < K);
 
-        // Cooperative load: 64 threads load 16×16 = 256 elements, 4 per thread
-        for (var i: u32 = 0u; i < 4u; i++) {
-            let idx = lin * 4u + i;
-            let tr = idx / TILE;
-            let tc = idx % TILE;
-
-            // Load tile_a: row = workgroup_row_base + tr, col = tile_k + tc
-            let a_row = gid.x * 2u - lid.x * 2u + tr;  // workgroup base row + tr
-            let a_col = tile_k + tc;
-            if (a_row < M && a_col < K) {
-                tile_a[tr * TILE + tc] = mat_a[a_row * K + a_col];
-            } else {
-                tile_a[tr * TILE + tc] = 0.0;
-            }
-
-            // Load tile_b: row = tile_k + tr, col = workgroup_col_base + tc
-            let b_row = tile_k + tr;
-            let b_col = gid.y * 2u - lid.y * 2u + tc;  // workgroup base col + tc
-            if (b_row < K && b_col < N) {
-                tile_b[tr * TILE + tc] = mat_b[b_row * N + b_col];
-            } else {
-                tile_b[tr * TILE + tc] = 0.0;
-            }
-        }
+        let br0 = tk + r0;
+        let br1 = tk + r1;
+        let bc0 = wg_col + c0;
+        let bc1 = wg_col + c1;
+        tile_b[r0 * TILE + c0] = select(0.0, mat_b[br0 * N + bc0], br0 < K && bc0 < N);
+        tile_b[r0 * TILE + c1] = select(0.0, mat_b[br0 * N + bc1], br0 < K && bc1 < N);
+        tile_b[r1 * TILE + c0] = select(0.0, mat_b[br1 * N + bc0], br1 < K && bc0 < N);
+        tile_b[r1 * TILE + c1] = select(0.0, mat_b[br1 * N + bc1], br1 < K && bc1 < N);
 
         workgroupBarrier();
 
         // Each thread accumulates its 2×2 block
-        let r0 = lr * 2u;
-        let r1 = r0 + 1u;
-        let c0 = lc * 2u;
-        let c1 = c0 + 1u;
-        for (var k: u32 = 0; k < TILE; k++) {
+        for (var k: u32 = 0u; k < TILE; k++) {
             let a0k = tile_a[r0 * TILE + k];
             let a1k = tile_a[r1 * TILE + k];
             let bk0 = tile_b[k * TILE + c0];
