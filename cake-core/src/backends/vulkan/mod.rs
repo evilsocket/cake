@@ -1009,7 +1009,7 @@ impl ComputeBackend for VulkanBackend {
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
         let n = gate.elem_count();
-        if n > 32768 {
+        if n > 8192 {
             log::debug!("silu_mul GPU: {n} elements");
             self.dispatch_binary_vec4(gate, up, "silu_mul")
         } else {
@@ -1020,7 +1020,7 @@ impl ComputeBackend for VulkanBackend {
 
     fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
         let n = x.elem_count();
-        if n > 32768 {
+        if n > 8192 {
             log::debug!("stable_softplus GPU: {n} elements");
             self.dispatch_unary_vec4(x, "stable_softplus")
         } else {
@@ -1034,7 +1034,7 @@ impl ComputeBackend for VulkanBackend {
 
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
         let n = a.elem_count();
-        if n > 32768 {
+        if n > 8192 {
             log::debug!("add3 GPU: {n} elements");
             self.dispatch_ternary_vec4(a, b, c, "add3")
         } else {
@@ -1045,7 +1045,7 @@ impl ComputeBackend for VulkanBackend {
 
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
         let n = x.elem_count();
-        if n > 32768 {
+        if n > 8192 {
             log::debug!("exp_mul GPU: {n} elements");
             self.dispatch_binary_vec4(x, y, "exp_mul")
         } else {
@@ -1056,7 +1056,7 @@ impl ComputeBackend for VulkanBackend {
 
     fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
         let n = a.elem_count();
-        if n > 32768 {
+        if n > 8192 {
             log::debug!("sub_mul GPU: {n} elements");
             self.dispatch_ternary_vec4(a, b, c, "sub_mul")
         } else {
