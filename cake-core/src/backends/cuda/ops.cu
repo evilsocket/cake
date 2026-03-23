@@ -266,10 +266,10 @@ extern "C" __global__ void FN_NAME( \
     /* Apply: weight * rms_norm(x) * silu(z) */ \
     for (int col = threadIdx.x; col < n_cols; col += block_size) { \
         float xv = static_cast<float>(x[offset + col]); \
-        float wv = static_cast<float>(weight[col]); \
+        float wv_scaled = static_cast<float>(weight[col]) * inv_rms; \
         float zv = static_cast<float>(z[offset + col]); \
         float silu_z = zv * __frcp_rn(1.0f + __expf(-zv)); \
-        out[offset + col] = static_cast<TYPENAME>(xv * inv_rms * wv * silu_z); \
+        out[offset + col] = static_cast<TYPENAME>(xv * wv_scaled * silu_z); \
     } \
 }
 
@@ -605,8 +605,8 @@ extern "C" __global__ void FN_NAME( \
     for (int c = threadIdx.x; c < channels; c += block_size) { \
         int off = b * channels * time_len + c * time_len + t; \
         float xv = static_cast<float>(x[off]); \
-        float wv = static_cast<float>(weight[c]); \
-        out[off] = static_cast<TYPENAME>(xv * inv_rms * wv); \
+        float wv_scaled = static_cast<float>(weight[c]) * inv_rms; \
+        out[off] = static_cast<TYPENAME>(xv * wv_scaled); \
     } \
 }
 
