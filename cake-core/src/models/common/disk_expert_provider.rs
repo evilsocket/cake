@@ -35,6 +35,8 @@ pub struct DiskExpertProvider {
     num_experts: usize,
     device: Device,
     dtype: DType,
+    /// Pre-computed: whether device transfer is needed.
+    needs_device_transfer: bool,
 }
 
 impl std::fmt::Debug for DiskExpertProvider {
@@ -72,6 +74,7 @@ impl DiskExpertProvider {
                 }
             })
             .collect();
+        let needs_device_transfer = !device.is_cpu();
         Self {
             storage,
             layer_prefix,
@@ -79,29 +82,35 @@ impl DiskExpertProvider {
             num_experts,
             device,
             dtype,
+            needs_device_transfer,
         }
     }
 
     /// Convert raw TensorData to a candle Tensor with target dtype/device.
+    #[inline]
     fn materialize(&self, data: crate::utils::tensor_storage::TensorData) -> Result<Tensor> {
-        let tensor = Tensor::from_raw_buffer(
-            &data.bytes,
-            data.dtype,
-            &data.shape,
-            &Device::Cpu,
-        )?;
-
-        let tensor = if tensor.dtype() != self.dtype {
-            tensor.to_dtype(self.dtype)?
+        // Construct tensor from raw bytes on CPU
+        let target_device = if self.needs_device_transfer {
+            &self.device
         } else {
-            tensor
+            &Device::Cpu
         };
 
-        if !self.device.is_cpu() {
-            tensor.to_device(&self.device)
+        let tensor = if data.dtype == self.dtype {
+            // Same dtype: construct directly on target device
+            Tensor::from_raw_buffer(&data.bytes, data.dtype, &data.shape, target_device)?
         } else {
-            Ok(tensor)
-        }
+            // Different dtype: construct on CPU, convert, then move
+            let tensor = Tensor::from_raw_buffer(&data.bytes, data.dtype, &data.shape, &Device::Cpu)?;
+            let tensor = tensor.to_dtype(self.dtype)?;
+            if self.needs_device_transfer {
+                tensor.to_device(&self.device)?
+            } else {
+                tensor
+            }
+        };
+
+        Ok(tensor)
     }
 }
 
