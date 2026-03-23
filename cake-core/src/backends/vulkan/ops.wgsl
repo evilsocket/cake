@@ -162,9 +162,10 @@ struct MatmulParams {
 @group(0) @binding(2) var<storage, read_write> mat_c: array<f32>;
 @group(0) @binding(3) var<uniform> mat_params: MatmulParams;
 
-const TILE_MN: u32 = 16;  // output tile M and N dimension
-const TILE_K: u32 = 32;   // K dimension tile (doubled for fewer iterations)
-var<workgroup> tile_a: array<f32, 512>;  // [16, 32]
+const TILE_MN: u32 = 16;   // output tile M and N dimension
+const TILE_K: u32 = 32;    // K dimension tile (doubled for fewer iterations)
+const TILE_A_STRIDE: u32 = 33;  // padded stride to avoid bank conflicts (32 banks on RDNA 2)
+var<workgroup> tile_a: array<f32, 528>;  // [16, 33] padded
 var<workgroup> tile_b: array<f32, 512>;  // [32, 16]
 
 @compute @workgroup_size(8, 8)
@@ -196,7 +197,7 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
     for (var t: u32 = 0u; t < num_tiles; t++) {
         let tk = t * TILE_K;
 
-        // Cooperative load tile_a[16, 32]: 64 threads, 8 elements each
+        // Cooperative load tile_a[16, 32] with padded stride: 64 threads, 8 elements each
         for (var i: u32 = 0u; i < 8u; i++) {
             let idx = lin * 8u + i;
             let tr = idx / TILE_K;   // row 0..15
@@ -204,9 +205,9 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
             let a_row = wg_row + tr;
             let a_col = tk + tc;
             if (a_row < M && a_col < K) {
-                tile_a[idx] = mat_a[a_row * K + a_col];
+                tile_a[tr * TILE_A_STRIDE + tc] = mat_a[a_row * K + a_col];
             } else {
-                tile_a[idx] = 0.0;
+                tile_a[tr * TILE_A_STRIDE + tc] = 0.0;
             }
         }
 
@@ -232,8 +233,8 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
         let c0 = lc * 2u;
         let c1 = c0 + 1u;
         for (var k: u32 = 0u; k < TILE_K; k++) {
-            let a0k = tile_a[r0 * TILE_K + k];
-            let a1k = tile_a[r1 * TILE_K + k];
+            let a0k = tile_a[r0 * TILE_A_STRIDE + k];
+            let a1k = tile_a[r1 * TILE_A_STRIDE + k];
             let bk0 = tile_b[k * TILE_MN + c0];
             let bk1 = tile_b[k * TILE_MN + c1];
             acc00 += a0k * bk0;
