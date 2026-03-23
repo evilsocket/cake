@@ -317,6 +317,15 @@ impl ComputeBackend for RocmBackend {
     fn name(&self) -> &str { "rocm" }
     fn device(&self) -> &Device { &self.device }
 
+    fn preprocess_linear_weight(&self, weight: &Tensor) -> Result<Tensor> {
+        // Pre-convert to F32 contiguous so tensor_matmul skips conversion in the hot path
+        if weight.dtype() == DType::F32 && weight.is_contiguous() {
+            Ok(weight.clone())
+        } else {
+            weight.to_dtype(DType::F32)?.contiguous()
+        }
+    }
+
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         let m = a.dims()[a.dims().len() - 2];
         if m <= 4 { return a.matmul(b); }
