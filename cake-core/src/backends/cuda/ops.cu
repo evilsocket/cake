@@ -330,8 +330,8 @@ extern "C" __global__ void FN_NAME( \
     for (int col = threadIdx.x; col < n_cols; col += block_size) { \
         float s = static_cast<float>(a[in_off + col]) + static_cast<float>(b[in_off + col]); \
         out[res_off + col] = static_cast<TYPENAME>(s); \
-        float wv = static_cast<float>(weight[col]); \
-        out[norm_off + col] = static_cast<TYPENAME>(s * inv_rms * wv); \
+        float wv_scaled = static_cast<float>(weight[col]) * inv_rms; \
+        out[norm_off + col] = static_cast<TYPENAME>(s * wv_scaled); \
     } \
 }
 
@@ -641,7 +641,7 @@ extern "C" __global__ void FN_NAME( \
         float av = static_cast<float>(a[i]); \
         float bv = static_cast<float>(b[i]); \
         float cv = static_cast<float>(c[chan]); \
-        out[i] = static_cast<TYPENAME>(av + bv * cv); \
+        out[i] = static_cast<TYPENAME>(fmaf(bv, cv, av)); \
     } \
 }
 
@@ -699,7 +699,7 @@ extern "C" __global__ void FN_NAME( \
         float wv = static_cast<float>(weight[col]); \
         float sv = static_cast<float>(scale[offset + col]); \
         float shv = static_cast<float>(shift[offset + col]); \
-        out[offset + col] = static_cast<TYPENAME>(xv * wv * (1.0f + sv) + shv); \
+        out[offset + col] = static_cast<TYPENAME>(fmaf(xv * wv, 1.0f + sv, shv)); \
     } \
 }
 
