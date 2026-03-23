@@ -18,12 +18,11 @@ pub fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor
     let dev = t.device();
     let half = dim / 2;
     let t = (t * TIME_FACTOR)?;
-    let arange = Tensor::arange(0, half as u32, dev)?.to_dtype(DType::F32)?;
-    let freqs = (arange * (-MAX_PERIOD.ln() / half as f64))?.exp()?;
-    let args = t
-        .unsqueeze(1)?
-        .to_dtype(DType::F32)?
-        .broadcast_mul(&freqs.unsqueeze(0)?)?;
+    // Compute frequency vector directly as f32 Vec — avoids arange + to_dtype + mul + exp
+    let decay = -MAX_PERIOD.ln() / half as f64;
+    let freqs_data: Vec<f32> = (0..half).map(|j| (j as f64 * decay).exp() as f32).collect();
+    let freqs = Tensor::new(freqs_data.as_slice(), dev)?.unsqueeze(0)?;
+    let args = t.unsqueeze(1)?.to_dtype(DType::F32)?.broadcast_mul(&freqs)?;
     Tensor::cat(&[args.cos()?, args.sin()?], D::Minus1)?.to_dtype(dtype)
 }
 
