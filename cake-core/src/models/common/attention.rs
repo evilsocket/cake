@@ -300,12 +300,16 @@ impl CausalSelfAttention {
             // The actual kv seq_len (may differ from query seq_len with sliding window)
             let kv_seq_len = k.dims()[2];
 
-            // Fused SDPA on Metal — single kernel, native GQA (no repeat_kv needed)
+            // Metal SDPA with fallback to manual attention if threadgroup memory exceeded
             #[cfg(feature = "metal")]
             if matches!(q.device(), candle_core::Device::Metal(_)) {
                 let scale = 1.0 / (self.head_dim as f32).sqrt();
-                break 'attn candle_nn::ops::sdpa(&q, &k, &v, None, seq_len > 1, scale, 1.0)
-                    .map_err(|e| anyhow!("sdpa: {e}"))?;
+                match candle_nn::ops::sdpa(&q, &k, &v, None, seq_len > 1, scale, 1.0) {
+                    Ok(result) => break 'attn result,
+                    Err(_) => {
+                        // Fall through to manual attention below
+                    }
+                }
             }
 
             // Manual attention with GQA head expansion (CPU fallback)
