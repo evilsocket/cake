@@ -250,7 +250,7 @@ impl Fp8Linear {
             Some(b) => y.broadcast_add(&b.to_dtype(compute)?)?,
             None => y,
         };
-        y.to_dtype(in_dtype)
+        if y.dtype() == in_dtype { Ok(y) } else { y.to_dtype(in_dtype) }
     }
 }
 
