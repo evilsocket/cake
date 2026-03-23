@@ -17,4 +17,8 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 015	2026-03-23T09:25:00	44657f1	-	PASS	PASS	revert	SDPA threadgroup exceeded with KV cache — keep manual attn
 016	2026-03-23T09:30:00	c62be95	-	PASS	PASS	keep	Add sync to common Transformer block (Metal safety for other models)
 017	2026-03-23T09:40:00	d286e09	53591420928	PASS	PASS	keep	Add SDPA fallback in common attention (prevent threadgroup panic)
----	Metal: 29.7 tok/s vs CPU: 23.8 tok/s (+25%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
+018	2026-03-23T09:50:00	7825340	-	PASS	PASS	keep	Mixed-precision attention: F16 matmuls + F32 softmax
+019	2026-03-23T10:00:00	459f2e5	-	PASS	PASS	keep	Apply same to common CausalSelfAttention
+020	2026-03-23T10:10:00	d7c4d03	-	PASS	PASS	keep	Skip GDN conv1d sync during gen — 32+ tok/s (+7%)
+021	2026-03-23T10:20:00	d498875	-	PASS	PASS	revert	full_attn conditional sync causes intermittent regression
+---	Metal: 32.7 tok/s vs CPU: 22.9 tok/s (+43%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
