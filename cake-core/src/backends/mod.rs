@@ -358,9 +358,34 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
     }
 
     /// Softmax over the given dimension.
-    /// Uses fused CustomOp for last dimension (faster), generic path otherwise.
+    /// Uses raw f32 computation for last-dim F32 (avoids CustomOp dispatch),
+    /// fused kernel for other dtypes, generic path for non-last dim.
     fn softmax(&self, x: &Tensor, dim: usize) -> Result<Tensor> {
         if dim == x.rank() - 1 {
+            // Fast path: F32 last-dim softmax on raw data
+            if x.dtype() == DType::F32 {
+                let shape = x.dims();
+                let last = *shape.last().unwrap_or(&0);
+                let data = x.contiguous()?.flatten_all()?.to_vec1::<f32>()?;
+                let rows = data.len() / last;
+                let mut out = vec![0f32; data.len()];
+                for r in 0..rows {
+                    let off = r * last;
+                    let row = &data[off..off + last];
+                    let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let mut sum = 0f32;
+                    for i in 0..last {
+                        let e = (row[i] - max).exp();
+                        out[off + i] = e;
+                        sum += e;
+                    }
+                    let inv_sum = 1.0 / sum;
+                    for i in 0..last {
+                        out[off + i] *= inv_sum;
+                    }
+                }
+                return Tensor::from_vec(out, shape, x.device());
+            }
             candle_nn::ops::softmax_last_dim(x)
         } else {
             let max = x.max_keepdim(dim)?;
