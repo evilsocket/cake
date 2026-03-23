@@ -221,7 +221,13 @@ jobs:
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y lld
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lld
+          # Vulkan SDK needed for --features vulkan
+          if [ "${{ matrix.features }}" = "vulkan" ]; then
+            sudo apt-get install -y libvulkan-dev
+          fi
 
       - name: Install CUDA toolkit
         if: matrix.cuda != ''
@@ -270,6 +276,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y lld libvulkan-dev
 
       - name: Cache cargo registry & build
         uses: actions/cache@v4
