@@ -188,6 +188,59 @@ fn gemv(@builtin(global_invocation_id) gid: vec3<u32>,
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// GEMV F16: same as gemv but weights stored as packed F16 (u32 pairs).
+// Halves bandwidth vs F32 weights. unpack2x16float converts in-register.
+// ═══════════════════════════════════════════════════════════════════
+
+@group(0) @binding(0) var<storage, read> gemvh_x: array<f32>;    // [K] F32
+@group(0) @binding(1) var<storage, read> gemvh_w: array<u32>;    // [K, N/2] packed F16
+@group(0) @binding(2) var<storage, read_write> gemvh_y: array<f32>; // [N] F32
+@group(0) @binding(3) var<uniform> gemvh_params: GemvParams;
+
+var<workgroup> gemvh_shared: array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn gemv_f16(@builtin(global_invocation_id) gid: vec3<u32>,
+            @builtin(local_invocation_id) lid: vec3<u32>) {
+    let col = gid.x;
+    let tid = lid.x;
+    let N = gemvh_params.N;
+    let K = gemvh_params.K;
+    let half_N = N / 2u;
+
+    var acc: f32 = 0.0;
+    let num_tiles = (K + 255u) / 256u;
+
+    for (var t: u32 = 0u; t < num_tiles; t++) {
+        let x_idx = t * 256u + tid;
+        if (x_idx < K) {
+            gemvh_shared[tid] = gemvh_x[x_idx];
+        } else {
+            gemvh_shared[tid] = 0.0;
+        }
+        workgroupBarrier();
+
+        if (col < N) {
+            let tile_base = t * 256u;
+            let tile_end = min(256u, K - tile_base);
+            let col_pair = col / 2u;
+            let col_half = col % 2u;
+            for (var k: u32 = 0u; k < tile_end; k++) {
+                let packed = gemvh_w[(tile_base + k) * half_N + col_pair];
+                let unpacked = unpack2x16float(packed);
+                let w_val = select(unpacked.x, unpacked.y, col_half == 1u);
+                acc += gemvh_shared[k] * w_val;
+            }
+        }
+        workgroupBarrier();
+    }
+
+    if (col < N) {
+        gemvh_y[col] = acc;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // Tiled GEMM: C[M,N] = A[M,K] × B[K,N]  (for M > 1)
 // 32×64 output tile with 2×4 register tiling, K-tile = 32.
 // 16×16 workgroup (256 threads = 4 RDNA 2 wavefronts). Each thread

@@ -90,12 +90,14 @@ impl BufferPool {
 
 // ─── Weight cache ────────────────────────────────────────────────────
 
+type ViewKey = (usize, usize, usize, u64);
+
 struct WeightCache {
     buffers: HashMap<TensorId, Arc<MappedBuffer>>,
-    /// View cache: keyed by (storage_ptr, offset, elem_count, stride_hash).
-    /// Handles `weight.t()` which creates new TensorIds but shares the same storage.
-    /// Works for any dtype (F16, F32, etc.) by extracting raw pointer from CpuStorage.
-    views: HashMap<(usize, usize, usize, u64), Arc<MappedBuffer>>,
+    /// F32 view cache for weight.t() views.
+    views: HashMap<ViewKey, Arc<MappedBuffer>>,
+    /// F16 (raw bytes) view cache for GEMV — halves bandwidth.
+    f16_views: HashMap<ViewKey, Arc<MappedBuffer>>,
 }
 
 impl WeightCache {
@@ -103,6 +105,7 @@ impl WeightCache {
         Self {
             buffers: HashMap::new(),
             views: HashMap::new(),
+            f16_views: HashMap::new(),
         }
     }
 }
@@ -901,13 +904,20 @@ impl VulkanBackend {
         &self,
         buf_x: &MappedBuffer,
         buf_w: &MappedBuffer,
+        buf_w_f16: Option<&Arc<MappedBuffer>>,
         k: usize,
         n: usize,
     ) -> (Vec<f32>, MappedBuffer) {
         let buf_y = self.alloc_output(n);
+        // Use F16 kernel if available — halves memory bandwidth
+        let (entry, w_buf) = if let Some(f16_buf) = buf_w_f16 {
+            ("gemv_f16", f16_buf.buffer)
+        } else {
+            ("gemv", buf_w.buffer)
+        };
         let result = self.dispatch_compute(
-            "gemv",
-            &[buf_x.buffer, buf_w.buffer, buf_y.buffer],
+            entry,
+            &[buf_x.buffer, w_buf, buf_y.buffer],
             &buf_y,
             n,
             &[n as u32, k as u32, 0, 0],
@@ -942,12 +952,13 @@ impl VulkanBackend {
         &self,
         buf_a: &MappedBuffer,
         buf_b: &MappedBuffer,
+        buf_b_f16: Option<&Arc<MappedBuffer>>,
         m: usize,
         k: usize,
         n: usize,
     ) -> (Vec<f32>, MappedBuffer) {
         if m == 1 {
-            self.gpu_gemv(buf_a, buf_b, k, n)
+            self.gpu_gemv(buf_a, buf_b, buf_b_f16, k, n)
         } else {
             self.gpu_gemm(buf_a, buf_b, m, k, n)
         }
@@ -975,7 +986,17 @@ impl VulkanBackend {
             // get_or_upload handles dtype conversion + contiguity
             let buf_a = self.get_or_upload(a)?;
             let buf_b = self.get_or_upload(b)?;
-            let (out, buf_out) = self.gpu_matmul(&buf_a, &buf_b, m, k, n);
+            // Check for F16 weight buffer (halves GEMV bandwidth)
+            let f16_buf = if m == 1 {
+                let vk = Self::view_key(b);
+                vk.and_then(|key| {
+                    let cache = self.weight_cache.lock().unwrap();
+                    cache.f16_views.get(&key).cloned()
+                })
+            } else {
+                None
+            };
+            let (out, buf_out) = self.gpu_matmul(&buf_a, &buf_b, f16_buf.as_ref(), m, k, n);
             let mut out_shape: Vec<usize> = a_dims[..a_rank - 2].to_vec();
             out_shape.push(m);
             out_shape.push(n);
@@ -1302,13 +1323,40 @@ impl ComputeBackend for VulkanBackend {
 
     fn preprocess_linear_weight(&self, weight: &Tensor) -> Result<Tensor> {
         // Pre-convert to F32 contiguous and pre-upload to GPU.
-        // This ensures:
-        // 1. No F16→F32 conversion during inference (done once at load time)
-        // 2. View cache keys use stable F32 storage pointers
-        // 3. weight.t() in linear_forward shares the same F32 storage
         let w = weight.to_dtype(DType::F32)?.contiguous()?;
-        // Pre-upload to GPU weight cache
+        // Pre-upload F32 to GPU weight cache
         let _ = self.get_or_upload(&w)?;
+
+        // Also pre-upload the TRANSPOSED F16 data for GEMV (halves bandwidth).
+        // weight.t() is what linear_forward passes to matmul.
+        if weight.dtype() == DType::F16 {
+            let wt_f16 = weight.t()?.contiguous()?; // [in, out] F16 contiguous
+            let f16_data: Vec<f32> = wt_f16.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+            // Store as raw F16 bytes (u32 packed pairs)
+            let n = wt_f16.elem_count();
+            let f16_vals: Vec<half::f16> = f16_data.iter().map(|&v| half::f16::from_f32(v)).collect();
+            let f16_bytes: &[u8] = bytemuck::cast_slice(&f16_vals);
+            // Upload as u32 buffer
+            let buf_bytes = (f16_bytes.len()) as u64;
+            let mut alloc_guard = self.allocator.lock().unwrap();
+            let alloc = alloc_guard.as_mut().unwrap();
+            let buf = Self::alloc_mapped_buffer(
+                &self.vk_device, alloc, buf_bytes,
+                vk::BufferUsageFlags::STORAGE_BUFFER, self.uma_memory_type,
+            ).map_err(candle_core::Error::Msg)?;
+            unsafe {
+                std::ptr::copy_nonoverlapping(f16_bytes.as_ptr(), buf.mapped_ptr, f16_bytes.len());
+            }
+            // Cache by the view key of the F32 weight's .t() (what get_or_upload will see)
+            let wt_f32 = w.t()?; // F32 non-contiguous [in, out]
+            if let Some(key) = Self::view_key(&wt_f32) {
+                let mut cache = self.weight_cache.lock().unwrap();
+                cache.f16_views.insert(key, Arc::new(buf));
+                log::debug!("pre-uploaded F16 GEMV weight: {} elements", n);
+            }
+            drop(alloc_guard);
+        }
+
         Ok(w)
     }
 
