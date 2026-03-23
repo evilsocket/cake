@@ -285,7 +285,7 @@ fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor, backend: &dy
         let k32 = k.to_dtype(DType::F32)?;
         let v32 = v.to_dtype(DType::F32)?;
         if let Ok(attn) = backend.sdpa(&q32, &k32, &v32, None, false, scale_factor as f32) {
-            return Ok(attn.to_dtype(q.dtype())?);
+            return attn.to_dtype(q.dtype());
         }
     }
 
