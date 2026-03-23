@@ -13,10 +13,28 @@ struct Params { count: u32, }
 
 @compute @workgroup_size(256)
 fn silu_mul(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
-    if (i >= params.count) { return; }
-    let g = input_a[i];
-    output[i] = g / (1.0 + exp(-g)) * input_b[i];
+    // Process 4 elements per thread via vec4 for better throughput
+    let base = gid.x * 4u;
+    let count = params.count;
+    if (base >= count) { return; }
+
+    // Fast path: full vec4
+    if (base + 3u < count) {
+        let g = vec4(input_a[base], input_a[base + 1u], input_a[base + 2u], input_a[base + 3u]);
+        let b = vec4(input_b[base], input_b[base + 1u], input_b[base + 2u], input_b[base + 3u]);
+        let s = g / (vec4(1.0) + exp(-g)) * b;
+        output[base] = s.x; output[base + 1u] = s.y;
+        output[base + 2u] = s.z; output[base + 3u] = s.w;
+    } else {
+        // Tail: process remaining elements
+        for (var j = 0u; j < 4u; j++) {
+            let idx = base + j;
+            if (idx < count) {
+                let g = input_a[idx];
+                output[idx] = g / (1.0 + exp(-g)) * input_b[idx];
+            }
+        }
+    }
 }
 
 @compute @workgroup_size(256)
