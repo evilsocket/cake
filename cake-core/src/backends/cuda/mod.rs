@@ -161,11 +161,15 @@ impl ComputeBackend for CudaBackend {
 
     fn f8e4m3_to_f16(&self, x: &Tensor) -> Result<Tensor> {
         if x.dtype() != candle_core::DType::F8E4M3 { return x.to_dtype(candle_core::DType::F16); }
+        // Try candle's built-in path first (works on SM 8.9+), fall back to custom kernel
+        if let Ok(t) = x.to_dtype(candle_core::DType::F16) { return Ok(t); }
         x.apply_op1_no_bwd(&ops::F8E4M3ToF16)
     }
 
     fn f8e4m3_to_bf16(&self, x: &Tensor) -> Result<Tensor> {
         if x.dtype() != candle_core::DType::F8E4M3 { return x.to_dtype(candle_core::DType::BF16); }
+        // Try candle's built-in path first, fall back to custom kernel
+        if let Ok(t) = x.to_dtype(candle_core::DType::BF16) { return Ok(t); }
         x.apply_op1_no_bwd(&ops::F8E4M3ToBF16)
     }
 
