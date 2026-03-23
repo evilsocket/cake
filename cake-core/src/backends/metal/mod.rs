@@ -619,44 +619,46 @@ impl ComputeBackend for MetalBackend {
         q: &Tensor, k: &Tensor, v: &Tensor,
         scale: f32, causal: bool,
     ) -> Result<Tensor> {
-        // Metal SDPA natively supports F16, F32, BF16 — no dtype conversion needed
-        candle_nn::ops::sdpa(q, k, v, None, causal, scale, 1.0)
+        let q = q.to_dtype(DType::F32)?;
+        let k = k.to_dtype(DType::F32)?;
+        let v = v.to_dtype(DType::F32)?;
+        candle_nn::ops::sdpa(&q, &k, &v, None, causal, scale, 1.0)
     }
 
     // ── Fused activations (MSL shaders) ──────────────────────────────
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-        gate.apply_op2_no_bwd(up, &MetalSiluMul)
+        // TODO: re-enable MSL kernel after validation
+        let g = candle_nn::ops::silu(gate)?;
+        (g * up)?.contiguous()
     }
 
     fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
-        x.apply_op1_no_bwd(&MetalStableSoftplus)
+        // TODO: re-enable MSL kernel after validation
+        let clamped = x.minimum(&Tensor::new(88.0f32, x.device())?.broadcast_as(x.shape())?)?;
+        let sp = (clamped.exp()? + 1.0)?.log()?;
+        x.maximum(&sp)
     }
 
     // ── Normalization (candle tensor ops) ────────────────────────────
 
     fn rms_norm_gated(&self, x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        let x = x.contiguous()?;
-        let z = z.contiguous()?.to_dtype(x.dtype())?;
-        x.apply_op3_no_bwd(&z, weight, &MetalRmsNormGated { eps })
+        // Use candle tensor ops for correctness (MSL SIMD reduction needs more validation)
+        let normed = candle_nn::ops::rms_norm(&x.contiguous()?, weight, eps)?;
+        let gate = candle_nn::ops::silu(&z.contiguous()?.to_dtype(x.dtype())?)?;
+        normed.mul(&gate)
     }
 
     fn add_rms_norm(&self, a: &Tensor, b: &Tensor, weight: &Tensor, eps: f32) -> Result<(Tensor, Tensor)> {
-        let a = a.contiguous()?;
-        let b = b.contiguous()?;
-        let shape = a.shape().clone();
-        let el = shape.elem_count();
-        // Fused kernel returns packed [residual | normed] as flat [2*el]
-        let packed = a.apply_op3_no_bwd(&b, weight, &MetalAddRmsNorm { eps })?;
-        let residual = packed.narrow(0, 0, el)?.reshape(&shape)?;
-        let normed = packed.narrow(0, el, el)?.reshape(&shape)?;
-        Ok((residual, normed))
+        let res = (a + b)?;
+        let normed = candle_nn::ops::rms_norm(&res.contiguous()?, weight, eps)?;
+        Ok((res, normed))
     }
 
     fn rms_norm_channel(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        // Direct channel-wise RMS norm without transpose overhead
-        let x = x.contiguous()?;
-        x.apply_op2_no_bwd(weight, &MetalRmsNormChannel { eps })
+        let xt = x.transpose(1, 2)?.contiguous()?;
+        let normed = candle_nn::ops::rms_norm(&xt, weight, eps)?;
+        normed.transpose(1, 2)?.contiguous()
     }
 
     // ── Convolutions (candle tensor ops) ─────────────────────────────
@@ -666,18 +668,31 @@ impl ComputeBackend for MetalBackend {
         window: &Tensor, weight: &Tensor,
         _kernel_size: usize, _channels: usize,
     ) -> Result<Tensor> {
-        window.apply_op2_no_bwd(weight, &MetalDepthwiseConv1dSilu)
+        let w = weight.unsqueeze(0)?;
+        let dot = window.broadcast_mul(&w)?.sum(candle_core::D::Minus1)?;
+        candle_nn::ops::silu(&dot)
     }
 
     fn depthwise_conv1d_bias(
         &self,
         padded_input: &Tensor, weight: &Tensor, bias: &Tensor,
-        _kernel_size: usize, _channels: usize,
+        kernel_size: usize, _channels: usize,
     ) -> Result<Tensor> {
-        // Flatten weight from (channels, 1, kernel_size) to (channels, kernel_size)
-        // for the MSL kernel's contiguous memory access pattern
-        let weight_flat = weight.contiguous()?.flatten(1, 2)?;
-        padded_input.apply_op3_no_bwd(&weight_flat, bias, &MetalDepthwiseConv1dBias)
+        let (_b, _channels, t_padded) = padded_input.dims3()?;
+        let out_len = t_padded - kernel_size + 1;
+        let mut acc: Option<Tensor> = None;
+        for k in 0..kernel_size {
+            let slice = padded_input.narrow(2, k, out_len)?;
+            let w_k = weight.narrow(1, k, 1)?.unsqueeze(0)?;
+            let term = slice.broadcast_mul(&w_k)?;
+            acc = Some(match acc {
+                None => term,
+                Some(a) => (a + term)?,
+            });
+        }
+        let out = acc.unwrap();
+        let bias = bias.unsqueeze(0)?.unsqueeze(2)?;
+        out.broadcast_add(&bias)
     }
 
     fn depthwise_conv1d_bias_ctx(
@@ -692,25 +707,24 @@ impl ComputeBackend for MetalBackend {
     // ── Elementwise (MSL shaders) ────────────────────────────────────
 
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        a.apply_op3_no_bwd(b, c, &MetalAdd3)
+        ((a + b)? + c)?.contiguous()
     }
 
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
-        x.apply_op2_no_bwd(y, &MetalExpMul)
+        (x * y.exp()?)?.contiguous()
     }
 
     fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        a.apply_op3_no_bwd(b, c, &MetalSubMul)
+        ((a - b)? * c)?.contiguous()
     }
 
     fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        if c.dims().len() == 1 {
-            // Use MSL kernel for per-channel broadcast: a + b * c[chan]
-            a.apply_op3_no_bwd(b, c, &MetalAddScaled)
+        let c_broadcast = if c.dims().len() == 1 {
+            c.unsqueeze(0)?.unsqueeze(2)?
         } else {
-            // Fallback for non-1D c (e.g. benchmark uses same-shape tensors)
-            (a + b.broadcast_mul(c)?)?.contiguous()
-        }
+            c.clone()
+        };
+        (a + b.broadcast_mul(&c_broadcast)?)?.contiguous()
     }
 
     // ── AdaLN (candle tensor ops) ────────────────────────────────────
