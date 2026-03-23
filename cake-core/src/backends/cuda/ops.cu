@@ -152,7 +152,34 @@ extern "C" __global__ void FN_NAME( \
     } \
 }
 
-SILU_MUL_OP(float, silu_mul_f32)
+// Vectorized f32 silu_mul: process 4 elements per thread via float4
+extern "C" __global__ void silu_mul_f32(
+    const size_t numel,
+    const float *x,
+    const float *y,
+    float *out
+) {
+    const size_t vec_numel = numel / 4;
+    const float4 *x4 = reinterpret_cast<const float4*>(x);
+    const float4 *y4 = reinterpret_cast<const float4*>(y);
+    float4 *out4 = reinterpret_cast<float4*>(out);
+    for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < vec_numel; i += blockDim.x * gridDim.x) {
+        float4 xv = x4[i];
+        float4 yv = y4[i];
+        float4 r;
+        r.x = silu_mul_fwd(xv.x, yv.x);
+        r.y = silu_mul_fwd(xv.y, yv.y);
+        r.z = silu_mul_fwd(xv.z, yv.z);
+        r.w = silu_mul_fwd(xv.w, yv.w);
+        out4[i] = r;
+    }
+    // Scalar tail
+    for (unsigned int i = vec_numel * 4 + blockIdx.x * blockDim.x + threadIdx.x;
+         i < numel; i += blockDim.x * gridDim.x) {
+        out[i] = silu_mul_fwd(x[i], y[i]);
+    }
+}
 SILU_MUL_OP(double, silu_mul_f64)
 #if __CUDA_ARCH__ >= 530
 SILU_MUL_OP(__half, silu_mul_f16)
@@ -215,7 +242,30 @@ extern "C" __global__ void FN_NAME( \
     } \
 }
 
-SOFTPLUS_OP(float, stable_softplus_f32)
+// Vectorized f32 stable_softplus: process 4 elements per thread via float4
+extern "C" __global__ void stable_softplus_f32(
+    const size_t numel,
+    const float *x,
+    float *out
+) {
+    const size_t vec_numel = numel / 4;
+    const float4 *x4 = reinterpret_cast<const float4*>(x);
+    float4 *out4 = reinterpret_cast<float4*>(out);
+    for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < vec_numel; i += blockDim.x * gridDim.x) {
+        float4 xv = x4[i];
+        float4 r;
+        r.x = stable_softplus_fwd(xv.x);
+        r.y = stable_softplus_fwd(xv.y);
+        r.z = stable_softplus_fwd(xv.z);
+        r.w = stable_softplus_fwd(xv.w);
+        out4[i] = r;
+    }
+    for (unsigned int i = vec_numel * 4 + blockIdx.x * blockDim.x + threadIdx.x;
+         i < numel; i += blockDim.x * gridDim.x) {
+        out[i] = stable_softplus_fwd(x[i]);
+    }
+}
 SOFTPLUS_OP(double, stable_softplus_f64)
 #if __CUDA_ARCH__ >= 530
 SOFTPLUS_OP(__half, stable_softplus_f16)
@@ -361,7 +411,34 @@ extern "C" __global__ void FN_NAME( \
     } \
 }
 
-ADD3_OP(float, add3_f32)
+// Vectorized f32 add3: process 4 elements per thread via float4
+extern "C" __global__ void add3_f32(
+    const size_t numel,
+    const float *a,
+    const float *b,
+    const float *c,
+    float *out
+) {
+    const size_t vec_numel = numel / 4;
+    const float4 *a4 = reinterpret_cast<const float4*>(a);
+    const float4 *b4 = reinterpret_cast<const float4*>(b);
+    const float4 *c4 = reinterpret_cast<const float4*>(c);
+    float4 *out4 = reinterpret_cast<float4*>(out);
+    for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < vec_numel; i += blockDim.x * gridDim.x) {
+        float4 av = a4[i], bv = b4[i], cv = c4[i];
+        float4 r;
+        r.x = av.x + bv.x + cv.x;
+        r.y = av.y + bv.y + cv.y;
+        r.z = av.z + bv.z + cv.z;
+        r.w = av.w + bv.w + cv.w;
+        out4[i] = r;
+    }
+    for (unsigned int i = vec_numel * 4 + blockIdx.x * blockDim.x + threadIdx.x;
+         i < numel; i += blockDim.x * gridDim.x) {
+        out[i] = a[i] + b[i] + c[i];
+    }
+}
 ADD3_OP(double, add3_f64)
 #if __CUDA_ARCH__ >= 530
 ADD3_OP(__half, add3_f16)
@@ -387,7 +464,32 @@ extern "C" __global__ void FN_NAME( \
     } \
 }
 
-EXP_MUL_OP(float, exp_mul_f32)
+// Vectorized f32 exp_mul: process 4 elements per thread via float4
+extern "C" __global__ void exp_mul_f32(
+    const size_t numel,
+    const float *x,
+    const float *y,
+    float *out
+) {
+    const size_t vec_numel = numel / 4;
+    const float4 *x4 = reinterpret_cast<const float4*>(x);
+    const float4 *y4 = reinterpret_cast<const float4*>(y);
+    float4 *out4 = reinterpret_cast<float4*>(out);
+    for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < vec_numel; i += blockDim.x * gridDim.x) {
+        float4 xv = x4[i], yv = y4[i];
+        float4 r;
+        r.x = xv.x * expf(yv.x);
+        r.y = xv.y * expf(yv.y);
+        r.z = xv.z * expf(yv.z);
+        r.w = xv.w * expf(yv.w);
+        out4[i] = r;
+    }
+    for (unsigned int i = vec_numel * 4 + blockIdx.x * blockDim.x + threadIdx.x;
+         i < numel; i += blockDim.x * gridDim.x) {
+        out[i] = x[i] * expf(y[i]);
+    }
+}
 EXP_MUL_OP(double, exp_mul_f64)
 #if __CUDA_ARCH__ >= 530
 EXP_MUL_OP(__half, exp_mul_f16)
@@ -709,7 +811,34 @@ ADALN_MODULATE_OP(__half, adaln_modulate_f16)
 ADALN_MODULATE_OP(__nv_bfloat16, adaln_modulate_bf16)
 #endif
 
-SUB_MUL_OP(float, sub_mul_f32)
+// Vectorized f32 sub_mul: process 4 elements per thread via float4
+extern "C" __global__ void sub_mul_f32(
+    const size_t numel,
+    const float *a,
+    const float *b,
+    const float *c,
+    float *out
+) {
+    const size_t vec_numel = numel / 4;
+    const float4 *a4 = reinterpret_cast<const float4*>(a);
+    const float4 *b4 = reinterpret_cast<const float4*>(b);
+    const float4 *c4 = reinterpret_cast<const float4*>(c);
+    float4 *out4 = reinterpret_cast<float4*>(out);
+    for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+         i < vec_numel; i += blockDim.x * gridDim.x) {
+        float4 av = a4[i], bv = b4[i], cv = c4[i];
+        float4 r;
+        r.x = (av.x - bv.x) * cv.x;
+        r.y = (av.y - bv.y) * cv.y;
+        r.z = (av.z - bv.z) * cv.z;
+        r.w = (av.w - bv.w) * cv.w;
+        out4[i] = r;
+    }
+    for (unsigned int i = vec_numel * 4 + blockIdx.x * blockDim.x + threadIdx.x;
+         i < numel; i += blockDim.x * gridDim.x) {
+        out[i] = (a[i] - b[i]) * c[i];
+    }
+}
 SUB_MUL_OP(double, sub_mul_f64)
 #if __CUDA_ARCH__ >= 530
 SUB_MUL_OP(__half, sub_mul_f16)
