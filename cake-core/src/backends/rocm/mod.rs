@@ -64,21 +64,46 @@ impl GpuBuf {
     #[inline] fn as_ptr(&self) -> *const f32 { self.ptr as *const f32 }
     #[inline] fn as_mut_ptr(&self) -> *mut f32 { self.ptr as *mut f32 }
 
-    /// Async download on the given stream, then sync. Single sync point.
+    /// Async download using pinned host memory for faster DMA, then sync.
     fn download_on_stream(&self, stream: *mut std::ffi::c_void) -> std::result::Result<Vec<f32>, String> {
-        let mut host = vec![0f32; self.count];
+        let bytes = self.count * 4;
+        // Allocate pinned (page-locked) host memory for faster DMA transfer
+        let mut pinned_ptr = std::ptr::null_mut();
+        let err = unsafe { ((*self.ffi).hip_host_malloc)(&mut pinned_ptr, bytes, 0) };
+        if err != 0 {
+            // Fallback to regular memory if pinned alloc fails
+            let mut host = vec![0f32; self.count];
+            let err = unsafe {
+                ((*self.ffi).hip_memcpy_async)(
+                    host.as_mut_ptr() as *mut std::ffi::c_void,
+                    self.ptr, bytes, HIP_MEMCPY_DEVICE_TO_HOST, stream,
+                )
+            };
+            if err != 0 { return Err(format!("hipMemcpyAsync D2H: error {err}")); }
+            let err = unsafe { ((*self.ffi).hip_stream_synchronize)(stream) };
+            if err != 0 { return Err(format!("hipStreamSync: error {err}")); }
+            return Ok(host);
+        }
         let err = unsafe {
             ((*self.ffi).hip_memcpy_async)(
-                host.as_mut_ptr() as *mut std::ffi::c_void,
-                self.ptr,
-                self.count * 4,
-                HIP_MEMCPY_DEVICE_TO_HOST,
-                stream,
+                pinned_ptr, self.ptr, bytes, HIP_MEMCPY_DEVICE_TO_HOST, stream,
             )
         };
-        if err != 0 { return Err(format!("hipMemcpyAsync D2H: error {err}")); }
+        if err != 0 {
+            unsafe { ((*self.ffi).hip_host_free)(pinned_ptr) };
+            return Err(format!("hipMemcpyAsync D2H pinned: error {err}"));
+        }
         let err = unsafe { ((*self.ffi).hip_stream_synchronize)(stream) };
-        if err != 0 { return Err(format!("hipStreamSync: error {err}")); }
+        if err != 0 {
+            unsafe { ((*self.ffi).hip_host_free)(pinned_ptr) };
+            return Err(format!("hipStreamSync: error {err}"));
+        }
+        // Copy from pinned to regular heap memory, then free pinned
+        let mut host = vec![0f32; self.count];
+        unsafe {
+            std::ptr::copy_nonoverlapping(pinned_ptr as *const f32, host.as_mut_ptr(), self.count);
+            ((*self.ffi).hip_host_free)(pinned_ptr);
+        }
         Ok(host)
     }
 }
