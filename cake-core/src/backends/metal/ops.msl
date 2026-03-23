@@ -431,3 +431,77 @@ kernel void rms_norm_channel_f16(
     SIMD_REDUCE_SUM(val * val, channels, lane, simd_id)
     output[idx] = half(val * fast::rsqrt(_sr / float(channels) + eps) * float(weight[c]));
 }
+
+// ─── Fused vector attention (generation, seq_len=1) ─────────────────
+// Q: (batch, heads, 1, head_dim) as flat (batch*heads, head_dim)
+// K: (batch, kv_heads, kv_len, head_dim) — repeat_kv handled via gqa_ratio
+// V: (batch, kv_heads, kv_len, head_dim)
+// Output: (batch*heads, head_dim)
+// Each threadgroup handles one (batch, head) pair.
+// Uses online softmax with F32 precision for numerical stability.
+kernel void fused_vector_attention_f16(
+    device const half* q [[buffer(0)]],      // (batch*heads, head_dim)
+    device const half* k [[buffer(1)]],      // (batch*kv_heads, kv_len, head_dim)
+    device const half* v [[buffer(2)]],      // (batch*kv_heads, kv_len, head_dim)
+    device half* output [[buffer(3)]],       // (batch*heads, head_dim)
+    constant uint& head_dim [[buffer(4)]],
+    constant uint& kv_len [[buffer(5)]],
+    constant float& scale [[buffer(6)]],
+    constant uint& gqa_ratio [[buffer(7)]],  // heads / kv_heads
+    uint2 gid [[thread_position_in_grid]],   // (thread_in_group, batch*head_idx)
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint bh = gid.y;  // batch*head index
+    uint bkv = bh / gqa_ratio;  // corresponding kv head
+    uint d = gid.x;  // head_dim index
+
+    if (d >= head_dim) return;
+
+    // Load query element for this head
+    float q_val = float(q[bh * head_dim + d]);
+
+    // Online softmax: process KV positions in streaming fashion
+    float max_score = -1e30f;
+    float sum_exp = 0.0f;
+    float acc = 0.0f;  // weighted sum of V
+
+    for (uint t = 0; t < kv_len; t++) {
+        // Compute dot(Q, K[t]) across head_dim using SIMD reduction
+        uint k_base = bkv * kv_len * head_dim + t * head_dim;
+        float qk = q_val * float(k[k_base + d]);
+        // Reduce across head_dim threads to get the full dot product
+        float score = simd_sum(qk);
+        // For head_dim > 32, need cross-SIMD reduction
+        threadgroup float partial[32];
+        if (head_dim > 32) {
+            if (lane == 0) partial[simd_id] = score;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            uint ns = (head_dim + 31) / 32;
+            float t2 = 0.0f;
+            if (simd_id == 0 && lane < ns) t2 = partial[lane];
+            t2 = simd_sum(t2);
+            if (simd_id == 0 && lane == 0) partial[0] = t2;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            score = partial[0];
+        }
+        score *= scale;
+
+        // Online softmax update
+        float v_val = float(v[bkv * kv_len * head_dim + t * head_dim + d]);
+        if (score > max_score) {
+            float correction = exp(max_score - score);
+            sum_exp = sum_exp * correction + 1.0f;
+            acc = acc * correction + v_val;
+            max_score = score;
+        } else {
+            float w = exp(score - max_score);
+            sum_exp += w;
+            acc += w * v_val;
+        }
+    }
+
+    // Normalize
+    output[bh * head_dim + d] = half(acc / sum_exp);
+}
