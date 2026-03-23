@@ -4,6 +4,8 @@ use candle_core::{DType, Device, Tensor};
 fn gpu_device() -> Device {
     if candle_core::utils::cuda_is_available() {
         Device::new_cuda(0).unwrap()
+    } else if candle_core::utils::metal_is_available() {
+        Device::new_metal(0).unwrap()
     } else {
         Device::Cpu
     }
