@@ -728,7 +728,7 @@ impl ComputeBackend for VulkanBackend {
     // GPU dispatch overhead (~50µs) only pays off for tensors > 8K elements.
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-        if gate.elem_count() > 8192 {
+        if gate.elem_count() > 32768 {
             self.dispatch_binary(gate, up, "silu_mul")
         } else {
             (candle_nn::ops::silu(&gate.contiguous()?)? * up.contiguous()?)?.contiguous()
@@ -736,7 +736,7 @@ impl ComputeBackend for VulkanBackend {
     }
 
     fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
-        if x.elem_count() > 8192 {
+        if x.elem_count() > 32768 {
             self.dispatch_unary(x, "stable_softplus")
         } else {
             let t88 = Tensor::full(88.0f32, x.shape(), x.device())?.to_dtype(x.dtype())?;
@@ -747,7 +747,7 @@ impl ComputeBackend for VulkanBackend {
     }
 
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        if a.elem_count() > 8192 {
+        if a.elem_count() > 32768 {
             self.dispatch_ternary(a, b, c, "add3")
         } else {
             ((a + b)? + c)?.contiguous()
@@ -755,7 +755,7 @@ impl ComputeBackend for VulkanBackend {
     }
 
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
-        if x.elem_count() > 8192 {
+        if x.elem_count() > 32768 {
             self.dispatch_binary(x, y, "exp_mul")
         } else {
             (x * y.exp()?)?.contiguous()
@@ -763,7 +763,7 @@ impl ComputeBackend for VulkanBackend {
     }
 
     fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        if a.elem_count() > 8192 {
+        if a.elem_count() > 32768 {
             self.dispatch_ternary(a, b, c, "sub_mul")
         } else {
             ((a - b)? * c)?.contiguous()
