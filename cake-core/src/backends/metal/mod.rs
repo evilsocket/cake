@@ -349,6 +349,73 @@ impl candle_core::CustomOp3 for MetalRmsNormGated {
     }
 }
 
+struct MetalAddRmsNorm { eps: f32 }
+impl candle_core::CustomOp3 for MetalAddRmsNorm {
+    fn name(&self) -> &'static str { "metal_add_rms_norm" }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalAddRmsNorm: expected Metal device") }
+    #[allow(clippy::too_many_arguments)]
+    fn metal_fwd(&self, s_a: &candle_core::MetalStorage, l_a: &Layout, s_b: &candle_core::MetalStorage, l_b: &Layout, s_w: &candle_core::MetalStorage, l_w: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
+        let device = s_a.device();
+        let dims = l_a.shape().dims();
+        let el = l_a.shape().elem_count();
+        let hidden = *dims.last().ok_or_else(|| candle_core::Error::Msg("empty shape".into()))?;
+        let num_rows = el / hidden;
+        let kernel_name: &'static str = match s_a.dtype() { DType::F32 => "add_rms_norm_f32", DType::F16 => "add_rms_norm_f16", dt => candle_core::bail!("add_rms_norm metal: unsupported dtype {dt:?}") };
+        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+        let output = device.new_buffer(2 * el, s_a.dtype(), "add_rms_norm")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let off_a = l_a.start_offset() * s_a.dtype().size_in_bytes();
+        let off_b = l_b.start_offset() * s_b.dtype().size_in_bytes();
+        let off_w = l_w.start_offset() * s_w.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s_a.buffer(), off_a));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (s_b.buffer(), off_b));
+        candle_metal_kernels::utils::set_param(&encoder, 2, (s_w.buffer(), off_w));
+        candle_metal_kernels::utils::set_param(&encoder, 3, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 4, el as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 5, hidden as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 6, self.eps);
+        let max_threads = pipeline.max_total_threads_per_threadgroup();
+        let tg_width = hidden.min(max_threads);
+        let grid = objc2_metal::MTLSize { width: hidden, height: num_rows, depth: 1 };
+        let group = objc2_metal::MTLSize { width: tg_width, height: 1, depth: 1 };
+        encoder.dispatch_threads(grid, group);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), 2 * el, s_a.dtype()), Shape::from(vec![2 * el])))
+    }
+}
+
+struct MetalRmsNormChannel { eps: f32 }
+impl candle_core::CustomOp2 for MetalRmsNormChannel {
+    fn name(&self) -> &'static str { "metal_rms_norm_channel" }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalRmsNormChannel: expected Metal device") }
+    fn metal_fwd(&self, s_x: &candle_core::MetalStorage, l_x: &Layout, s_w: &candle_core::MetalStorage, l_w: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
+        let device = s_x.device();
+        let dims = l_x.shape().dims();
+        let el = l_x.shape().elem_count();
+        let (batch, channels, time_len) = (dims[0], dims[1], dims[2]);
+        let num_bt = batch * time_len;
+        let kernel_name: &'static str = match s_x.dtype() { DType::F32 => "rms_norm_channel_f32", DType::F16 => "rms_norm_channel_f16", dt => candle_core::bail!("rms_norm_channel metal: unsupported dtype {dt:?}") };
+        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+        let output = device.new_buffer(el, s_x.dtype(), "rms_norm_channel")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let off_x = l_x.start_offset() * s_x.dtype().size_in_bytes();
+        let off_w = l_w.start_offset() * s_w.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s_x.buffer(), off_x));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (s_w.buffer(), off_w));
+        candle_metal_kernels::utils::set_param(&encoder, 2, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 3, channels as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 4, time_len as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 5, self.eps);
+        let max_threads = pipeline.max_total_threads_per_threadgroup();
+        let tg_width = channels.min(max_threads);
+        let grid = objc2_metal::MTLSize { width: channels, height: num_bt, depth: 1 };
+        let group = objc2_metal::MTLSize { width: tg_width, height: 1, depth: 1 };
+        encoder.dispatch_threads(grid, group);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s_x.dtype()), l_x.shape().clone()))
+    }
+}
+
 // ─── MetalBackend ────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -449,15 +516,19 @@ impl ComputeBackend for MetalBackend {
     }
 
     fn add_rms_norm(&self, a: &Tensor, b: &Tensor, weight: &Tensor, eps: f32) -> Result<(Tensor, Tensor)> {
-        let res = (a + b)?;
-        let normed = candle_nn::ops::rms_norm(&res.contiguous()?, weight, eps)?;
-        Ok((res, normed))
+        let a = a.contiguous()?;
+        let b = b.contiguous()?;
+        let shape = a.shape().clone();
+        let el = shape.elem_count();
+        let packed = a.apply_op3_no_bwd(&b, weight, &MetalAddRmsNorm { eps })?;
+        let residual = packed.narrow(0, 0, el)?.reshape(&shape)?;
+        let normed = packed.narrow(0, el, el)?.reshape(&shape)?;
+        Ok((residual, normed))
     }
 
     fn rms_norm_channel(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        let xt = x.transpose(1, 2)?.contiguous()?;
-        let normed = candle_nn::ops::rms_norm(&xt, weight, eps)?;
-        normed.transpose(1, 2)?.contiguous()
+        let x = x.contiguous()?;
+        x.apply_op2_no_bwd(weight, &MetalRmsNormChannel { eps })
     }
 
     fn adaln_modulate(&self, x: &Tensor, norm_weight: &Tensor, scale: &Tensor, shift: &Tensor, eps: f32) -> Result<Tensor> {
