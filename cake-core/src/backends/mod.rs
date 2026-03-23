@@ -256,13 +256,57 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
         eps: f32,
     ) -> Result<Tensor> {
         use candle_core::{DType, D};
-        // Fast path: contiguous input with bias → fused kernel
+        // Fast path: contiguous F32 — raw computation avoids tensor op overhead
+        if x.dtype() == DType::F32 && x.is_contiguous() {
+            let shape = x.dims();
+            let hidden = *shape.last().unwrap_or(&0);
+            let x_data = x.flatten_all()?.to_vec1::<f32>()?;
+            let w_data = weight.to_vec1::<f32>()?;
+            let b_data = match bias {
+                Some(b) => Some(b.to_vec1::<f32>()?),
+                None => None,
+            };
+            let rows = x_data.len() / hidden;
+            let mut out = vec![0f32; x_data.len()];
+            let eps64 = eps as f64;
+            for r in 0..rows {
+                let off = r * hidden;
+                let row = &x_data[off..off + hidden];
+                let mut sum = 0f64;
+                let mut sum_sq = 0f64;
+                for &v in row {
+                    let v64 = v as f64;
+                    sum += v64;
+                    sum_sq += v64 * v64;
+                }
+                let mean = sum / hidden as f64;
+                let var = sum_sq / hidden as f64 - mean * mean;
+                let rstd = 1.0 / (var + eps64).sqrt();
+                match &b_data {
+                    Some(bd) => {
+                        for i in 0..hidden {
+                            out[off + i] =
+                                (((row[i] as f64 - mean) * rstd) * w_data[i] as f64
+                                    + bd[i] as f64) as f32;
+                        }
+                    }
+                    None => {
+                        for i in 0..hidden {
+                            out[off + i] =
+                                (((row[i] as f64 - mean) * rstd) * w_data[i] as f64) as f32;
+                        }
+                    }
+                }
+            }
+            return Tensor::from_vec(out, shape, x.device());
+        }
+        // Fused kernel for contiguous non-F32 with bias
         if x.is_contiguous() {
             if let Some(b) = bias {
                 return candle_nn::ops::layer_norm(x, weight, b, eps);
             }
         }
-        // Slow path: manual computation with F32 promotion
+        // Generic fallback with F32 promotion
         let x_dtype = x.dtype();
         let internal_dtype = match x_dtype {
             DType::F16 | DType::BF16 => DType::F32,
