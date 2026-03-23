@@ -24,6 +24,32 @@ template<> __device__ __forceinline__ __nv_bfloat16 expg<__nv_bfloat16>(__nv_bfl
 }
 #endif
 
+// ─── f8e4m3 dequant helper: branchless bit manipulation ─────────────
+// Constructs IEEE 754 float32 directly from F8E4M3 bit pattern.
+// F8E4M3: 1 sign, 4 exponent (bias=7), 3 mantissa.
+// Float32: 1 sign, 8 exponent (bias=127), 23 mantissa.
+__device__ __forceinline__ float f8e4m3_decode(uint8_t bits) {
+    uint32_t sign = (bits >> 7) & 1;
+    uint32_t exp  = (bits >> 3) & 0xF;
+    uint32_t mant = bits & 0x7;
+
+    if (exp == 0 && mant == 0) {
+        return sign ? -0.0f : 0.0f;
+    } else if (exp == 0) {
+        // Subnormal: 2^(-6) * (mant / 8)
+        float result = ldexpf((float)mant / 8.0f, -6);
+        return sign ? -result : result;
+    } else if (exp == 0xF && mant == 0x7) {
+        return __int_as_float(0x7FC00000); // NaN
+    } else {
+        // Normal: construct float32 directly via bit manipulation
+        // F8 exp bias=7 → float32 exp = exp - 7 + 127 = exp + 120
+        // F8 mant 3 bits → float32 mant shifted left by 20
+        uint32_t f32_bits = (sign << 31) | ((exp + 120) << 23) | (mant << 20);
+        return __uint_as_float(f32_bits);
+    }
+}
+
 // ─── f8e4m3_to_f32: software FP8 dequantization for SM < 8.9 ────────
 // On SM89+ (Ada/Hopper), candle uses native __nv_fp8_e4m3 hardware.
 // On SM80 (A100) and below, the native FP8 type doesn't exist.
@@ -35,25 +61,7 @@ extern "C" __global__ void f8e4m3_to_f32(
 ) {
     for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
          i < numel; i += blockDim.x * gridDim.x) {
-        uint8_t bits = inp[i];
-        uint32_t sign = (bits >> 7) & 1;
-        uint32_t exp  = (bits >> 3) & 0xF;
-        uint32_t mant = bits & 0x7;
-
-        float result;
-        if (exp == 0 && mant == 0) {
-            result = 0.0f;
-        } else if (exp == 0) {
-            // Subnormal: 2^(-6) * (mant / 8)
-            result = ldexpf((float)mant / 8.0f, -6);
-        } else if (exp == 0xF && mant == 0x7) {
-            result = __int_as_float(0x7FC00000); // NaN
-        } else {
-            // Normal: 2^(exp-7) * (1 + mant/8)
-            result = ldexpf(1.0f + (float)mant / 8.0f, (int)exp - 7);
-        }
-        if (sign) result = -result;
-        out[i] = result;
+        out[i] = f8e4m3_decode(inp[i]);
     }
 }
 
@@ -69,23 +77,7 @@ extern "C" __global__ void f8e4m3_to_f16(
 ) {
     for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
          i < numel; i += blockDim.x * gridDim.x) {
-        uint8_t bits = inp[i];
-        uint32_t sign = (bits >> 7) & 1;
-        uint32_t exp  = (bits >> 3) & 0xF;
-        uint32_t mant = bits & 0x7;
-
-        float result;
-        if (exp == 0 && mant == 0) {
-            result = 0.0f;
-        } else if (exp == 0) {
-            result = ldexpf((float)mant / 8.0f, -6);
-        } else if (exp == 0xF && mant == 0x7) {
-            result = __int_as_float(0x7FC00000);
-        } else {
-            result = ldexpf(1.0f + (float)mant / 8.0f, (int)exp - 7);
-        }
-        if (sign) result = -result;
-        out[i] = __float2half(result);
+        out[i] = __float2half(f8e4m3_decode(inp[i]));
     }
 }
 #endif
@@ -101,23 +93,7 @@ extern "C" __global__ void f8e4m3_to_bf16(
 ) {
     for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
          i < numel; i += blockDim.x * gridDim.x) {
-        uint8_t bits = inp[i];
-        uint32_t sign = (bits >> 7) & 1;
-        uint32_t exp  = (bits >> 3) & 0xF;
-        uint32_t mant = bits & 0x7;
-
-        float result;
-        if (exp == 0 && mant == 0) {
-            result = 0.0f;
-        } else if (exp == 0) {
-            result = ldexpf((float)mant / 8.0f, -6);
-        } else if (exp == 0xF && mant == 0x7) {
-            result = __int_as_float(0x7FC00000);
-        } else {
-            result = ldexpf(1.0f + (float)mant / 8.0f, (int)exp - 7);
-        }
-        if (sign) result = -result;
-        out[i] = __float2bfloat16(result);
+        out[i] = __float2bfloat16(f8e4m3_decode(inp[i]));
     }
 }
 #endif
