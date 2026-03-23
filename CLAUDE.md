@@ -36,6 +36,17 @@ cake chat --server http://localhost:8080
 
 The TUI streams tokens in real time and detects `<think>` tags — showing a "thinking..." indicator with reasoning in gray, then the final response in white.
 
+## Model Management
+
+```bash
+cake pull evilsocket/Qwen3-0.6B       # download from HuggingFace
+cake list                              # show all cached models
+cake rm evilsocket/Qwen3-0.6B         # delete a cached model (with confirmation)
+cake rm Qwen3-0.6B                    # short name also works (suffix match)
+```
+
+`cake rm` shows the model name, path, and size before asking for confirmation. For HF cache models it removes the entire `models--org--name/` directory. Refuses to delete local (non-cache) models.
+
 ## Run Commands (Qwen3.5-0.8B cluster)
 
 ```bash

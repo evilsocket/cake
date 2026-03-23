@@ -1,0 +1,12 @@
+id	timestamp	commit	score_ns	tests	clippy	status	notes
+000	2026-03-23T09:26:11	e18915a	54333880000	PASS	PASS	baseline	Unmodified baseline
+001	2026-03-23T09:40:00	75a902b	57715066000	PASS	PASS	keep	Cache dequantized FP8 weight (85% faster small seqs, 30% large)
+002	2026-03-23T09:50:00	9b846b6	59423749000	PASS	PASS	keep	Simplify Fp8Linear::forward (broadcast_matmul, skip unneeded ops)
+003	2026-03-23T10:00:00	4154711	58384033000	PASS	PASS	keep	Optimize apply_rope (direct rotation computation)
+004	2026-03-23T10:10:00	33304cf	-	PASS	PASS	keep	Eliminate ones_like in FLUX.2 modulate
+005	2026-03-23T10:15:00	1624b91	-	PASS	PASS	keep	Eliminate ones_like in FLUX.1 modulation
+006	2026-03-23T10:20:00	02b4615	59361448000	PASS	PASS	keep	Cache inv_freq in Flux2PosEmbed (eliminate per-call Vec alloc)
+007	2026-03-23T10:30:00	a64ea7f	57713702000	PASS	PASS	keep	Metal F32 SDPA for FLUX.2 attention (non-causal)
+008	2026-03-23T10:40:00	d3dff99	63723290000	PASS	PASS	keep	Metal F32 SDPA for FLUX.1 attention (non-causal)
+009	2026-03-23T10:50:00	8b9b8ba	57944717000	PASS	PASS	keep	Pre-transpose weight in Fp8Linear (eliminate per-forward transpose)
+010	2026-03-23T11:00:00	8d98cee	57395819000	PASS	PASS	keep	Cache inv_freq in FLUX.1 EmbedNd + inline rope

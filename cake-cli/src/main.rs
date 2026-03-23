@@ -67,6 +67,11 @@ enum Commands {
         #[arg(long, default_value = "http://localhost:8080")]
         server: String,
     },
+    /// Delete a cached model.
+    Rm {
+        /// Model name (e.g., evilsocket/Qwen3-0.6B or just Qwen3-0.6B)
+        model: String,
+    },
     /// Split a model into per-worker bundles
     Split {
         /// Input model path
@@ -182,6 +187,34 @@ async fn main() -> Result<()> {
                 println!("model downloaded to {}", path.display());
             } else {
                 anyhow::bail!("'{}' does not look like a HuggingFace repo ID (expected format: org/model-name)", model);
+            }
+            Ok(())
+        }
+        Commands::Rm { model } => {
+            let found = utils::models::find_model(&model)?;
+            match found {
+                Some(m) => {
+                    let size = human_bytes::human_bytes(m.size_bytes as f64);
+                    println!("model: {}", m.name);
+                    println!("path:  {}", m.path.display());
+                    println!("size:  {}", size);
+                    print!("\ndelete? [y/N] ");
+                    std::io::Write::flush(&mut std::io::stdout())?;
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input)?;
+                    if input.trim().eq_ignore_ascii_case("y") {
+                        utils::models::delete_model(&m)?;
+                        println!("deleted.");
+                    } else {
+                        println!("cancelled.");
+                    }
+                }
+                None => {
+                    anyhow::bail!(
+                        "model '{}' not found. Run 'cake list' to see available models.",
+                        model
+                    );
+                }
             }
             Ok(())
         }

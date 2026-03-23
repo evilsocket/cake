@@ -135,15 +135,17 @@ pub fn ensure_model_downloaded(repo_id: &str) -> Result<PathBuf> {
     let api = builder.build()?;
     let repo = api.model(repo_id.to_string());
 
-    // Download config.json first — validates repo access (fails fast on auth errors).
+    // Download config.json (optional — image models like FLUX don't have it).
     log::info!("downloading config.json ...");
-    repo.download("config.json")
-        .map_err(|e| anyhow!("failed to download config.json from '{}': {}", repo_id, e))?;
+    match repo.download("config.json") {
+        Ok(_) => log::info!("config.json downloaded"),
+        Err(_) => log::info!("no config.json (image/diffusion model)"),
+    }
 
     // Download tokenizer (optional — some models like VibeVoice use external tokenizers).
     log::info!("downloading tokenizer.json ...");
-    if let Err(e) = repo.download("tokenizer.json") {
-        log::warn!("tokenizer.json not available for '{}': {}", repo_id, e);
+    if repo.download("tokenizer.json").is_err() {
+        log::info!("no tokenizer.json");
     }
 
     // Try sharded model first (model.safetensors.index.json), fall back to single file.
@@ -178,16 +180,38 @@ pub fn ensure_model_downloaded(repo_id: &str) -> Result<PathBuf> {
         }
 
         index_path.parent().unwrap().to_path_buf()
-    } else {
+    } else if let Ok(model_path) = repo.download("model.safetensors") {
         log::info!("downloading model.safetensors ...");
-        let model_path = repo.download("model.safetensors").map_err(|e| {
-            anyhow!(
-                "failed to download model from '{}': no index.json and no model.safetensors found: {}",
-                repo_id,
-                e
-            )
-        })?;
         model_path.parent().unwrap().to_path_buf()
+    } else {
+        // No standard model layout — list repo files and download all .safetensors
+        // (e.g. FLUX repos use flux1-dev-fp8.safetensors at root)
+        log::info!("no standard model layout, listing repo files...");
+        let repo_info = repo.info().map_err(|e| {
+            anyhow!("failed to get repo info for '{}': {}", repo_id, e)
+        })?;
+        let safetensor_files: Vec<&str> = repo_info.siblings.iter()
+            .map(|s| s.rfilename.as_str())
+            .filter(|f| f.ends_with(".safetensors") && !f.contains('/'))
+            .collect();
+        if safetensor_files.is_empty() {
+            anyhow::bail!(
+                "no .safetensors files found in '{}' — cannot download model",
+                repo_id
+            );
+        }
+        log::info!("found {} safetensor files to download", safetensor_files.len());
+        let mut snapshot_dir = None;
+        for (i, file) in safetensor_files.iter().enumerate() {
+            log::info!("[{}/{}] downloading {} ...", i + 1, safetensor_files.len(), file);
+            let path = repo.download(file).map_err(|e| {
+                anyhow!("failed to download '{}' from '{}': {}", file, repo_id, e)
+            })?;
+            if snapshot_dir.is_none() {
+                snapshot_dir = Some(path.parent().unwrap().to_path_buf());
+            }
+        }
+        snapshot_dir.unwrap()
     };
 
     log::info!("model files ready at {}", snapshot_dir.display());

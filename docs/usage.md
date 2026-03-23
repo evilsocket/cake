@@ -40,6 +40,15 @@ cake list
 
 This scans `~/.cache/huggingface/hub/` and `~/.cache/cake/` and shows each model's status (`complete` or `partial`), size, and source.
 
+Delete a cached model:
+
+```sh
+cake rm evilsocket/Qwen3-0.6B    # full name
+cake rm Qwen3-0.6B               # short name (auto-matched)
+```
+
+Shows the model name, path, and size, then asks for confirmation before deleting.
+
 ## Web UI
 
 When using `cake serve`, Cake serves a web interface with two tabs:

@@ -94,6 +94,63 @@ pub fn list_models() -> Result<Vec<LocalModel>> {
     Ok(models)
 }
 
+/// Find a model by name. Supports exact match (`org/model`) or suffix match (`model`).
+/// Returns `Err` if the suffix match is ambiguous (multiple models match).
+pub fn find_model(name: &str) -> Result<Option<LocalModel>> {
+    let models = list_models()?;
+
+    // Exact match first
+    if let Some(m) = models.iter().find(|m| m.name == name) {
+        return Ok(Some(m.clone()));
+    }
+
+    // Suffix match: "Qwen3-0.6B" matches "evilsocket/Qwen3-0.6B"
+    let suffix = format!("/{name}");
+    let matches: Vec<_> = models.iter().filter(|m| m.name.ends_with(&suffix)).collect();
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(Some(matches[0].clone())),
+        _ => anyhow::bail!(
+            "'{}' is ambiguous, matches: {}",
+            name,
+            matches
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// Delete a cached model from disk.
+///
+/// For HuggingFace cache models, removes the entire `models--org--name/` directory
+/// (including all snapshots and blobs). For cluster cache models, removes the model
+/// directory. Refuses to delete local models.
+pub fn delete_model(model: &LocalModel) -> Result<()> {
+    match model.source {
+        ModelSource::HuggingFaceCache => {
+            // model.path is .../snapshots/{hash}/ — go up to models--org--name/
+            let hf_model_dir = model
+                .path
+                .parent() // snapshots/
+                .and_then(|p| p.parent()) // models--org--name/
+                .ok_or_else(|| anyhow::anyhow!("unexpected HF cache structure for {}", model.path.display()))?;
+            std::fs::remove_dir_all(hf_model_dir)?;
+        }
+        ModelSource::ClusterCache { .. } => {
+            std::fs::remove_dir_all(&model.path)?;
+        }
+        ModelSource::Local => {
+            anyhow::bail!(
+                "refusing to delete local model '{}' — use rm -rf manually",
+                model.name
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Check a single directory and return its model status, or None if it's not a model dir.
 fn check_model_dir(dir: &Path) -> Option<(ModelStatus, u64)> {
     // Must have config.json to be considered a model
