@@ -367,3 +367,58 @@ fn metal_rms_norm_channel_matches_cpu() {
     let metal_out = metal.rms_norm_channel(&x_m, &w_m, 1e-6).unwrap();
     assert_close(&cpu_out, &metal_out, 1e-3, "rms_norm_channel");
 }
+
+/// Test candle's internal Metal ops at F16 precision to find the source
+/// of garbage model output. The model uses F16 dtype on Metal.
+#[cfg(feature = "metal")]
+#[test]
+fn metal_candle_f16_rms_norm_correctness() {
+    let Some((_, dev)) = try_metal_backend() else { return };
+    // F16 rms_norm on Metal vs F32 on CPU
+    let x_cpu = super::helpers::make_tensor(&[1, 1, 1024], 2000);
+    let x_f16 = x_cpu.to_dtype(DType::F16).unwrap().to_device(&dev).unwrap();
+    let w_f16 = Tensor::ones(1024, DType::F16, &dev).unwrap();
+    let w_f32 = Tensor::ones(1024, DType::F32, &Device::Cpu).unwrap();
+
+    let normed_metal = candle_nn::ops::rms_norm(&x_f16, &w_f16, 1e-6).unwrap();
+    let normed_cpu = candle_nn::ops::rms_norm(&x_cpu, &w_f32, 1e-6).unwrap();
+    // Allow F16 precision loss (mantissa = 10 bits ≈ 3 decimal digits)
+    assert_close(&normed_cpu, &normed_metal, 0.01, "candle_rms_norm_f16");
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn metal_candle_f16_matmul_correctness() {
+    let Some((_, dev)) = try_metal_backend() else { return };
+    let a_cpu = super::helpers::make_tensor(&[1, 64], 2100);
+    let b_cpu = super::helpers::make_tensor(&[64, 128], 2101);
+    let a_f16 = a_cpu.to_dtype(DType::F16).unwrap().to_device(&dev).unwrap();
+    let b_f16 = b_cpu.to_dtype(DType::F16).unwrap().to_device(&dev).unwrap();
+
+    let mm_metal = a_f16.matmul(&b_f16).unwrap();
+    let mm_cpu = a_cpu.matmul(&b_cpu).unwrap();
+    assert_close(&mm_cpu, &mm_metal, 0.01, "candle_matmul_f16");
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn metal_candle_f16_silu_correctness() {
+    let Some((_, dev)) = try_metal_backend() else { return };
+    let x_cpu = super::helpers::make_tensor(&[1, 1, 1024], 2200);
+    let x_f16 = x_cpu.to_dtype(DType::F16).unwrap().to_device(&dev).unwrap();
+
+    let silu_metal = candle_nn::ops::silu(&x_f16).unwrap();
+    let silu_cpu = candle_nn::ops::silu(&x_cpu).unwrap();
+    assert_close(&silu_cpu, &silu_metal, 0.001, "candle_silu_f16");
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn metal_candle_f16_to_f32_conversion() {
+    let Some((_, dev)) = try_metal_backend() else { return };
+    let x_cpu = super::helpers::make_tensor(&[1, 1, 1024], 2300);
+    let x_f16_metal = x_cpu.to_dtype(DType::F16).unwrap().to_device(&dev).unwrap();
+    let x_f32_metal = x_f16_metal.to_dtype(DType::F32).unwrap();
+    let x_f16_cpu = x_cpu.to_dtype(DType::F16).unwrap().to_dtype(DType::F32).unwrap();
+    assert_close(&x_f16_cpu, &x_f32_metal, 1e-6, "f16_to_f32_conversion");
+}
