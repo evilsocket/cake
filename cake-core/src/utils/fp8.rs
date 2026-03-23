@@ -232,14 +232,20 @@ impl Fp8Linear {
         let w_t = self.get_weight()?;
         let compute = w_t.dtype();
         let x = x.to_dtype(compute)?;
-        let dims = x.dims().to_vec();
-        let last = *dims.last().unwrap();
-        let batch: usize = dims[..dims.len() - 1].iter().product();
-        let x_2d = x.reshape((batch, last))?;
-        let y_2d = x_2d.matmul(&w_t)?;
-        let mut out_dims = dims[..dims.len() - 1].to_vec();
-        out_dims.push(w_t.dim(1)?);
-        let y = y_2d.reshape(out_dims)?;
+
+        // For 2D input, skip reshaping — matmul handles it directly
+        let y = if x.rank() == 2 {
+            x.matmul(&w_t)?
+        } else {
+            let dims = x.dims();
+            let last = dims[dims.len() - 1];
+            let batch: usize = dims[..dims.len() - 1].iter().product();
+            let y_2d = x.reshape((batch, last))?.matmul(&w_t)?;
+            let mut out_dims = dims[..dims.len() - 1].to_vec();
+            out_dims.push(w_t.dim(1)?);
+            y_2d.reshape(out_dims)?
+        };
+
         let y = match &self.bias {
             Some(b) => y.broadcast_add(&b.to_dtype(compute)?)?,
             None => y,
