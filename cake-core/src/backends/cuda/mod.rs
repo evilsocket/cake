@@ -52,14 +52,17 @@ impl ComputeBackend for CudaBackend {
         let attn = if causal {
             let seq_len = q.dim(2)?;
             let kv_len = k.dim(2)?;
-            let mut mask_data = vec![0u8; seq_len * kv_len];
-            for i in 0..seq_len {
-                let max_j = kv_len.saturating_sub(seq_len) + i;
-                for j in 0..=max_j.min(kv_len - 1) {
-                    mask_data[i * kv_len + j] = 1;
-                }
-            }
-            let mask = Tensor::from_vec(mask_data, (1, 1, seq_len, kv_len), q.device())?;
+            // Build causal mask on GPU: row indices >= col indices (with offset for kv_len > seq_len)
+            let offset = kv_len.saturating_sub(seq_len);
+            let rows = Tensor::arange(0u32, seq_len as u32, q.device())?
+                .reshape((seq_len, 1))?;
+            let cols = Tensor::arange(0u32, kv_len as u32, q.device())?
+                .reshape((1, kv_len))?;
+            let offset_t = Tensor::full(offset as u32, (1, 1), q.device())?;
+            // mask[i,j] = 1 where j <= i + offset, i.e. (i + offset) >= j
+            let shifted = rows.broadcast_add(&offset_t)?;
+            let mask = shifted.broadcast_ge(&cols)?;
+            let mask = mask.reshape((1, 1, seq_len, kv_len))?;
             let neg_inf = Tensor::full(f32::NEG_INFINITY, attn.shape(), q.device())?;
             mask.broadcast_as(attn.shape())?
                 .where_cond(&attn, &neg_inf)?
