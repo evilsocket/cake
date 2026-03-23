@@ -946,9 +946,9 @@ impl VulkanBackend {
         k: usize,
         n: usize,
     ) -> (Vec<f32>, MappedBuffer) {
-        // Always use GEMM (even for M=1) for now — GEMV has precision issues.
-        // GEMM with 2×4 tiling works correctly for all M values.
-        {
+        if m == 1 {
+            self.gpu_gemv(buf_a, buf_b, k, n)
+        } else {
             self.gpu_gemm(buf_a, buf_b, m, k, n)
         }
     }
@@ -1306,10 +1306,7 @@ impl ComputeBackend for VulkanBackend {
         let m = a_dims[a_dims.len() - 2];
         let k = a_dims[a_dims.len() - 1];
         let n = b_dims[b_dims.len() - 1];
-        if m <= 1 {
-            log::debug!("matmul CPU: M={m} K={k} N={n} (M<=1, generation)");
-            return a.matmul(b);
-        }
+        // GPU for all sizes. M=1 uses coalesced GEMV. View cache handles weight.t().
         log::debug!("matmul GPU: M={m} K={k} N={n}");
         let orig_dtype = a.dtype();
         let result = self.tensor_matmul(a, b)?;
