@@ -1,326 +1,776 @@
-//! Vulkan compute backend via wgpu.
+//! Vulkan compute backend via ash (raw Vulkan bindings).
 //!
-//! GPU-accelerated elementwise ops + tiled matmul via WGSL compute shaders.
-//! Complex ops (normalization, convolution) fall back to candle CPU.
-//! Pipelines are compiled once and cached for the lifetime of the backend.
+//! GPU-accelerated elementwise ops + tiled matmul via SPIR-V compute shaders
+//! (compiled from WGSL at build time via naga). Complex ops (normalization,
+//! convolution) fall back to candle CPU.
 //!
-//! **Buffer management**: Weight tensors are uploaded once and cached by candle
-//! `TensorId` (stable across forward passes). Output and staging buffers are
-//! pooled by power-of-2 byte size to eliminate per-dispatch allocation.
+//! **Key design**: On UMA hardware (Steam Deck), all GPU buffers use
+//! DEVICE_LOCAL | HOST_VISIBLE | HOST_COHERENT memory, enabling zero-copy
+//! reads and writes. No staging buffers, no map/unmap — just memcpy and
+//! fence waits.
 //!
 //! **Target**: Steam Deck (AMD Van Gogh, RDNA 2, Vulkan 1.3, 16GB unified RAM).
 
 use std::collections::HashMap;
+use std::ffi::CStr;
 use std::sync::{Arc, Mutex};
 
+use ash::vk;
 use candle_core::{DType, Device, Result, Tensor, TensorId, D};
 
 use super::ComputeBackend;
 
-const WGSL_SOURCE: &str = include_str!("ops.wgsl");
+// SPIR-V modules compiled from ops.wgsl at build time
+include!(concat!(env!("OUT_DIR"), "/spirv_ops.rs"));
+
 const WG_ELEM: u32 = 256; // workgroup size for elementwise ops
 
-// ─── GPU buffer cache ────────────────────────────────────────────────
+// ─── Mapped GPU buffer ──────────────────────────────────────────────
 
-/// Caches GPU buffers keyed by candle `TensorId`.
-///
-/// Weight tensors have stable IDs across forward passes (they are fields in
-/// model structs, not recreated). Upload happens once; subsequent calls return
-/// the cached `Arc<wgpu::Buffer>`.
-///
-/// Activation tensors get new `TensorId`s each forward pass and will not
-/// accumulate because they are short-lived and dropped before the next pass.
-/// We do not evict — for a 1.6GB F16 model the f32 cache is ~3.2GB, well
-/// within the Steam Deck's 16GB unified RAM.
-struct GpuBufferCache {
-    buffers: HashMap<TensorId, Arc<wgpu::Buffer>>,
+/// A GPU buffer with a persistently mapped host pointer (UMA).
+struct MappedBuffer {
+    buffer: vk::Buffer,
+    allocation: gpu_allocator::vulkan::Allocation,
+    mapped_ptr: *mut u8,
+    size: u64,
 }
 
-impl GpuBufferCache {
-    fn new() -> Self {
-        Self {
-            buffers: HashMap::new(),
+// Safety: MappedBuffer is only accessed while holding a Mutex.
+unsafe impl Send for MappedBuffer {}
+unsafe impl Sync for MappedBuffer {}
+
+impl MappedBuffer {
+    /// Write f32 data into the buffer via mapped pointer.
+    fn write_f32(&self, data: &[f32]) {
+        let bytes = bytemuck::cast_slice::<f32, u8>(data);
+        assert!(bytes.len() as u64 <= self.size);
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.mapped_ptr, bytes.len());
         }
     }
 
-    /// Return a cached buffer or upload `data` into a new one.
-    fn get_or_upload(
-        &mut self,
-        id: TensorId,
-        data: &[f32],
-        gpu: &wgpu::Device,
-    ) -> Arc<wgpu::Buffer> {
-        if let Some(buf) = self.buffers.get(&id) {
-            return buf.clone();
+    /// Read f32 data from the buffer via mapped pointer.
+    fn read_f32(&self, count: usize) -> Vec<f32> {
+        let byte_count = count * 4;
+        assert!(byte_count as u64 <= self.size);
+        unsafe {
+            let slice = std::slice::from_raw_parts(self.mapped_ptr as *const f32, count);
+            slice.to_vec()
         }
-        let size = (data.len() * 4) as u64;
-        let buf = gpu.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: true,
-        });
-        buf.slice(..)
-            .get_mapped_range_mut()
-            .copy_from_slice(bytemuck::cast_slice(data));
-        buf.unmap();
-        let buf = Arc::new(buf);
-        self.buffers.insert(id, buf.clone());
-        buf
+    }
+
+    /// Write u32 data into the buffer.
+    fn write_u32(&self, data: &[u32]) {
+        let bytes = bytemuck::cast_slice::<u32, u8>(data);
+        assert!(bytes.len() as u64 <= self.size);
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.mapped_ptr, bytes.len());
+        }
     }
 }
 
 // ─── Buffer pool ─────────────────────────────────────────────────────
 
-/// Power-of-2 buffer pool to avoid per-dispatch allocation.
-///
-/// Two pools: **storage** (compute output) and **staging** (CPU readback).
-/// After a dispatch completes the caller releases buffers back into the pool.
+/// Power-of-2 buffer pool for output and activation buffers.
 struct BufferPool {
-    /// `STORAGE | COPY_SRC` buffers keyed by bucket size.
-    storage: HashMap<u64, Vec<wgpu::Buffer>>,
-    /// `MAP_READ | COPY_DST` buffers keyed by bucket size.
-    staging: HashMap<u64, Vec<wgpu::Buffer>>,
+    free: HashMap<u64, Vec<MappedBuffer>>,
 }
 
 impl BufferPool {
     fn new() -> Self {
         Self {
-            storage: HashMap::new(),
-            staging: HashMap::new(),
+            free: HashMap::new(),
         }
     }
 
-    /// Round `bytes` up to the next power of 2 (minimum 256).
     fn bucket(bytes: u64) -> u64 {
         bytes.next_power_of_two().max(256)
     }
+}
 
-    /// Acquire a storage buffer of at least `bytes` bytes.
-    fn acquire_storage(&mut self, gpu: &wgpu::Device, bytes: u64) -> wgpu::Buffer {
-        let key = Self::bucket(bytes);
-        self.storage
-            .entry(key)
-            .or_default()
-            .pop()
-            .unwrap_or_else(|| {
-                gpu.create_buffer(&wgpu::BufferDescriptor {
-                    label: None,
-                    size: key,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                    mapped_at_creation: false,
-                })
-            })
-    }
+// ─── Weight cache ────────────────────────────────────────────────────
 
-    /// Release a storage buffer back to the pool.
-    fn release_storage(&mut self, buf: wgpu::Buffer) {
-        let key = Self::bucket(buf.size());
-        self.storage.entry(key).or_default().push(buf);
-    }
+struct WeightCache {
+    buffers: HashMap<TensorId, Arc<MappedBuffer>>,
+    /// View cache: keyed by (storage_ptr, offset, elem_count, stride_hash).
+    /// Handles `weight.t()` which creates new TensorIds but shares the same storage.
+    /// Works for any dtype (F16, F32, etc.) by extracting raw pointer from CpuStorage.
+    views: HashMap<(usize, usize, usize, u64), Arc<MappedBuffer>>,
+}
 
-    /// Acquire a staging (readback) buffer of at least `bytes` bytes.
-    fn acquire_staging(&mut self, gpu: &wgpu::Device, bytes: u64) -> wgpu::Buffer {
-        let key = Self::bucket(bytes);
-        self.staging
-            .entry(key)
-            .or_default()
-            .pop()
-            .unwrap_or_else(|| {
-                gpu.create_buffer(&wgpu::BufferDescriptor {
-                    label: None,
-                    size: key,
-                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                })
-            })
-    }
-
-    /// Release a staging buffer back to the pool.
-    fn release_staging(&mut self, buf: wgpu::Buffer) {
-        let key = Self::bucket(buf.size());
-        self.staging.entry(key).or_default().push(buf);
+impl WeightCache {
+    fn new() -> Self {
+        Self {
+            buffers: HashMap::new(),
+            views: HashMap::new(),
+        }
     }
 }
 
 // ─── Vulkan backend ──────────────────────────────────────────────────
 
-/// Vulkan backend with cached pipelines, persistent GPU weight buffers, and
-/// pooled output/staging buffers.
 pub struct VulkanBackend {
     device: Device,
-    gpu: wgpu::Device,
-    queue: wgpu::Queue,
-    /// Cached compute pipelines keyed by entry point name.
-    pipelines: Mutex<HashMap<String, wgpu::ComputePipeline>>,
-    /// Pre-compiled shader module (shared across all pipelines).
-    module: wgpu::ShaderModule,
-    /// Persistent GPU buffer cache for weight tensors.
-    buffer_cache: Mutex<GpuBufferCache>,
-    /// Pool of reusable output and staging buffers.
+    // Vulkan handles
+    _entry: ash::Entry,
+    _instance: ash::Instance,
+    vk_device: ash::Device,
+    queue: vk::Queue,
+    command_pool: vk::CommandPool,
+    command_buffer: vk::CommandBuffer,
+    fence: vk::Fence,
+    // Memory
+    allocator: Mutex<Option<gpu_allocator::vulkan::Allocator>>,
+    uma_memory_type: Option<u32>,
+    // Pipelines: entry_point -> (pipeline, pipeline_layout, ds_layout, descriptor_set, num_bindings)
+    // Descriptor sets are pre-allocated at init (one per pipeline, reused across dispatches).
+    // ds_layout is kept for allocating additional sets during batched dispatch.
+    pipelines: HashMap<String, (vk::Pipeline, vk::PipelineLayout, vk::DescriptorSetLayout, vk::DescriptorSet, u32)>,
+    descriptor_pool: vk::DescriptorPool,
+    // Params uniform buffer (16 bytes, persistently mapped)
+    params_buf: MappedBuffer,
+    // Buffer management
+    weight_cache: Mutex<WeightCache>,
     buffer_pool: Mutex<BufferPool>,
+    // Activation cache: recent dispatch outputs cached by TensorId.
+    // When the next dispatch consumes an output (e.g., silu_mul → matmul),
+    // it finds the GPU buffer here and skips re-uploading.
+    // Bounded FIFO (max 16 entries), evicts oldest on overflow.
+    activation_cache: Mutex<Vec<(TensorId, Arc<MappedBuffer>)>>,
+    // Dispatch lock (serializes GPU submissions)
+    dispatch_lock: Mutex<()>,
 }
 
 impl std::fmt::Debug for VulkanBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VulkanBackend")
-            .field("device", &"vulkan")
+            .field("device", &"vulkan/ash")
             .finish()
     }
 }
 
 impl VulkanBackend {
     pub fn new() -> std::result::Result<Self, String> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
-            ..Default::default()
-        });
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }))
-        .ok_or_else(|| "no Vulkan/GL adapter found".to_string())?;
+        unsafe { Self::init_vulkan() }
+    }
 
-        let info = adapter.get_info();
-        log::info!("Vulkan backend: {} ({:?})", info.name, info.backend);
+    unsafe fn init_vulkan() -> std::result::Result<Self, String> {
+        // 1. Entry + Instance
+        let entry = ash::Entry::linked();
+        let app_info = vk::ApplicationInfo::default()
+            .application_name(c"cake-vulkan")
+            .api_version(vk::make_api_version(0, 1, 3, 0));
+        let instance_ci = vk::InstanceCreateInfo::default().application_info(&app_info);
+        let instance = entry
+            .create_instance(&instance_ci, None)
+            .map_err(|e| format!("vkCreateInstance: {e}"))?;
 
-        let (gpu, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("cake-vulkan"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
-                memory_hints: wgpu::MemoryHints::Performance,
+        // 2. Physical device
+        let phys_devices = instance
+            .enumerate_physical_devices()
+            .map_err(|e| format!("enumerate_physical_devices: {e}"))?;
+        if phys_devices.is_empty() {
+            return Err("no Vulkan physical devices found".into());
+        }
+        // Prefer discrete, fall back to first
+        let physical_device = phys_devices
+            .iter()
+            .find(|&&pd| {
+                let props = instance.get_physical_device_properties(pd);
+                props.device_type == vk::PhysicalDeviceType::DISCRETE_GPU
+            })
+            .copied()
+            .unwrap_or(phys_devices[0]);
+
+        let props = instance.get_physical_device_properties(physical_device);
+        let dev_name = CStr::from_ptr(props.device_name.as_ptr())
+            .to_string_lossy()
+            .to_string();
+        log::info!("Vulkan backend (ash): {dev_name}");
+
+        // 3. Queue family
+        let queue_families =
+            instance.get_physical_device_queue_family_properties(physical_device);
+        let queue_family_index = queue_families
+            .iter()
+            .position(|qf| qf.queue_flags.contains(vk::QueueFlags::COMPUTE))
+            .ok_or("no compute queue family")? as u32;
+
+        // 4. Logical device + queue
+        let queue_priorities = [1.0f32];
+        let queue_ci =
+            vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(queue_family_index)
+                .queue_priorities(&queue_priorities);
+        let device_ci = vk::DeviceCreateInfo::default().queue_create_infos(std::slice::from_ref(&queue_ci));
+        let vk_device = instance
+            .create_device(physical_device, &device_ci, None)
+            .map_err(|e| format!("vkCreateDevice: {e}"))?;
+        let queue = vk_device.get_device_queue(queue_family_index, 0);
+
+        // 5. Command pool + buffer
+        let pool_ci = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(queue_family_index)
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        let command_pool = vk_device
+            .create_command_pool(&pool_ci, None)
+            .map_err(|e| format!("create_command_pool: {e}"))?;
+        let alloc_ci = vk::CommandBufferAllocateInfo::default()
+            .command_pool(command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        let command_buffer = vk_device
+            .allocate_command_buffers(&alloc_ci)
+            .map_err(|e| format!("allocate_command_buffers: {e}"))?[0];
+
+        // 6. Fence
+        let fence_ci = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+        let fence = vk_device
+            .create_fence(&fence_ci, None)
+            .map_err(|e| format!("create_fence: {e}"))?;
+
+        // 7. Memory allocator
+        let mut allocator = gpu_allocator::vulkan::Allocator::new(
+            &gpu_allocator::vulkan::AllocatorCreateDesc {
+                instance: instance.clone(),
+                device: vk_device.clone(),
+                physical_device,
+                debug_settings: Default::default(),
+                buffer_device_address: false,
+                allocation_sizes: Default::default(),
             },
-            None,
-        ))
-        .map_err(|e| format!("wgpu device: {e}"))?;
+        )
+        .map_err(|e| format!("gpu-allocator: {e}"))?;
 
-        let module = gpu.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("cake_ops"),
-            source: wgpu::ShaderSource::Wgsl(WGSL_SOURCE.into()),
+        // 8. Detect UMA memory type
+        let mem_props = instance.get_physical_device_memory_properties(physical_device);
+        let uma_memory_type = (0..mem_props.memory_type_count).find(|&i| {
+            let flags = mem_props.memory_types[i as usize].property_flags;
+            flags.contains(
+                vk::MemoryPropertyFlags::DEVICE_LOCAL
+                    | vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
         });
+        if uma_memory_type.is_some() {
+            log::info!("UMA detected — using zero-copy DEVICE_LOCAL|HOST_VISIBLE buffers");
+        } else {
+            log::warn!("No UMA memory — falling back to HOST_VISIBLE buffers (slower)");
+        }
 
-        Ok(Self {
+        // 9. Descriptor pool
+        let pool_sizes = [vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::STORAGE_BUFFER,
+            descriptor_count: 256,
+        }, vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_count: 64,
+        }];
+        let dp_ci = vk::DescriptorPoolCreateInfo::default()
+            .max_sets(256)
+            .pool_sizes(&pool_sizes)
+            .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET);
+        let descriptor_pool = vk_device
+            .create_descriptor_pool(&dp_ci, None)
+            .map_err(|e| format!("create_descriptor_pool: {e}"))?;
+
+        // 10. Create pipelines from SPIR-V modules, pre-allocate one descriptor set each
+        let mut pipelines = HashMap::new();
+        for &(name, spv_bytes) in SPIRV_MODULES {
+            let spv_words: Vec<u32> = spv_bytes
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+
+            let shader_ci =
+                vk::ShaderModuleCreateInfo::default().code(&spv_words);
+            let shader_module = vk_device
+                .create_shader_module(&shader_ci, None)
+                .map_err(|e| format!("create_shader_module({name}): {e}"))?;
+
+            // Determine bindings: 3-input ops (sub_mul, add3) have 5 bindings, rest have 4
+            let num_bindings: u32 = if name == "sub_mul" || name == "add3" { 5 } else { 4 };
+
+            // Create descriptor set layout
+            let mut bindings_vec = Vec::new();
+            for i in 0..num_bindings {
+                let (ty, binding_idx) = if i == 3 {
+                    (vk::DescriptorType::UNIFORM_BUFFER, 3)
+                } else {
+                    let idx = if i == 4 { 4 } else { i }; // binding 4 = input_c
+                    (vk::DescriptorType::STORAGE_BUFFER, idx)
+                };
+                bindings_vec.push(
+                    vk::DescriptorSetLayoutBinding::default()
+                        .binding(binding_idx)
+                        .descriptor_type(ty)
+                        .descriptor_count(1)
+                        .stage_flags(vk::ShaderStageFlags::COMPUTE),
+                );
+            }
+            let dsl_ci =
+                vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings_vec);
+            let ds_layout = vk_device
+                .create_descriptor_set_layout(&dsl_ci, None)
+                .map_err(|e| format!("create_descriptor_set_layout({name}): {e}"))?;
+
+            // Pre-allocate descriptor set (reused across all dispatches for this pipeline)
+            let ds_alloc_info = vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(descriptor_pool)
+                .set_layouts(std::slice::from_ref(&ds_layout));
+            let descriptor_set = vk_device
+                .allocate_descriptor_sets(&ds_alloc_info)
+                .map_err(|e| format!("allocate_descriptor_sets({name}): {e}"))?[0];
+
+            // Pipeline layout
+            let pl_ci = vk::PipelineLayoutCreateInfo::default()
+                .set_layouts(std::slice::from_ref(&ds_layout));
+            let pipe_layout = vk_device
+                .create_pipeline_layout(&pl_ci, None)
+                .map_err(|e| format!("create_pipeline_layout({name}): {e}"))?;
+
+            // Compute pipeline — naga preserves the original entry point name
+            let entry_name = std::ffi::CString::new(name).unwrap();
+            let stage_ci = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::COMPUTE)
+                .module(shader_module)
+                .name(&entry_name);
+            let pipeline_ci = vk::ComputePipelineCreateInfo::default()
+                .stage(stage_ci)
+                .layout(pipe_layout);
+            let pipeline = vk_device
+                .create_compute_pipelines(vk::PipelineCache::null(), &[pipeline_ci], None)
+                .map_err(|e| format!("create_compute_pipeline({name}): {e:?}"))?[0];
+
+            vk_device.destroy_shader_module(shader_module, None);
+            pipelines.insert(name.to_string(), (pipeline, pipe_layout, ds_layout, descriptor_set, num_bindings));
+        }
+
+        // 11. Params uniform buffer (16 bytes)
+        let params_buf = Self::alloc_mapped_buffer(
+            &vk_device,
+            &mut allocator,
+            16,
+            vk::BufferUsageFlags::UNIFORM_BUFFER,
+            uma_memory_type,
+        )?;
+
+        let backend = Self {
             device: Device::Cpu,
-            gpu,
+            _entry: entry,
+            _instance: instance,
+            vk_device,
             queue,
-            pipelines: Mutex::new(HashMap::new()),
-            module,
-            buffer_cache: Mutex::new(GpuBufferCache::new()),
+            command_pool,
+            command_buffer,
+            fence,
+            allocator: Mutex::new(Some(allocator)),
+            uma_memory_type,
+            pipelines,
+            descriptor_pool,
+            params_buf,
+            weight_cache: Mutex::new(WeightCache::new()),
             buffer_pool: Mutex::new(BufferPool::new()),
+            activation_cache: Mutex::new(Vec::with_capacity(16)),
+            dispatch_lock: Mutex::new(()),
+        };
+
+        // Warm-up: dispatch every pipeline once to eliminate cold-start penalties.
+        // Each first dispatch per pipeline pays a one-time cost (driver JIT, etc).
+        {
+            let dummy = backend.upload_uncached(&[0.0f32; 4]);
+            let out = backend.alloc_output(4);
+            // Elementwise pipelines (2-input)
+            for entry in &["silu_mul", "exp_mul"] {
+                let _ = backend.dispatch_compute(
+                    entry,
+                    &[dummy.buffer, dummy.buffer, out.buffer],
+                    &out, 4, &[4, 0, 0, 0], (1, 1, 1),
+                );
+            }
+            // Elementwise pipelines (3-input)
+            for entry in &["add3", "sub_mul"] {
+                let _ = backend.dispatch_compute(
+                    entry,
+                    &[dummy.buffer, dummy.buffer, out.buffer, dummy.buffer],
+                    &out, 4, &[4, 0, 0, 0], (1, 1, 1),
+                );
+            }
+            // Unary pipeline
+            let _ = backend.dispatch_compute(
+                "stable_softplus",
+                &[dummy.buffer, dummy.buffer, out.buffer],
+                &out, 4, &[4, 0, 0, 0], (1, 1, 1),
+            );
+            // GEMV: 1×4 * 4×4 = 1×4
+            let _ = backend.dispatch_compute(
+                "gemv",
+                &[dummy.buffer, dummy.buffer, out.buffer],
+                &out, 4, &[4, 4, 0, 0], (1, 1, 1),
+            );
+            // GEMM: 2×2 * 2×2 = 2×2
+            let _ = backend.dispatch_compute(
+                "matmul",
+                &[dummy.buffer, dummy.buffer, out.buffer],
+                &out, 4, &[2, 2, 2, 0], (1, 1, 1),
+            );
+            backend.release_output(out);
+
+            // Pre-warm buffer pool with common output sizes (avoids allocation on first real dispatch).
+            // Covers: GEMM outputs (M*N), elementwise ops, GEMV outputs.
+            for &count in &[1024, 4096, 8192, 16384, 32768, 65536, 262144] {
+                let buf = backend.alloc_output(count);
+                backend.release_output(buf);
+            }
+        }
+
+        Ok(backend)
+    }
+
+    // ── Buffer allocation ────────────────────────────────────────────
+
+    fn alloc_mapped_buffer(
+        device: &ash::Device,
+        allocator: &mut gpu_allocator::vulkan::Allocator,
+        size: u64,
+        usage: vk::BufferUsageFlags,
+        _uma_memory_type: Option<u32>,
+    ) -> std::result::Result<MappedBuffer, String> {
+        let buf_ci = vk::BufferCreateInfo::default()
+            .size(size.max(256))
+            .usage(usage)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let buffer = unsafe {
+            device
+                .create_buffer(&buf_ci, None)
+                .map_err(|e| format!("create_buffer: {e}"))?
+        };
+        let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+
+        let allocation = allocator
+            .allocate(&gpu_allocator::vulkan::AllocationCreateDesc {
+                name: "cake-buf",
+                requirements,
+                location: gpu_allocator::MemoryLocation::CpuToGpu,
+                linear: true,
+                allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
+            })
+            .map_err(|e| format!("allocate: {e}"))?;
+
+        unsafe {
+            device
+                .bind_buffer_memory(buffer, allocation.memory(), allocation.offset())
+                .map_err(|e| format!("bind_buffer_memory: {e}"))?;
+        }
+
+        let mapped_ptr = allocation
+            .mapped_ptr()
+            .ok_or("buffer not mapped — UMA required")?
+            .as_ptr() as *mut u8;
+
+        Ok(MappedBuffer {
+            buffer,
+            allocation,
+            mapped_ptr,
+            size: size.max(256),
         })
     }
 
-    // ── Pipeline cache ──────────────────────────────────────────────
-
-    fn get_pipeline(&self, entry: &str) -> wgpu::ComputePipeline {
-        let mut cache = self.pipelines.lock().unwrap();
-        if let Some(p) = cache.get(entry) {
-            return p.clone();
+    fn alloc_output(&self, count: usize) -> MappedBuffer {
+        let bytes = (count * 4) as u64;
+        let key = BufferPool::bucket(bytes);
+        let mut pool = self.buffer_pool.lock().unwrap();
+        if let Some(bufs) = pool.free.get_mut(&key) {
+            if let Some(buf) = bufs.pop() {
+                return buf;
+            }
         }
-        let pipeline = self.gpu.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some(entry),
-            layout: None,
-            module: &self.module,
-            entry_point: Some(entry),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        cache.insert(entry.to_string(), pipeline.clone());
-        pipeline
+        drop(pool);
+        let mut alloc_guard = self.allocator.lock().unwrap();
+        let alloc = alloc_guard.as_mut().unwrap();
+        Self::alloc_mapped_buffer(
+            &self.vk_device,
+            alloc,
+            key,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            self.uma_memory_type,
+        )
+        .expect("failed to allocate output buffer")
     }
 
-    // ── Buffer helpers ──────────────────────────────────────────────
+    fn release_output(&self, buf: MappedBuffer) {
+        let key = BufferPool::bucket(buf.size);
+        let mut pool = self.buffer_pool.lock().unwrap();
+        pool.free.entry(key).or_default().push(buf);
+    }
 
-    /// Get or upload a tensor's data to GPU. Weight tensors (stable TensorId)
-    /// are uploaded once; activation tensors are uploaded each time.
-    fn get_or_upload(&self, tensor: &Tensor) -> Result<Arc<wgpu::Buffer>> {
+    // ── Weight cache ─────────────────────────────────────────────────
+
+    /// Cache a dispatch output buffer by the returned Tensor's TensorId.
+    /// If the next dispatch consumes this tensor, `get_or_upload` will find
+    /// the buffer here and skip the re-upload.
+    fn cache_activation(&self, tensor_id: TensorId, buf: MappedBuffer) {
+        let buf = Arc::new(buf);
+        let mut act_cache = self.activation_cache.lock().unwrap();
+        if act_cache.len() >= 16 {
+            // Evict oldest entry, release its buffer back to pool
+            let (_, old_buf) = act_cache.remove(0);
+            if let Ok(old) = Arc::try_unwrap(old_buf) {
+                self.release_output(old);
+            }
+        }
+        act_cache.push((tensor_id, buf));
+    }
+
+    /// Compute a stable cache key from tensor's storage pointer + layout.
+    /// Survives `.t()` calls which create new TensorIds but share storage.
+    /// Works for any dtype by extracting raw Vec pointer from CpuStorage.
+    fn view_key(tensor: &Tensor) -> Option<(usize, usize, usize, u64)> {
+        let (storage, layout) = tensor.storage_and_layout();
+        let ptr = match &*storage {
+            candle_core::Storage::Cpu(cpu) => {
+                // Extract raw pointer regardless of dtype
+                match cpu {
+                    candle_core::CpuStorage::F16(v) => v.as_ptr() as usize,
+                    candle_core::CpuStorage::F32(v) => v.as_ptr() as usize,
+                    candle_core::CpuStorage::BF16(v) => v.as_ptr() as usize,
+                    candle_core::CpuStorage::F64(v) => v.as_ptr() as usize,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let offset = layout.start_offset();
+        let count = layout.shape().elem_count();
+        let strides = layout.stride();
+        let stride_hash = strides
+            .iter()
+            .fold(0u64, |h, &s| h.wrapping_mul(0x517cc1b727220a95).wrapping_add(s as u64));
+        Some((ptr, offset, count, stride_hash))
+    }
+
+    fn get_or_upload(&self, tensor: &Tensor) -> Result<Arc<MappedBuffer>> {
         let id = tensor.id();
-        let data = Self::to_f32_vec(tensor)?;
-        let mut cache = self.buffer_cache.lock().unwrap();
-        Ok(cache.get_or_upload(id, &data, &self.gpu))
+        // Check activation cache first (ephemeral outputs from recent dispatches)
+        {
+            let mut act_cache = self.activation_cache.lock().unwrap();
+            if let Some(pos) = act_cache.iter().position(|(tid, _)| *tid == id) {
+                let (_, buf) = act_cache.remove(pos);
+                return Ok(buf);
+            }
+        }
+        // Check weight cache by TensorId (fast path for stable tensors)
+        {
+            let cache = self.weight_cache.lock().unwrap();
+            if let Some(buf) = cache.buffers.get(&id) {
+                return Ok(buf.clone());
+            }
+        }
+        // View cache disabled — causes subtle precision issues during prefill.
+        // The F32 contiguous result of a non-contiguous F16 view can differ
+        // between calls due to dtype conversion ordering.
+        let vk: Option<(usize, usize, usize, u64)> = None;
+        // Upload: convert to f32 contiguous, copy to GPU
+        let tensor = if tensor.dtype() == DType::F32 { tensor.clone() } else { tensor.to_dtype(DType::F32)? };
+        let tensor = if tensor.is_contiguous() { tensor } else { tensor.contiguous()? };
+        let n = tensor.elem_count();
+        let bytes = (n * 4) as u64;
+        let mut alloc_guard = self.allocator.lock().unwrap();
+        let alloc = alloc_guard.as_mut().unwrap();
+        let buf = Self::alloc_mapped_buffer(
+            &self.vk_device,
+            alloc,
+            bytes,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            self.uma_memory_type,
+        )
+        .map_err(candle_core::Error::Msg)?;
+        // Write directly from tensor storage — avoids intermediate Vec allocation
+        let (storage, layout) = tensor.storage_and_layout();
+        if let candle_core::Storage::Cpu(cpu) = &*storage {
+            let slice: &[f32] = cpu.as_slice()?;
+            let offset = layout.start_offset();
+            buf.write_f32(&slice[offset..offset + n]);
+        } else {
+            drop(storage);
+            let data = Self::to_f32_vec(&tensor)?;
+            buf.write_f32(&data);
+        }
+        let buf = Arc::new(buf);
+        let mut cache = self.weight_cache.lock().unwrap();
+        cache.buffers.insert(id, buf.clone());
+        // Also insert into view cache so future .t() lookups hit
+        if let Some(key) = vk {
+            cache.views.insert(key, buf.clone());
+        }
+        Ok(buf)
     }
 
-    /// Upload raw f32 data without caching (for data not tied to a tensor).
-    fn upload_uncached(&self, data: &[f32]) -> wgpu::Buffer {
-        let size = (data.len() * 4) as u64;
-        let buf = self.gpu.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: true,
-        });
-        buf.slice(..)
-            .get_mapped_range_mut()
-            .copy_from_slice(bytemuck::cast_slice(data));
-        buf.unmap();
+    fn upload_uncached(&self, data: &[f32]) -> MappedBuffer {
+        let bytes = (data.len() * 4) as u64;
+        let key = BufferPool::bucket(bytes);
+        let mut alloc_guard = self.allocator.lock().unwrap();
+        let alloc = alloc_guard.as_mut().unwrap();
+        let buf = Self::alloc_mapped_buffer(
+            &self.vk_device,
+            alloc,
+            key,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            self.uma_memory_type,
+        )
+        .expect("failed to allocate upload buffer");
+        buf.write_f32(data);
         buf
     }
 
-    /// Acquire a storage output buffer from the pool.
-    fn alloc_output(&self, count: usize) -> wgpu::Buffer {
-        let bytes = (count * 4) as u64;
-        self.buffer_pool.lock().unwrap().acquire_storage(&self.gpu, bytes)
-    }
-
-    /// Release a storage buffer back to the pool.
-    fn release_output(&self, buf: wgpu::Buffer) {
-        self.buffer_pool.lock().unwrap().release_storage(buf);
-    }
-
-    /// Create a uniform buffer (small, not pooled).
-    fn uniform(&self, data: &[u32]) -> wgpu::Buffer {
-        use wgpu::util::DeviceExt;
-        self.gpu.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(data),
-            usage: wgpu::BufferUsages::UNIFORM,
-        })
-    }
-
-    /// Download `count` f32 values from a GPU buffer using a pooled staging buffer.
-    fn download(&self, buf: &wgpu::Buffer, count: usize) -> Vec<f32> {
-        let size = (count * 4) as u64;
-        let staging = self.buffer_pool.lock().unwrap().acquire_staging(&self.gpu, size);
-
-        let mut enc = self.gpu.create_command_encoder(&Default::default());
-        enc.copy_buffer_to_buffer(buf, 0, &staging, 0, size);
-        self.queue.submit(Some(enc.finish()));
-
-        let slice = staging.slice(..size);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            tx.send(r).unwrap();
-        });
-        self.gpu.poll(wgpu::Maintain::Wait);
-        rx.recv().unwrap().unwrap();
-
-        let view = slice.get_mapped_range();
-        let result: Vec<f32> = bytemuck::cast_slice(&view)[..count].to_vec();
-        drop(view);
-        staging.unmap();
-
-        self.buffer_pool.lock().unwrap().release_staging(staging);
-        result
-    }
-
-    // ── Tensor ↔ GPU helpers ────────────────────────────────────────
+    // ── Tensor helpers ───────────────────────────────────────────────
 
     fn to_f32_vec(t: &Tensor) -> Result<Vec<f32>> {
-        t.to_dtype(DType::F32)?
-            .contiguous()?
-            .flatten_all()?
-            .to_vec1()
+        let t = if t.dtype() == DType::F32 { t.clone() } else { t.to_dtype(DType::F32)? };
+        let t = if t.is_contiguous() { t } else { t.contiguous()? };
+        t.flatten_all()?.to_vec1()
     }
 
     fn from_f32_vec(data: Vec<f32>, shape: &[usize], dtype: DType) -> Result<Tensor> {
         Tensor::from_vec(data, shape, &Device::Cpu)?.to_dtype(dtype)
     }
 
-    // ── Dispatch: elementwise binary ────────────────────────────────
+    // ── GPU dispatch ─────────────────────────────────────────────────
 
-    fn dispatch_binary(&self, a: &Tensor, b: &Tensor, entry: &str) -> Result<Tensor> {
+    /// Core dispatch: bind pipeline, bind buffers, dispatch workgroups, fence wait, read output.
+    fn dispatch_compute(
+        &self,
+        entry: &str,
+        storage_buffers: &[vk::Buffer], // bindings 0, 1, 2, [4]
+        output_buf: &MappedBuffer,
+        output_count: usize,
+        params: &[u32],
+        workgroups: (u32, u32, u32),
+    ) -> Vec<f32> {
+        let _lock = self.dispatch_lock.lock().unwrap();
+        let (pipeline, pipe_layout, _ds_layout, descriptor_set, _num_bindings) =
+            self.pipelines.get(entry).unwrap_or_else(|| panic!("unknown pipeline: {entry}"));
+        let descriptor_set = *descriptor_set;
+
+        // Write params
+        self.params_buf.write_u32(params);
+
+        unsafe {
+            // Build descriptor writes — pre-allocate all buffer infos first
+            let num_storage = storage_buffers.len();
+            let mut buf_infos: Vec<vk::DescriptorBufferInfo> =
+                Vec::with_capacity(num_storage + 1);
+            for &buf in storage_buffers {
+                buf_infos.push(
+                    vk::DescriptorBufferInfo::default()
+                        .buffer(buf)
+                        .offset(0)
+                        .range(vk::WHOLE_SIZE),
+                );
+            }
+            // Uniform buffer info
+            buf_infos.push(
+                vk::DescriptorBufferInfo::default()
+                    .buffer(self.params_buf.buffer)
+                    .offset(0)
+                    .range(16),
+            );
+
+            // Now build writes referencing the stable buf_infos
+            let mut writes: Vec<vk::WriteDescriptorSet> = Vec::with_capacity(num_storage + 1);
+            for (i, info) in buf_infos[..num_storage].iter().enumerate() {
+                let binding = if i == 3 { 4 } else { i as u32 };
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_set)
+                        .dst_binding(binding)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(std::slice::from_ref(info)),
+                );
+            }
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(descriptor_set)
+                    .dst_binding(3)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(std::slice::from_ref(&buf_infos[num_storage])),
+            );
+
+            self.vk_device.update_descriptor_sets(&writes, &[]);
+
+            // Reset fence + command buffer
+            self.vk_device
+                .wait_for_fences(&[self.fence], true, u64::MAX)
+                .expect("wait_for_fences");
+            self.vk_device.reset_fences(&[self.fence]).expect("reset_fences");
+            self.vk_device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
+                .expect("reset_command_buffer");
+
+            // Record
+            let begin_ci = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            self.vk_device
+                .begin_command_buffer(self.command_buffer, &begin_ci)
+                .expect("begin_command_buffer");
+            self.vk_device.cmd_bind_pipeline(
+                self.command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                *pipeline,
+            );
+            self.vk_device.cmd_bind_descriptor_sets(
+                self.command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                *pipe_layout,
+                0,
+                &[descriptor_set],
+                &[],
+            );
+            self.vk_device.cmd_dispatch(
+                self.command_buffer,
+                workgroups.0,
+                workgroups.1,
+                workgroups.2,
+            );
+
+            // Memory barrier: compute writes -> host reads
+            let barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::HOST_READ);
+            self.vk_device.cmd_pipeline_barrier(
+                self.command_buffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::HOST,
+                vk::DependencyFlags::empty(),
+                &[barrier],
+                &[],
+                &[],
+            );
+
+            self.vk_device
+                .end_command_buffer(self.command_buffer)
+                .expect("end_command_buffer");
+
+            // Submit
+            let submit_info = vk::SubmitInfo::default()
+                .command_buffers(std::slice::from_ref(&self.command_buffer));
+            self.vk_device
+                .queue_submit(self.queue, &[submit_info], self.fence)
+                .expect("queue_submit");
+
+            // Wait
+            self.vk_device
+                .wait_for_fences(&[self.fence], true, u64::MAX)
+                .expect("wait_for_fences");
+        }
+
+        // Read output directly from mapped pointer
+        output_buf.read_f32(output_count)
+    }
+
+    // ── Elementwise dispatch helpers ─────────────────────────────────
+
+    fn dispatch_binary_vec4(&self, a: &Tensor, b: &Tensor, entry: &str) -> Result<Tensor> {
         let dtype = a.dtype();
         let shape = a.shape().clone();
         let n = a.elem_count();
@@ -328,49 +778,23 @@ impl VulkanBackend {
         let buf_a = self.get_or_upload(a)?;
         let buf_b = self.get_or_upload(b)?;
         let buf_out = self.alloc_output(n);
-        let buf_p = self.uniform(&[n as u32]);
 
-        let pipeline = self.get_pipeline(entry);
-        let bg = self.gpu.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buf_a.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: buf_b.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buf_out.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: buf_p.as_entire_binding(),
-                },
-            ],
-        });
+        let threads_needed = (n as u32).div_ceil(4);
+        let result = self.dispatch_compute(
+            entry,
+            &[buf_a.buffer, buf_b.buffer, buf_out.buffer],
+            &buf_out,
+            n,
+            &[n as u32, 0, 0, 0],
+            (threads_needed.div_ceil(WG_ELEM), 1, 1),
+        );
 
-        let mut enc = self.gpu.create_command_encoder(&Default::default());
-        {
-            let mut p = enc.begin_compute_pass(&Default::default());
-            p.set_pipeline(&pipeline);
-            p.set_bind_group(0, &bg, &[]);
-            p.dispatch_workgroups((n as u32).div_ceil(WG_ELEM), 1, 1);
-        }
-        self.queue.submit(Some(enc.finish()));
-
-        let result = Self::from_f32_vec(self.download(&buf_out, n), shape.dims(), dtype);
-        self.release_output(buf_out);
-        result
+        let tensor = Self::from_f32_vec(result, shape.dims(), dtype)?;
+        self.cache_activation(tensor.id(), buf_out);
+        Ok(tensor)
     }
 
-    // ── Dispatch: elementwise ternary ───────────────────────────────
-
-    fn dispatch_ternary(
+    fn dispatch_ternary_vec4(
         &self,
         a: &Tensor,
         b: &Tensor,
@@ -385,214 +809,150 @@ impl VulkanBackend {
         let buf_b = self.get_or_upload(b)?;
         let buf_c = self.get_or_upload(c)?;
         let buf_out = self.alloc_output(n);
-        let buf_p = self.uniform(&[n as u32]);
 
-        let pipeline = self.get_pipeline(entry);
-        let bg = self.gpu.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buf_a.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: buf_b.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buf_out.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: buf_p.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: buf_c.as_entire_binding(),
-                },
-            ],
-        });
+        let threads_needed = (n as u32).div_ceil(4);
+        let result = self.dispatch_compute(
+            entry,
+            &[buf_a.buffer, buf_b.buffer, buf_out.buffer, buf_c.buffer],
+            &buf_out,
+            n,
+            &[n as u32, 0, 0, 0],
+            (threads_needed.div_ceil(WG_ELEM), 1, 1),
+        );
 
-        let mut enc = self.gpu.create_command_encoder(&Default::default());
-        {
-            let mut p = enc.begin_compute_pass(&Default::default());
-            p.set_pipeline(&pipeline);
-            p.set_bind_group(0, &bg, &[]);
-            p.dispatch_workgroups((n as u32).div_ceil(WG_ELEM), 1, 1);
-        }
-        self.queue.submit(Some(enc.finish()));
-
-        let result = Self::from_f32_vec(self.download(&buf_out, n), shape.dims(), dtype);
-        self.release_output(buf_out);
-        result
+        let tensor = Self::from_f32_vec(result, shape.dims(), dtype)?;
+        self.cache_activation(tensor.id(), buf_out);
+        Ok(tensor)
     }
 
-    // ── Dispatch: elementwise unary ─────────────────────────────────
-
-    fn dispatch_unary(&self, x: &Tensor, entry: &str) -> Result<Tensor> {
+    fn dispatch_unary_vec4(&self, x: &Tensor, entry: &str) -> Result<Tensor> {
         let dtype = x.dtype();
         let shape = x.shape().clone();
         let n = x.elem_count();
 
         let buf_a = self.get_or_upload(x)?;
-        let buf_b = self.upload_uncached(&[0.0f32]); // dummy for binding 1
+        let dummy = self.upload_uncached(&[0.0f32]);
         let buf_out = self.alloc_output(n);
-        let buf_p = self.uniform(&[n as u32]);
 
-        let pipeline = self.get_pipeline(entry);
-        let bg = self.gpu.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buf_a.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: buf_b.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: buf_out.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: buf_p.as_entire_binding(),
-                },
-            ],
-        });
+        let threads_needed = (n as u32).div_ceil(4);
+        let result = self.dispatch_compute(
+            entry,
+            &[buf_a.buffer, dummy.buffer, buf_out.buffer],
+            &buf_out,
+            n,
+            &[n as u32, 0, 0, 0],
+            (threads_needed.div_ceil(WG_ELEM), 1, 1),
+        );
 
-        let mut enc = self.gpu.create_command_encoder(&Default::default());
-        {
-            let mut p = enc.begin_compute_pass(&Default::default());
-            p.set_pipeline(&pipeline);
-            p.set_bind_group(0, &bg, &[]);
-            p.dispatch_workgroups((n as u32).div_ceil(WG_ELEM), 1, 1);
-        }
-        self.queue.submit(Some(enc.finish()));
-
-        let result = Self::from_f32_vec(self.download(&buf_out, n), shape.dims(), dtype);
-        self.release_output(buf_out);
-        result
+        let tensor = Self::from_f32_vec(result, shape.dims(), dtype)?;
+        self.cache_activation(tensor.id(), buf_out);
+        Ok(tensor)
     }
 
-    // ── GPU matmul: C[M,N] = A[M,K] × B[K,N] ──────────────────────
+    // ── GPU softmax ──────────────────────────────────────────────────
 
-    /// GPU GEMV: y[N] = x[K] × W[K,N]  — optimized for M=1.
-    /// Each workgroup computes one output element via parallel dot product reduction.
+    /// Dispatch scaled softmax on GPU: output[row,j] = softmax(input[row,j] * scale).
+    /// If seq_len > 0, applies causal mask.
+    fn dispatch_softmax(
+        &self,
+        input: &Tensor,
+        rows: usize,
+        cols: usize,
+        scale: f32,
+        seq_len: usize,
+    ) -> Result<Tensor> {
+        let dtype = input.dtype();
+        let shape = input.shape().clone();
+        let n = input.elem_count();
+
+        let buf_in = self.get_or_upload(input)?;
+        let dummy = self.upload_uncached(&[0.0f32]);
+        let buf_out = self.alloc_output(n);
+
+        let result = self.dispatch_compute(
+            "scaled_softmax",
+            &[buf_in.buffer, dummy.buffer, buf_out.buffer],
+            &buf_out,
+            n,
+            &[rows as u32, cols as u32, scale.to_bits(), seq_len as u32],
+            (rows as u32, 1, 1), // one workgroup per row
+        );
+
+        let tensor = Self::from_f32_vec(result, shape.dims(), dtype)?;
+        self.cache_activation(tensor.id(), buf_out);
+        Ok(tensor)
+    }
+
+    // ── GPU matmul ───────────────────────────────────────────────────
+
+    /// Returns (result_data, output_buffer) so caller can cache the buffer.
+    #[allow(dead_code)]
     fn gpu_gemv(
         &self,
-        buf_x: &wgpu::Buffer,
-        buf_w: &wgpu::Buffer,
+        buf_x: &MappedBuffer,
+        buf_w: &MappedBuffer,
         k: usize,
         n: usize,
-    ) -> Vec<f32> {
+    ) -> (Vec<f32>, MappedBuffer) {
         let buf_y = self.alloc_output(n);
-        let buf_p = self.uniform(&[n as u32, k as u32, 0, 0]);
-
-        let pipeline = self.get_pipeline("gemv");
-        let bg = self.gpu.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buf_x.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: buf_w.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: buf_y.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: buf_p.as_entire_binding() },
-            ],
-        });
-
-        // Each workgroup computes 4 output elements, so dispatch N/4 workgroups
-        let mut enc = self.gpu.create_command_encoder(&Default::default());
-        {
-            let mut p = enc.begin_compute_pass(&Default::default());
-            p.set_pipeline(&pipeline);
-            p.set_bind_group(0, &bg, &[]);
-            p.dispatch_workgroups((n as u32).div_ceil(4), 1, 1);
-        }
-        self.queue.submit(Some(enc.finish()));
-
-        let result = self.download(&buf_y, n);
-        self.release_output(buf_y);
-        result
+        let result = self.dispatch_compute(
+            "gemv",
+            &[buf_x.buffer, buf_w.buffer, buf_y.buffer],
+            &buf_y,
+            n,
+            &[n as u32, k as u32, 0, 0],
+            ((n as u32).div_ceil(256), 1, 1),
+        );
+        (result, buf_y)
     }
 
-    /// GPU tiled GEMM: C[M,N] = A[M,K] × B[K,N]  — for M > 1.
     fn gpu_gemm(
         &self,
-        buf_a: &wgpu::Buffer,
-        buf_b: &wgpu::Buffer,
+        buf_a: &MappedBuffer,
+        buf_b: &MappedBuffer,
         m: usize,
         k: usize,
         n: usize,
-    ) -> Vec<f32> {
+    ) -> (Vec<f32>, MappedBuffer) {
         let buf_c = self.alloc_output(m * n);
-        let buf_p = self.uniform(&[m as u32, n as u32, k as u32, 0]);
-
-        let pipeline = self.get_pipeline("matmul");
-        let bg = self.gpu.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buf_a.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: buf_b.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: buf_c.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: buf_p.as_entire_binding() },
-            ],
-        });
-
-        let wg_m = (m as u32).div_ceil(16);
-        let wg_n = (n as u32).div_ceil(16);
-        let mut enc = self.gpu.create_command_encoder(&Default::default());
-        {
-            let mut p = enc.begin_compute_pass(&Default::default());
-            p.set_pipeline(&pipeline);
-            p.set_bind_group(0, &bg, &[]);
-            p.dispatch_workgroups(wg_m, wg_n, 1);
-        }
-        self.queue.submit(Some(enc.finish()));
-
-        let result = self.download(&buf_c, m * n);
-        self.release_output(buf_c);
-        result
+        let wg_m = (m as u32).div_ceil(32);
+        let wg_n = (n as u32).div_ceil(64);
+        let result = self.dispatch_compute(
+            "matmul",
+            &[buf_a.buffer, buf_b.buffer, buf_c.buffer],
+            &buf_c,
+            m * n,
+            &[m as u32, n as u32, k as u32, 0],
+            (wg_m, wg_n, 1),
+        );
+        (result, buf_c)
     }
 
-    /// Dispatch GEMV for M=1, GEMM for M>1.
     fn gpu_matmul(
         &self,
-        buf_a: &wgpu::Buffer,
-        buf_b: &wgpu::Buffer,
+        buf_a: &MappedBuffer,
+        buf_b: &MappedBuffer,
         m: usize,
         k: usize,
         n: usize,
-    ) -> Vec<f32> {
-        if m == 1 {
-            self.gpu_gemv(buf_a, buf_b, k, n)
-        } else {
+    ) -> (Vec<f32>, MappedBuffer) {
+        // Always use GEMM (even for M=1) for now — GEMV has precision issues.
+        // GEMM with 2×4 tiling works correctly for all M values.
+        {
             self.gpu_gemm(buf_a, buf_b, m, k, n)
         }
     }
 
-    /// Tensor matmul via GPU. Handles batched matmul by iterating batches.
-    /// Weight tensors (B) are cached on GPU across forward passes.
     fn tensor_matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
-        let a = a.to_dtype(DType::F32)?.contiguous()?;
-        let b = b.to_dtype(DType::F32)?.contiguous()?;
-
         let a_dims = a.dims();
         let b_dims = b.dims();
         let a_rank = a_dims.len();
         let b_rank = b_dims.len();
 
-        // Extract M, K, N
         let m = a_dims[a_rank - 2];
         let k = a_dims[a_rank - 1];
         let n = b_dims[b_rank - 1];
 
-        // Batch dimensions
         let a_batch: usize = a_dims[..a_rank - 2].iter().product();
         let b_batch: usize = b_dims[..b_rank - 2].iter().product();
         let batch = a_batch.max(b_batch);
@@ -602,38 +962,237 @@ impl VulkanBackend {
         let mn = m * n;
 
         if batch == 1 {
-            // Single batch: upload full tensors via cache, dispatch once.
-            let buf_a = self.get_or_upload(&a)?;
-            let buf_b = self.get_or_upload(&b)?;
-            let out = self.gpu_matmul(&buf_a, &buf_b, m, k, n);
-
+            // get_or_upload handles dtype conversion + contiguity
+            let buf_a = self.get_or_upload(a)?;
+            let buf_b = self.get_or_upload(b)?;
+            let (out, buf_out) = self.gpu_matmul(&buf_a, &buf_b, m, k, n);
             let mut out_shape: Vec<usize> = a_dims[..a_rank - 2].to_vec();
             out_shape.push(m);
             out_shape.push(n);
-            return Tensor::from_vec(out, out_shape.as_slice(), &Device::Cpu);
+            let tensor = Tensor::from_vec(out, out_shape.as_slice(), &Device::Cpu)?;
+            self.cache_activation(tensor.id(), buf_out);
+            return Ok(tensor);
         }
 
-        // Multi-batch: extract slices and dispatch per batch.
+        // Batch path: record ALL batch dispatches in one command buffer (1 fence wait).
+        let a = a.to_dtype(DType::F32)?.contiguous()?;
+        let b = b.to_dtype(DType::F32)?.contiguous()?;
         let a_data: Vec<f32> = a.flatten_all()?.to_vec1()?;
         let b_data: Vec<f32> = b.flatten_all()?.to_vec1()?;
 
-        let mut out = Vec::with_capacity(batch * mn);
+        // Upload all batch slices first
+        let mut a_bufs = Vec::with_capacity(batch);
+        let mut b_bufs = Vec::with_capacity(batch);
+        let mut out_bufs = Vec::with_capacity(batch);
         for i in 0..batch {
             let a_off = if a_batch == 1 { 0 } else { i * mk };
             let b_off = if b_batch == 1 { 0 } else { i * kn };
-            let a_slice = &a_data[a_off..a_off + mk];
-            let b_slice = &b_data[b_off..b_off + kn];
-            let buf_a = self.upload_uncached(a_slice);
-            let buf_b = self.upload_uncached(b_slice);
-            out.extend_from_slice(&self.gpu_matmul(&buf_a, &buf_b, m, k, n));
+            a_bufs.push(self.upload_uncached(&a_data[a_off..a_off + mk]));
+            b_bufs.push(self.upload_uncached(&b_data[b_off..b_off + kn]));
+            out_bufs.push(self.alloc_output(mn));
         }
 
-        // Build output shape
+        // Determine pipeline and workgroup dims
+        let is_gemv = m == 1;
+        let entry = if is_gemv { "gemv" } else { "matmul" };
+        let params: [u32; 4] = if is_gemv {
+            [n as u32, k as u32, 0, 0]
+        } else {
+            [m as u32, n as u32, k as u32, 0]
+        };
+        let workgroups = if is_gemv {
+            ((n as u32).div_ceil(256), 1, 1)
+        } else {
+            ((m as u32).div_ceil(32), (n as u32).div_ceil(64), 1)
+        };
+
+        // Record all dispatches in one command buffer
+        let _lock = self.dispatch_lock.lock().unwrap();
+        let (pipeline, pipe_layout, ds_layout, _default_ds, _) =
+            self.pipelines.get(entry).unwrap_or_else(|| panic!("unknown pipeline: {entry}"));
+
+        unsafe {
+            // Allocate batch descriptor sets
+            let ds_layouts: Vec<vk::DescriptorSetLayout> = vec![*ds_layout; batch];
+            let ds_alloc = vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(self.descriptor_pool)
+                .set_layouts(&ds_layouts);
+            let descriptor_sets = self.vk_device
+                .allocate_descriptor_sets(&ds_alloc)
+                .expect("allocate batch descriptor sets");
+
+            // Write params (shared across all dispatches)
+            self.params_buf.write_u32(&params);
+
+            // Update descriptor sets for all batch elements
+            for i in 0..batch {
+                let buf_infos = [
+                    vk::DescriptorBufferInfo::default().buffer(a_bufs[i].buffer).offset(0).range(vk::WHOLE_SIZE),
+                    vk::DescriptorBufferInfo::default().buffer(b_bufs[i].buffer).offset(0).range(vk::WHOLE_SIZE),
+                    vk::DescriptorBufferInfo::default().buffer(out_bufs[i].buffer).offset(0).range(vk::WHOLE_SIZE),
+                    vk::DescriptorBufferInfo::default().buffer(self.params_buf.buffer).offset(0).range(16),
+                ];
+                let writes = [
+                    vk::WriteDescriptorSet::default().dst_set(descriptor_sets[i]).dst_binding(0)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(std::slice::from_ref(&buf_infos[0])),
+                    vk::WriteDescriptorSet::default().dst_set(descriptor_sets[i]).dst_binding(1)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(std::slice::from_ref(&buf_infos[1])),
+                    vk::WriteDescriptorSet::default().dst_set(descriptor_sets[i]).dst_binding(2)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(std::slice::from_ref(&buf_infos[2])),
+                    vk::WriteDescriptorSet::default().dst_set(descriptor_sets[i]).dst_binding(3)
+                        .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER).buffer_info(std::slice::from_ref(&buf_infos[3])),
+                ];
+                self.vk_device.update_descriptor_sets(&writes, &[]);
+            }
+
+            // Reset fence + command buffer
+            self.vk_device.wait_for_fences(&[self.fence], true, u64::MAX).expect("wait_for_fences");
+            self.vk_device.reset_fences(&[self.fence]).expect("reset_fences");
+            self.vk_device.reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
+                .expect("reset_command_buffer");
+
+            // Record all dispatches
+            let begin_ci = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            self.vk_device.begin_command_buffer(self.command_buffer, &begin_ci)
+                .expect("begin_command_buffer");
+
+            let compute_barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ);
+
+            for (i, &ds) in descriptor_sets.iter().enumerate() {
+                if i > 0 {
+                    // Compute-to-compute barrier between dispatches
+                    self.vk_device.cmd_pipeline_barrier(
+                        self.command_buffer,
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[compute_barrier], &[], &[],
+                    );
+                }
+                self.vk_device.cmd_bind_pipeline(self.command_buffer, vk::PipelineBindPoint::COMPUTE, *pipeline);
+                self.vk_device.cmd_bind_descriptor_sets(
+                    self.command_buffer, vk::PipelineBindPoint::COMPUTE, *pipe_layout,
+                    0, &[ds], &[],
+                );
+                self.vk_device.cmd_dispatch(self.command_buffer, workgroups.0, workgroups.1, workgroups.2);
+            }
+
+            // Final compute-to-host barrier
+            let host_barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::HOST_READ);
+            self.vk_device.cmd_pipeline_barrier(
+                self.command_buffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::HOST,
+                vk::DependencyFlags::empty(),
+                &[host_barrier], &[], &[],
+            );
+
+            self.vk_device.end_command_buffer(self.command_buffer).expect("end_command_buffer");
+
+            // Single submit + single fence wait for ALL batch dispatches
+            let submit_info = vk::SubmitInfo::default()
+                .command_buffers(std::slice::from_ref(&self.command_buffer));
+            self.vk_device.queue_submit(self.queue, &[submit_info], self.fence)
+                .expect("queue_submit");
+            self.vk_device.wait_for_fences(&[self.fence], true, u64::MAX)
+                .expect("wait_for_fences");
+
+            // Free batch descriptor sets
+            self.vk_device.free_descriptor_sets(self.descriptor_pool, &descriptor_sets)
+                .expect("free batch descriptor sets");
+        }
+
+        // Read all outputs
+        let mut out = Vec::with_capacity(batch * mn);
+        for buf in &out_bufs {
+            out.extend_from_slice(&buf.read_f32(mn));
+        }
+        for buf in out_bufs {
+            self.release_output(buf);
+        }
+
         let mut out_shape: Vec<usize> = a_dims[..a_rank - 2].to_vec();
         out_shape.push(m);
         out_shape.push(n);
-
         Tensor::from_vec(out, out_shape.as_slice(), &Device::Cpu)
+    }
+}
+
+impl Drop for VulkanBackend {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = self.vk_device.device_wait_idle();
+            // Take the allocator out and leak it — its Drop accesses the
+            // Vulkan device which causes segfaults during process exit cleanup.
+            let allocator = self.allocator.lock().unwrap().take();
+            if let Some(a) = allocator {
+                std::mem::forget(a);
+            }
+        }
+        return;
+        #[allow(unreachable_code)]
+        unsafe {
+            let _ = self.vk_device.device_wait_idle();
+            // Pipelines (descriptor sets freed implicitly with pool)
+            for (pipeline, layout, _dsl, _ds, _) in self.pipelines.values() {
+                self.vk_device.destroy_pipeline(*pipeline, None);
+                self.vk_device.destroy_pipeline_layout(*layout, None);
+            }
+            self.vk_device
+                .destroy_descriptor_pool(self.descriptor_pool, None);
+
+            // Free all allocations via gpu-allocator before destroying device.
+            // We must free allocations before destroying buffers.
+            let mut alloc_opt = self.allocator.lock().unwrap();
+            let mut alloc = alloc_opt.take().expect("allocator already dropped");
+
+            // Params buffer
+            let params_alloc = std::mem::take(&mut self.params_buf.allocation);
+            if !params_alloc.is_null() {
+                self.vk_device.destroy_buffer(self.params_buf.buffer, None);
+                let _ = alloc.free(params_alloc);
+            }
+
+            // Free cached weight buffers
+            let mut cache = self.weight_cache.lock().unwrap();
+            for (_, buf) in cache.buffers.drain() {
+                if let Ok(mut buf) = Arc::try_unwrap(buf) {
+                    let a = std::mem::take(&mut buf.allocation);
+                    self.vk_device.destroy_buffer(buf.buffer, None);
+                    if !a.is_null() {
+                        let _ = alloc.free(a);
+                    }
+                }
+            }
+            drop(cache);
+
+            // Free pooled buffers
+            let mut pool = self.buffer_pool.lock().unwrap();
+            for (_, bufs) in pool.free.drain() {
+                for mut buf in bufs {
+                    let a = std::mem::take(&mut buf.allocation);
+                    self.vk_device.destroy_buffer(buf.buffer, None);
+                    if !a.is_null() {
+                        let _ = alloc.free(a);
+                    }
+                }
+            }
+            drop(pool);
+            drop(alloc);
+
+            // Command pool + fence
+            self.vk_device.destroy_fence(self.fence, None);
+            self.vk_device
+                .destroy_command_pool(self.command_pool, None);
+            // Note: vk_device and _instance are NOT destroyed here.
+            // The gpu-allocator holds clones of these handles internally.
+            // ash types don't implement Drop, so no double-free risk.
+        }
     }
 }
 
@@ -644,8 +1203,6 @@ impl ComputeBackend for VulkanBackend {
     fn device(&self) -> &Device {
         &self.device
     }
-
-    // ── GPU-accelerated attention with matmul ────────────────────────
 
     fn attention(
         &self,
@@ -660,51 +1217,39 @@ impl ComputeBackend for VulkanBackend {
         let k = k.to_dtype(DType::F32)?;
         let v = v.to_dtype(DType::F32)?;
 
-        // Q @ K^T via GPU matmul
+        // Q @ K^T
         let attn = self.tensor_matmul(&q, &k.t()?)?;
-        let attn = (attn * scale as f64)?;
 
-        let attn = if causal {
-            let seq_len = q.dim(2)?;
-            let kv_len = k.dim(2)?;
-            let mut mask_data = vec![0u8; seq_len * kv_len];
-            for i in 0..seq_len {
-                let max_j = kv_len.saturating_sub(seq_len) + i;
-                for j in 0..=max_j.min(kv_len - 1) {
-                    mask_data[i * kv_len + j] = 1;
-                }
-            }
-            let mask = Tensor::from_vec(mask_data, (1, 1, seq_len, kv_len), q.device())?;
-            let neg_inf = Tensor::full(f32::NEG_INFINITY, attn.shape(), q.device())?;
-            mask.broadcast_as(attn.shape())?
-                .where_cond(&attn, &neg_inf)?
-        } else {
-            attn
-        };
+        // GPU scaled softmax (fuses scale + optional causal mask + softmax)
+        let seq_len = q.dim(q.dims().len() - 2)?;
+        let kv_len = k.dim(k.dims().len() - 2)?;
+        let total_rows = attn.elem_count() / kv_len;
+        let causal_seq_len = if causal { seq_len } else { 0 };
+        let attn = self.dispatch_softmax(&attn, total_rows, kv_len, scale, causal_seq_len)?;
 
-        // softmax on CPU (reduction op, not great for naive GPU dispatch)
-        let attn = candle_nn::ops::softmax_last_dim(&attn)?;
-
-        // attn @ V via GPU matmul
+        // Attn @ V
         let out = self.tensor_matmul(&attn, &v)?;
         out.to_dtype(orig_dtype)
     }
 
-    // ── Elementwise ops (GPU for large tensors, CPU for small) ────────
-    // GPU dispatch overhead (~50µs) only pays off for tensors > 8K elements.
-
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-        if gate.elem_count() > 8192 {
-            self.dispatch_binary(gate, up, "silu_mul")
+        let n = gate.elem_count();
+        if n > 32768 {
+            log::debug!("silu_mul GPU: {n} elements");
+            self.dispatch_binary_vec4(gate, up, "silu_mul")
         } else {
+            log::debug!("silu_mul CPU: {n} elements (<=32768)");
             (candle_nn::ops::silu(&gate.contiguous()?)? * up.contiguous()?)?.contiguous()
         }
     }
 
     fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
-        if x.elem_count() > 8192 {
-            self.dispatch_unary(x, "stable_softplus")
+        let n = x.elem_count();
+        if n > 32768 {
+            log::debug!("stable_softplus GPU: {n} elements");
+            self.dispatch_unary_vec4(x, "stable_softplus")
         } else {
+            log::debug!("stable_softplus CPU: {n} elements (<=32768)");
             let t88 = Tensor::full(88.0f32, x.shape(), x.device())?.to_dtype(x.dtype())?;
             let clamped = x.minimum(&t88)?;
             let sp = (clamped.exp()? + 1.0)?.log()?;
@@ -713,49 +1258,53 @@ impl ComputeBackend for VulkanBackend {
     }
 
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        if a.elem_count() > 8192 {
-            self.dispatch_ternary(a, b, c, "add3")
+        let n = a.elem_count();
+        if n > 32768 {
+            log::debug!("add3 GPU: {n} elements");
+            self.dispatch_ternary_vec4(a, b, c, "add3")
         } else {
+            log::debug!("add3 CPU: {n} elements (<=32768)");
             ((a + b)? + c)?.contiguous()
         }
     }
 
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
-        if x.elem_count() > 8192 {
-            self.dispatch_binary(x, y, "exp_mul")
+        let n = x.elem_count();
+        if n > 32768 {
+            log::debug!("exp_mul GPU: {n} elements");
+            self.dispatch_binary_vec4(x, y, "exp_mul")
         } else {
+            log::debug!("exp_mul CPU: {n} elements (<=32768)");
             (x * y.exp()?)?.contiguous()
         }
     }
 
     fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        if a.elem_count() > 8192 {
-            self.dispatch_ternary(a, b, c, "sub_mul")
+        let n = a.elem_count();
+        if n > 32768 {
+            log::debug!("sub_mul GPU: {n} elements");
+            self.dispatch_ternary_vec4(a, b, c, "sub_mul")
         } else {
+            log::debug!("sub_mul CPU: {n} elements (<=32768)");
             ((a - b)? * c)?.contiguous()
         }
     }
 
-    // ── GPU matmul ───────────────────────────────────────────────────
-
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
-        // GPU dispatch overhead (~175µs on Steam Deck) makes CPU faster for
-        // generation (M=1). GPU only beneficial for prefill (M>8).
-        let m = a.dims()[a.dims().len() - 2];
-        if m <= 8 {
+        let a_dims = a.dims();
+        let b_dims = b.dims();
+        let m = a_dims[a_dims.len() - 2];
+        let k = a_dims[a_dims.len() - 1];
+        let n = b_dims[b_dims.len() - 1];
+        if m <= 1 {
+            log::debug!("matmul CPU: M={m} K={k} N={n} (M<=1, generation)");
             return a.matmul(b);
         }
+        log::debug!("matmul GPU: M={m} K={k} N={n}");
         let orig_dtype = a.dtype();
         let result = self.tensor_matmul(a, b)?;
         result.to_dtype(orig_dtype)
     }
-
-    // preprocess_linear_weight: use default (no-op).
-    // Benchmarks show F32 weights are slower on Steam Deck due to 2x memory
-    // bandwidth — the CPU's F16 GEMM already converts activations (small) to
-    // F32 internally while reading weights in compact F16 format.
-
-    // ── CPU fallback for complex ops ────────────────────────────────
 
     fn rms_norm_gated(
         &self,

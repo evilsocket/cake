@@ -208,8 +208,8 @@ impl SparseMoeMlp {
                 .map_err(|e| anyhow!("moe up matmul -> {e}"))?;
 
             let hidden = self.backend.silu_mul(
-                &gate_out.contiguous().map_err(|e| anyhow!("moe gate contig -> {e}"))?,
-                &up_out.contiguous().map_err(|e| anyhow!("moe up contig -> {e}"))?,
+                &gate_out,
+                &up_out,
             )
             .map_err(|e| anyhow!("moe silu_mul -> {e}"))?;
 
@@ -222,10 +222,8 @@ impl SparseMoeMlp {
                 .to_dtype(compute_dtype)
                 .map_err(|e| anyhow!("moe weight to_dtype -> {e}"))?
                 .unsqueeze(1)
-                .map_err(|e| anyhow!("moe weight unsqueeze -> {e}"))?
-                .broadcast_as(expert_out.shape())
-                .map_err(|e| anyhow!("moe weight broadcast -> {e}"))?;
-            let expert_out = (expert_out * w_t)
+                .map_err(|e| anyhow!("moe weight unsqueeze -> {e}"))?;
+            let expert_out = expert_out.broadcast_mul(&w_t)
                 .map_err(|e| anyhow!("moe expert_out * weight -> {e}"))?;
 
             output = output
@@ -283,8 +281,8 @@ impl SparseMoeMlp {
             .map_err(|e| anyhow!("moe batched up matmul -> {e}"))?;
 
         let hidden = self.backend.silu_mul(
-            &gate_out.contiguous().map_err(|e| anyhow!("moe gate contig -> {e}"))?,
-            &up_out.contiguous().map_err(|e| anyhow!("moe up contig -> {e}"))?,
+            &gate_out,
+            &up_out,
         )
         .map_err(|e| anyhow!("moe silu_mul -> {e}"))?;
 

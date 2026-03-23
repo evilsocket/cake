@@ -145,8 +145,8 @@ impl Qwen3_5MoeSparseMlp {
                 .forward(&x_flat)
                 .map_err(|e| anyhow!("shared up_proj: {e}"))?;
             let hidden = self.backend.silu_mul(
-                &gate.contiguous().map_err(|e| anyhow!("shared gate contig: {e}"))?,
-                &up.contiguous().map_err(|e| anyhow!("shared up contig: {e}"))?,
+                &gate,
+                &up,
             )
             .map_err(|e| anyhow!("shared silu_mul: {e}"))?;
             self.shared_down_proj
@@ -239,8 +239,8 @@ impl Qwen3_5MoeSparseMlp {
                     .map_err(|e| anyhow!("up_proj t: {e}"))?)
                     .map_err(|e| anyhow!("expert up matmul: {e}"))?;
                 let hidden = self.backend.silu_mul(
-                    &gate_out.contiguous().map_err(|e| anyhow!("gate contig: {e}"))?,
-                    &up_out.contiguous().map_err(|e| anyhow!("up contig: {e}"))?,
+                    &gate_out,
+                    &up_out,
                 )
                 .map_err(|e| anyhow!("silu_mul: {e}"))?;
                 let expert_out = hidden.matmul(&ew.down_proj.t()
@@ -315,8 +315,8 @@ impl Qwen3_5MoeSparseMlp {
                 .map_err(|e| anyhow!("expert up matmul: {e}"))?; // (n_sel, i)
 
             let hidden = self.backend.silu_mul(
-                &gate_out.contiguous().map_err(|e| anyhow!("gate contig: {e}"))?,
-                &up_out.contiguous().map_err(|e| anyhow!("up contig: {e}"))?,
+                &gate_out,
+                &up_out,
             )
             .map_err(|e| anyhow!("silu_mul: {e}"))?;
 
@@ -324,16 +324,14 @@ impl Qwen3_5MoeSparseMlp {
                 .map_err(|e| anyhow!("down_proj t: {e}"))?)
                 .map_err(|e| anyhow!("expert down matmul: {e}"))?; // (n_sel, h)
 
-            // Scale by routing weight
+            // Scale by routing weight — broadcast_mul avoids materializing full (n_sel, h) weight tensor
             let w_t = Tensor::new(weights.as_slice(), x_flat.device())
                 .map_err(|e| anyhow!("w tensor: {e}"))?
                 .to_dtype(compute_dtype)
                 .map_err(|e| anyhow!("w to_dtype: {e}"))?
                 .unsqueeze(1)
-                .map_err(|e| anyhow!("w unsqueeze: {e}"))?
-                .broadcast_as(expert_out.shape())
-                .map_err(|e| anyhow!("w broadcast: {e}"))?;
-            let expert_out = (expert_out * w_t)
+                .map_err(|e| anyhow!("w unsqueeze: {e}"))?;
+            let expert_out = expert_out.broadcast_mul(&w_t)
                 .map_err(|e| anyhow!("expert_out * w: {e}"))?;
 
             output = output
