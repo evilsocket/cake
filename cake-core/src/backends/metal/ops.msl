@@ -28,7 +28,7 @@ kernel void stable_softplus_f16(
     output[idx] = half(max(x, sp));
 }
 
-// ─── silu_mul: silu(gate) * up ───────────────────────────────────────────────
+// ─── silu_mul: silu(gate) * up = gate * sigmoid(gate) * up ──────────────────
 kernel void silu_mul_f32(
     device const float* gate [[buffer(0)]],
     device const float* up [[buffer(1)]],
@@ -38,7 +38,8 @@ kernel void silu_mul_f32(
 ) {
     if (idx >= count) return;
     float g = gate[idx];
-    output[idx] = (g / (1.0f + exp(-g))) * up[idx];
+    float sig = 1.0f / (1.0f + exp(-g));
+    output[idx] = g * sig * up[idx];
 }
 
 kernel void silu_mul_f16(
@@ -50,7 +51,8 @@ kernel void silu_mul_f16(
 ) {
     if (idx >= count) return;
     float g = float(gate[idx]);
-    output[idx] = half((g / (1.0f + exp(-g))) * float(up[idx]));
+    float sig = 1.0f / (1.0f + exp(-g));
+    output[idx] = half(g * sig * float(up[idx]));
 }
 
 // ─── add3: a + b + c ────────────────────────────────────────────────
@@ -169,7 +171,8 @@ kernel void depthwise_conv1d_silu_f32(
     for (uint k = 0; k < kernel_size; k++) {
         dot += window[idx * kernel_size + k] * weight[c * kernel_size + k];
     }
-    output[idx] = dot / (1.0f + exp(-dot));
+    float sig = 1.0f / (1.0f + exp(-dot));
+    output[idx] = dot * sig;
 }
 
 kernel void depthwise_conv1d_silu_f16(
@@ -187,7 +190,8 @@ kernel void depthwise_conv1d_silu_f16(
     for (uint k = 0; k < kernel_size; k++) {
         dot += float(window[idx * kernel_size + k]) * float(weight[c * kernel_size + k]);
     }
-    output[idx] = half(dot / (1.0f + exp(-dot)));
+    float sig = 1.0f / (1.0f + exp(-dot));
+    output[idx] = half(dot * sig);
 }
 
 // ─── depthwise_conv1d_bias: conv1d + bias for (batch, channels, time) ────
