@@ -1300,6 +1300,18 @@ impl ComputeBackend for VulkanBackend {
         }
     }
 
+    fn preprocess_linear_weight(&self, weight: &Tensor) -> Result<Tensor> {
+        // Pre-convert to F32 contiguous and pre-upload to GPU.
+        // This ensures:
+        // 1. No F16→F32 conversion during inference (done once at load time)
+        // 2. View cache keys use stable F32 storage pointers
+        // 3. weight.t() in linear_forward shares the same F32 storage
+        let w = weight.to_dtype(DType::F32)?.contiguous()?;
+        // Pre-upload to GPU weight cache
+        let _ = self.get_or_upload(&w)?;
+        Ok(w)
+    }
+
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         let a_dims = a.dims();
         let b_dims = b.dims();
