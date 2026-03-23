@@ -95,6 +95,7 @@ pub struct RocmBackend {
     device: Device,
     ffi: Box<RocmFfi>,
     blas_handle: *mut std::ffi::c_void,
+    stream: *mut std::ffi::c_void,
     cache: RwLock<HashMap<TensorId, GpuBuf>>,
 }
 
@@ -158,10 +159,19 @@ impl RocmBackend {
         let err = unsafe { (ffi.rocblas_create_handle)(&mut handle) };
         if err != 0 { return Err(format!("rocblas_create_handle: error {err}")); }
 
+        let mut stream = std::ptr::null_mut();
+        let err = unsafe { (ffi.hip_stream_create)(&mut stream) };
+        if err != 0 { return Err(format!("hipStreamCreate: error {err}")); }
+
+        // Bind stream to rocBLAS for async GEMM
+        let err = unsafe { (ffi.rocblas_set_stream)(handle, stream) };
+        if err != 0 { return Err(format!("rocblas_set_stream: error {err}")); }
+
         Ok(Self {
             device: Device::Cpu,
             ffi,
             blas_handle: handle,
+            stream,
             cache: RwLock::new(HashMap::with_capacity(64)),
         })
     }
@@ -178,9 +188,12 @@ impl RocmBackend {
     fn gpu_upload(&self, data: &[f32]) -> Result<GpuBuf> {
         let buf = self.gpu_alloc(data.len())?;
         let err = unsafe {
-            (self.ffi.hip_memcpy)(buf.ptr, data.as_ptr() as *const _, data.len() * 4, HIP_MEMCPY_HOST_TO_DEVICE)
+            (self.ffi.hip_memcpy_async)(
+                buf.ptr, data.as_ptr() as *const _, data.len() * 4,
+                HIP_MEMCPY_HOST_TO_DEVICE, self.stream,
+            )
         };
-        if err != 0 { return Err(candle_core::Error::Msg(format!("hipMemcpy H2D: {err}"))); }
+        if err != 0 { return Err(candle_core::Error::Msg(format!("hipMemcpyAsync H2D: {err}"))); }
         Ok(buf)
     }
 
@@ -218,8 +231,8 @@ impl RocmBackend {
             )
         };
         if err != 0 { return Err(candle_core::Error::Msg(format!("rocblas_sgemm: {err}"))); }
-        let err = unsafe { (self.ffi.hip_device_synchronize)() };
-        if err != 0 { return Err(candle_core::Error::Msg(format!("hipSync: {err}"))); }
+        let err = unsafe { (self.ffi.hip_stream_synchronize)(self.stream) };
+        if err != 0 { return Err(candle_core::Error::Msg(format!("hipStreamSync: {err}"))); }
         Ok(c)
     }
 
@@ -270,9 +283,9 @@ impl RocmBackend {
             };
             if err != 0 { return Err(candle_core::Error::Msg(format!("rocblas_sgemm batch {i}: {err}"))); }
         }
-        // Single sync + download for all batches
-        let err = unsafe { (self.ffi.hip_device_synchronize)() };
-        if err != 0 { return Err(candle_core::Error::Msg(format!("hipSync: {err}"))); }
+        // Single stream sync + download for all batches
+        let err = unsafe { (self.ffi.hip_stream_synchronize)(self.stream) };
+        if err != 0 { return Err(candle_core::Error::Msg(format!("hipStreamSync: {err}"))); }
         let out = c_gpu.download().map_err(candle_core::Error::Msg)?;
         let mut s = ad[..ra-2].to_vec(); s.push(m); s.push(n);
         Tensor::from_vec(out, s.as_slice(), &Device::Cpu)

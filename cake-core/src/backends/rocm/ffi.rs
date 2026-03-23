@@ -8,6 +8,7 @@ use std::ffi::c_void;
 use std::os::raw::c_int;
 
 /// Loaded HIP + rocBLAS function pointers.
+#[allow(dead_code)]
 pub struct RocmFfi {
     _hip_lib: libloading::Library,
     _blas_lib: libloading::Library,
@@ -21,9 +22,13 @@ pub struct RocmFfi {
     pub hip_memcpy: unsafe extern "C" fn(*mut c_void, *const c_void, usize, c_int) -> c_int,
     pub hip_mem_get_info: unsafe extern "C" fn(*mut usize, *mut usize) -> c_int,
     pub hip_device_synchronize: unsafe extern "C" fn() -> c_int,
+    pub hip_stream_create: unsafe extern "C" fn(*mut *mut c_void) -> c_int,
+    pub hip_stream_synchronize: unsafe extern "C" fn(*mut c_void) -> c_int,
+    pub hip_memcpy_async: unsafe extern "C" fn(*mut c_void, *const c_void, usize, c_int, *mut c_void) -> c_int,
 
     pub rocblas_create_handle: unsafe extern "C" fn(*mut *mut c_void) -> c_int,
     pub rocblas_destroy_handle: unsafe extern "C" fn(*mut c_void) -> c_int,
+    pub rocblas_set_stream: unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int,
     pub rocblas_sgemm: unsafe extern "C" fn(
         *mut c_void, c_int, c_int,
         c_int, c_int, c_int,
@@ -73,9 +78,13 @@ impl RocmFfi {
                 hip_memcpy: sym!(hip_lib, b"hipMemcpy\0"),
                 hip_mem_get_info: sym!(hip_lib, b"hipMemGetInfo\0"),
                 hip_device_synchronize: sym!(hip_lib, b"hipDeviceSynchronize\0"),
+                hip_stream_create: sym!(hip_lib, b"hipStreamCreate\0"),
+                hip_stream_synchronize: sym!(hip_lib, b"hipStreamSynchronize\0"),
+                hip_memcpy_async: sym!(hip_lib, b"hipMemcpyAsync\0"),
 
                 rocblas_create_handle: sym!(blas_lib, b"rocblas_create_handle\0"),
                 rocblas_destroy_handle: sym!(blas_lib, b"rocblas_destroy_handle\0"),
+                rocblas_set_stream: sym!(blas_lib, b"rocblas_set_stream\0"),
                 rocblas_sgemm: sym!(blas_lib, b"rocblas_sgemm\0"),
 
                 _hip_lib: hip_lib,
