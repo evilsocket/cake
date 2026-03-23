@@ -221,7 +221,7 @@ Original image generation endpoint. Accepts SD/FLUX generation arguments directl
 curl http://localhost:8080/api/v1/image \
   -H "Content-Type: application/json" \
   -d '{
-    "image_args": {"sd-image-prompt": "An old man at seaside"},
+    "image_args": {"prompt": "An old man at seaside"},
     "response_format": "png"
 }' -o output.png
 
@@ -230,9 +230,9 @@ curl http://localhost:8080/api/v1/image \
   -H "Content-Type: application/json" \
   -d '{
     "image_args": {
-      "sd-image-prompt": "An old man sitting on the chair at seaside",
+      "prompt": "An old man sitting on the chair at seaside",
       "sd-num-samples": 1,
-      "sd-image-seed": 2439383
+      "image-seed": 2439383
     }
 }'
 ```

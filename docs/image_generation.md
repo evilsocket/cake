@@ -20,8 +20,9 @@ Cake supports image generation with Stable Diffusion and FLUX models.
 High-quality 12B parameter flow-matching transformer. Runs in FP8 precision on a single GPU with 16GB+ VRAM. Models are downloaded automatically from HuggingFace.
 
 ```sh
-cake run evilsocket/flux1-dev --model-type image-model --image-model-arch flux1 \
-  --sd-image-prompt "a photorealistic landscape at golden hour, dramatic clouds" \
+cake run evilsocket/flux1-dev \
+  "a photorealistic landscape at golden hour, dramatic clouds" \
+  --model-type image-model --image-model-arch flux1 \
   --flux-height 768 --flux-width 1024 \
   --image-output landscape.png
 ```
@@ -31,9 +32,9 @@ cake run evilsocket/flux1-dev --model-type image-model --image-model-arch flux1 
 Faster 4B variant, 4 denoising steps, best at 512x512:
 
 ```sh
-cake run black-forest-labs/FLUX.2-klein-4B --model-type image-model --image-model-arch flux \
-  --model black-forest-labs/FLUX.2-klein-4B \
-  --sd-image-prompt "a fluffy orange cat sitting on a wooden table"
+cake run black-forest-labs/FLUX.2-klein-4B \
+  "a fluffy orange cat sitting on a wooden table" \
+  --model-type image-model --image-model-arch flux
 ```
 
 ### FLUX Arguments
@@ -42,8 +43,8 @@ cake run black-forest-labs/FLUX.2-klein-4B --model-type image-model --image-mode
 |----------|---------|-------------|
 | `--flux-height` | 1024 | Image height in pixels |
 | `--flux-width` | 1024 | Image width in pixels |
-| `--flux-steps` | 20 | Denoising steps (FLUX.2-klein uses 4) |
-| `--flux-guidance` | 3.5 | CFG guidance scale |
+| `--n-steps` | 20 | Denoising steps (FLUX.2-klein uses 4) |
+| `--guidance-scale` | 3.5 | CFG guidance scale |
 | `--image-output` | `output.png` | Output file path (PNG) |
 
 ## Stable Diffusion
@@ -51,9 +52,10 @@ cake run black-forest-labs/FLUX.2-klein-4B --model-type image-model --image-mode
 ### Single Node
 
 ```sh
-cake run evilsocket/flux1-dev --model-type image-model \
-  --sd-image-prompt "An old man sitting on the chair at seaside" \
-  --sd-version xl --sd-num-samples 1 --sd-image-seed 2439383
+cake run stabilityai/stable-diffusion-xl-base-1.0 \
+  "An old man sitting on the chair at seaside" \
+  --model-type image-model \
+  --sd-version xl --sd-num-samples 1 --image-seed 2439383
 ```
 
 ### Distributed Generation
@@ -108,9 +110,9 @@ curl http://master-ip:8080/api/v1/image \
   -H "Content-Type: application/json" \
   -d '{
     "image_args": {
-      "sd-image-prompt": "An old man sitting on the chair at seaside",
+      "prompt": "An old man sitting on the chair at seaside",
       "sd-num-samples": 1,
-      "sd-image-seed": 2439383
+      "image-seed": 2439383
     }
 }'
 ```
@@ -131,6 +133,5 @@ See the full [REST API Reference](api.md) for details.
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--sd-version` | `v1-5` | SD version to use |
-| `--sd-image-prompt` | (required) | Text prompt for image generation |
 | `--sd-num-samples` | 1 | Number of images to generate |
-| `--sd-image-seed` | random | Seed for reproducibility |
+| `--image-seed` | random | Seed for reproducibility |

@@ -69,7 +69,7 @@ cake serve evilsocket/Qwen3-0.6B
 
 # Image generation (FLUX.1-dev FP8)
 cake run evilsocket/flux1-dev --model-type image-model --image-model-arch flux1 \
-  --sd-image-prompt "a cyberpunk cityscape at night"
+  "a cyberpunk cityscape at night"
 
 # Voice synthesis with voice cloning
 cake run evilsocket/VibeVoice-1.5B --model-type audio-model \

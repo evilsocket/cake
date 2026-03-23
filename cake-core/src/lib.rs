@@ -169,8 +169,8 @@ pub struct Args {
     /// Topology file.
     #[arg(long)]
     pub topology: Option<String>,
-    /// The initial prompt.
-    #[arg(long, default_value = "The sky is blue because ")]
+    /// The initial prompt (set programmatically from the positional argument in `cake run`).
+    #[arg(skip = String::from("The sky is blue because "))]
     pub prompt: String,
     /// The system prompt.
     #[arg(long, default_value = "You are a helpful AI assistant.")]
@@ -303,14 +303,6 @@ pub struct FluxArgs {
     /// Image width for FLUX generation.
     #[arg(long = "flux-width", default_value_t = 1024, id = "flux_width")]
     pub width: usize,
-
-    /// Number of denoising steps (20 for FLUX.1-dev, 4 for distilled FLUX.2-klein).
-    #[arg(long = "flux-steps", default_value_t = 20, id = "flux_steps")]
-    pub num_steps: usize,
-
-    /// Guidance scale for classifier-free guidance.
-    #[arg(long = "flux-guidance", default_value_t = 3.5, id = "flux_guidance")]
-    pub guidance_scale: f64,
 }
 
 #[derive(Clone, Parser, Default, Debug)]
@@ -370,12 +362,9 @@ fn default_img2img_strength() -> f64 {
 
 #[derive(Clone, Parser, Default, Debug, Deserialize)]
 pub struct ImageGenerationArgs {
-    /// The prompt to be used for image generation.
-    #[arg(
-        long = "sd-image-prompt",
-        default_value = "A very realistic photo of a rusty robot walking on a sandy beach"
-    )]
-    #[serde(rename(deserialize = "sd-image-prompt"), default = "default_prompt")]
+    /// The prompt to be used for image generation (set from positional arg or API body).
+    #[arg(skip = default_prompt())]
+    #[serde(rename(deserialize = "prompt"), default = "default_prompt")]
     image_prompt: String,
 
     #[arg(long = "sd-uncond-prompt", default_value = "")]
@@ -388,8 +377,8 @@ pub struct ImageGenerationArgs {
     tracing: bool,
 
     /// The number of steps to run the diffusion for.
-    #[arg(long = "sd-n-steps")]
-    #[serde(rename(deserialize = "sd-n-steps"))]
+    #[arg(long = "n-steps")]
+    #[serde(rename(deserialize = "n-steps"))]
     n_steps: Option<usize>,
 
     /// The number of samples to generate iteratively.
@@ -407,8 +396,8 @@ pub struct ImageGenerationArgs {
     #[serde(rename(deserialize = "sd-intermediary-images"), default)]
     intermediary_images: usize,
 
-    #[arg(long = "sd-guidance-scale")]
-    #[serde(rename(deserialize = "sd-guidance-scale"))]
+    #[arg(long = "guidance-scale")]
+    #[serde(rename(deserialize = "guidance-scale"))]
     guidance_scale: Option<f64>,
 
     #[arg(long = "sd-img2img", value_name = "FILE")]
@@ -426,8 +415,8 @@ pub struct ImageGenerationArgs {
     img2img_strength: f64,
 
     /// The seed to use when generating random samples.
-    #[arg(long = "sd-seed")]
-    #[serde(rename(deserialize = "sd-seed"))]
+    #[arg(long = "image-seed")]
+    #[serde(rename(deserialize = "image-seed"))]
     image_seed: Option<u64>,
 }
 
@@ -438,6 +427,11 @@ impl ImageGenerationArgs {
             image_prompt: prompt.to_string(),
             ..Default::default()
         }
+    }
+
+    /// Override the image prompt (used to pass the positional CLI prompt).
+    pub fn set_prompt(&mut self, prompt: &str) {
+        self.image_prompt = prompt.to_string();
     }
 }
 

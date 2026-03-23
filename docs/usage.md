@@ -27,7 +27,7 @@ cake serve /path/to/Meta-Llama-3-8B
 To quickly test a model with a single prompt (no API server):
 
 ```sh
-cake run evilsocket/Qwen2.5-Coder-1.5B-Instruct --prompt "Why is the sky blue?"
+cake run evilsocket/Qwen2.5-Coder-1.5B-Instruct "Why is the sky blue?"
 ```
 
 ## Listing Local Models
@@ -123,7 +123,6 @@ See the full [REST API Reference](api.md) for all endpoints, request/response fo
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `--model` | - | Model path or HuggingFace repo ID |
-| `--prompt` | - | Single prompt for CLI inference |
 | `--system-prompt` | `"You are a helpful AI assistant."` | System prompt |
 | `--api` | - | API bind address (e.g. `0.0.0.0:8080`) |
 | `--topology` | - | Topology file for manual cluster setup |
