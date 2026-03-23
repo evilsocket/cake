@@ -10,8 +10,9 @@ kernel void stable_softplus_f32(
 ) {
     if (idx >= count) return;
     float x = input[idx];
-    float clamped = min(x, 88.0f);
-    float sp = log(exp(clamped) + 1.0f);
+    // For large x, softplus(x) ≈ x; for small x, use log1p(exp(x))
+    // log1p is more numerically stable than log(exp(x) + 1)
+    float sp = (x > 20.0f) ? x : log1p(exp(x));
     output[idx] = max(x, sp);
 }
 
@@ -23,8 +24,7 @@ kernel void stable_softplus_f16(
 ) {
     if (idx >= count) return;
     float x = float(input[idx]);
-    float clamped = min(x, 88.0f);
-    float sp = log(exp(clamped) + 1.0f);
+    float sp = (x > 20.0f) ? x : log1p(exp(x));
     output[idx] = half(max(x, sp));
 }
 
