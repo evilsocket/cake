@@ -712,7 +712,6 @@ impl candle_core::CustomOp3 for AddRmsNorm {
         let eps = self.eps;
         let el = l_a.shape().elem_count();
         let n_rows = el / n_cols;
-        let out_cols = n_cols * 2;
 
         #[allow(clippy::too_many_arguments)]
         fn launch<T: DeviceRepr + WithDType>(
@@ -757,7 +756,7 @@ impl candle_core::CustomOp3 for AddRmsNorm {
             builder.arg(&b);
             builder.arg(&w);
             builder.arg(&out);
-            candle_core::builder_arg!(builder, n_cols as i32, block_size as i32, eps);
+            candle_core::builder_arg!(builder, n_cols as i32, block_size as i32, eps, n_rows as i32);
             unsafe { builder.launch(cfg) }.w()?;
             Ok(out)
         }
@@ -782,8 +781,9 @@ impl candle_core::CustomOp3 for AddRmsNorm {
             _ => candle_core::bail!("add_rms_norm: unsupported dtype"),
         };
 
+        // Output layout: (2*n_rows, n_cols) — residual rows then normed rows
         let mut out_dims = l_a.shape().dims().to_vec();
-        *out_dims.last_mut().unwrap() = out_cols;
+        out_dims[0] *= 2;
 
         Ok((
             CudaStorage {

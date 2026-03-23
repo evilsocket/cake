@@ -285,8 +285,8 @@ RMS_NORM_GATED_OP(__nv_bfloat16, rms_norm_gated_bf16)
 // ─── add_rms_norm: rms_norm(a + b, weight, eps) with residual output ──
 // Fuses 2 kernels (add + rms_norm) into 1.
 // Used in transformer blocks: residual add followed by layer norm.
-// Output is [a+b, rms_norm(a+b)] concatenated on last dim (2 * n_cols).
-// Caller splits with narrow (zero-cost view).
+// Output layout: [all residual rows, all normed rows] = (2*n_rows, n_cols).
+// narrow(0, 0, n_rows) / narrow(0, n_rows, n_rows) yields contiguous views.
 // a, b: (n_rows, n_cols), weight: (n_cols,)
 #define ADD_RMS_NORM_OP(TYPENAME, FN_NAME) \
 extern "C" __global__ void FN_NAME( \
@@ -296,13 +296,13 @@ extern "C" __global__ void FN_NAME( \
     TYPENAME *out, \
     const int n_cols, \
     const int block_size, \
-    const float eps \
+    const float eps, \
+    const int n_rows \
 ) { \
     const int row = blockIdx.x; \
-    const int out_stride = n_cols * 2; \
     const int in_off = row * n_cols; \
-    const int res_off = row * out_stride; \
-    const int norm_off = res_off + n_cols; \
+    const int res_off = row * n_cols; \
+    const int norm_off = n_rows * n_cols + row * n_cols; \
     /* Compute sum of squares in first pass (don't write yet) */ \
     float sum2 = 0.0f; \
     for (int col = threadIdx.x; col < n_cols; col += block_size) { \
@@ -326,7 +326,7 @@ extern "C" __global__ void FN_NAME( \
         sum2 += __shfl_xor_sync(0xffffffff, sum2, mask); \
     } \
     float inv_rms = rsqrtf(sum2 / (float)n_cols + eps); \
-    /* Re-read a+b (L2-cached) and write both residual + normed output */ \
+    /* Re-read a+b (L2-cached), residual rows first then normed rows */ \
     for (int col = threadIdx.x; col < n_cols; col += block_size) { \
         float s = static_cast<float>(a[in_off + col]) + static_cast<float>(b[in_off + col]); \
         out[res_off + col] = static_cast<TYPENAME>(s); \

@@ -6,7 +6,7 @@
 
 mod ops;
 
-use candle_core::{Device, Result, Tensor, D};
+use candle_core::{Device, Result, Tensor};
 
 use super::ComputeBackend;
 
@@ -94,8 +94,10 @@ impl ComputeBackend for CudaBackend {
         let b = b.contiguous()?;
         let w = weight.contiguous()?;
         let combined = a.apply_op3_no_bwd(&b, &w, &ops::AddRmsNorm { eps, n_cols })?;
-        let residual = combined.narrow(D::Minus1, 0, n_cols)?.contiguous()?;
-        let normed = combined.narrow(D::Minus1, n_cols, n_cols)?.contiguous()?;
+        // Layout: (2*n_rows, n_cols) — narrow on dim 0 yields contiguous views (no copy)
+        let n_rows = combined.dim(0)? / 2;
+        let residual = combined.narrow(0, 0, n_rows)?;
+        let normed = combined.narrow(0, n_rows, n_rows)?;
         Ok((residual, normed))
     }
 
