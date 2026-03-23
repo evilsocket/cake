@@ -916,8 +916,9 @@ async fn receive_model_data(
 
     log::info!("receiving model data [{}] ...", layer_range);
 
+    let mut read_buf = Vec::with_capacity(MODEL_DATA_CHUNK_SIZE + 1024);
     loop {
-        let (_, msg) = Message::from_reader(stream).await?;
+        let (_, msg) = Message::from_reader_buf(stream, &mut read_buf).await?;
 
         match msg {
             Message::ModelDataChunk {
