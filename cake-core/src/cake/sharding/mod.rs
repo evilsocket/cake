@@ -552,6 +552,7 @@ async fn push_model_data(
 
     // Stream each file using chunked reads (constant 128MB memory, not full file)
     let mut read_buf = vec![0u8; MODEL_DATA_CHUNK_SIZE];
+    let mut write_buf = Vec::with_capacity(MODEL_DATA_CHUNK_SIZE + 1024); // reusable write buffer
 
     for file_path in &files_to_send {
         let filename = file_path
@@ -638,7 +639,7 @@ async fn push_model_data(
                 checksum,
                 data,
             };
-            msg.to_writer(stream).await?;
+            msg.to_writer_buf(stream, &mut write_buf).await?;
             offset += to_read as u64;
 
             // Log progress for large files
