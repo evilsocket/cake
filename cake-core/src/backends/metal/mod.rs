@@ -34,6 +34,7 @@ const ALL_KERNELS: &[&str] = &[
     "add_rms_norm_f32", "add_rms_norm_f16",
     "rms_norm_channel_f32", "rms_norm_channel_f16",
     "f8e4m3_to_f32", "f8e4m3_to_f16",
+    "adaln_modulate_f32", "adaln_modulate_f16",
     "fused_vector_attention_f16",
     "fused_vector_attention_f32",
 ];
@@ -461,6 +462,46 @@ impl candle_core::CustomOp1 for MetalF8ToF16 {
     }
 }
 
+struct MetalAdalnModulate {
+    eps: f32,
+    shift_storage: candle_core::MetalStorage,
+    shift_layout: Layout,
+}
+impl candle_core::CustomOp3 for MetalAdalnModulate {
+    fn name(&self) -> &'static str { "metal_adaln_modulate" }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalAdalnModulate: expected Metal device") }
+    #[allow(clippy::too_many_arguments)]
+    fn metal_fwd(&self, s_x: &candle_core::MetalStorage, l_x: &Layout, s_w: &candle_core::MetalStorage, _l_w: &Layout, s_scale: &candle_core::MetalStorage, l_scale: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
+        let device = s_x.device();
+        let dims = l_x.shape().dims();
+        let el = l_x.shape().elem_count();
+        let hidden = *dims.last().ok_or_else(|| candle_core::Error::Msg("empty shape".into()))?;
+        let num_rows = el / hidden;
+        let kernel_name: &'static str = match s_x.dtype() { DType::F32 => "adaln_modulate_f32", DType::F16 => "adaln_modulate_f16", dt => candle_core::bail!("adaln_modulate metal: unsupported dtype {dt:?}") };
+        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+        let output = device.new_buffer(el, s_x.dtype(), "adaln_modulate")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let off_x = l_x.start_offset() * s_x.dtype().size_in_bytes();
+        let off_w = 0usize; // weight is always from start
+        let off_scale = l_scale.start_offset() * s_scale.dtype().size_in_bytes();
+        let off_shift = self.shift_layout.start_offset() * self.shift_storage.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s_x.buffer(), off_x));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (s_w.buffer(), off_w));
+        candle_metal_kernels::utils::set_param(&encoder, 2, (s_scale.buffer(), off_scale));
+        candle_metal_kernels::utils::set_param(&encoder, 3, (self.shift_storage.buffer(), off_shift));
+        candle_metal_kernels::utils::set_param(&encoder, 4, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 5, hidden as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 6, self.eps);
+        let max_threads = pipeline.max_total_threads_per_threadgroup();
+        let tg_width = hidden.min(max_threads);
+        let grid = objc2_metal::MTLSize { width: hidden, height: num_rows, depth: 1 };
+        let group = objc2_metal::MTLSize { width: tg_width, height: 1, depth: 1 };
+        encoder.dispatch_threads(grid, group);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s_x.dtype()), l_x.shape().clone()))
+    }
+}
+
 struct MetalFusedVectorAttention { scale: f32, gqa_ratio: u32 }
 impl candle_core::CustomOp3 for MetalFusedVectorAttention {
     fn name(&self) -> &'static str { "metal_fused_vector_attention" }
@@ -653,8 +694,20 @@ impl ComputeBackend for MetalBackend {
     }
 
     fn adaln_modulate(&self, x: &Tensor, norm_weight: &Tensor, scale: &Tensor, shift: &Tensor, eps: f32) -> Result<Tensor> {
-        let n = candle_nn::ops::rms_norm(&x.contiguous()?, norm_weight, eps)?;
-        (n.broadcast_mul(&(scale + 1.0)?)? + shift)?.contiguous()
+        let x = x.contiguous()?;
+        let scale = scale.contiguous()?;
+        let shift = shift.contiguous()?;
+        // Extract Metal storage for shift (passed as captured state to CustomOp3)
+        if let Device::Metal(_) = x.device() {
+            let (shift_storage, shift_layout) = shift.storage_and_layout();
+            if let candle_core::Storage::Metal(ms) = &*shift_storage {
+                let op = MetalAdalnModulate { eps, shift_storage: ms.clone(), shift_layout: shift_layout.clone() };
+                return x.apply_op3_no_bwd(norm_weight, &scale, &op);
+            }
+        }
+        // Fallback
+        let n = candle_nn::ops::rms_norm(&x, norm_weight, eps)?;
+        (n.broadcast_mul(&(scale + 1.0)?)? + &shift)?.contiguous()
     }
 
     fn f8e4m3_to_f32(&self, x: &Tensor) -> Result<Tensor> {

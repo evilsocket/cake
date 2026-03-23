@@ -33,4 +33,5 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 031	2026-03-23T22:10:00	3bdd7ab	55306610176	PASS	PASS	keep	fast::exp + fma in fused vector attention online softmax
 032	2026-03-23T22:20:00	dd4f897	61687027200	PASS	PASS	keep	F32 fused vector attention + sdpa() override (gen seq_len=1: 35→21µs)
 033	2026-03-23T22:40:00	cebff17	52256070912	PASS	PASS	keep	Native half ALU in sub_mul, exp_mul, add_scaled f16 kernels
+034	2026-03-23T22:55:00	fd45b07	49489678080	PASS	PASS	keep	Half-precision final multiply in silu_mul, softplus, conv_silu f16
 ---	Metal: 36.4 tok/s avg vs CPU: 22.9 tok/s (+59%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
