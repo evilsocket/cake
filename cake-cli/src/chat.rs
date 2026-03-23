@@ -759,7 +759,8 @@ async fn fetch_topology(client: &Client, server: &str) -> Result<TopologyRespons
 
 // ── Main loop ──────────────────────────────────────────────────────────────
 
-pub async fn run(server: &str) -> Result<()> {
+/// Remote chat: connect to an API server.
+pub async fn run_remote(server: &str) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -984,4 +985,45 @@ async fn run_app(
     }
 
     Ok(())
+}
+
+
+// ─── Local chat mode ─────────────────────────────────────────────────
+
+use cake_core::cake::Context;
+
+/// Local chat: start an ephemeral API server, then connect the TUI to it.
+/// This reuses the existing remote chat TUI with zero code duplication.
+pub async fn run_local(ctx: &mut Context) -> Result<()> {
+    // Bind to an ephemeral port on localhost
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server_url = format!("http://{}", addr);
+
+    eprintln!("starting local API server on {server_url} ...");
+
+    // Store the listener so the master can use it
+    ctx.args.api = Some(addr.to_string());
+    *ctx.listener_override.lock().unwrap() = Some(listener);
+
+    // Run the master on a separate tokio runtime (actix-web is !Send)
+    let ctx_clone = ctx.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&rt, async move {
+            if let Err(e) = super::run_master(ctx_clone).await {
+                eprintln!("local inference server error: {e}");
+            }
+        });
+    });
+
+    // Give the server a moment to start accepting connections
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+    // Run the existing TUI chat connected to our local server
+    run_remote(&server_url).await
 }

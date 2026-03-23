@@ -62,7 +62,15 @@ cake serve evilsocket/Qwen2.5-Coder-1.5B-Instruct --ui-auth user:pass
 
 ## TUI Chat
 
-Cake includes a terminal-based chat client that connects to a running API server:
+Cake includes a terminal-based chat client with two modes:
+
+**Local mode** — loads a model and starts interactive chat (no separate server needed):
+
+```sh
+cake chat Qwen/Qwen3-0.6B
+```
+
+**Remote mode** — connects to a running API server:
 
 ```sh
 cake chat --server http://localhost:8080

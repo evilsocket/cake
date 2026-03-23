@@ -60,6 +60,9 @@ Run any model locally on a single machine — architecture is auto-detected from
 # Text generation
 cake run evilsocket/Qwen3-0.6B "Explain quantum computing in simple terms"
 
+# Interactive TUI chat
+cake chat Qwen/Qwen3-0.6B
+
 # Start an API server + web UI
 cake serve evilsocket/Qwen3-0.6B
 

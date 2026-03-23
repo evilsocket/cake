@@ -55,11 +55,20 @@ enum Commands {
     },
     /// List locally available models
     List,
-    /// Interactive chat with a running server
+    /// Interactive chat with a model (local or remote).
+    ///
+    /// Local mode:  `cake chat <model>` — loads model and runs TUI chat.
+    /// Remote mode: `cake chat --server http://host:8080` — connects to API.
     Chat {
-        /// Server URL
+        /// Model name or HuggingFace repo for local chat (e.g., Qwen/Qwen3-0.6B).
+        /// If omitted, connects to --server instead.
+        model: Option<String>,
+        /// Server URL for remote chat mode.
         #[arg(long, default_value = "http://localhost:8080")]
         server: String,
+        /// Flatten common model args for local mode.
+        #[command(flatten)]
+        args: Args,
     },
     /// Split a model into per-worker bundles
     Split {
@@ -152,8 +161,17 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Commands::Chat { server } => {
-            chat::run(&server).await
+        Commands::Chat { model, server, mut args } => {
+            if let Some(model_name) = model {
+                // Local chat: load model, run TUI with local inference
+                args.model = model_name;
+                args.mode = cake_core::cake::Mode::Master;
+                let mut ctx = cake_core::cake::Context::from_args(args)?;
+                chat::run_local(&mut ctx).await
+            } else {
+                // Remote chat: connect to API server
+                chat::run_remote(&server).await
+            }
         }
         Commands::Pull { model } => {
             if utils::hf::looks_like_hf_repo(&model) {
@@ -245,7 +263,7 @@ async fn run_as_master(mut args: Args) -> Result<()> {
 }
 
 #[cfg(feature = "master")]
-async fn run_master(ctx: Context) -> Result<()> {
+pub(crate) async fn run_master(ctx: Context) -> Result<()> {
     use cake_core::cake::Master;
 
     // Image model dispatch — early return to avoid duplicating text arch arms
