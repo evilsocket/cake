@@ -169,7 +169,7 @@ pub struct Args {
     /// Topology file.
     #[arg(long)]
     pub topology: Option<String>,
-    /// The initial prompt (set from positional argument in `run` subcommand).
+    /// The initial prompt (set programmatically from the positional argument in `cake run`).
     #[arg(skip = String::from("The sky is blue because "))]
     pub prompt: String,
     /// The system prompt.
