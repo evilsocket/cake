@@ -233,7 +233,7 @@ kernel void depthwise_conv1d_silu_f32(
     uint c = idx % channels;
     float dot = 0.0f;
     for (uint k = 0; k < kernel_size; k++)
-        dot += window[idx * kernel_size + k] * weight[c * kernel_size + k];
+        dot = fma(window[idx * kernel_size + k], weight[c * kernel_size + k], dot);
     float sig = 1.0f / (1.0f + exp(-dot));
     output[idx] = dot * sig;
 }
@@ -251,7 +251,7 @@ kernel void depthwise_conv1d_silu_f16(
     uint c = idx % channels;
     float dot = 0.0f;
     for (uint k = 0; k < kernel_size; k++)
-        dot += float(window[idx * kernel_size + k]) * float(weight[c * kernel_size + k]);
+        dot = fma(float(window[idx * kernel_size + k]), float(weight[c * kernel_size + k]), dot);
     float sig = 1.0f / (1.0f + exp(-dot));
     output[idx] = half(dot * sig);
 }
@@ -277,7 +277,7 @@ kernel void depthwise_conv1d_bias_f32(
     uint in_base = (b * channels + c) * t_padded + t_out;
     uint w_base = c * kernel_size;
     for (uint k = 0; k < kernel_size; k++)
-        acc += input[in_base + k] * weight[w_base + k];
+        acc = fma(input[in_base + k], weight[w_base + k], acc);
     output[idx] = acc + bias[c];
 }
 
@@ -301,7 +301,7 @@ kernel void depthwise_conv1d_bias_f16(
     uint in_base = (b * channels + c) * t_padded + t_out;
     uint w_base = c * kernel_size;
     for (uint k = 0; k < kernel_size; k++)
-        acc += float(input[in_base + k]) * float(weight[w_base + k]);
+        acc = fma(float(input[in_base + k]), float(weight[w_base + k]), acc);
     output[idx] = half(acc + float(bias[c]));
 }
 
