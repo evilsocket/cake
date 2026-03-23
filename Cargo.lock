@@ -714,6 +714,7 @@ dependencies = [
  "env_logger",
  "futures",
  "human_bytes",
+ "log",
  "ratatui",
  "reqwest",
  "serde",

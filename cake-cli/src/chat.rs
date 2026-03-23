@@ -995,18 +995,24 @@ use cake_core::cake::Context;
 /// Local chat: start an ephemeral API server, then connect the TUI to it.
 /// This reuses the existing remote chat TUI with zero code duplication.
 pub async fn run_local(ctx: &mut Context) -> Result<()> {
-    // Bind to an ephemeral port on localhost
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr()?;
-    let server_url = format!("http://{}", addr);
+    // Find a free port by temporarily binding to :0
+    let tmp = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = tmp.local_addr()?.port();
+    drop(tmp); // release the port so actix can bind to it
 
-    eprintln!("starting local API server on {server_url} ...");
+    let addr = format!("127.0.0.1:{port}");
+    let server_url = format!("http://{addr}");
 
-    // Store the listener so the master can use it
-    ctx.args.api = Some(addr.to_string());
-    *ctx.listener_override.lock().unwrap() = Some(listener);
+    eprintln!("loading model and starting local server on {server_url} ...");
 
-    // Run the master on a separate tokio runtime (actix-web is !Send)
+    ctx.args.api = Some(addr);
+
+    // Suppress log output — the TUI owns the terminal.
+    // env_logger is already initialized; just lower the filter.
+    ::log::set_max_level(::log::LevelFilter::Off);
+
+    // Run the master on a separate thread with its own tokio runtime
+    // (actix-web uses !Send types that can't cross tokio::spawn boundaries)
     let ctx_clone = ctx.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -1016,13 +1022,20 @@ pub async fn run_local(ctx: &mut Context) -> Result<()> {
         let local = tokio::task::LocalSet::new();
         local.block_on(&rt, async move {
             if let Err(e) = super::run_master(ctx_clone).await {
-                eprintln!("local inference server error: {e}");
+                // Can't use eprintln here — TUI owns the terminal
+                let _ = e;
             }
         });
     });
 
-    // Give the server a moment to start accepting connections
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    // Wait for the server to be ready
+    let client = Client::new();
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if client.get(format!("{server_url}/v1/models")).send().await.is_ok() {
+            break;
+        }
+    }
 
     // Run the existing TUI chat connected to our local server
     run_remote(&server_url).await
