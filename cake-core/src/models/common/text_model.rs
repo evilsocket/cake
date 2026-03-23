@@ -270,18 +270,6 @@ impl TextModelBase {
         if let Some(scale) = self.ctx.config.as_ref().and_then(|c| c.embed_scale) {
             x = (x * scale as f64)?;
         }
-        // Debug: check for NaN/Inf in embeddings
-        if self.generated == 0 {
-            let _ = self.ctx.backend.synchronize();
-            let dbg = x.to_dtype(candle_core::DType::F32)?.to_device(&candle_core::Device::Cpu)?;
-            let v: Vec<f32> = dbg.flatten_all()?.to_vec1()?;
-            let has_nan = v.iter().any(|x| x.is_nan());
-            let has_inf = v.iter().any(|x| x.is_infinite());
-            let mean = v.iter().sum::<f32>() / v.len() as f32;
-            let max = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let min = v.iter().cloned().fold(f32::INFINITY, f32::min);
-            log::info!("DBG embed: mean={mean:.6} min={min:.4} max={max:.4} nan={has_nan} inf={has_inf} shape={:?}", x.shape());
-        }
         let emb_elapsed = emb_start.elapsed();
 
         let num_blocks = self.blocks.len();
@@ -299,18 +287,8 @@ impl TextModelBase {
                     .map_err(|e| {
                         anyhow!("error in forward operation of local block {block_idx}: {e}")
                     })?;
+                // Flush Metal command buffer between blocks
                 let _ = self.ctx.backend.synchronize();
-                // Debug: check intermediate values after each block
-                if self.generated == 0 {
-                    let dbg = x.to_dtype(candle_core::DType::F32)?.to_device(&candle_core::Device::Cpu)?;
-                    let v: Vec<f32> = dbg.flatten_all()?.to_vec1()?;
-                    let has_nan = v.iter().any(|x| x.is_nan());
-                    let has_inf = v.iter().any(|x| x.is_infinite());
-                    let mean = v.iter().sum::<f32>() / v.len() as f32;
-                    let max = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                    let min = v.iter().cloned().fold(f32::INFINITY, f32::min);
-                    log::info!("DBG block {block_idx}: mean={mean:.6} min={min:.4} max={max:.4} nan={has_nan} inf={has_inf}");
-                }
                 local_elapsed += local_start.elapsed();
                 local_count += 1;
 
@@ -367,17 +345,8 @@ impl TextModelBase {
             .lm_head
             .forward(&x)
             .map_err(|e| anyhow!("error in lm_head.forward: {e}"))?;
+        // Flush Metal command buffer before returning logits to CPU for sampling
         let _ = self.ctx.backend.synchronize();
-        // Debug: check logits for first few tokens
-        if self.generated < 3 {
-            let dbg = logits.to_dtype(candle_core::DType::F32)?.to_device(&candle_core::Device::Cpu)?;
-            let v: Vec<f32> = dbg.flatten_all()?.to_vec1()?;
-            let has_nan = v.iter().any(|x| x.is_nan());
-            let mean = v.iter().sum::<f32>() / v.len() as f32;
-            let max = v.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-            let argmax = v.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).map(|(i,_)| i).unwrap_or(0);
-            log::info!("DBG logits gen={}: mean={mean:.4} max={max:.4} argmax={argmax} nan={has_nan} len={}", self.generated, v.len());
-        }
         let head_elapsed = head_start.elapsed();
 
         let total_elapsed = forward_start.elapsed();
