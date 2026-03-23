@@ -96,10 +96,19 @@ impl WorkerCapacity for NamedNode<'_> {
         self.node.vram_bytes
     }
     fn total_tflops(&self) -> f64 {
+        // Fast path: if TFLOPS is explicitly set, skip GPU info construction
+        if self.node.tflops > 0.0 {
+            return self.node.tflops;
+        }
         let gpus = self.node.as_gpu_info();
         estimate_tflops_for_gpus(&gpus)
     }
     fn max_layers_for_size(&self, layer_size_bytes: u64) -> usize {
+        // Fast path: if VRAM is directly available, skip GPU info construction
+        if self.node.vram_bytes > 0 && layer_size_bytes > 0 {
+            let usable = (self.node.vram_bytes as f64 * 0.85) as u64;
+            return (usable / layer_size_bytes) as usize;
+        }
         let gpus = self.node.as_gpu_info();
         max_layers_for_gpus(&gpus, layer_size_bytes)
     }
