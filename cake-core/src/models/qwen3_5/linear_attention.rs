@@ -346,8 +346,11 @@ impl GatedDeltaNet {
                 .map_err(|e| anyhow!("conv1d_seq: {e}"))?
         };
 
-        // Flush GPU commands after conv1d operations
-        let _ = self.backend.synchronize();
+        // Flush GPU commands after conv1d — needed for prefill (many ops in conv_seq),
+        // skip for generation (seq_len=1) since conv_step is just ~5 commands
+        if seq_len > 1 {
+            let _ = self.backend.synchronize();
+        }
 
         cache.set_conv_state(block_idx, new_conv_state);
 
