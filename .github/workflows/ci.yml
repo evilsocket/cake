@@ -165,8 +165,8 @@ jobs:
           IPHONEOS_DEPLOYMENT_TARGET: "16.0"
         run: cargo test --target=aarch64-apple-ios -p cake-core --test protocol --no-default-features --features "llama,qwen2,qwen3_5,qwen3,qwen3_moe,qwen3_5_moe,phi4,mistral,gemma3,falcon3,olmo2,exaone4,flux,vibevoice,luxtts,metal" --no-run
 
-  build-features:
-    name: Build (${{ matrix.name }})
+  test-features:
+    name: Test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -235,30 +235,20 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-${{ matrix.name }}-
 
-      - name: Build (cake-core + cake-cli)
+      - name: Unit tests (cake-core lib)
         env:
           CUDA_COMPUTE_CAP: ${{ matrix.compute_cap }}
-        run: cargo build -p cake-core -p cake-cli --features "${{ matrix.features }}"
+        run: cargo test -p cake-core --lib --features "${{ matrix.features }}"
 
-      - name: Clippy
+      - name: Unit tests (cake-core external)
         env:
           CUDA_COMPUTE_CAP: ${{ matrix.compute_cap }}
-        run: cargo clippy -p cake-core --lib --tests -p cake-cli --features "${{ matrix.features }}" -- -D warnings
+        run: cargo test -p cake-core --test unit --features "${{ matrix.features }}"
 
-      - name: Compile tests (cake-core lib)
+      - name: Protocol tests
         env:
           CUDA_COMPUTE_CAP: ${{ matrix.compute_cap }}
-        run: cargo test -p cake-core --lib --features "${{ matrix.features }}" --no-run
-
-      - name: Compile tests (cake-core unit)
-        env:
-          CUDA_COMPUTE_CAP: ${{ matrix.compute_cap }}
-        run: cargo test -p cake-core --test unit --features "${{ matrix.features }}" --no-run
-
-      - name: Compile tests (cake-core protocol)
-        env:
-          CUDA_COMPUTE_CAP: ${{ matrix.compute_cap }}
-        run: cargo test -p cake-core --test protocol --features "${{ matrix.features }}" --no-run
+        run: cargo test -p cake-core --test protocol --features "${{ matrix.features }}"
 
   clippy:
     name: Clippy
@@ -281,5 +271,5 @@ jobs:
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-clippy-
 
-      - name: Clippy (cake-core + cake-cli)
-        run: cargo clippy -p cake-core --lib --tests -p cake-cli -- -D warnings
+      - name: Clippy (cake-core + cake-cli, all features)
+        run: cargo clippy -p cake-core --lib --tests -p cake-cli --features "vulkan,rocm" -- -D warnings
