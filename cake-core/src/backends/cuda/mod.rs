@@ -60,8 +60,8 @@ impl ComputeBackend for CudaBackend {
             // mask[i,j] = (i + offset >= j) — true where attention is allowed
             let mask = (rows + offset as f64)?.broadcast_ge(&cols)?;
             let mask = mask.broadcast_as(attn.shape())?;
-            let neg_inf = Tensor::full(f32::NEG_INFINITY, attn.shape(), q.device())?;
-            mask.where_cond(&attn, &neg_inf)?
+            let neg_large = Tensor::full(-1e9f32, attn.shape(), q.device())?;
+            mask.where_cond(&attn, &neg_large)?
         } else {
             attn
         };
