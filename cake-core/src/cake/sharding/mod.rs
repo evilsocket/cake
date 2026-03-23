@@ -552,6 +552,7 @@ async fn push_model_data(
 
     // Stream each file using chunked reads (constant 128MB memory, not full file)
     let mut read_buf = vec![0u8; MODEL_DATA_CHUNK_SIZE];
+    let mut write_buf = Vec::with_capacity(MODEL_DATA_CHUNK_SIZE + 1024); // reusable write buffer
 
     for file_path in &files_to_send {
         let filename = file_path
@@ -605,25 +606,47 @@ async fn push_model_data(
 
         while offset < total_size {
             let to_read = ((total_size - offset) as usize).min(MODEL_DATA_CHUNK_SIZE);
-            let raw_chunk = if let Some(ref data) = small_data {
+            // Get a slice to the raw chunk data without copying
+            let raw_slice: &[u8] = if let Some(ref data) = small_data {
                 // Small files (config, tokenizer, index): already in memory
-                data[offset as usize..offset as usize + to_read].to_vec()
+                &data[offset as usize..offset as usize + to_read]
             } else {
-                // Large files (safetensors): stream from disk
+                // Large files (safetensors): stream from disk into reusable buffer
                 use std::io::Read;
                 let fh = file_handle.as_mut().unwrap();
                 fh.read_exact(&mut read_buf[..to_read])
                     .map_err(|e| anyhow!("read error at offset {offset}: {e}"))?;
-                read_buf[..to_read].to_vec()
+                &read_buf[..to_read]
             };
 
-            // Compress with zstd level 1 (only if it saves space)
-            let compressed_data = zstd::encode_all(raw_chunk.as_slice(), 1)
-                .unwrap_or_else(|_| raw_chunk.clone());
-            let (data, is_compressed) = if compressed_data.len() < raw_chunk.len() {
-                (compressed_data, true)
+            // Compress with zstd level 1 (only if it saves space).
+            // For large chunks, probe a small sample first to avoid wasting CPU
+            // on incompressible model weight data (F16/BF16 pseudo-random).
+            let (data, is_compressed) = if raw_slice.len() > 4096 {
+                let sample = &raw_slice[..4096.min(raw_slice.len())];
+                let sample_compressed = zstd::encode_all(sample, 1)
+                    .unwrap_or_else(|_| sample.to_vec());
+                if sample_compressed.len() < sample.len() {
+                    // Sample compresses — try the full chunk
+                    let compressed_data = zstd::encode_all(raw_slice, 1)
+                        .unwrap_or_else(|_| raw_slice.to_vec());
+                    if compressed_data.len() < raw_slice.len() {
+                        (compressed_data, true)
+                    } else {
+                        (raw_slice.to_vec(), false)
+                    }
+                } else {
+                    // Sample doesn't compress — skip full compression
+                    (raw_slice.to_vec(), false)
+                }
             } else {
-                (raw_chunk, false)
+                let compressed_data = zstd::encode_all(raw_slice, 1)
+                    .unwrap_or_else(|_| raw_slice.to_vec());
+                if compressed_data.len() < raw_slice.len() {
+                    (compressed_data, true)
+                } else {
+                    (raw_slice.to_vec(), false)
+                }
             };
 
             // CRC32 checksum of wire data (after compression)
@@ -637,7 +660,7 @@ async fn push_model_data(
                 checksum,
                 data,
             };
-            msg.to_writer(stream).await?;
+            msg.to_writer_buf(stream, &mut write_buf).await?;
             offset += to_read as u64;
 
             // Log progress for large files
@@ -893,8 +916,9 @@ async fn receive_model_data(
 
     log::info!("receiving model data [{}] ...", layer_range);
 
+    let mut read_buf = Vec::with_capacity(MODEL_DATA_CHUNK_SIZE + 1024);
     loop {
-        let (_, msg) = Message::from_reader(stream).await?;
+        let (_, msg) = Message::from_reader_buf(stream, &mut read_buf).await?;
 
         match msg {
             Message::ModelDataChunk {
