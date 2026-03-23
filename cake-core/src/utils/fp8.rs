@@ -226,20 +226,15 @@ impl Fp8Linear {
         let in_dtype = x.dtype();
         let w = self.get_weight()?;
         let compute = w.dtype();
-        let x = x.to_dtype(compute)?;
-        let dims = x.dims().to_vec();
-        let last = *dims.last().unwrap();
-        let batch: usize = dims[..dims.len() - 1].iter().product();
-        let x_2d = x.reshape((batch, last))?;
-        let y_2d = x_2d.matmul(&w.t()?)?;
-        let mut out_dims = dims[..dims.len() - 1].to_vec();
-        out_dims.push(w.dim(0)?);
-        let y = y_2d.reshape(out_dims)?;
+        // Skip dtype conversion if already matching (common case after first call)
+        let x = if x.dtype() == compute { x.clone() } else { x.to_dtype(compute)? };
+        // Use broadcast_matmul to handle batched input without reshape
+        let y = x.broadcast_matmul(&w.t()?)?;
         let y = match &self.bias {
             Some(b) => y.broadcast_add(&b.to_dtype(compute)?)?,
             None => y,
         };
-        y.to_dtype(in_dtype)
+        if in_dtype == compute { Ok(y) } else { y.to_dtype(in_dtype) }
     }
 }
 
