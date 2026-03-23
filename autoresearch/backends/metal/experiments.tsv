@@ -24,4 +24,6 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 022	2026-03-23T10:30:00	7e63007	-	PASS	PASS	keep	Remove lm_head sync (implicit sync from CPU read)
 023	2026-03-23T10:40:00	764ffd2	-	PASS	PASS	keep	Zero GDN syncs during gen — 36 tok/s avg, 39 peak
 024	2026-03-23T10:50:00	22fed04	-	PASS	PASS	keep	Skip full_attn final sync during gen
----	Metal: 35.6 tok/s avg vs CPU: 22.9 tok/s (+55%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
+025	2026-03-23T11:00:00	13f11af	-	PASS	PASS	keep	Per-block profiling: full_attn 2.9ms, GDN 0.07ms
+026	2026-03-23T11:10:00	7a75324	-	PASS	PASS	revert	F16 SDPA garbage even for gen — confirmed always broken
+---	Metal: 34.6 tok/s avg vs CPU: 22.9 tok/s (+51%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
