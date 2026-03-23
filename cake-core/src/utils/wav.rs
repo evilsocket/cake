@@ -57,9 +57,12 @@ pub fn save_wav(samples: &[f32], path: &Path, sample_rate: u32) -> Result<()> {
     f.write_all(&16u16.to_le_bytes())?;
     f.write_all(b"data")?;
     f.write_all(&data_size.to_le_bytes())?;
-    for &s in samples {
-        f.write_all(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())?;
-    }
+    // Batch-convert all samples to i16 bytes, then write once
+    let sample_bytes: Vec<u8> = samples
+        .iter()
+        .flat_map(|&s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())
+        .collect();
+    f.write_all(&sample_bytes)?;
     Ok(())
 }
 
