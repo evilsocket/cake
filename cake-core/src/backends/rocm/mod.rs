@@ -15,7 +15,7 @@ mod ffi;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::RwLock;
 
 /// Whether HIP runtime has been initialized (used for SIGABRT workaround).
 static HIP_INITIALIZED: AtomicBool = AtomicBool::new(false);
@@ -95,7 +95,7 @@ pub struct RocmBackend {
     device: Device,
     ffi: Box<RocmFfi>,
     blas_handle: *mut std::ffi::c_void,
-    cache: Mutex<HashMap<TensorId, GpuBuf>>,
+    cache: RwLock<HashMap<TensorId, GpuBuf>>,
 }
 
 unsafe impl Send for RocmBackend {}
@@ -162,7 +162,7 @@ impl RocmBackend {
             device: Device::Cpu,
             ffi,
             blas_handle: handle,
-            cache: Mutex::new(HashMap::new()),
+            cache: RwLock::new(HashMap::new()),
         })
     }
 
@@ -192,14 +192,15 @@ impl RocmBackend {
     #[inline]
     fn get_or_upload(&self, tensor: &Tensor) -> Result<*const f32> {
         let id = tensor.id();
-        let mut cache = self.cache.lock().unwrap();
-        if let Some(buf) = cache.get(&id) {
+        // Fast path: read lock for cache hit (no write contention)
+        if let Some(buf) = self.cache.read().unwrap().get(&id) {
             return Ok(buf.as_ptr());
         }
+        // Slow path: write lock for cache miss
         let data = Self::to_f32_vec(tensor)?;
         let buf = self.gpu_upload(&data)?;
         let ptr = buf.as_ptr();
-        cache.insert(id, buf);
+        self.cache.write().unwrap().insert(id, buf);
         Ok(ptr)
     }
 
