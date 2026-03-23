@@ -7,6 +7,84 @@ use cake::Mode;
 use clap::{Parser, ValueEnum};
 use serde::Deserialize;
 
+// ─── Model dispatch macros ──────────────────────────────────────────
+// These generate the repetitive match blocks for Master/Worker dispatch
+// and config loading across all supported text model architectures.
+
+/// Dispatch `$wrapper::<ModelType>::new($ctx).await?.run().await` for the
+/// text model architecture in `$arch`. Used for both Master and Worker.
+#[macro_export]
+macro_rules! dispatch_text_model {
+    ($arch:expr, $ctx:expr, $wrapper:ident) => {
+        match $arch {
+            #[cfg(feature = "qwen2")]
+            $crate::TextModelArch::Qwen2 => $wrapper::<$crate::models::qwen2::Qwen2>::new($ctx).await?.run().await,
+            #[cfg(feature = "qwen3_5")]
+            $crate::TextModelArch::Qwen3_5 => $wrapper::<$crate::models::qwen3_5::Qwen3_5>::new($ctx).await?.run().await,
+            #[cfg(feature = "qwen3")]
+            $crate::TextModelArch::Qwen3 => $wrapper::<$crate::models::qwen3::Qwen3>::new($ctx).await?.run().await,
+            #[cfg(feature = "qwen3_moe")]
+            $crate::TextModelArch::Qwen3Moe => $wrapper::<$crate::models::qwen3_moe::Qwen3Moe>::new($ctx).await?.run().await,
+            #[cfg(feature = "qwen3_5_moe")]
+            $crate::TextModelArch::Qwen3_5Moe => $wrapper::<$crate::models::qwen3_5_moe::Qwen3_5Moe>::new($ctx).await?.run().await,
+            #[cfg(feature = "phi4")]
+            $crate::TextModelArch::Phi4 => $wrapper::<$crate::models::phi4::Phi4>::new($ctx).await?.run().await,
+            #[cfg(feature = "mistral")]
+            $crate::TextModelArch::Mistral => $wrapper::<$crate::models::mistral::Mistral>::new($ctx).await?.run().await,
+            #[cfg(feature = "gemma3")]
+            $crate::TextModelArch::Gemma3 => $wrapper::<$crate::models::gemma3::Gemma3>::new($ctx).await?.run().await,
+            #[cfg(feature = "falcon3")]
+            $crate::TextModelArch::Falcon3 => $wrapper::<$crate::models::falcon3::Falcon3>::new($ctx).await?.run().await,
+            #[cfg(feature = "olmo2")]
+            $crate::TextModelArch::OLMo2 => $wrapper::<$crate::models::olmo2::OLMo2>::new($ctx).await?.run().await,
+            #[cfg(feature = "exaone4")]
+            $crate::TextModelArch::EXAONE4 => $wrapper::<$crate::models::exaone4::EXAONE4>::new($ctx).await?.run().await,
+            #[cfg(feature = "luxtts")]
+            $crate::TextModelArch::LuxTTS => $wrapper::<$crate::models::luxtts::LuxTTS>::new($ctx).await?.run().await,
+            #[cfg(feature = "llama")]
+            $crate::TextModelArch::Llama | $crate::TextModelArch::Auto => $wrapper::<$crate::models::llama3::LLama>::new($ctx).await?.run().await,
+            #[allow(unreachable_patterns)]
+            _ => ::anyhow::bail!("no text model feature enabled for architecture {:?}", $arch),
+        }
+    };
+}
+
+/// Load model config for the text model architecture in `$arch`.
+/// Returns a `Config` value. LuxTTS is handled separately (not in this macro).
+#[macro_export]
+macro_rules! dispatch_config_load {
+    ($arch:expr, $config_path:expr) => {
+        match $arch {
+            #[cfg(feature = "qwen2")]
+            $crate::TextModelArch::Qwen2 => $crate::models::qwen2::QwenConfig::from_path($config_path)?.into_config(),
+            #[cfg(feature = "qwen3_5")]
+            $crate::TextModelArch::Qwen3_5 => $crate::models::qwen3_5::Qwen3_5Config::from_path($config_path)?.into_config(),
+            #[cfg(feature = "qwen3")]
+            $crate::TextModelArch::Qwen3 => $crate::models::qwen3::Qwen3Config::from_path($config_path)?.into_config(),
+            #[cfg(feature = "qwen3_moe")]
+            $crate::TextModelArch::Qwen3Moe => $crate::models::qwen3_moe::Qwen3MoeConfig::from_path($config_path)?.into_config(),
+            #[cfg(feature = "qwen3_5_moe")]
+            $crate::TextModelArch::Qwen3_5Moe => $crate::models::qwen3_5_moe::Qwen3_5MoeConfig::from_path($config_path)?.into_config(),
+            #[cfg(feature = "phi4")]
+            $crate::TextModelArch::Phi4 => $crate::models::phi4::Phi4Config::from_path($config_path)?.into_config(),
+            #[cfg(feature = "mistral")]
+            $crate::TextModelArch::Mistral => $crate::models::mistral::MistralConfig::from_path($config_path)?.into_config(),
+            #[cfg(feature = "gemma3")]
+            $crate::TextModelArch::Gemma3 => $crate::models::gemma3::Gemma3Config::from_path($config_path)?.into_config(),
+            #[cfg(feature = "falcon3")]
+            $crate::TextModelArch::Falcon3 => $crate::models::falcon3::Falcon3Config::from_path($config_path)?.into_config(),
+            #[cfg(feature = "olmo2")]
+            $crate::TextModelArch::OLMo2 => $crate::models::olmo2::OLMo2Config::from_path($config_path)?.into_config(),
+            #[cfg(feature = "exaone4")]
+            $crate::TextModelArch::EXAONE4 => $crate::models::exaone4::EXAONE4Config::from_path($config_path)?.into_config(),
+            #[cfg(feature = "llama")]
+            $crate::TextModelArch::Llama => $crate::models::llama3::LlamaConfig::from_path($config_path)?.into_config(),
+            #[allow(unreachable_patterns)]
+            _ => ::anyhow::bail!("no text model feature enabled for architecture {:?}", $arch),
+        }
+    };
+}
+
 pub mod backends;
 pub mod cake;
 pub mod models;

@@ -269,113 +269,61 @@ impl Context {
 
                 log::info!("text model architecture: {:?}", text_model_arch);
 
-                let config_internal = match text_model_arch {
-                    #[cfg(feature = "qwen2")]
-                    TextModelArch::Qwen2 => {
-                        crate::models::qwen2::QwenConfig::from_path(&config_filename)?.into_config()
-                    }
-                    #[cfg(feature = "qwen3_5")]
-                    TextModelArch::Qwen3_5 => {
-                        crate::models::qwen3_5::Qwen3_5Config::from_path(&config_filename)?
-                            .into_config()
-                    }
-                    #[cfg(feature = "qwen3")]
-                    TextModelArch::Qwen3 => {
-                        crate::models::qwen3::Qwen3Config::from_path(&config_filename)?
-                            .into_config()
-                    }
-                    #[cfg(feature = "qwen3_moe")]
-                    TextModelArch::Qwen3Moe => {
-                        crate::models::qwen3_moe::Qwen3MoeConfig::from_path(&config_filename)?
-                            .into_config()
-                    }
-                    #[cfg(feature = "qwen3_5_moe")]
-                    TextModelArch::Qwen3_5Moe => {
-                        crate::models::qwen3_5_moe::Qwen3_5MoeConfig::from_path(&config_filename)?
-                            .into_config()
-                    }
-                    #[cfg(feature = "phi4")]
-                    TextModelArch::Phi4 => {
-                        crate::models::phi4::Phi4Config::from_path(&config_filename)?.into_config()
-                    }
-                    #[cfg(feature = "mistral")]
-                    TextModelArch::Mistral => {
-                        crate::models::mistral::MistralConfig::from_path(&config_filename)?
-                            .into_config()
-                    }
-                    #[cfg(feature = "gemma3")]
-                    TextModelArch::Gemma3 => {
-                        crate::models::gemma3::Gemma3Config::from_path(&config_filename)?
-                            .into_config()
-                    }
-                    #[cfg(feature = "falcon3")]
-                    TextModelArch::Falcon3 => {
-                        crate::models::falcon3::Falcon3Config::from_path(&config_filename)?
-                            .into_config()
-                    }
-                    #[cfg(feature = "olmo2")]
-                    TextModelArch::OLMo2 => {
-                        crate::models::olmo2::OLMo2Config::from_path(&config_filename)?
-                            .into_config()
-                    }
-                    #[cfg(feature = "exaone4")]
-                    TextModelArch::EXAONE4 => {
-                        crate::models::exaone4::EXAONE4Config::from_path(&config_filename)?
-                            .into_config()
-                    }
-                    #[cfg(feature = "luxtts")]
-                    TextModelArch::LuxTTS => {
-                        let luxtts_cfg =
-                            crate::models::luxtts::LuxTTSConfig::from_path(&config_filename)?;
-                        // Create a minimal common Config for the framework
-                        Config {
-                            hidden_size: luxtts_cfg.model.fm_decoder_dim,
-                            intermediate_size: luxtts_cfg.model.fm_decoder_feedforward_dim,
-                            vocab_size: luxtts_cfg.model.vocab_size,
-                            num_hidden_layers: luxtts_cfg.total_fm_layers(),
-                            num_attention_heads: luxtts_cfg.model.fm_decoder_num_heads,
-                            num_key_value_heads: luxtts_cfg.model.fm_decoder_num_heads,
-                            rms_norm_eps: 1e-5,
-                            rope_theta: 10000.0,
-                            bos_token_id: None,
-                            eos_token_id: None,
-                            rope_scaling: None,
-                            tie_word_embeddings: false,
-                            max_seq_len: 4096,
-                            use_qkv_bias: false,
-                            model_prefix: "fm_decoder".to_string(),
-                            head_dim: None,
-                            partial_rotary_factor: 1.0,
-                            linear_attn: None,
-                            residual_rms_norm: false,
-                            use_qk_norm: false,
-                            pre_reshape_qk_norm: false,
-                            sliding_window: None,
-                            fused_qkv_proj: false,
-                            fused_gate_up_proj: false,
-                            global_layers: vec![],
-                            use_gelu_mlp: false,
-                            embed_scale: None,
-                            moe_intermediate_size: None,
-                            num_experts: 0,
-                            num_experts_per_tok: 0,
-                            norm_topk_prob: false,
-                            shared_expert_intermediate_size: None,
-                            attn_output_gate: false,
+                // LuxTTS has a unique Config construction — handle separately.
+                // All other text models use dispatch_config_load! macro.
+                #[cfg(feature = "luxtts")]
+                let luxtts_override = text_model_arch == TextModelArch::LuxTTS;
+                #[cfg(not(feature = "luxtts"))]
+                let luxtts_override = false;
+
+                let config_internal = if luxtts_override {
+                    {
+                        #[cfg(feature = "luxtts")]
+                        {
+                            let luxtts_cfg =
+                                crate::models::luxtts::LuxTTSConfig::from_path(&config_filename)?;
+                            Config {
+                                hidden_size: luxtts_cfg.model.fm_decoder_dim,
+                                intermediate_size: luxtts_cfg.model.fm_decoder_feedforward_dim,
+                                vocab_size: luxtts_cfg.model.vocab_size,
+                                num_hidden_layers: luxtts_cfg.total_fm_layers(),
+                                num_attention_heads: luxtts_cfg.model.fm_decoder_num_heads,
+                                num_key_value_heads: luxtts_cfg.model.fm_decoder_num_heads,
+                                rms_norm_eps: 1e-5,
+                                rope_theta: 10000.0,
+                                bos_token_id: None,
+                                eos_token_id: None,
+                                rope_scaling: None,
+                                tie_word_embeddings: false,
+                                max_seq_len: 4096,
+                                use_qkv_bias: false,
+                                model_prefix: "fm_decoder".to_string(),
+                                head_dim: None,
+                                partial_rotary_factor: 1.0,
+                                linear_attn: None,
+                                residual_rms_norm: false,
+                                use_qk_norm: false,
+                                pre_reshape_qk_norm: false,
+                                sliding_window: None,
+                                fused_qkv_proj: false,
+                                fused_gate_up_proj: false,
+                                global_layers: vec![],
+                                use_gelu_mlp: false,
+                                embed_scale: None,
+                                moe_intermediate_size: None,
+                                num_experts: 0,
+                                num_experts_per_tok: 0,
+                                norm_topk_prob: false,
+                                shared_expert_intermediate_size: None,
+                                attn_output_gate: false,
+                            }
                         }
+                        #[cfg(not(feature = "luxtts"))]
+                        unreachable!()
                     }
-                    #[cfg(feature = "llama")]
-                    TextModelArch::Llama => {
-                        crate::models::llama3::LlamaConfig::from_path(&config_filename)?
-                            .into_config()
-                    }
-                    _ => {
-                        bail!(
-                            "no text model feature enabled for architecture {:?}",
-                            text_model_arch
-                        )
-                    }
-                };
+                    } else {
+                        crate::dispatch_config_load!(text_model_arch, &config_filename)
+                    };
 
                 let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
                 quant = Arc::from(utils::detect_quantization(&config_filename));
