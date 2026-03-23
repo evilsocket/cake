@@ -98,7 +98,7 @@ impl Client {
         );
 
         match msg {
-            Message::Tensor(raw) => Ok(raw.to_tensor(&self.device)?),
+            Message::Tensor(raw) => Ok(raw.into_tensor(&self.device)?),
             Message::WorkerError { message } => Err(anyhow!(
                 "worker {} reported error: {}",
                 &self.address,

@@ -75,6 +75,45 @@ impl RawTensor {
             device,
         )?)
     }
+
+    /// Consume self and create a Tensor, avoiding a copy on CPU by reusing the data buffer.
+    pub fn into_tensor(self, device: &Device) -> Result<Tensor> {
+        let dtype = u8_to_dtype(self.dtype)?;
+        if matches!(device, Device::Cpu) {
+            // Reinterpret owned Vec<u8> directly as typed storage — avoids memcpy.
+            Self::vec_u8_to_tensor(self.data, dtype, &self.shape)
+        } else {
+            // GPU path must copy to device memory regardless.
+            Ok(Tensor::from_raw_buffer(&self.data, dtype, &self.shape, device)?)
+        }
+    }
+
+    /// Zero-copy conversion of Vec<u8> → CPU Tensor by reinterpreting bytes.
+    fn vec_u8_to_tensor(data: Vec<u8>, dtype: DType, shape: &[usize]) -> Result<Tensor> {
+        macro_rules! reinterpret {
+            ($t:ty) => {{
+                let elem_size = std::mem::size_of::<$t>();
+                let numel = data.len() / elem_size;
+                assert_eq!(data.len() % elem_size, 0, "data length not aligned to element size");
+                let mut data = std::mem::ManuallyDrop::new(data);
+                let ptr = data.as_mut_ptr() as *mut $t;
+                let cap = data.capacity() / elem_size;
+                let typed = unsafe { Vec::from_raw_parts(ptr, numel, cap) };
+                Ok(Tensor::from_vec(typed, shape, &Device::Cpu)?)
+            }};
+        }
+        match dtype {
+            DType::U8 => reinterpret!(u8),
+            DType::U32 => reinterpret!(u32),
+            DType::I64 => reinterpret!(i64),
+            DType::BF16 => reinterpret!(half::bf16),
+            DType::F16 => reinterpret!(half::f16),
+            DType::F32 => reinterpret!(f32),
+            DType::F64 => reinterpret!(f64),
+            // F8E4M3 and other exotic types fall back to the copy path
+            _ => Ok(Tensor::from_raw_buffer(&data, dtype, shape, &Device::Cpu)?),
+        }
+    }
 }
 
 /// Diagnostic information about a worker.
