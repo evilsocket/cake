@@ -31,11 +31,12 @@ pub fn encode_wav_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     // data chunk
     buf.extend_from_slice(b"data");
     buf.extend_from_slice(&data_size.to_le_bytes());
-    for &s in samples {
-        let clamped = s.clamp(-1.0, 1.0);
-        let i = (clamped * 32767.0) as i16;
-        buf.extend_from_slice(&i.to_le_bytes());
-    }
+    // Convert all samples to i16 bytes in one pass — single extend_from_slice
+    let sample_bytes: Vec<u8> = samples
+        .iter()
+        .flat_map(|&s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())
+        .collect();
+    buf.extend_from_slice(&sample_bytes);
     buf
 }
 
