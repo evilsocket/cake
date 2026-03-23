@@ -309,7 +309,7 @@ impl Message {
     where
         W: AsyncWriteExt + Unpin,
     {
-        let mut buf = Vec::new();
+        let mut buf = Vec::with_capacity(8 + self.serialized_size_hint());
         self.to_writer_buf(writer, &mut buf).await
     }
 
