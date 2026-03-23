@@ -336,6 +336,61 @@ impl candle_core::CustomOp2 for MetalDepthwiseConv1dSilu {
     }
 }
 
+struct MetalDepthwiseConv1dBias;
+
+impl candle_core::CustomOp3 for MetalDepthwiseConv1dBias {
+    fn name(&self) -> &'static str { "metal_depthwise_conv1d_bias" }
+
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("MetalDepthwiseConv1dBias: expected Metal device")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn metal_fwd(
+        &self,
+        s_in: &candle_core::MetalStorage, l_in: &Layout,
+        s_wt: &candle_core::MetalStorage, l_wt: &Layout,
+        s_bias: &candle_core::MetalStorage, l_bias: &Layout,
+    ) -> Result<(candle_core::MetalStorage, Shape)> {
+        let device = s_in.device();
+        // padded_input: (batch, channels, t_padded)
+        let in_dims = l_in.shape().dims();
+        let (batch, channels, t_padded) = (in_dims[0], in_dims[1], in_dims[2]);
+        // weight: (channels, 1, kernel_size) or (channels, kernel_size)
+        let wt_dims = l_wt.shape().dims();
+        let kernel_size = wt_dims[wt_dims.len() - 1];
+        let out_len = t_padded - kernel_size + 1;
+        let out_count = batch * channels * out_len;
+
+        let kernel_name: &'static str = match s_in.dtype() {
+            DType::F32 => "depthwise_conv1d_bias_f32",
+            DType::F16 => "depthwise_conv1d_bias_f16",
+            dt => candle_core::bail!("depthwise_conv1d_bias metal: unsupported dtype {dt:?}"),
+        };
+        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+        let output = device.new_buffer(out_count, s_in.dtype(), "dw_conv1d_bias")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let off_in = l_in.start_offset() * s_in.dtype().size_in_bytes();
+        let off_wt = l_wt.start_offset() * s_wt.dtype().size_in_bytes();
+        let off_bias = l_bias.start_offset() * s_bias.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s_in.buffer(), off_in));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (s_wt.buffer(), off_wt));
+        candle_metal_kernels::utils::set_param(&encoder, 2, (s_bias.buffer(), off_bias));
+        candle_metal_kernels::utils::set_param(&encoder, 3, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 4, out_count as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 5, channels as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 6, out_len as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 7, t_padded as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 8, kernel_size as u32);
+        let grid = objc2_metal::MTLSize { width: out_count, height: 1, depth: 1 };
+        let group = candle_metal_kernels::utils::get_block_dims(out_count, 1, 1);
+        encoder.dispatch_threads(grid, group);
+        let out_shape = Shape::from(vec![batch, channels, out_len]);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), out_count, s_in.dtype()), out_shape))
+    }
+}
+
 // ─── MetalBackend ────────────────────────────────────────────────────
 
 /// Metal backend -- MSL kernels for fused ops, candle tensor ops for everything else.
@@ -415,23 +470,12 @@ impl ComputeBackend for MetalBackend {
     fn depthwise_conv1d_bias(
         &self,
         padded_input: &Tensor, weight: &Tensor, bias: &Tensor,
-        kernel_size: usize, _channels: usize,
+        _kernel_size: usize, _channels: usize,
     ) -> Result<Tensor> {
-        let (_b, _channels, t_padded) = padded_input.dims3()?;
-        let out_len = t_padded - kernel_size + 1;
-        let mut acc: Option<Tensor> = None;
-        for k in 0..kernel_size {
-            let slice = padded_input.narrow(2, k, out_len)?;
-            let w_k = weight.narrow(1, k, 1)?.unsqueeze(0)?;
-            let term = slice.broadcast_mul(&w_k)?;
-            acc = Some(match acc {
-                None => term,
-                Some(a) => (a + term)?,
-            });
-        }
-        let out = acc.unwrap();
-        let bias = bias.unsqueeze(0)?.unsqueeze(2)?;
-        out.broadcast_add(&bias)
+        // Flatten weight from (channels, 1, kernel_size) to (channels, kernel_size)
+        // for the MSL kernel's contiguous memory access pattern
+        let weight_flat = weight.contiguous()?.flatten(1, 2)?;
+        padded_input.apply_op3_no_bwd(&weight_flat, bias, &MetalDepthwiseConv1dBias)
     }
 
     fn depthwise_conv1d_bias_ctx(

@@ -190,6 +190,62 @@ kernel void depthwise_conv1d_silu_f16(
     output[idx] = half(dot / (1.0f + exp(-dot)));
 }
 
+// ─── depthwise_conv1d_bias: conv1d + bias for (batch, channels, time) ────
+// padded_input: (batch, channels, t_padded), weight: (channels, 1, kernel_size)
+// bias: (channels,), output: (batch, channels, out_len) where out_len = t_padded - kernel_size + 1
+// Each thread computes one output element at (batch, channel, time_out)
+kernel void depthwise_conv1d_bias_f32(
+    device const float* input [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& out_count [[buffer(4)]],
+    constant uint& channels [[buffer(5)]],
+    constant uint& out_len [[buffer(6)]],
+    constant uint& t_padded [[buffer(7)]],
+    constant uint& kernel_size [[buffer(8)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= out_count) return;
+    // Decode flat index into (batch_idx, channel, time_out)
+    uint t_out = idx % out_len;
+    uint c = (idx / out_len) % channels;
+    uint b = idx / (out_len * channels);
+    // Accumulate convolution
+    float acc = 0.0f;
+    uint in_base = (b * channels + c) * t_padded + t_out;
+    uint w_base = c * kernel_size;
+    for (uint k = 0; k < kernel_size; k++) {
+        acc += input[in_base + k] * weight[w_base + k];
+    }
+    output[idx] = acc + bias[c];
+}
+
+kernel void depthwise_conv1d_bias_f16(
+    device const half* input [[buffer(0)]],
+    device const half* weight [[buffer(1)]],
+    device const half* bias [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& out_count [[buffer(4)]],
+    constant uint& channels [[buffer(5)]],
+    constant uint& out_len [[buffer(6)]],
+    constant uint& t_padded [[buffer(7)]],
+    constant uint& kernel_size [[buffer(8)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= out_count) return;
+    uint t_out = idx % out_len;
+    uint c = (idx / out_len) % channels;
+    uint b = idx / (out_len * channels);
+    float acc = 0.0f;
+    uint in_base = (b * channels + c) * t_padded + t_out;
+    uint w_base = c * kernel_size;
+    for (uint k = 0; k < kernel_size; k++) {
+        acc += float(input[in_base + k]) * float(weight[w_base + k]);
+    }
+    output[idx] = half(acc + float(bias[c]));
+}
+
 kernel void sub_mul_f16(
     device const half* a [[buffer(0)]],
     device const half* b [[buffer(1)]],
