@@ -162,7 +162,7 @@ impl RocmBackend {
             device: Device::Cpu,
             ffi,
             blas_handle: handle,
-            cache: RwLock::new(HashMap::new()),
+            cache: RwLock::new(HashMap::with_capacity(64)),
         })
     }
 
