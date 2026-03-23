@@ -544,8 +544,8 @@ impl VulkanBackend {
             ],
         });
 
-        let wg_m = (m as u32).div_ceil(32);
-        let wg_n = (n as u32).div_ceil(32);
+        let wg_m = (m as u32).div_ceil(16);
+        let wg_n = (n as u32).div_ceil(16);
         let mut enc = self.gpu.create_command_encoder(&Default::default());
         {
             let mut p = enc.begin_compute_pass(&Default::default());
