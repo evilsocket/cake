@@ -165,6 +165,84 @@ jobs:
           IPHONEOS_DEPLOYMENT_TARGET: "16.0"
         run: cargo test --target=aarch64-apple-ios -p cake-core --test protocol --no-default-features --features "llama,qwen2,qwen3_5,qwen3,qwen3_moe,qwen3_5_moe,phi4,mistral,gemma3,falcon3,olmo2,exaone4,flux,vibevoice,luxtts,metal" --no-run
 
+  build-features:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-cuda
+            os: ubuntu-latest
+            features: cuda
+            cuda: "12.4.0"
+
+          - name: linux-flash-attn
+            os: ubuntu-latest
+            features: flash-attn
+            cuda: "12.4.0"
+
+          - name: linux-vulkan
+            os: ubuntu-latest
+            features: vulkan
+            cuda: ""
+
+          - name: linux-rocm
+            os: ubuntu-latest
+            features: rocm
+            cuda: ""
+
+          - name: macos-metal
+            os: macos-latest
+            features: metal
+            cuda: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y lld
+
+      - name: Install CUDA toolkit
+        if: matrix.cuda != ''
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: ${{ matrix.cuda }}
+          method: network
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.name }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-${{ matrix.name }}-
+
+      - name: Build (cake-core + cake-cli)
+        run: cargo build -p cake-core -p cake-cli --features "${{ matrix.features }}"
+
+      - name: Clippy
+        run: cargo clippy -p cake-core --lib --tests -p cake-cli --features "${{ matrix.features }}" -- -D warnings
+
+      - name: Compile tests (cake-core lib)
+        run: cargo test -p cake-core --lib --features "${{ matrix.features }}" --no-run
+
+      - name: Compile tests (cake-core unit)
+        run: cargo test -p cake-core --test unit --features "${{ matrix.features }}" --no-run
+
+      - name: Compile tests (cake-core protocol)
+        run: cargo test -p cake-core --test protocol --features "${{ matrix.features }}" --no-run
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
