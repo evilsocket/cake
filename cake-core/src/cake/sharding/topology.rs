@@ -41,12 +41,15 @@ pub struct Node {
 impl Node {
     /// Return true if this node hosts the specified layer.
     pub fn is_text_model_layer_owner(&self, full_layer_name: &str) -> bool {
+        let name_bytes = full_layer_name.as_bytes();
         for prefix in self.layers.iter() {
-            if full_layer_name.starts_with(&format!("{}.", prefix)) {
+            let plen = prefix.len();
+            if full_layer_name.starts_with(prefix.as_str())
+                && name_bytes.get(plen) == Some(&b'.')
+            {
                 return true;
             }
         }
-
         false
     }
 
