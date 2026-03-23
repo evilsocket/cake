@@ -178,26 +178,31 @@ jobs:
             os: ubuntu-latest
             features: cuda
             cuda: "12.4.0"
+            compute_cap: "89"
 
           - name: linux-flash-attn
             os: ubuntu-latest
             features: flash-attn
             cuda: "12.4.0"
+            compute_cap: "89"
 
           - name: linux-vulkan
             os: ubuntu-latest
             features: vulkan
             cuda: ""
+            compute_cap: ""
 
           - name: linux-rocm
             os: ubuntu-latest
             features: rocm
             cuda: ""
+            compute_cap: ""
 
           - name: macos-metal
             os: macos-latest
             features: metal
             cuda: ""
+            compute_cap: ""
 
     steps:
       - uses: actions/checkout@v4
@@ -231,18 +236,28 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-${{ matrix.name }}-
 
       - name: Build (cake-core + cake-cli)
+        env:
+          CUDA_COMPUTE_CAP: ${{ matrix.compute_cap }}
         run: cargo build -p cake-core -p cake-cli --features "${{ matrix.features }}"
 
       - name: Clippy
+        env:
+          CUDA_COMPUTE_CAP: ${{ matrix.compute_cap }}
         run: cargo clippy -p cake-core --lib --tests -p cake-cli --features "${{ matrix.features }}" -- -D warnings
 
       - name: Compile tests (cake-core lib)
+        env:
+          CUDA_COMPUTE_CAP: ${{ matrix.compute_cap }}
         run: cargo test -p cake-core --lib --features "${{ matrix.features }}" --no-run
 
       - name: Compile tests (cake-core unit)
+        env:
+          CUDA_COMPUTE_CAP: ${{ matrix.compute_cap }}
         run: cargo test -p cake-core --test unit --features "${{ matrix.features }}" --no-run
 
       - name: Compile tests (cake-core protocol)
+        env:
+          CUDA_COMPUTE_CAP: ${{ matrix.compute_cap }}
         run: cargo test -p cake-core --test protocol --features "${{ matrix.features }}" --no-run
 
   clippy:
