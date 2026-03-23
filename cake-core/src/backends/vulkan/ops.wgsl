@@ -157,9 +157,7 @@ fn gemv(@builtin(global_invocation_id) gid: vec3<u32>,
     let N = gemv_params.N;
     let K = gemv_params.K;
 
-    // Kahan compensated summation for numerical stability across K elements
     var acc: f32 = 0.0;
-    var comp: f32 = 0.0;  // compensation term
     let num_tiles = (K + 255u) / 256u;
 
     for (var t: u32 = 0u; t < num_tiles; t++) {
@@ -178,10 +176,7 @@ fn gemv(@builtin(global_invocation_id) gid: vec3<u32>,
             let tile_base = t * 256u;
             let tile_end = min(256u, K - tile_base);
             for (var k: u32 = 0u; k < tile_end; k++) {
-                let y = gemv_shared[k] * gemv_w[(tile_base + k) * N + col] - comp;
-                let t_val = acc + y;
-                comp = (t_val - acc) - y;
-                acc = t_val;
+                acc += gemv_shared[k] * gemv_w[(tile_base + k) * N + col];
             }
         }
         workgroupBarrier();
