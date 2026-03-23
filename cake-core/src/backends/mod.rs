@@ -294,9 +294,48 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
     ) -> Result<Tensor> {
         use candle_core::DType;
         let x_shape = x.dims();
+        let x_dtype = x.dtype();
+        // Fast path: F32 CPU data — single-pass raw computation
+        if x_dtype == DType::F32 {
+            let (b_sz, n_channels) = (x_shape[0], x_shape[1]);
+            let spatial: usize = x_shape[2..].iter().product();
+            let channels_per_group = n_channels / num_groups;
+            let group_size = channels_per_group * spatial;
+            let x_data = x.contiguous()?.flatten_all()?.to_vec1::<f32>()?;
+            let w_data = weight.to_vec1::<f32>()?;
+            let b_data = bias.to_vec1::<f32>()?;
+            let mut out = vec![0f32; x_data.len()];
+            for batch in 0..b_sz {
+                let batch_off = batch * n_channels * spatial;
+                for g in 0..num_groups {
+                    let group_off = batch_off + g * group_size;
+                    let mut sum = 0f64;
+                    let mut sum_sq = 0f64;
+                    for i in 0..group_size {
+                        let v = x_data[group_off + i] as f64;
+                        sum += v;
+                        sum_sq += v * v;
+                    }
+                    let mean = sum / group_size as f64;
+                    let var = sum_sq / group_size as f64 - mean * mean;
+                    let rstd = 1.0 / (var + eps as f64).sqrt();
+                    for c in 0..channels_per_group {
+                        let ch = g * channels_per_group + c;
+                        let w = w_data[ch] as f64;
+                        let b = b_data[ch] as f64;
+                        let ch_off = group_off + c * spatial;
+                        for s in 0..spatial {
+                            let v = x_data[ch_off + s] as f64;
+                            out[ch_off + s] = ((v - mean) * rstd * w + b) as f32;
+                        }
+                    }
+                }
+            }
+            return Tensor::from_vec(out, x_shape, x.device());
+        }
+        // Fallback: tensor ops with dtype promotion
         let (b_sz, n_channels) = (x_shape[0], x_shape[1]);
         let hidden_size = x_shape[2..].iter().product::<usize>() * n_channels / num_groups;
-        let x_dtype = x.dtype();
         let internal_dtype = match x_dtype {
             DType::F16 | DType::BF16 => DType::F32,
             d => d,
@@ -382,29 +421,61 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
         if seq_len == 1 {
             return Tensor::zeros((1, kv_len), DType::U8, device);
         }
-        // Build lower-triangular mask: j > i means future position (masked)
-        let mask: Vec<u8> = (0..seq_len)
-            .flat_map(|i| (0..seq_len).map(move |j| u8::from(j > i)))
-            .collect();
-        let mask = Tensor::from_slice(&mask, (seq_len, seq_len), device)?;
-        if kv_len > seq_len {
-            // Prepend zeros: all positions attend to cached KV prefix
-            let pad = Tensor::zeros((seq_len, kv_len - seq_len), DType::U8, device)?;
-            Tensor::cat(&[&pad, &mask], 1)
-        } else {
-            Ok(mask)
+        // Build full (seq_len, kv_len) mask in one allocation — no Tensor::cat.
+        let prefix = kv_len.saturating_sub(seq_len);
+        let mut mask = vec![0u8; seq_len * kv_len];
+        for i in 0..seq_len {
+            let row_start = i * kv_len + prefix + i + 1;
+            let row_end = (i + 1) * kv_len;
+            if row_start < row_end {
+                mask[row_start..row_end].fill(1);
+            }
         }
+        Tensor::from_vec(mask, (seq_len, kv_len), device)
     }
 
     /// Top-K selection: returns `(values, indices)` for the largest K elements
-    /// along the last dimension. More efficient than full sort for large N.
+    /// along the last dimension. Uses partial sort O(N + K log K) for large N.
     fn topk(&self, x: &Tensor, k: usize) -> Result<(Tensor, Tensor)> {
-        // Default: full sort then narrow (O(N log N))
-        let last_dim = x.rank() - 1;
-        let (sorted, indices) = x.sort_last_dim(false)?;
-        let top_vals = sorted.narrow(last_dim, 0, k)?;
-        let top_idx = indices.narrow(last_dim, 0, k)?;
-        Ok((top_vals, top_idx))
+        let x = x.contiguous()?;
+        let shape = x.shape();
+        let last = shape.dims().last().copied().unwrap_or(0);
+        if last <= 32 || k * 2 >= last {
+            let last_dim = x.rank() - 1;
+            let (sorted, indices) = x.sort_last_dim(false)?;
+            let top_vals = sorted.narrow(last_dim, 0, k)?;
+            let top_idx = indices.narrow(last_dim, 0, k)?;
+            return Ok((top_vals, top_idx));
+        }
+        let rank = x.rank();
+        let batch: usize = shape.dims()[..rank - 1].iter().product();
+        let flat = x.reshape((batch, last))?;
+        let data = flat.to_vec2::<f32>()?;
+        let mut all_vals = Vec::with_capacity(batch * k);
+        let mut all_idxs = Vec::with_capacity(batch * k);
+        for row in &data {
+            let mut indices: Vec<u32> = (0..last as u32).collect();
+            indices.select_nth_unstable_by(k - 1, |&a, &b| {
+                row[b as usize]
+                    .partial_cmp(&row[a as usize])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let top_slice = &mut indices[..k];
+            top_slice.sort_unstable_by(|&a, &b| {
+                row[b as usize]
+                    .partial_cmp(&row[a as usize])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for &idx in top_slice.iter() {
+                all_vals.push(row[idx as usize]);
+                all_idxs.push(idx);
+            }
+        }
+        let mut out_shape: Vec<usize> = shape.dims()[..rank - 1].to_vec();
+        out_shape.push(k);
+        let vals = Tensor::from_vec(all_vals, out_shape.as_slice(), x.device())?;
+        let idxs = Tensor::from_vec(all_idxs, out_shape.as_slice(), x.device())?;
+        Ok((vals, idxs))
     }
 
     // ── Convolutions ──────────────────────────────────────────────────
