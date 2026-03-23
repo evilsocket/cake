@@ -281,9 +281,36 @@ impl Qwen3_5MoeSparseMlp {
         let mut output = Tensor::zeros((n_tok, h), compute_dtype, x_flat.device())
             .map_err(|e| anyhow!("output zeros: {e}"))?;
 
-        // Dispatch: gather → expert FFN → weighted scatter-add
+        // Dispatch: per-expert FFN with single-token fast path
         for (exp_idx, tokens) in expert_tokens.iter().enumerate() {
             if tokens.is_empty() {
+                continue;
+            }
+
+            let ew = self.expert_provider.get_expert(exp_idx)
+                .map_err(|e| anyhow!("get_expert({exp_idx}): {e}"))?;
+
+            // Single-token fast path: skip index_select/index_add, use narrow + scalar mul
+            if tokens.len() == 1 {
+                let (tok, w) = tokens[0];
+                let x_tok = x_flat.narrow(0, tok, 1)
+                    .map_err(|e| anyhow!("narrow: {e}"))?;
+                let gate_out = x_tok.matmul(&ew.gate_proj.t()
+                    .map_err(|e| anyhow!("gate_proj t: {e}"))?)
+                    .map_err(|e| anyhow!("gate matmul: {e}"))?;
+                let up_out = x_tok.matmul(&ew.up_proj.t()
+                    .map_err(|e| anyhow!("up_proj t: {e}"))?)
+                    .map_err(|e| anyhow!("up matmul: {e}"))?;
+                let hidden = self.backend.silu_mul(&gate_out, &up_out)
+                    .map_err(|e| anyhow!("silu_mul: {e}"))?;
+                let expert_out = (hidden.matmul(&ew.down_proj.t()
+                    .map_err(|e| anyhow!("down_proj t: {e}"))?)
+                    .map_err(|e| anyhow!("down matmul: {e}"))? * w as f64)
+                    .map_err(|e| anyhow!("scale: {e}"))?;
+                let idx = Tensor::new(&[tok as u32], x_flat.device())
+                    .map_err(|e| anyhow!("idx: {e}"))?;
+                output = output.index_add(&idx, &expert_out, 0)
+                    .map_err(|e| anyhow!("index_add: {e}"))?;
                 continue;
             }
 
@@ -295,16 +322,14 @@ impl Qwen3_5MoeSparseMlp {
 
             let selected = x_flat
                 .index_select(&idx, 0)
-                .map_err(|e| anyhow!("index_select: {e}"))?; // (n_sel, h)
+                .map_err(|e| anyhow!("index_select: {e}"))?;
 
-            let ew = self.expert_provider.get_expert(exp_idx)
-                .map_err(|e| anyhow!("get_expert({exp_idx}): {e}"))?;
             let gate_out = selected.matmul(&ew.gate_proj.t()
                 .map_err(|e| anyhow!("gate_proj t: {e}"))?)
-                .map_err(|e| anyhow!("expert gate matmul: {e}"))?; // (n_sel, i)
+                .map_err(|e| anyhow!("expert gate matmul: {e}"))?;
             let up_out = selected.matmul(&ew.up_proj.t()
                 .map_err(|e| anyhow!("up_proj t: {e}"))?)
-                .map_err(|e| anyhow!("expert up matmul: {e}"))?; // (n_sel, i)
+                .map_err(|e| anyhow!("expert up matmul: {e}"))?;
 
             let hidden = self.backend.silu_mul(
                 &gate_out,
@@ -314,9 +339,8 @@ impl Qwen3_5MoeSparseMlp {
 
             let expert_out = hidden.matmul(&ew.down_proj.t()
                 .map_err(|e| anyhow!("down_proj t: {e}"))?)
-                .map_err(|e| anyhow!("expert down matmul: {e}"))?; // (n_sel, h)
+                .map_err(|e| anyhow!("expert down matmul: {e}"))?;
 
-            // Scale by routing weight — broadcast_mul avoids materializing full (n_sel, h) weight tensor
             let w_t = Tensor::new(weights.as_slice(), x_flat.device())
                 .map_err(|e| anyhow!("w tensor: {e}"))?
                 .to_dtype(compute_dtype)

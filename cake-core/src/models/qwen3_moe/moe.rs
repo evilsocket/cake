@@ -180,6 +180,35 @@ impl SparseMoeMlp {
                 continue;
             }
 
+            let ew = self
+                .expert_provider
+                .get_expert(exp_idx)
+                .map_err(|e| anyhow!("moe get_expert({exp_idx}) -> {e}"))?;
+
+            // Single-token fast path: skip index_select/index_add, use narrow + scalar mul
+            if tokens.len() == 1 {
+                let (tok, w) = tokens[0];
+                let x_tok = x_flat.narrow(0, tok, 1)
+                    .map_err(|e| anyhow!("moe narrow -> {e}"))?;
+                let gate_out = x_tok.matmul(&ew.gate_proj.t()
+                    .map_err(|e| anyhow!("moe gp.t -> {e}"))?)
+                    .map_err(|e| anyhow!("moe gate matmul -> {e}"))?;
+                let up_out = x_tok.matmul(&ew.up_proj.t()
+                    .map_err(|e| anyhow!("moe up.t -> {e}"))?)
+                    .map_err(|e| anyhow!("moe up matmul -> {e}"))?;
+                let hidden = self.backend.silu_mul(&gate_out, &up_out)
+                    .map_err(|e| anyhow!("moe silu_mul -> {e}"))?;
+                let expert_out = (hidden.matmul(&ew.down_proj.t()
+                    .map_err(|e| anyhow!("moe dp.t -> {e}"))?)
+                    .map_err(|e| anyhow!("moe down matmul -> {e}"))? * w as f64)
+                    .map_err(|e| anyhow!("moe scale -> {e}"))?;
+                let idx = Tensor::new(&[tok as u32], x_flat.device())
+                    .map_err(|e| anyhow!("moe idx -> {e}"))?;
+                output = output.index_add(&idx, &expert_out, 0)
+                    .map_err(|e| anyhow!("moe index_add -> {e}"))?;
+                continue;
+            }
+
             let tok_ids: Vec<u32> = tokens.iter().map(|(t, _)| *t as u32).collect();
             let weights: Vec<f32> = tokens.iter().map(|(_, w)| *w).collect();
 
@@ -189,12 +218,6 @@ impl SparseMoeMlp {
             let selected = x_flat
                 .index_select(&idx, 0)
                 .map_err(|e| anyhow!("moe index_select -> {e}"))?;
-
-            // Get expert weights from provider
-            let ew = self
-                .expert_provider
-                .get_expert(exp_idx)
-                .map_err(|e| anyhow!("moe get_expert({exp_idx}) -> {e}"))?;
 
             let gate_out = selected
                 .matmul(&ew.gate_proj.t().map_err(|e| anyhow!("moe gp.t -> {e}"))?)
@@ -250,14 +273,11 @@ impl SparseMoeMlp {
             .squeeze(0)
             .map_err(|e| anyhow!("moe squeeze idx -> {e}"))?;
 
-        let sel_gate = stacked
-            .gate_proj()
+        // Fused gate+up: single index_select + single matmul instead of 2 each
+        let sel_gate_up = stacked
+            .gate_up_proj()
             .index_select(&expert_indices, 0)
-            .map_err(|e| anyhow!("moe sel gate_proj -> {e}"))?;
-        let sel_up = stacked
-            .up_proj()
-            .index_select(&expert_indices, 0)
-            .map_err(|e| anyhow!("moe sel up_proj -> {e}"))?;
+            .map_err(|e| anyhow!("moe sel gate_up -> {e}"))?;
         let sel_down = stacked
             .down_proj()
             .index_select(&expert_indices, 0)
@@ -269,12 +289,16 @@ impl SparseMoeMlp {
             .expand((k, 1, h))
             .map_err(|e| anyhow!("moe x expand -> {e}"))?;
 
-        let gate_out = x_exp
-            .matmul(&sel_gate.t().map_err(|e| anyhow!("moe sel gp.t -> {e}"))?)
-            .map_err(|e| anyhow!("moe batched gate matmul -> {e}"))?;
-        let up_out = x_exp
-            .matmul(&sel_up.t().map_err(|e| anyhow!("moe sel up.t -> {e}"))?)
-            .map_err(|e| anyhow!("moe batched up matmul -> {e}"))?;
+        // Single fused matmul for gate+up, then split
+        let gate_up_out = x_exp
+            .matmul(&sel_gate_up.t().map_err(|e| anyhow!("moe sel gu.t -> {e}"))?)
+            .map_err(|e| anyhow!("moe batched gate_up matmul -> {e}"))?;
+
+        let i = gate_up_out.dim(D::Minus1).map_err(|e| anyhow!("moe gu dim -> {e}"))? / 2;
+        let gate_out = gate_up_out.narrow(D::Minus1, 0, i)
+            .map_err(|e| anyhow!("moe gate narrow -> {e}"))?;
+        let up_out = gate_up_out.narrow(D::Minus1, i, i)
+            .map_err(|e| anyhow!("moe up narrow -> {e}"))?;
 
         let hidden = self.backend.silu_mul(
             &gate_out,

@@ -49,15 +49,20 @@ pub struct StackedResidentProvider {
     up_proj: Tensor,
     /// (num_experts, hidden_size, intermediate_size)
     down_proj: Tensor,
+    /// Fused gate+up: (num_experts, 2*intermediate_size, hidden_size)
+    gate_up_proj: Tensor,
     num_experts: usize,
 }
 
 impl StackedResidentProvider {
     pub fn new(gate_proj: Tensor, up_proj: Tensor, down_proj: Tensor, num_experts: usize) -> Self {
+        let gate_up_proj = Tensor::cat(&[&gate_proj, &up_proj], 1)
+            .expect("failed to fuse gate+up stacked tensors");
         Self {
             gate_proj,
             up_proj,
             down_proj,
+            gate_up_proj,
             num_experts,
         }
     }
@@ -71,6 +76,10 @@ impl StackedResidentProvider {
     }
     pub fn down_proj(&self) -> &Tensor {
         &self.down_proj
+    }
+    /// Fused gate+up: (num_experts, 2*intermediate_size, hidden_size)
+    pub fn gate_up_proj(&self) -> &Tensor {
+        &self.gate_up_proj
     }
 }
 
