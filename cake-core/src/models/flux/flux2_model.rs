@@ -95,18 +95,22 @@ fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
 
     let x = x.to_dtype(DType::F32)?;
 
-    // Split into interleaved pairs: reshape to (..., D/2, 2), unbind last dim
+    // Split into interleaved pairs: [B, H, S, D] → [B, H, S, D/2, 2]
     let x_pairs = x.reshape((b, h, s, d / 2, 2))?;
-    let x_real = x_pairs.narrow(D::Minus1, 0, 1)?.squeeze(D::Minus1)?; // [B, H, S, D/2]
+    let x_real = x_pairs.narrow(D::Minus1, 0, 1)?.squeeze(D::Minus1)?;
     let x_imag = x_pairs.narrow(D::Minus1, 1, 1)?.squeeze(D::Minus1)?;
 
-    // x_rotated = [-x_imag, x_real] interleaved
-    let neg_x_imag = x_imag.neg()?;
-    let x_rotated = Tensor::stack(&[&neg_x_imag, &x_real], D::Minus1)?
-        .reshape((b, h, s, d))?;
+    // Compute real and imaginary parts of rotation separately:
+    // out_real = x_real * cos_half - x_imag * sin_half
+    // out_imag = x_imag * cos_half + x_real * sin_half
+    // Then interleave back to [B, H, S, D]
+    let cos_half = cos.reshape((1, 1, s, d / 2, 2))?.narrow(D::Minus1, 0, 1)?.squeeze(D::Minus1)?;
+    let sin_half = sin.reshape((1, 1, s, d / 2, 2))?.narrow(D::Minus1, 0, 1)?.squeeze(D::Minus1)?;
 
-    // out = x * cos + x_rotated * sin
-    let out = (x.broadcast_mul(&cos)? + x_rotated.broadcast_mul(&sin)?)?;
+    let out_real = (&x_real * &cos_half)? - (&x_imag * &sin_half)?;
+    let out_imag = (&x_imag * &cos_half)? + (&x_real * &sin_half)?;
+
+    let out = Tensor::stack(&[&out_real?, &out_imag?], D::Minus1)?.reshape((b, h, s, d))?;
     out.to_dtype(dtype)
 }
 
