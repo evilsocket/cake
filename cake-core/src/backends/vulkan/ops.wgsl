@@ -39,17 +39,42 @@ fn silu_mul(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(256)
 fn exp_mul(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
-    if (i >= params.count) { return; }
-    output[i] = input_a[i] * exp(input_b[i]);
+    let base = gid.x * 4u;
+    let count = params.count;
+    if (base >= count) { return; }
+    if (base + 3u < count) {
+        let a = vec4(input_a[base], input_a[base + 1u], input_a[base + 2u], input_a[base + 3u]);
+        let b = vec4(input_b[base], input_b[base + 1u], input_b[base + 2u], input_b[base + 3u]);
+        let s = a * exp(b);
+        output[base] = s.x; output[base + 1u] = s.y;
+        output[base + 2u] = s.z; output[base + 3u] = s.w;
+    } else {
+        for (var j = 0u; j < 4u; j++) {
+            let idx = base + j;
+            if (idx < count) { output[idx] = input_a[idx] * exp(input_b[idx]); }
+        }
+    }
 }
 
 @compute @workgroup_size(256)
 fn stable_softplus(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
-    if (i >= params.count) { return; }
-    let x = input_a[i];
-    output[i] = max(x, log(exp(min(x, 88.0)) + 1.0));
+    let base = gid.x * 4u;
+    let count = params.count;
+    if (base >= count) { return; }
+    if (base + 3u < count) {
+        let x = vec4(input_a[base], input_a[base + 1u], input_a[base + 2u], input_a[base + 3u]);
+        let s = max(x, log(exp(min(x, vec4(88.0))) + vec4(1.0)));
+        output[base] = s.x; output[base + 1u] = s.y;
+        output[base + 2u] = s.z; output[base + 3u] = s.w;
+    } else {
+        for (var j = 0u; j < 4u; j++) {
+            let idx = base + j;
+            if (idx < count) {
+                let x = input_a[idx];
+                output[idx] = max(x, log(exp(min(x, 88.0)) + 1.0));
+            }
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -60,9 +85,22 @@ fn stable_softplus(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(256)
 fn sub_mul(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
-    if (i >= params.count) { return; }
-    output[i] = (input_a[i] - input_b[i]) * input_c[i];
+    let base = gid.x * 4u;
+    let count = params.count;
+    if (base >= count) { return; }
+    if (base + 3u < count) {
+        let a = vec4(input_a[base], input_a[base + 1u], input_a[base + 2u], input_a[base + 3u]);
+        let b = vec4(input_b[base], input_b[base + 1u], input_b[base + 2u], input_b[base + 3u]);
+        let c = vec4(input_c[base], input_c[base + 1u], input_c[base + 2u], input_c[base + 3u]);
+        let s = (a - b) * c;
+        output[base] = s.x; output[base + 1u] = s.y;
+        output[base + 2u] = s.z; output[base + 3u] = s.w;
+    } else {
+        for (var j = 0u; j < 4u; j++) {
+            let idx = base + j;
+            if (idx < count) { output[idx] = (input_a[idx] - input_b[idx]) * input_c[idx]; }
+        }
+    }
 }
 
 @compute @workgroup_size(256)
