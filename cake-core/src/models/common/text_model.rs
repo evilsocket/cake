@@ -345,8 +345,8 @@ impl TextModelBase {
             .lm_head
             .forward(&x)
             .map_err(|e| anyhow!("error in lm_head.forward: {e}"))?;
-        // Flush Metal command buffer before returning logits to CPU for sampling
-        let _ = self.ctx.backend.synchronize();
+        // Note: no explicit sync needed here — the CPU-side logits sampling
+        // (to_vec1 in LogitsProcessor) implicitly synchronizes the Metal command buffer.
         let head_elapsed = head_start.elapsed();
 
         let total_elapsed = forward_start.elapsed();
