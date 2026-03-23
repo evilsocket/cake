@@ -241,8 +241,10 @@ impl RocmBackend {
     }
 
     fn tensor_matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
-        let a = a.to_dtype(DType::F32)?.contiguous()?;
-        let b = b.to_dtype(DType::F32)?.contiguous()?;
+        let a = if a.dtype() == DType::F32 && a.is_contiguous() { a.clone() }
+            else { a.to_dtype(DType::F32)?.contiguous()? };
+        let b = if b.dtype() == DType::F32 && b.is_contiguous() { b.clone() }
+            else { b.to_dtype(DType::F32)?.contiguous()? };
         let ad = a.dims(); let bd = b.dims();
         let ra = ad.len(); let rb = bd.len();
         let m = ad[ra-2]; let k = ad[ra-1]; let n = bd[rb-1];
