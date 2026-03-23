@@ -657,6 +657,7 @@ impl VulkanBackend {
         params: &[u32],
         workgroups: (u32, u32, u32),
     ) -> Vec<f32> {
+        let t0 = std::time::Instant::now();
         let _lock = self.dispatch_lock.lock().unwrap();
         let (pipeline, pipe_layout, _ds_layout, descriptor_set, _num_bindings) =
             self.pipelines.get(entry).unwrap_or_else(|| panic!("unknown pipeline: {entry}"));
@@ -761,6 +762,8 @@ impl VulkanBackend {
                 .end_command_buffer(self.command_buffer)
                 .expect("end_command_buffer");
 
+            let t_record = t0.elapsed();
+
             // Submit
             let submit_info = vk::SubmitInfo::default()
                 .command_buffers(std::slice::from_ref(&self.command_buffer));
@@ -772,6 +775,14 @@ impl VulkanBackend {
             self.vk_device
                 .wait_for_fences(&[self.fence], true, u64::MAX)
                 .expect("wait_for_fences");
+
+            let t_gpu = t0.elapsed();
+            let gpu_us = (t_gpu - t_record).as_micros();
+            let record_us = t_record.as_micros();
+            if record_us + gpu_us > 100 {
+                log::debug!("dispatch {entry} wg=({},{},{}): record={record_us}µs gpu={gpu_us}µs total={}µs",
+                    workgroups.0, workgroups.1, workgroups.2, t_gpu.as_micros());
+            }
         }
 
         // Read output directly from mapped pointer
@@ -911,7 +922,7 @@ impl VulkanBackend {
             &buf_y,
             n,
             &[n as u32, k as u32, 0, 0],
-            ((n as u32).div_ceil(256), 1, 1),
+            ((n as u32).div_ceil(1024), 1, 1),
         );
         (result, buf_y)
     }
@@ -1011,7 +1022,7 @@ impl VulkanBackend {
             [m as u32, n as u32, k as u32, 0]
         };
         let workgroups = if is_gemv {
-            ((n as u32).div_ceil(256), 1, 1)
+            ((n as u32).div_ceil(1024), 1, 1)
         } else {
             ((m as u32).div_ceil(32), (n as u32).div_ceil(64), 1)
         };
