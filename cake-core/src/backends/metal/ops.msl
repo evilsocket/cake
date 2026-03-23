@@ -314,7 +314,7 @@ kernel void rms_norm_gated_f32(
     uint base = row * hidden;
     float val = x[base + col];
     SIMD_REDUCE_SUM(val * val, hidden, lane, simd_id)
-    float rms = rsqrt(_sr / float(hidden) + eps);
+    float rms = fast::rsqrt(_sr / float(hidden) + eps);
     float zv = z[base + col];
     float silu_z = zv * precise::recip(1.0f + fast::exp(-zv));
     output[base + col] = val * rms * weight[col] * silu_z;
@@ -336,7 +336,7 @@ kernel void rms_norm_gated_f16(
     uint base = row * hidden;
     float val = float(x[base + col]);
     SIMD_REDUCE_SUM(val * val, hidden, lane, simd_id)
-    float rms = rsqrt(_sr / float(hidden) + eps);
+    float rms = fast::rsqrt(_sr / float(hidden) + eps);
     float zv = float(z[base + col]);
     float silu_z = zv * precise::recip(1.0f + fast::exp(-zv));
     output[base + col] = half(val * rms * float(weight[col]) * silu_z);
@@ -361,7 +361,7 @@ kernel void add_rms_norm_f32(
     float res = a[base + col] + b[base + col];
     output[base + col] = res;
     SIMD_REDUCE_SUM(res * res, hidden, lane, simd_id)
-    output[el + base + col] = res * rsqrt(_sr / float(hidden) + eps) * weight[col];
+    output[el + base + col] = res * fast::rsqrt(_sr / float(hidden) + eps) * weight[col];
 }
 
 kernel void add_rms_norm_f16(
@@ -382,7 +382,7 @@ kernel void add_rms_norm_f16(
     float res = float(a[base + col]) + float(b[base + col]);
     output[base + col] = half(res);
     SIMD_REDUCE_SUM(res * res, hidden, lane, simd_id)
-    output[el + base + col] = half(res * rsqrt(_sr / float(hidden) + eps) * float(weight[col]));
+    output[el + base + col] = half(res * fast::rsqrt(_sr / float(hidden) + eps) * float(weight[col]));
 }
 
 // ─── rms_norm_channel ───────────────────────────────────────────────
@@ -403,7 +403,7 @@ kernel void rms_norm_channel_f32(
     uint idx = b * channels * time_len + c * time_len + t;
     float val = x[idx];
     SIMD_REDUCE_SUM(val * val, channels, lane, simd_id)
-    output[idx] = val * rsqrt(_sr / float(channels) + eps) * weight[c];
+    output[idx] = val * fast::rsqrt(_sr / float(channels) + eps) * weight[c];
 }
 
 kernel void rms_norm_channel_f16(
@@ -423,5 +423,5 @@ kernel void rms_norm_channel_f16(
     uint idx = b * channels * time_len + c * time_len + t;
     float val = float(x[idx]);
     SIMD_REDUCE_SUM(val * val, channels, lane, simd_id)
-    output[idx] = half(val * rsqrt(_sr / float(channels) + eps) * float(weight[c]));
+    output[idx] = half(val * fast::rsqrt(_sr / float(channels) + eps) * float(weight[c]));
 }
