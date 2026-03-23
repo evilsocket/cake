@@ -32,3 +32,5 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 029	2026-03-23T09:30:00	0e22dd7	424173056	PASS	PASS	keep	Pre-warm pipeline cache (moves compile cost to init, +170ms in bench)
 030	2026-03-23T10:00:00	b64ea53	-	PASS	PASS	keep	Add 12 Metal vs CPU correctness tests
 031	2026-03-23T10:15:00	7f854ce	50835899904	PASS	PASS	keep	Re-enable 8 MSL kernels (validated by tests, norms stay on candle ops)
+032	2026-03-23T11:30:00	8fa9e55	-	PASS	PASS	keep	22 diagnostic tests: all candle Metal ops pass, gibberish is upstream candle bug
+033	2026-03-23T11:45:00	a6b4cac	362983168	PASS	PASS	keep	Clean state: 8 MSL ops enabled, 22 Metal tests, 363ms benchmark
