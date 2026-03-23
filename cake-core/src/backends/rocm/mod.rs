@@ -166,6 +166,7 @@ impl RocmBackend {
         })
     }
 
+    #[inline]
     fn gpu_alloc(&self, count: usize) -> Result<GpuBuf> {
         let mut ptr = std::ptr::null_mut();
         let err = unsafe { (self.ffi.hip_malloc)(&mut ptr, count * 4) };
@@ -173,6 +174,7 @@ impl RocmBackend {
         Ok(GpuBuf { ptr, count, ffi: &*self.ffi as *const RocmFfi })
     }
 
+    #[inline]
     fn gpu_upload(&self, data: &[f32]) -> Result<GpuBuf> {
         let buf = self.gpu_alloc(data.len())?;
         let err = unsafe {
@@ -182,10 +184,12 @@ impl RocmBackend {
         Ok(buf)
     }
 
+    #[inline]
     fn to_f32_vec(t: &Tensor) -> Result<Vec<f32>> {
         t.to_dtype(DType::F32)?.contiguous()?.flatten_all()?.to_vec1()
     }
 
+    #[inline]
     fn get_or_upload(&self, tensor: &Tensor) -> Result<*const f32> {
         let id = tensor.id();
         let mut cache = self.cache.lock().unwrap();
