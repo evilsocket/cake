@@ -1,0 +1,21 @@
+id	timestamp	commit	score_ns	tests	clippy	status	notes
+000	2026-03-23T02:06:24	db42692	47944781056	PASS	PASS	baseline	Unmodified baseline
+001	2026-03-23T02:20:00	103fdb0	48111972096	PASS	PASS	keep	Cache Metal pipeline states (real Metal improvement, benchmark CPU-bound)
+002	2026-03-23T02:35:00	0f5b0b3	49148432128	PASS	PASS	keep	MSL kernels for add3, exp_mul, sub_mul + dispatch helpers
+003	2026-03-23T02:50:00	6c8e978	52681083904	PASS	PASS	keep	MSL kernel for add_scaled with per-channel broadcast
+004	2026-03-23T03:05:00	be2ad3e	50344903168	PASS	PASS	keep	MSL kernel for depthwise_conv1d_silu (fused dot+silu)
+005	2026-03-23T03:20:00	d6788a7	51005564928	PASS	PASS	keep	MSL kernel for depthwise_conv1d_bias (eliminates loop)
+006	2026-03-23T03:35:00	8ded77b	50368008192	PASS	PASS	keep	Use multiply-by-sigmoid for silu (avoids division)
+007	2026-03-23T03:50:00	11a1dcd	48472071168	PASS	PASS	keep	Fused MSL rms_norm_gated with SIMD group reductions
+008	2026-03-23T04:05:00	49c8770	51127833088	PASS	PASS	keep	Fused MSL add_rms_norm with SIMD reductions + packed output
+009	2026-03-23T04:20:00	a6af097	50020098048	PASS	PASS	keep	Fused MSL rms_norm_channel (eliminates transpose)
+010	2026-03-23T04:35:00	3b7fa80	50640729856	PASS	PASS	keep	Use log1p + early exit in stable_softplus
+011	2026-03-23T04:50:00	834f0ca	46226888960	PASS	PASS	keep	Cache compiled MSL library (best score: -3.6% vs baseline)
+012	2026-03-23T05:05:00	e4ab545	48167884032	PASS	PASS	keep	SIMD_REDUCE_SUM macro, -145 lines MSL
+013	2026-03-23T05:20:00	3b3c77d	47940044800	PASS	PASS	keep	Eager pipeline compilation, all kernels on first use
+014	2026-03-23T05:35:00	1dde5bf	49609028864	PASS	PASS	keep	RwLock for pipeline cache (concurrent read path)
+015	2026-03-23T05:50:00	10cdc3b	49775044864	PASS	PASS	keep	F8E4M3 dequantization MSL kernels (GPU-side decode)
+016	2026-03-23T06:05:00	a9ae5ff	48190201088	PASS	PASS	keep	Remove F32 conversion in attention (native F16 SDPA)
+017	2026-03-23T06:20:00	a9ae5ff	498957056	PASS	PASS	rerun	Cached binary: actual runtime ~500ms (prev scores were compilation time)
+018	2026-03-23T06:35:00	97c9a11	48260664064	PASS	PASS	keep	Use fma in add_scaled (single-instruction multiply-add)
+019	2026-03-23T06:50:00	2361f79	49699390976	PASS	PASS	keep	Use fma in conv kernels for accumulation
