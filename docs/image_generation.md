@@ -34,8 +34,7 @@ Faster 4B variant, 4 denoising steps, best at 512x512:
 ```sh
 cake run black-forest-labs/FLUX.2-klein-4B \
   "a fluffy orange cat sitting on a wooden table" \
-  --model-type image-model --image-model-arch flux \
-  --model black-forest-labs/FLUX.2-klein-4B
+  --model-type image-model --image-model-arch flux
 ```
 
 ### FLUX Arguments
