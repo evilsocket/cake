@@ -36,4 +36,5 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 034	2026-03-23T22:55:00	fd45b07	49489678080	PASS	PASS	keep	Half-precision final multiply in silu_mul, softplus, conv_silu f16
 035	2026-03-23T23:10:00	17280de	59652808192	PASS	PASS	keep	Fuse adaln_modulate into single MSL kernel (3 dispatches → 1)
 036	2026-03-23T23:20:00	c78a958	63751747072	PASS	PASS	keep	Relax causal constraint in fused attention (causal=true ok for seq_len=1)
+037	2026-03-23T23:35:00	0d1b2e8	64067161088	PASS	PASS	keep	Fused standalone SiLU MSL kernel (4 dispatches → 1)
 ---	Metal: 36.4 tok/s avg vs CPU: 22.9 tok/s (+59%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
