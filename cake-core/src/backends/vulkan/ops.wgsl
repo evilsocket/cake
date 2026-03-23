@@ -304,32 +304,13 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
         let r1 = r0 + 1u;
         let c0 = lc * 2u;
         let c1 = c0 + 1u;
-        let a0_base = r0 * TILE_A_STRIDE;
-        let a1_base = r1 * TILE_A_STRIDE;
-        // Unroll by 4 (TILE_K=64 is divisible by 4)
-        for (var k: u32 = 0u; k < TILE_K; k += 4u) {
-            let a0k0 = tile_a[a0_base + k]; let a1k0 = tile_a[a1_base + k];
-            let bk00 = tile_b[k * TILE_B_STRIDE + c0]; let bk01 = tile_b[k * TILE_B_STRIDE + c1];
-            acc00 += a0k0 * bk00; acc01 += a0k0 * bk01;
-            acc10 += a1k0 * bk00; acc11 += a1k0 * bk01;
-
-            let k1 = k + 1u;
-            let a0k1 = tile_a[a0_base + k1]; let a1k1 = tile_a[a1_base + k1];
-            let bk10 = tile_b[k1 * TILE_B_STRIDE + c0]; let bk11 = tile_b[k1 * TILE_B_STRIDE + c1];
-            acc00 += a0k1 * bk10; acc01 += a0k1 * bk11;
-            acc10 += a1k1 * bk10; acc11 += a1k1 * bk11;
-
-            let k2 = k + 2u;
-            let a0k2 = tile_a[a0_base + k2]; let a1k2 = tile_a[a1_base + k2];
-            let bk20 = tile_b[k2 * TILE_B_STRIDE + c0]; let bk21 = tile_b[k2 * TILE_B_STRIDE + c1];
-            acc00 += a0k2 * bk20; acc01 += a0k2 * bk21;
-            acc10 += a1k2 * bk20; acc11 += a1k2 * bk21;
-
-            let k3 = k + 3u;
-            let a0k3 = tile_a[a0_base + k3]; let a1k3 = tile_a[a1_base + k3];
-            let bk30 = tile_b[k3 * TILE_B_STRIDE + c0]; let bk31 = tile_b[k3 * TILE_B_STRIDE + c1];
-            acc00 += a0k3 * bk30; acc01 += a0k3 * bk31;
-            acc10 += a1k3 * bk30; acc11 += a1k3 * bk31;
+        for (var k: u32 = 0u; k < TILE_K; k++) {
+            let a0k = tile_a[r0 * TILE_A_STRIDE + k];
+            let a1k = tile_a[r1 * TILE_A_STRIDE + k];
+            let bk0 = tile_b[k * TILE_B_STRIDE + c0];
+            let bk1 = tile_b[k * TILE_B_STRIDE + c1];
+            acc00 += a0k * bk0; acc01 += a0k * bk1;
+            acc10 += a1k * bk0; acc11 += a1k * bk1;
         }
         workgroupBarrier();
     }
