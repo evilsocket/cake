@@ -148,21 +148,32 @@ impl ExpertProvider for DiskExpertProvider {
 
         let names = &self.expert_names[idx];
 
-        // Batch read: may merge into single pread if contiguous in safetensors
-        let tensor_names = [
-            names.gate_proj.as_str(),
-            names.up_proj.as_str(),
-            names.down_proj.as_str(),
-        ];
-        let mut data = self
-            .storage
-            .read_tensors(&tensor_names)
-            .map_err(|e| candle_core::Error::Msg(format!("read_tensors: {e}")))?;
-
-        // data is [gate, up, down] in order
-        let down_data = data.pop().unwrap();
-        let up_data = data.pop().unwrap();
-        let gate_data = data.pop().unwrap();
+        // For F32→F32 (zero-copy path), individual reads are faster than
+        // batch+split since each read's buffer transfers directly into the
+        // Tensor without copying. The batch path would add 3 memcpys to split
+        // the contiguous buffer.
+        let (gate_data, up_data, down_data) = if self.dtype == DType::F32 {
+            let g = self.storage.read_tensor(&names.gate_proj)
+                .map_err(|e| candle_core::Error::Msg(format!("read_tensor: {e}")))?;
+            let u = self.storage.read_tensor(&names.up_proj)
+                .map_err(|e| candle_core::Error::Msg(format!("read_tensor: {e}")))?;
+            let d = self.storage.read_tensor(&names.down_proj)
+                .map_err(|e| candle_core::Error::Msg(format!("read_tensor: {e}")))?;
+            (g, u, d)
+        } else {
+            // For dtype conversion path, batch read saves pread syscalls
+            let tensor_names = [
+                names.gate_proj.as_str(),
+                names.up_proj.as_str(),
+                names.down_proj.as_str(),
+            ];
+            let mut data = self.storage.read_tensors(&tensor_names)
+                .map_err(|e| candle_core::Error::Msg(format!("read_tensors: {e}")))?;
+            let d = data.pop().unwrap();
+            let u = data.pop().unwrap();
+            let g = data.pop().unwrap();
+            (g, u, d)
+        };
 
         Ok(ExpertWeights {
             gate_proj: self.materialize(gate_data)?,
