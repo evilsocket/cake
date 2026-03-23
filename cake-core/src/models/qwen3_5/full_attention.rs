@@ -192,16 +192,13 @@ impl Qwen3_5FullAttention {
                 ).map_err(|e| anyhow!("flash_attn: {e}"))?;
             }
 
-            // Metal: mixed-precision attention — F16 matmuls with F32 softmax.
-            // F16 SDPA causes garbage (precision loss in softmax), F32 SDPA exceeds
-            // threadgroup memory. This hybrid keeps F16 matmul speed + F32 softmax precision.
+            // Metal: mixed-precision attention — F16 matmuls + F32 softmax.
+            // F16 SDPA causes garbage (even for gen), F32 SDPA exceeds threadgroup memory.
             #[cfg(feature = "metal")]
             if matches!(q.device(), candle_core::Device::Metal(_)) {
                 let k = self.repeat_kv(k).map_err(|e| anyhow!("repeat_kv k: {e}"))?;
                 let v = self.repeat_kv(v).map_err(|e| anyhow!("repeat_kv v: {e}"))?;
-                // QK^T in native dtype (F16) for fast matmul
                 let att = (q.matmul(&k.t()?)? / (self.head_dim as f64).sqrt())?;
-                // Softmax in F32 for precision (the critical part)
                 let att = att.to_dtype(candle_core::DType::F32)?;
                 let att = if seq_len == 1 {
                     att
@@ -214,7 +211,6 @@ impl Qwen3_5FullAttention {
                     (att + mask).map_err(|e| anyhow!("mask add: {e}"))?
                 };
                 let att = candle_nn::ops::softmax_last_dim(&att)?;
-                // Att @ V: convert att back to input dtype for F16 matmul
                 let att = att.to_dtype(v.dtype())?;
                 break 'attn att.matmul(&v.contiguous()?)
                     .map_err(|e| anyhow!("att matmul v: {e}"))?;
