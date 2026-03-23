@@ -345,6 +345,88 @@ kernel void rms_norm_gated_f16(
     output[base + col] = half(val * rms * float(weight[col]) * gate);
 }
 
+// ─── add_rms_norm: residual = a + b, normed = rms_norm(residual, weight, eps)
+// Output: packed [residual | normed] in a single buffer (2 * el elements)
+kernel void add_rms_norm_f32(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device const float* weight [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& el [[buffer(4)]],
+    constant uint& hidden [[buffer(5)]],
+    constant float& eps [[buffer(6)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    if (col >= hidden) return;
+
+    uint base = row * hidden;
+    float res = a[base + col] + b[base + col];
+    output[base + col] = res; // residual in first half
+
+    float sq = res * res;
+    float sum_sq = simd_sum(sq);
+
+    threadgroup float partial_sums[32];
+    if (lane == 0) {
+        partial_sums[simd_id] = sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint num_simd_groups = (hidden + 31) / 32;
+    float total = 0.0f;
+    if (simd_id == 0 && lane < num_simd_groups) {
+        total = partial_sums[lane];
+    }
+    total = simd_sum(total);
+
+    float rms = rsqrt(total / float(hidden) + eps);
+    output[el + base + col] = res * rms * weight[col]; // normed in second half
+}
+
+kernel void add_rms_norm_f16(
+    device const half* a [[buffer(0)]],
+    device const half* b [[buffer(1)]],
+    device const half* weight [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& el [[buffer(4)]],
+    constant uint& hidden [[buffer(5)]],
+    constant float& eps [[buffer(6)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = gid.y;
+    uint col = gid.x;
+    if (col >= hidden) return;
+
+    uint base = row * hidden;
+    float res = float(a[base + col]) + float(b[base + col]);
+    output[base + col] = half(res);
+
+    float sq = res * res;
+    float sum_sq = simd_sum(sq);
+
+    threadgroup float partial_sums[32];
+    if (lane == 0) {
+        partial_sums[simd_id] = sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint num_simd_groups = (hidden + 31) / 32;
+    float total = 0.0f;
+    if (simd_id == 0 && lane < num_simd_groups) {
+        total = partial_sums[lane];
+    }
+    total = simd_sum(total);
+
+    float rms = rsqrt(total / float(hidden) + eps);
+    output[el + base + col] = half(res * rms * float(weight[col]));
+}
+
 kernel void sub_mul_f16(
     device const half* a [[buffer(0)]],
     device const half* b [[buffer(1)]],
