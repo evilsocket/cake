@@ -346,13 +346,22 @@ impl TensorStorageProvider for SafetensorsStorage {
             .get(&meta.shard_path)
             .ok_or_else(|| anyhow::anyhow!("shard file not open: {:?}", meta.shard_path))?;
 
-        let mut buf = vec![0u8; meta.byte_size as usize];
+        let size = meta.byte_size as usize;
+        // SAFETY: allocate without zeroing — pread will fill the entire buffer.
+        // We set_len after read_at confirms all bytes were written.
+        let mut buf = Vec::with_capacity(size);
 
         // pread: thread-safe, no seek, optimal for concurrent reads
         #[cfg(unix)]
         {
             use std::os::unix::fs::FileExt;
-            file.read_at(&mut buf, meta.abs_offset)?;
+            // SAFETY: spare capacity is valid for writing; read_at returns
+            // exact byte count. We only set_len to the amount actually read.
+            unsafe {
+                let spare = std::slice::from_raw_parts_mut(buf.as_mut_ptr(), size);
+                file.read_at(spare, meta.abs_offset)?;
+                buf.set_len(size);
+            }
         }
 
         #[cfg(not(unix))]
@@ -403,12 +412,17 @@ impl TensorStorageProvider for SafetensorsStorage {
                 .get(&first.shard_path)
                 .ok_or_else(|| anyhow::anyhow!("shard file not open: {:?}", first.shard_path))?;
 
-            let mut buf = vec![0u8; total_size];
+            // SAFETY: allocate without zeroing — pread fills the entire buffer.
+            let mut buf = Vec::with_capacity(total_size);
 
             #[cfg(unix)]
             {
                 use std::os::unix::fs::FileExt;
-                file.read_at(&mut buf, first.abs_offset)?;
+                unsafe {
+                    let spare = std::slice::from_raw_parts_mut(buf.as_mut_ptr(), total_size);
+                    file.read_at(spare, first.abs_offset)?;
+                    buf.set_len(total_size);
+                }
             }
 
             #[cfg(not(unix))]
