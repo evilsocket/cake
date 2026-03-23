@@ -427,6 +427,92 @@ kernel void add_rms_norm_f16(
     output[el + base + col] = half(res * rms * float(weight[col]));
 }
 
+// ─── rms_norm_channel: RMS norm for (batch, channels, time) layout ──────────
+// Normalizes across channels dimension without transpose.
+// Each threadgroup handles one (batch, time) position.
+// weight: (channels,)
+kernel void rms_norm_channel_f32(
+    device const float* x [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& channels [[buffer(3)]],
+    constant uint& time_len [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    // gid.y = batch*time position, gid.x = channel index
+    uint bt = gid.y;
+    uint c = gid.x;
+    if (c >= channels) return;
+
+    // Data layout: x[batch, channels, time] -> x[b * channels * time + c * time + t]
+    uint b = bt / time_len;
+    uint t = bt % time_len;
+    uint idx = b * channels * time_len + c * time_len + t;
+    float val = x[idx];
+
+    float sq = val * val;
+    float sum_sq = simd_sum(sq);
+
+    threadgroup float partial_sums[32];
+    if (lane == 0) {
+        partial_sums[simd_id] = sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint num_simd_groups = (channels + 31) / 32;
+    float total = 0.0f;
+    if (simd_id == 0 && lane < num_simd_groups) {
+        total = partial_sums[lane];
+    }
+    total = simd_sum(total);
+
+    float rms = rsqrt(total / float(channels) + eps);
+    output[idx] = val * rms * weight[c];
+}
+
+kernel void rms_norm_channel_f16(
+    device const half* x [[buffer(0)]],
+    device const half* weight [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant uint& channels [[buffer(3)]],
+    constant uint& time_len [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint bt = gid.y;
+    uint c = gid.x;
+    if (c >= channels) return;
+
+    uint b = bt / time_len;
+    uint t = bt % time_len;
+    uint idx = b * channels * time_len + c * time_len + t;
+    float val = float(x[idx]);
+
+    float sq = val * val;
+    float sum_sq = simd_sum(sq);
+
+    threadgroup float partial_sums[32];
+    if (lane == 0) {
+        partial_sums[simd_id] = sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint num_simd_groups = (channels + 31) / 32;
+    float total = 0.0f;
+    if (simd_id == 0 && lane < num_simd_groups) {
+        total = partial_sums[lane];
+    }
+    total = simd_sum(total);
+
+    float rms = rsqrt(total / float(channels) + eps);
+    output[idx] = half(val * rms * float(weight[c]));
+}
+
 kernel void sub_mul_f16(
     device const half* a [[buffer(0)]],
     device const half* b [[buffer(1)]],
