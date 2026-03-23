@@ -173,12 +173,12 @@ __device__ __forceinline__ T stable_softplus_fwd(T x) {
     return (x > sp) ? x : sp;
 }
 
-// Float specialization: use __expf + log1pf for fast softplus
+// Float specialization: fast-path branches + __expf + log1pf
 template<>
 __device__ __forceinline__ float stable_softplus_fwd<float>(float x) {
-    float clamped = fminf(x, 88.0f);
-    float sp = log1pf(__expf(clamped));
-    return fmaxf(x, sp);
+    if (x > 20.0f) return x;           // softplus(x) ≈ x for large x
+    if (x < -10.0f) return __expf(x);   // softplus(x) ≈ exp(x) ≈ 0 for very negative x
+    return log1pf(__expf(x));
 }
 
 // Specialise for half types using float intermediates
