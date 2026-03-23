@@ -16,6 +16,13 @@ use crate::utils::tensor_storage::TensorStorageProvider;
 
 use super::expert_provider::{ExpertProvider, ExpertWeights};
 
+/// Pre-computed tensor names for a single expert (avoids format! on hot path).
+struct ExpertNames {
+    gate_proj: String,
+    up_proj: String,
+    down_proj: String,
+}
+
 /// Streams expert weights from disk via `TensorStorageProvider`.
 ///
 /// Expert tensors are read from safetensors files by name, e.g.:
@@ -23,9 +30,15 @@ use super::expert_provider::{ExpertProvider, ExpertWeights};
 pub struct DiskExpertProvider {
     storage: Arc<dyn TensorStorageProvider>,
     layer_prefix: String,
+    /// Pre-computed tensor name strings for each expert index.
+    expert_names: Vec<ExpertNames>,
     num_experts: usize,
     device: Device,
     dtype: DType,
+    /// Pre-computed: whether device transfer is needed.
+    needs_device_transfer: bool,
+    /// Pre-computed: whether F32 zero-copy path can be used (storage and target both F32).
+    use_f32_zerocopy: bool,
 }
 
 impl std::fmt::Debug for DiskExpertProvider {
@@ -53,42 +66,88 @@ impl DiskExpertProvider {
         device: Device,
         dtype: DType,
     ) -> Self {
+        let expert_names: Vec<ExpertNames> = (0..num_experts)
+            .map(|idx| {
+                let prefix = format!("{}.experts.{}", layer_prefix, idx);
+                ExpertNames {
+                    gate_proj: format!("{prefix}.gate_proj.weight"),
+                    up_proj: format!("{prefix}.up_proj.weight"),
+                    down_proj: format!("{prefix}.down_proj.weight"),
+                }
+            })
+            .collect();
+        let needs_device_transfer = !device.is_cpu();
+        // Detect storage dtype from first expert's gate_proj (all experts share dtype)
+        let storage_dtype = expert_names
+            .first()
+            .and_then(|names| {
+                storage
+                    .read_tensor(&names.gate_proj)
+                    .ok()
+                    .map(|d| d.dtype)
+            });
+        let use_f32_zerocopy = dtype == DType::F32
+            && storage_dtype.is_some_and(|sd| sd == DType::F32);
         Self {
             storage,
             layer_prefix,
+            expert_names,
             num_experts,
             device,
             dtype,
+            needs_device_transfer,
+            use_f32_zerocopy,
         }
     }
 
-    /// Read a single tensor from storage, wrap as candle Tensor.
-    fn read_weight(&self, name: &str) -> Result<Tensor> {
-        let data = self
-            .storage
-            .read_tensor(name)
-            .map_err(|e| candle_core::Error::Msg(format!("read_tensor({name}): {e}")))?;
+    /// Reinterpret a `Vec<u8>` as `Vec<f32>` without copying.
+    ///
+    /// # Safety
+    /// The buffer must:
+    /// - Have length divisible by 4
+    /// - Be properly aligned for f32 (alignment >= 4, guaranteed by std allocator)
+    /// - Contain valid f32 bytes (guaranteed by pread from safetensors F32 data)
+    #[inline]
+    fn bytes_to_f32_vec(bytes: Vec<u8>) -> Vec<f32> {
+        let byte_len = bytes.len();
+        let f32_len = byte_len / 4;
+        let ptr = bytes.as_ptr();
+        let cap = bytes.capacity();
+        std::mem::forget(bytes);
+        // SAFETY: Vec<u8> from global allocator is aligned >= 8 on 64-bit,
+        // satisfying f32's alignment of 4. Length and capacity are adjusted
+        // from u8 to f32 units. Data is valid F32 from safetensors.
+        unsafe { Vec::from_raw_parts(ptr as *mut f32, f32_len, cap / 4) }
+    }
 
-        // Create tensor from raw bytes
-        let tensor = Tensor::from_raw_buffer(
-            &data.bytes,
-            data.dtype,
-            &data.shape,
-            &Device::Cpu,
-        )?;
-
-        // Convert to target dtype and device if needed
-        let tensor = if tensor.dtype() != self.dtype {
-            tensor.to_dtype(self.dtype)?
+    /// Convert raw TensorData to a candle Tensor with target dtype/device.
+    #[inline]
+    fn materialize(&self, data: crate::utils::tensor_storage::TensorData) -> Result<Tensor> {
+        let target_device = if self.needs_device_transfer {
+            &self.device
         } else {
-            tensor
+            &Device::Cpu
         };
 
-        if !self.device.is_cpu() {
-            tensor.to_device(&self.device)
-        } else {
-            Ok(tensor)
+        // Fast path: F32 storage → F32 target, zero-copy via Vec ownership transfer
+        if data.dtype == DType::F32 && self.dtype == DType::F32 {
+            let f32_data = Self::bytes_to_f32_vec(data.bytes);
+            return Tensor::from_vec(f32_data, &*data.shape, target_device);
         }
+
+        let tensor = if data.dtype == self.dtype {
+            Tensor::from_raw_buffer(&data.bytes, data.dtype, &data.shape, target_device)?
+        } else {
+            let tensor = Tensor::from_raw_buffer(&data.bytes, data.dtype, &data.shape, &Device::Cpu)?;
+            let tensor = tensor.to_dtype(self.dtype)?;
+            if self.needs_device_transfer {
+                tensor.to_device(&self.device)?
+            } else {
+                tensor
+            }
+        };
+
+        Ok(tensor)
     }
 }
 
@@ -101,16 +160,39 @@ impl ExpertProvider for DiskExpertProvider {
             )));
         }
 
-        let prefix = format!("{}.experts.{}", self.layer_prefix, idx);
+        let names = &self.expert_names[idx];
 
-        let gate_proj = self.read_weight(&format!("{prefix}.gate_proj.weight"))?;
-        let up_proj = self.read_weight(&format!("{prefix}.up_proj.weight"))?;
-        let down_proj = self.read_weight(&format!("{prefix}.down_proj.weight"))?;
+        // For F32→F32 (zero-copy path), individual reads are faster than
+        // batch+split since each read's buffer transfers directly into the
+        // Tensor without copying. The batch path would add 3 memcpys to split
+        // the contiguous buffer.
+        let (gate_data, up_data, down_data) = if self.use_f32_zerocopy {
+            let g = self.storage.read_tensor(&names.gate_proj)
+                .map_err(|e| candle_core::Error::Msg(format!("read_tensor: {e}")))?;
+            let u = self.storage.read_tensor(&names.up_proj)
+                .map_err(|e| candle_core::Error::Msg(format!("read_tensor: {e}")))?;
+            let d = self.storage.read_tensor(&names.down_proj)
+                .map_err(|e| candle_core::Error::Msg(format!("read_tensor: {e}")))?;
+            (g, u, d)
+        } else {
+            // For dtype conversion path, batch read saves pread syscalls
+            let tensor_names = [
+                names.gate_proj.as_str(),
+                names.up_proj.as_str(),
+                names.down_proj.as_str(),
+            ];
+            let mut data = self.storage.read_tensors(&tensor_names)
+                .map_err(|e| candle_core::Error::Msg(format!("read_tensors: {e}")))?;
+            let d = data.pop().unwrap();
+            let u = data.pop().unwrap();
+            let g = data.pop().unwrap();
+            (g, u, d)
+        };
 
         Ok(ExpertWeights {
-            gate_proj,
-            up_proj,
-            down_proj,
+            gate_proj: self.materialize(gate_data)?,
+            up_proj: self.materialize(up_data)?,
+            down_proj: self.materialize(down_data)?,
         })
     }
 
