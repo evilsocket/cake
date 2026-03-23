@@ -441,10 +441,7 @@ impl GatedDeltaNet {
                 .map_err(|e| anyhow!("stack outputs: {e}"))?
         };
 
-        // Flush Metal commands after conv+gates+recurrent (~20 operations)
-        let _ = self.backend.synchronize();
-
-        // Save updated state
+        // Save updated state (sync deferred to after out_proj)
         cache.set_recurrent_state(block_idx, state);
 
         // Apply gated RMS norm: norm(output_f32, z_model_dtype)
