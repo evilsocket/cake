@@ -182,6 +182,7 @@ impl Clone for Fp8Linear {
 impl Fp8Linear {
     /// Create an Fp8Linear from a weight tensor and optional bias.
     /// If the weight is F8E4M3, it's stored as-is and dequantized lazily.
+    /// Non-F8 weights are pre-transposed for optimal forward() matmul.
     pub fn new(weight: candle_core::Tensor, bias: Option<candle_core::Tensor>) -> Self {
         if weight.dtype() == candle_core::DType::F8E4M3 {
             Self {
@@ -190,25 +191,30 @@ impl Fp8Linear {
                 bias,
             }
         } else {
+            // Pre-transpose for forward: x @ w^T becomes x @ wt (already transposed)
+            let wt = weight.t().and_then(|t| t.contiguous()).unwrap_or(weight);
             Self {
                 f8_weight: None,
-                weight: std::sync::RwLock::new(Some(weight)),
+                weight: std::sync::RwLock::new(Some(wt)),
                 bias,
             }
         }
     }
 
     fn get_weight(&self) -> candle_core::Result<candle_core::Tensor> {
-        // Fast path: return cached dequantized weight
+        // Fast path: return cached dequantized + transposed weight
         if let Some(w) = self.weight.read().unwrap().as_ref() {
             return Ok(w.clone());
         }
-        // Slow path: dequantize F8→F32→F16 and cache for future calls
+        // Slow path: dequantize F8→F32→F16, transpose, and cache
         let f8_w = self
             .f8_weight
             .as_ref()
             .expect("no F8 weight and no cached weight");
-        let dequantized = f8_w.to_dtype(candle_core::DType::F32)?.to_dtype(candle_core::DType::F16)?;
+        // Pre-transpose and contiguous so forward() avoids per-call transpose
+        let dequantized = f8_w.to_dtype(candle_core::DType::F32)?
+            .to_dtype(candle_core::DType::F16)?
+            .t()?.contiguous()?;
         *self.weight.write().unwrap() = Some(dequantized.clone());
         Ok(dequantized)
     }
@@ -222,14 +228,13 @@ impl Fp8Linear {
     }
 
     /// Forward pass: dequantizes weight if needed, computes matmul in weight dtype.
+    /// The cached weight is already transposed and contiguous for optimal matmul.
     pub fn forward(&self, x: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor> {
         let in_dtype = x.dtype();
-        let w = self.get_weight()?;
-        let compute = w.dtype();
-        // Skip dtype conversion if already matching (common case after first call)
+        let wt = self.get_weight()?; // pre-transposed
+        let compute = wt.dtype();
         let x = if x.dtype() == compute { x.clone() } else { x.to_dtype(compute)? };
-        // Use broadcast_matmul to handle batched input without reshape
-        let y = x.broadcast_matmul(&w.t()?)?;
+        let y = x.broadcast_matmul(&wt)?;
         let y = match &self.bias {
             Some(b) => y.broadcast_add(&b.to_dtype(compute)?)?,
             None => y,
