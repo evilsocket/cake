@@ -417,6 +417,12 @@ impl VulkanBackend {
                 &[dummy.buffer, dummy.buffer, out.buffer],
                 &out, 4, &[2, 2, 2, 0], (1, 1, 1),
             );
+            // Small GEMM: 2×2 * 2×2 = 2×2
+            let _ = backend.dispatch_compute(
+                "matmul_small",
+                &[dummy.buffer, dummy.buffer, out.buffer],
+                &out, 4, &[2, 2, 2, 0], (1, 1, 1),
+            );
             backend.release_output(out);
 
             // Pre-warm buffer pool with common output sizes (avoids allocation on first real dispatch).
@@ -936,10 +942,14 @@ impl VulkanBackend {
         n: usize,
     ) -> (Vec<f32>, MappedBuffer) {
         let buf_c = self.alloc_output(m * n);
-        let wg_m = (m as u32).div_ceil(32);
-        let wg_n = (n as u32).div_ceil(64);
+        // Use small-M kernel (16×64 tile) for M<=16, large kernel (32×64) otherwise
+        let (entry, wg_m, wg_n) = if m <= 16 {
+            ("matmul_small", (m as u32).div_ceil(16), (n as u32).div_ceil(64))
+        } else {
+            ("matmul", (m as u32).div_ceil(32), (n as u32).div_ceil(64))
+        };
         let result = self.dispatch_compute(
-            "matmul",
+            entry,
             &[buf_a.buffer, buf_b.buffer, buf_c.buffer],
             &buf_c,
             m * n,
@@ -1026,7 +1036,7 @@ impl VulkanBackend {
 
         // Determine pipeline and workgroup dims
         let is_gemv = m == 1;
-        let entry = if is_gemv { "gemv" } else { "matmul" };
+        let entry = if is_gemv { "gemv" } else if m <= 16 { "matmul_small" } else { "matmul" };
         let params: [u32; 4] = if is_gemv {
             [n as u32, k as u32, 0, 0]
         } else {
@@ -1034,6 +1044,8 @@ impl VulkanBackend {
         };
         let workgroups = if is_gemv {
             ((n as u32).div_ceil(256), 1, 1)
+        } else if m <= 16 {
+            ((m as u32).div_ceil(16), (n as u32).div_ceil(64), 1)
         } else {
             ((m as u32).div_ceil(32), (n as u32).div_ceil(64), 1)
         };

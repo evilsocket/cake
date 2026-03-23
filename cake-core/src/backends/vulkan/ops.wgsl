@@ -461,3 +461,91 @@ fn scaled_softmax(@builtin(workgroup_id) wid: vec3<u32>,
         i += 256u;
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Small-M GEMM: C[M,N] = A[M,K] × B[K,N]  (for M <= 16)
+// 16×64 output tile with 1×4 register tiling, K-tile = 32.
+// 16×16 workgroup (256 threads). Each thread computes 1×4 outputs.
+// Halves wasted M-dimension work vs 32×64 tile for small M.
+// ═══════════════════════════════════════════════════════════════════
+
+@group(0) @binding(0) var<storage, read> smat_a: array<f32>;
+@group(0) @binding(1) var<storage, read> smat_b: array<f32>;
+@group(0) @binding(2) var<storage, read_write> smat_c: array<f32>;
+@group(0) @binding(3) var<uniform> smat_params: MatmulParams;
+
+const STILE_M: u32 = 16;
+const STILE_N: u32 = 64;
+const STILE_K: u32 = 32;
+const STILE_A_STRIDE: u32 = 33;
+const STILE_B_STRIDE: u32 = 65;
+var<workgroup> stile_a: array<f32, 528>;   // [16, 33]
+var<workgroup> stile_b: array<f32, 2080>;  // [32, 65]
+
+@compute @workgroup_size(16, 16)
+fn matmul_small(@builtin(global_invocation_id) gid: vec3<u32>,
+                @builtin(local_invocation_id) lid: vec3<u32>) {
+    let lr = lid.x;
+    let lc = lid.y;
+    let M = smat_params.M;
+    let N = smat_params.N;
+    let K = smat_params.K;
+
+    let wg_row = gid.x - lid.x;
+    let wg_col = gid.y * 4u - lid.y * 4u;
+    let row0 = wg_row + lr;
+    let col0 = wg_col + lc * 4u;
+
+    var acc0: f32 = 0.0; var acc1: f32 = 0.0; var acc2: f32 = 0.0; var acc3: f32 = 0.0;
+    let num_tiles = (K + STILE_K - 1u) / STILE_K;
+    let lin = lr * 16u + lc;
+
+    for (var t: u32 = 0u; t < num_tiles; t++) {
+        let tk = t * STILE_K;
+
+        // Load tile_a[16, 32]: 256 threads, 2 elements each
+        for (var i: u32 = 0u; i < 2u; i++) {
+            let idx = lin * 2u + i;
+            let tr = idx / STILE_K;
+            let tc = idx % STILE_K;
+            let a_row = wg_row + tr;
+            let a_col = tk + tc;
+            if (a_row < M && a_col < K) {
+                stile_a[tr * STILE_A_STRIDE + tc] = smat_a[a_row * K + a_col];
+            } else {
+                stile_a[tr * STILE_A_STRIDE + tc] = 0.0;
+            }
+        }
+
+        // Load tile_b[32, 64]: 256 threads, 8 elements each
+        for (var i: u32 = 0u; i < 8u; i++) {
+            let idx = lin * 8u + i;
+            let tr = idx / STILE_N;
+            let tc = idx % STILE_N;
+            let b_row = tk + tr;
+            let b_col = wg_col + tc;
+            if (b_row < K && b_col < N) {
+                stile_b[tr * STILE_B_STRIDE + tc] = smat_b[b_row * N + b_col];
+            } else {
+                stile_b[tr * STILE_B_STRIDE + tc] = 0.0;
+            }
+        }
+
+        workgroupBarrier();
+
+        let c0 = lc * 4u;
+        for (var k: u32 = 0u; k < STILE_K; k++) {
+            let a_val = stile_a[lr * STILE_A_STRIDE + k];
+            acc0 += a_val * stile_b[k * STILE_B_STRIDE + c0];
+            acc1 += a_val * stile_b[k * STILE_B_STRIDE + c0 + 1u];
+            acc2 += a_val * stile_b[k * STILE_B_STRIDE + c0 + 2u];
+            acc3 += a_val * stile_b[k * STILE_B_STRIDE + c0 + 3u];
+        }
+        workgroupBarrier();
+    }
+
+    if (row0 < M && col0 < N) { smat_c[row0 * N + col0] = acc0; }
+    if (row0 < M && col0 + 1u < N) { smat_c[row0 * N + col0 + 1u] = acc1; }
+    if (row0 < M && col0 + 2u < N) { smat_c[row0 * N + col0 + 2u] = acc2; }
+    if (row0 < M && col0 + 3u < N) { smat_c[row0 * N + col0 + 3u] = acc3; }
+}
