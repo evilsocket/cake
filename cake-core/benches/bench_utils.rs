@@ -2,11 +2,16 @@ use cake_core::backends::ComputeBackend;
 use candle_core::{DType, Device, Tensor};
 
 fn gpu_device() -> Device {
-    if candle_core::utils::cuda_is_available() {
-        Device::new_cuda(0).unwrap()
-    } else {
-        Device::Cpu
-    }
+    static GPU: std::sync::LazyLock<Device> = std::sync::LazyLock::new(|| {
+        if candle_core::utils::cuda_is_available() {
+            Device::new_cuda(0).unwrap()
+        } else if candle_core::utils::metal_is_available() {
+            Device::new_metal(0).unwrap()
+        } else {
+            Device::Cpu
+        }
+    });
+    GPU.clone()
 }
 
 fn make_gpu_tensor(shape: &[usize], seed: u64) -> Tensor {

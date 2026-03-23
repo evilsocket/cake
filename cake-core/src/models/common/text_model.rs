@@ -287,6 +287,8 @@ impl TextModelBase {
                     .map_err(|e| {
                         anyhow!("error in forward operation of local block {block_idx}: {e}")
                     })?;
+                // Flush Metal command buffer between blocks
+                let _ = self.ctx.backend.synchronize();
                 local_elapsed += local_start.elapsed();
                 local_count += 1;
 
@@ -343,6 +345,8 @@ impl TextModelBase {
             .lm_head
             .forward(&x)
             .map_err(|e| anyhow!("error in lm_head.forward: {e}"))?;
+        // Flush Metal command buffer before returning logits to CPU for sampling
+        let _ = self.ctx.backend.synchronize();
         let head_elapsed = head_start.elapsed();
 
         let total_elapsed = forward_start.elapsed();

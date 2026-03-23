@@ -245,7 +245,7 @@ impl ComputeBackend for RocmBackend {
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> { ((a+b)?+c)?.contiguous() }
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> { (x*y.exp()?)?.contiguous() }
     fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> { ((a-b)?*c)?.contiguous() }
-    fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> { (a+b.broadcast_mul(&c.unsqueeze(0)?.unsqueeze(2)?)?)?.contiguous() }
+    fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> { let cb = if c.dims().len()==1 { c.unsqueeze(0)?.unsqueeze(2)? } else { c.clone() }; (a+b.broadcast_mul(&cb)?)?.contiguous() }
     fn adaln_modulate(&self, x: &Tensor, nw: &Tensor, sc: &Tensor, sh: &Tensor, e: f32) -> Result<Tensor> { (candle_nn::ops::rms_norm(&x.contiguous()?,nw,e)?.broadcast_mul(&(sc+1.0)?)?+sh)?.contiguous() }
     fn f8e4m3_to_f32(&self, x: &Tensor) -> Result<Tensor> { x.to_dtype(DType::F32) }
     fn f8e4m3_to_f16(&self, x: &Tensor) -> Result<Tensor> { x.to_dtype(DType::F16) }

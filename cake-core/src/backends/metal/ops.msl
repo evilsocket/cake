@@ -1,7 +1,65 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// ─── stable_softplus: ln(1 + exp(clamp(x, -inf, 88))) with max(x, result) ───
+// ─── SIMD reduction helper ──────────────────────────────────────────
+// Reduces a per-thread value across all threads in a threadgroup using
+// SIMD group operations (32-wide on Apple Silicon).
+#define SIMD_REDUCE_SUM(val, dim, lane, simd_id) \
+    float _sr = simd_sum(val); \
+    if ((dim) > 32) { \
+        threadgroup float _ps[32]; \
+        if (lane == 0) _ps[simd_id] = _sr; \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+        uint _ns = ((dim) + 31) / 32; \
+        float _t = 0.0f; \
+        if (simd_id == 0 && lane < _ns) _t = _ps[lane]; \
+        _t = simd_sum(_t); \
+        /* Broadcast total to ALL threads via threadgroup memory */ \
+        if (simd_id == 0 && lane == 0) _ps[0] = _t; \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+        _sr = _ps[0]; \
+    }
+
+// ─── F8E4M3 dequantization ──────────────────────────────────────────
+// Decode F8E4M3 (1 sign + 4 exponent + 3 mantissa) to float32.
+// Uses branchless bitwise decode for uniform execution on GPU.
+
+inline float f8e4m3_decode(uchar bits) {
+    uint sign = (bits >> 7) & 1u;
+    uint exp_bits = (bits >> 3) & 0xFu;
+    uint mant_bits = bits & 0x7u;
+    // Branchless: treat subnormal and NaN as special cases via select
+    float normal = ldexp(1.0f + float(mant_bits) * 0.125f, int(exp_bits) - 7);
+    float subnormal = ldexp(float(mant_bits) * 0.125f, -6);
+    float nan_val = as_type<float>(0x7FC00000u);
+    bool is_subnormal = (exp_bits == 0u);
+    bool is_nan = (exp_bits == 15u && mant_bits == 7u);
+    float result = select(normal, subnormal, is_subnormal);
+    result = select(result, nan_val, is_nan);
+    return select(result, -result, bool(sign));
+}
+
+kernel void f8e4m3_to_f32(
+    device const uchar* input [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    output[idx] = f8e4m3_decode(input[idx]);
+}
+
+kernel void f8e4m3_to_f16(
+    device const uchar* input [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& count [[buffer(2)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    output[idx] = half(f8e4m3_decode(input[idx]));
+}
+
+// ─── stable_softplus ────────────────────────────────────────────────
 kernel void stable_softplus_f32(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
@@ -10,8 +68,8 @@ kernel void stable_softplus_f32(
 ) {
     if (idx >= count) return;
     float x = input[idx];
-    float clamped = min(x, 88.0f);
-    float sp = log(exp(clamped) + 1.0f);
+    // Branchless: select avoids warp divergence
+    float sp = select(log(1.0f + exp(x)), x, x > 20.0f);
     output[idx] = max(x, sp);
 }
 
@@ -23,12 +81,11 @@ kernel void stable_softplus_f16(
 ) {
     if (idx >= count) return;
     float x = float(input[idx]);
-    float clamped = min(x, 88.0f);
-    float sp = log(exp(clamped) + 1.0f);
+    float sp = select(log(1.0f + exp(x)), x, x > 20.0f);
     output[idx] = half(max(x, sp));
 }
 
-// ─── silu_mul: silu(gate) * up ───────────────────────────────────────────────
+// ─── silu_mul ───────────────────────────────────────────────────────
 kernel void silu_mul_f32(
     device const float* gate [[buffer(0)]],
     device const float* up [[buffer(1)]],
@@ -38,7 +95,9 @@ kernel void silu_mul_f32(
 ) {
     if (idx >= count) return;
     float g = gate[idx];
-    output[idx] = (g / (1.0f + exp(-g))) * up[idx];
+    // x * sigmoid(x) * up = x * (1 / (1 + exp(-x))) * up
+    float sig = 1.0f / (1.0f + exp(-g));
+    output[idx] = g * sig * up[idx];
 }
 
 kernel void silu_mul_f16(
@@ -50,5 +109,325 @@ kernel void silu_mul_f16(
 ) {
     if (idx >= count) return;
     float g = float(gate[idx]);
-    output[idx] = half((g / (1.0f + exp(-g))) * float(up[idx]));
+    float sig = 1.0f / (1.0f + exp(-g));
+    output[idx] = half(g * sig * float(up[idx]));
+}
+
+// ─── add3 ───────────────────────────────────────────────────────────
+kernel void add3_f32(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device const float* c [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    output[idx] = a[idx] + b[idx] + c[idx];
+}
+
+kernel void add3_f16(
+    device const half* a [[buffer(0)]],
+    device const half* b [[buffer(1)]],
+    device const half* c [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    output[idx] = a[idx] + b[idx] + c[idx];
+}
+
+// ─── exp_mul ────────────────────────────────────────────────────────
+kernel void exp_mul_f32(
+    device const float* x [[buffer(0)]],
+    device const float* y [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    output[idx] = x[idx] * exp(y[idx]);
+}
+
+kernel void exp_mul_f16(
+    device const half* x [[buffer(0)]],
+    device const half* y [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant uint& count [[buffer(3)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    output[idx] = half(float(x[idx]) * exp(float(y[idx])));
+}
+
+// ─── sub_mul ────────────────────────────────────────────────────────
+kernel void sub_mul_f32(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device const float* c [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    output[idx] = (a[idx] - b[idx]) * c[idx];
+}
+
+kernel void sub_mul_f16(
+    device const half* a [[buffer(0)]],
+    device const half* b [[buffer(1)]],
+    device const half* c [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    output[idx] = half((float(a[idx]) - float(b[idx])) * float(c[idx]));
+}
+
+// ─── add_scaled: a + b * c with channel broadcast ───────────────────
+kernel void add_scaled_f32(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device const float* c [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    constant uint& channels [[buffer(5)]],
+    constant uint& time_len [[buffer(6)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    // fma: a + b*c in one instruction with full precision
+    output[idx] = fma(b[idx], c[(idx / time_len) % channels], a[idx]);
+}
+
+kernel void add_scaled_f16(
+    device const half* a [[buffer(0)]],
+    device const half* b [[buffer(1)]],
+    device const half* c [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    constant uint& channels [[buffer(5)]],
+    constant uint& time_len [[buffer(6)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    uint chan = (idx / time_len) % channels;
+    output[idx] = half(fma(float(b[idx]), float(c[chan]), float(a[idx])));
+}
+
+// ─── depthwise_conv1d_silu ──────────────────────────────────────────
+kernel void depthwise_conv1d_silu_f32(
+    device const float* window [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& out_count [[buffer(3)]],
+    constant uint& channels [[buffer(4)]],
+    constant uint& kernel_size [[buffer(5)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= out_count) return;
+    uint c = idx % channels;
+    float dot = 0.0f;
+    for (uint k = 0; k < kernel_size; k++)
+        dot = fma(window[idx * kernel_size + k], weight[c * kernel_size + k], dot);
+    float sig = 1.0f / (1.0f + exp(-dot));
+    output[idx] = dot * sig;
+}
+
+kernel void depthwise_conv1d_silu_f16(
+    device const half* window [[buffer(0)]],
+    device const half* weight [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant uint& out_count [[buffer(3)]],
+    constant uint& channels [[buffer(4)]],
+    constant uint& kernel_size [[buffer(5)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= out_count) return;
+    uint c = idx % channels;
+    float dot = 0.0f;
+    for (uint k = 0; k < kernel_size; k++)
+        dot = fma(float(window[idx * kernel_size + k]), float(weight[c * kernel_size + k]), dot);
+    float sig = 1.0f / (1.0f + exp(-dot));
+    output[idx] = half(dot * sig);
+}
+
+// ─── depthwise_conv1d_bias ──────────────────────────────────────────
+kernel void depthwise_conv1d_bias_f32(
+    device const float* input [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& out_count [[buffer(4)]],
+    constant uint& channels [[buffer(5)]],
+    constant uint& out_len [[buffer(6)]],
+    constant uint& t_padded [[buffer(7)]],
+    constant uint& kernel_size [[buffer(8)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= out_count) return;
+    uint t_out = idx % out_len;
+    uint c = (idx / out_len) % channels;
+    uint b = idx / (out_len * channels);
+    float acc = 0.0f;
+    uint in_base = (b * channels + c) * t_padded + t_out;
+    uint w_base = c * kernel_size;
+    for (uint k = 0; k < kernel_size; k++)
+        acc = fma(input[in_base + k], weight[w_base + k], acc);
+    output[idx] = acc + bias[c];
+}
+
+kernel void depthwise_conv1d_bias_f16(
+    device const half* input [[buffer(0)]],
+    device const half* weight [[buffer(1)]],
+    device const half* bias [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& out_count [[buffer(4)]],
+    constant uint& channels [[buffer(5)]],
+    constant uint& out_len [[buffer(6)]],
+    constant uint& t_padded [[buffer(7)]],
+    constant uint& kernel_size [[buffer(8)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= out_count) return;
+    uint t_out = idx % out_len;
+    uint c = (idx / out_len) % channels;
+    uint b = idx / (out_len * channels);
+    float acc = 0.0f;
+    uint in_base = (b * channels + c) * t_padded + t_out;
+    uint w_base = c * kernel_size;
+    for (uint k = 0; k < kernel_size; k++)
+        acc = fma(float(input[in_base + k]), float(weight[w_base + k]), acc);
+    output[idx] = half(acc + float(bias[c]));
+}
+
+// ─── rms_norm_gated ─────────────────────────────────────────────────
+kernel void rms_norm_gated_f32(
+    device const float* x [[buffer(0)]],
+    device const float* z [[buffer(1)]],
+    device const float* weight [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& hidden [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = gid.y, col = gid.x;
+    if (col >= hidden) return;
+    uint base = row * hidden;
+    float val = x[base + col];
+    SIMD_REDUCE_SUM(val * val, hidden, lane, simd_id)
+    float rms = rsqrt(_sr / float(hidden) + eps);
+    float zv = z[base + col];
+    float silu_z = zv * 1.0f / (1.0f + exp(-zv));
+    output[base + col] = val * rms * weight[col] * silu_z;
+}
+
+kernel void rms_norm_gated_f16(
+    device const half* x [[buffer(0)]],
+    device const half* z [[buffer(1)]],
+    device const half* weight [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& hidden [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = gid.y, col = gid.x;
+    if (col >= hidden) return;
+    uint base = row * hidden;
+    float val = float(x[base + col]);
+    SIMD_REDUCE_SUM(val * val, hidden, lane, simd_id)
+    float rms = rsqrt(_sr / float(hidden) + eps);
+    float zv = float(z[base + col]);
+    float silu_z = zv * 1.0f / (1.0f + exp(-zv));
+    output[base + col] = half(val * rms * float(weight[col]) * silu_z);
+}
+
+// ─── add_rms_norm ───────────────────────────────────────────────────
+kernel void add_rms_norm_f32(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device const float* weight [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& el [[buffer(4)]],
+    constant uint& hidden [[buffer(5)]],
+    constant float& eps [[buffer(6)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = gid.y, col = gid.x;
+    if (col >= hidden) return;
+    uint base = row * hidden;
+    float res = a[base + col] + b[base + col];
+    output[base + col] = res;
+    SIMD_REDUCE_SUM(res * res, hidden, lane, simd_id)
+    output[el + base + col] = res * rsqrt(_sr / float(hidden) + eps) * weight[col];
+}
+
+kernel void add_rms_norm_f16(
+    device const half* a [[buffer(0)]],
+    device const half* b [[buffer(1)]],
+    device const half* weight [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& el [[buffer(4)]],
+    constant uint& hidden [[buffer(5)]],
+    constant float& eps [[buffer(6)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = gid.y, col = gid.x;
+    if (col >= hidden) return;
+    uint base = row * hidden;
+    float res = float(a[base + col]) + float(b[base + col]);
+    output[base + col] = half(res);
+    SIMD_REDUCE_SUM(res * res, hidden, lane, simd_id)
+    output[el + base + col] = half(res * rsqrt(_sr / float(hidden) + eps) * float(weight[col]));
+}
+
+// ─── rms_norm_channel ───────────────────────────────────────────────
+kernel void rms_norm_channel_f32(
+    device const float* x [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& channels [[buffer(3)]],
+    constant uint& time_len [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint bt = gid.y, c = gid.x;
+    if (c >= channels) return;
+    uint b = bt / time_len, t = bt % time_len;
+    uint idx = b * channels * time_len + c * time_len + t;
+    float val = x[idx];
+    SIMD_REDUCE_SUM(val * val, channels, lane, simd_id)
+    output[idx] = val * rsqrt(_sr / float(channels) + eps) * weight[c];
+}
+
+kernel void rms_norm_channel_f16(
+    device const half* x [[buffer(0)]],
+    device const half* weight [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant uint& channels [[buffer(3)]],
+    constant uint& time_len [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint bt = gid.y, c = gid.x;
+    if (c >= channels) return;
+    uint b = bt / time_len, t = bt % time_len;
+    uint idx = b * channels * time_len + c * time_len + t;
+    float val = float(x[idx]);
+    SIMD_REDUCE_SUM(val * val, channels, lane, simd_id)
+    output[idx] = half(val * rsqrt(_sr / float(channels) + eps) * float(weight[c]));
 }

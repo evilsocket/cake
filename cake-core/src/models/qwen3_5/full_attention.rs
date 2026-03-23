@@ -191,12 +191,32 @@ impl Qwen3_5FullAttention {
                 ).map_err(|e| anyhow!("flash_attn: {e}"))?;
             }
 
-            // Fused SDPA on Metal — single kernel, native GQA (no repeat_kv needed)
+            // Metal: use manual F32 attention to avoid:
+            // 1. F16 precision loss in SDPA that causes garbage output
+            // 2. Threadgroup memory exceeded errors with F32 SDPA on some GPUs
             #[cfg(feature = "metal")]
             if matches!(q.device(), candle_core::Device::Metal(_)) {
-                let scale = 1.0 / (self.head_dim as f32).sqrt();
-                break 'attn candle_nn::ops::sdpa(&q, &k, &v, None, seq_len > 1, scale, 1.0)
-                    .map_err(|e| anyhow!("sdpa: {e}"))?;
+                let k = self.repeat_kv(k).map_err(|e| anyhow!("repeat_kv k: {e}"))?;
+                let v = self.repeat_kv(v).map_err(|e| anyhow!("repeat_kv v: {e}"))?;
+                let q = q.to_dtype(candle_core::DType::F32)?;
+                let k = k.to_dtype(candle_core::DType::F32)?;
+                let v = v.to_dtype(candle_core::DType::F32)?;
+                let att = (q.matmul(&k.t()?)? / (self.head_dim as f64).sqrt())?;
+                let att = if seq_len == 1 {
+                    att
+                } else {
+                    // Additive causal mask: tril = 0 for valid, -inf for masked positions
+                    let tril = Tensor::tril2(seq_len, candle_core::DType::F32, att.device())
+                        .map_err(|e| anyhow!("tril: {e}"))?;
+                    // Convert: 1->0, 0->-inf
+                    let mask = ((tril - 1.0)? * 1e9)?;
+                    let mask = mask.broadcast_as(att.shape())
+                        .map_err(|e| anyhow!("mask broadcast: {e}"))?;
+                    (att + mask).map_err(|e| anyhow!("mask add: {e}"))?
+                };
+                let att = candle_nn::ops::softmax_last_dim(&att)?;
+                break 'attn att.matmul(&v.contiguous()?)
+                    .map_err(|e| anyhow!("att matmul v: {e}"))?;
             }
 
             // Manual attention with GQA head expansion (CPU fallback)
@@ -219,8 +239,11 @@ impl Qwen3_5FullAttention {
         };
 
         // Reshape: (batch, heads, seq, head_dim) -> (batch, seq, hidden_size)
+        // Convert back to model dtype for gating and output projection
         let y = y.transpose(1, 2)?.reshape(&[b_sz, seq_len, hidden_size])
-            .map_err(|e| anyhow!("y reshape: {e}"))?;
+            .map_err(|e| anyhow!("y reshape: {e}"))?
+            .to_dtype(x.dtype())
+            .map_err(|e| anyhow!("y to_dtype: {e}"))?;
 
         // Output gating: y * sigmoid(gate)
         let gate = candle_nn::ops::sigmoid(&gate).map_err(|e| anyhow!("sigmoid gate: {e}"))?;
