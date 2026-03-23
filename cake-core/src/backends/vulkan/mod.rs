@@ -890,6 +890,7 @@ impl VulkanBackend {
     // ── GPU matmul ───────────────────────────────────────────────────
 
     /// Returns (result_data, output_buffer) so caller can cache the buffer.
+    #[allow(dead_code)]
     fn gpu_gemv(
         &self,
         buf_x: &MappedBuffer,
@@ -939,9 +940,9 @@ impl VulkanBackend {
         k: usize,
         n: usize,
     ) -> (Vec<f32>, MappedBuffer) {
-        if m == 1 {
-            self.gpu_gemv(buf_a, buf_b, k, n)
-        } else {
+        // Always use GEMM (even for M=1) for now — GEMV has precision issues.
+        // GEMM with 2×4 tiling works correctly for all M values.
+        {
             self.gpu_gemm(buf_a, buf_b, m, k, n)
         }
     }
