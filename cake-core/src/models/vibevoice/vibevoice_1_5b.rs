@@ -5,9 +5,49 @@
 //! Supports up to 4 distinct speakers with voice cloning from .wav files.
 
 use anyhow::Result;
-use candle_core::{DType, Device, IndexOp, Module, Tensor, D};
+use candle_core::{DType, Device, IndexOp, Module, Shape, Tensor, D};
 use candle_nn::VarBuilder;
 use log::info;
+
+/// Backend that loads safetensors to CPU, casts to target dtype, then moves to device.
+/// Avoids BF16 CUDA kernel issues on GPUs older than Ampere (SM < 8.0).
+struct CpuCastBackend {
+    inner: candle_core::safetensors::MmapedSafetensors,
+    target_device: Device,
+}
+
+impl candle_nn::var_builder::SimpleBackend for CpuCastBackend {
+    fn get(
+        &self,
+        s: Shape,
+        name: &str,
+        _h: candle_nn::Init,
+        dtype: DType,
+        _dev: &Device,
+    ) -> candle_core::Result<Tensor> {
+        let tensor = self.inner.load(name, &Device::Cpu)?
+            .to_dtype(dtype)?
+            .to_device(&self.target_device)?;
+        if tensor.shape() != &s {
+            Err(candle_core::Error::UnexpectedShape {
+                msg: format!("shape mismatch for {name}"),
+                expected: s,
+                got: tensor.shape().clone(),
+            }.bt())?
+        }
+        Ok(tensor)
+    }
+
+    fn get_unchecked(&self, name: &str, dtype: DType, _dev: &Device) -> candle_core::Result<Tensor> {
+        self.inner.load(name, &Device::Cpu)?
+            .to_dtype(dtype)?
+            .to_device(&self.target_device)
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        self.inner.get(name).is_ok()
+    }
+}
 
 use super::acoustic_connector::AcousticConnector;
 use super::config_1_5b::*;
@@ -69,10 +109,15 @@ impl VibeVoice1_5B {
         let common_cfg = config.into_config();
 
         info!("Loading VibeVoice-1.5B...");
-        let dtype = DType::BF16;
+        let dtype = DType::F16;
 
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(weight_paths, dtype, device)?
+            // Load via CPU to handle BF16→F16 cast (BF16 CUDA kernels need SM 8.0+).
+            // MmapedSafetensors loads BF16 on CPU, casts to F16, then moves to device.
+            let tensors = candle_core::safetensors::MmapedSafetensors::multi(weight_paths)?;
+            let backend: Box<dyn candle_nn::var_builder::SimpleBackend> =
+                Box::new(CpuCastBackend { inner: tensors, target_device: device.clone() });
+            VarBuilder::from_backend(backend, dtype, device.clone())
         };
 
         // Single LM (28 layers)

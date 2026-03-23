@@ -56,32 +56,35 @@ fn compute_stft(samples: &[f32], n_fft: usize, hop_length: usize) -> Vec<f32> {
     let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(n_fft);
 
-    let mut result = Vec::new();
-
     let n_frames = if samples.len() >= n_fft {
         (samples.len() - n_fft) / hop_length + 1
     } else {
         0
     };
 
+    // Pre-allocate result and reusable FFT buffer
+    let mut result = vec![0.0f32; n_frames * n_freq];
+    let mut buffer = vec![Complex::new(0.0f32, 0.0); n_fft];
+
     for frame_idx in 0..n_frames {
         let start = frame_idx * hop_length;
-        let mut buffer: Vec<Complex<f32>> = (0..n_fft)
-            .map(|i| {
-                let sample = if start + i < samples.len() {
-                    samples[start + i]
-                } else {
-                    0.0
-                };
-                Complex::new(sample * window[i], 0.0)
-            })
-            .collect();
+
+        // Fill buffer with windowed samples (reuse allocation)
+        for i in 0..n_fft {
+            let sample = if start + i < samples.len() {
+                samples[start + i]
+            } else {
+                0.0
+            };
+            buffer[i] = Complex::new(sample * window[i], 0.0);
+        }
 
         fft.process(&mut buffer);
 
         // Magnitude squared for first n_freq bins
-        for item in buffer.iter().take(n_freq) {
-            result.push(item.norm_sqr());
+        let out_offset = frame_idx * n_freq;
+        for (j, item) in buffer.iter().take(n_freq).enumerate() {
+            result[out_offset + j] = item.norm_sqr();
         }
     }
 

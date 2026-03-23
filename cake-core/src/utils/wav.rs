@@ -31,19 +31,20 @@ pub fn encode_wav_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
     // data chunk
     buf.extend_from_slice(b"data");
     buf.extend_from_slice(&data_size.to_le_bytes());
-    for &s in samples {
-        let clamped = s.clamp(-1.0, 1.0);
-        let i = (clamped * 32767.0) as i16;
-        buf.extend_from_slice(&i.to_le_bytes());
-    }
+    // Convert all samples to i16 bytes in one pass — single extend_from_slice
+    let sample_bytes: Vec<u8> = samples
+        .iter()
+        .flat_map(|&s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())
+        .collect();
+    buf.extend_from_slice(&sample_bytes);
     buf
 }
 
 /// Save PCM f32 samples as a WAV file (16-bit PCM, mono).
 pub fn save_wav(samples: &[f32], path: &Path, sample_rate: u32) -> Result<()> {
-    use std::io::Write;
+    use std::io::{BufWriter, Write};
     let data_size = (samples.len() * 2) as u32;
-    let mut f = std::fs::File::create(path)?;
+    let mut f = BufWriter::new(std::fs::File::create(path)?);
     f.write_all(b"RIFF")?;
     f.write_all(&(36 + data_size).to_le_bytes())?;
     f.write_all(b"WAVEfmt ")?;
@@ -56,9 +57,12 @@ pub fn save_wav(samples: &[f32], path: &Path, sample_rate: u32) -> Result<()> {
     f.write_all(&16u16.to_le_bytes())?;
     f.write_all(b"data")?;
     f.write_all(&data_size.to_le_bytes())?;
-    for &s in samples {
-        f.write_all(&((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())?;
-    }
+    // Batch-convert all samples to i16 bytes, then write once
+    let sample_bytes: Vec<u8> = samples
+        .iter()
+        .flat_map(|&s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())
+        .collect();
+    f.write_all(&sample_bytes)?;
     Ok(())
 }
 
