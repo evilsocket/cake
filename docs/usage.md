@@ -86,7 +86,7 @@ cake chat --server http://localhost:8080
 | `Esc` / `Ctrl+C` | Quit |
 | `PageUp` / `PageDown` | Scroll |
 
-The Chat tab shows streaming responses with tokens/second stats. The Cluster tab displays topology info, VRAM usage, and layer distribution across nodes.
+The Chat tab shows streaming responses with real-time tokens/second stats. Models that use `<think>` tags (e.g. Qwen3) show a "thinking..." indicator with the reasoning streamed in gray, followed by the final response in white. The Cluster tab displays topology info, VRAM usage, and layer distribution across nodes.
 
 ## API
 

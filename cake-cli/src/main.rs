@@ -164,6 +164,9 @@ async fn main() -> Result<()> {
                 let args = Args {
                     model: model_name,
                     mode: cake_core::cake::Mode::Master,
+                    sample_len: 2048,
+                    temperature: 1.0,
+                    repeat_penalty: 1.1,
                     ..Args::default()
                 };
                 let mut ctx = cake_core::cake::Context::from_args(args)?;

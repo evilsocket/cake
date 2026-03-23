@@ -146,6 +146,9 @@ impl<M: Model> Master<M> {
                 break;
             } else {
                 stream(&token.to_string());
+                // Yield to the runtime so the SSE stream task can flush
+                // this token to the client before we start the next one.
+                tokio::task::yield_now().await;
             }
         }
 
