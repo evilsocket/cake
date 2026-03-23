@@ -402,6 +402,13 @@ impl VulkanBackend {
                 &out, 4, &[2, 2, 2, 0], (1, 1, 1),
             );
             backend.release_output(out);
+
+            // Pre-warm buffer pool with common output sizes (avoids allocation on first real dispatch).
+            // Covers: GEMM outputs (M*N), elementwise ops, GEMV outputs.
+            for &count in &[1024, 4096, 8192, 16384, 32768, 65536, 262144] {
+                let buf = backend.alloc_output(count);
+                backend.release_output(buf);
+            }
         }
 
         Ok(backend)
