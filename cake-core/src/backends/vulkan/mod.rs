@@ -90,12 +90,14 @@ impl BufferPool {
 
 // ─── Weight cache ────────────────────────────────────────────────────
 
+type ViewKey = (usize, usize, usize, u64);
+
 struct WeightCache {
     buffers: HashMap<TensorId, Arc<MappedBuffer>>,
-    /// View cache: keyed by (storage_ptr, offset, elem_count, stride_hash).
-    /// Handles `weight.t()` which creates new TensorIds but shares the same storage.
-    /// Works for any dtype (F16, F32, etc.) by extracting raw pointer from CpuStorage.
-    views: HashMap<(usize, usize, usize, u64), Arc<MappedBuffer>>,
+    /// F32 view cache for weight.t() views.
+    views: HashMap<ViewKey, Arc<MappedBuffer>>,
+    /// F16 (raw bytes) view cache for GEMV — halves bandwidth.
+    f16_views: HashMap<ViewKey, Arc<MappedBuffer>>,
 }
 
 impl WeightCache {
@@ -103,6 +105,7 @@ impl WeightCache {
         Self {
             buffers: HashMap::new(),
             views: HashMap::new(),
+            f16_views: HashMap::new(),
         }
     }
 }
@@ -566,10 +569,17 @@ impl VulkanBackend {
                 return Ok(buf.clone());
             }
         }
-        // View cache disabled — causes subtle precision issues during prefill.
-        // The F32 contiguous result of a non-contiguous F16 view can differ
-        // between calls due to dtype conversion ordering.
-        let vk: Option<(usize, usize, usize, u64)> = None;
+        // View cache: only for NON-CONTIGUOUS tensors (weight.t() views).
+        // Contiguous tensors (activations) must NOT use the view cache because
+        // freed tensors can be reallocated at the same address, causing stale hits.
+        let is_view = !tensor.is_contiguous();
+        let vk = if is_view { Self::view_key(tensor) } else { None };
+        if let Some(ref key) = vk {
+            let cache = self.weight_cache.lock().unwrap();
+            if let Some(buf) = cache.views.get(key) {
+                return Ok(buf.clone());
+            }
+        }
         // Upload: convert to f32 contiguous, copy to GPU
         let tensor = if tensor.dtype() == DType::F32 { tensor.clone() } else { tensor.to_dtype(DType::F32)? };
         let tensor = if tensor.is_contiguous() { tensor } else { tensor.contiguous()? };
@@ -598,10 +608,13 @@ impl VulkanBackend {
         }
         let buf = Arc::new(buf);
         let mut cache = self.weight_cache.lock().unwrap();
-        cache.buffers.insert(id, buf.clone());
-        // Also insert into view cache so future .t() lookups hit
         if let Some(key) = vk {
+            // Non-contiguous view (e.g., weight.t()): store in view cache only.
+            // Don't store by TensorId since .t() creates new IDs each call (would leak).
             cache.views.insert(key, buf.clone());
+        } else {
+            // Contiguous tensor with stable TensorId: store in buffers cache.
+            cache.buffers.insert(id, buf.clone());
         }
         Ok(buf)
     }
@@ -891,13 +904,20 @@ impl VulkanBackend {
         &self,
         buf_x: &MappedBuffer,
         buf_w: &MappedBuffer,
+        buf_w_f16: Option<&Arc<MappedBuffer>>,
         k: usize,
         n: usize,
     ) -> (Vec<f32>, MappedBuffer) {
         let buf_y = self.alloc_output(n);
+        // Use F16 kernel if available — halves memory bandwidth
+        let (entry, w_buf) = if let Some(f16_buf) = buf_w_f16 {
+            ("gemv_f16", f16_buf.buffer)
+        } else {
+            ("gemv", buf_w.buffer)
+        };
         let result = self.dispatch_compute(
-            "gemv",
-            &[buf_x.buffer, buf_w.buffer, buf_y.buffer],
+            entry,
+            &[buf_x.buffer, w_buf, buf_y.buffer],
             &buf_y,
             n,
             &[n as u32, k as u32, 0, 0],
@@ -932,13 +952,14 @@ impl VulkanBackend {
         &self,
         buf_a: &MappedBuffer,
         buf_b: &MappedBuffer,
+        buf_b_f16: Option<&Arc<MappedBuffer>>,
         m: usize,
         k: usize,
         n: usize,
     ) -> (Vec<f32>, MappedBuffer) {
-        // Always use GEMM (even for M=1) for now — GEMV has precision issues.
-        // GEMM with 2×4 tiling works correctly for all M values.
-        {
+        if m == 1 {
+            self.gpu_gemv(buf_a, buf_b, buf_b_f16, k, n)
+        } else {
             self.gpu_gemm(buf_a, buf_b, m, k, n)
         }
     }
@@ -965,7 +986,17 @@ impl VulkanBackend {
             // get_or_upload handles dtype conversion + contiguity
             let buf_a = self.get_or_upload(a)?;
             let buf_b = self.get_or_upload(b)?;
-            let (out, buf_out) = self.gpu_matmul(&buf_a, &buf_b, m, k, n);
+            // Check for F16 weight buffer (halves GEMV bandwidth)
+            let f16_buf = if m == 1 {
+                let vk = Self::view_key(b);
+                vk.and_then(|key| {
+                    let cache = self.weight_cache.lock().unwrap();
+                    cache.f16_views.get(&key).cloned()
+                })
+            } else {
+                None
+            };
+            let (out, buf_out) = self.gpu_matmul(&buf_a, &buf_b, f16_buf.as_ref(), m, k, n);
             let mut out_shape: Vec<usize> = a_dims[..a_rank - 2].to_vec();
             out_shape.push(m);
             out_shape.push(n);
@@ -1290,20 +1321,55 @@ impl ComputeBackend for VulkanBackend {
         }
     }
 
+    fn preprocess_linear_weight(&self, weight: &Tensor) -> Result<Tensor> {
+        // Pre-convert to F32 contiguous and pre-upload to GPU.
+        let w = weight.to_dtype(DType::F32)?.contiguous()?;
+        // Pre-upload F32 to GPU weight cache
+        let _ = self.get_or_upload(&w)?;
+
+        // Also pre-upload the TRANSPOSED F16 data for GEMV (halves bandwidth).
+        // weight.t() is what linear_forward passes to matmul.
+        if weight.dtype() == DType::F16 {
+            let wt_f16 = weight.t()?.contiguous()?; // [in, out] F16 contiguous
+            let f16_data: Vec<f32> = wt_f16.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+            // Store as raw F16 bytes (u32 packed pairs)
+            let n = wt_f16.elem_count();
+            let f16_vals: Vec<half::f16> = f16_data.iter().map(|&v| half::f16::from_f32(v)).collect();
+            let f16_bytes: &[u8] = bytemuck::cast_slice(&f16_vals);
+            // Upload as u32 buffer
+            let buf_bytes = (f16_bytes.len()) as u64;
+            let mut alloc_guard = self.allocator.lock().unwrap();
+            let alloc = alloc_guard.as_mut().unwrap();
+            let buf = Self::alloc_mapped_buffer(
+                &self.vk_device, alloc, buf_bytes,
+                vk::BufferUsageFlags::STORAGE_BUFFER, self.uma_memory_type,
+            ).map_err(candle_core::Error::Msg)?;
+            unsafe {
+                std::ptr::copy_nonoverlapping(f16_bytes.as_ptr(), buf.mapped_ptr, f16_bytes.len());
+            }
+            // Cache by the view key of the F32 weight's .t() (what get_or_upload will see)
+            let wt_f32 = w.t()?; // F32 non-contiguous [in, out]
+            if let Some(key) = Self::view_key(&wt_f32) {
+                let mut cache = self.weight_cache.lock().unwrap();
+                cache.f16_views.insert(key, Arc::new(buf));
+                log::debug!("pre-uploaded F16 GEMV weight: {} elements", n);
+            }
+            drop(alloc_guard);
+        }
+
+        Ok(w)
+    }
+
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         let a_dims = a.dims();
         let b_dims = b.dims();
         let m = a_dims[a_dims.len() - 2];
         let k = a_dims[a_dims.len() - 1];
         let n = b_dims[b_dims.len() - 1];
-        if m <= 1 {
-            log::debug!("matmul CPU: M={m} K={k} N={n} (M<=1, generation)");
-            return a.matmul(b);
-        }
+        // GPU for all sizes. M=1 uses coalesced GEMV. View cache handles weight.t().
+        // Return F32 always — avoids F32→F16→F32 round-trips between ops.
         log::debug!("matmul GPU: M={m} K={k} N={n}");
-        let orig_dtype = a.dtype();
-        let result = self.tensor_matmul(a, b)?;
-        result.to_dtype(orig_dtype)
+        self.tensor_matmul(a, b)
     }
 
     fn rms_norm_gated(
@@ -1381,12 +1447,7 @@ impl ComputeBackend for VulkanBackend {
     }
 
     fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        let c_broadcast = if c.dims().len() == 1 {
-            c.unsqueeze(0)?.unsqueeze(2)?
-        } else {
-            c.clone()
-        };
-        (a + b.broadcast_mul(&c_broadcast)?)?.contiguous()
+        (a + b.broadcast_mul(&c.unsqueeze(0)?.unsqueeze(2)?)?)?.contiguous()
     }
 
     fn adaln_modulate(
