@@ -505,13 +505,13 @@ impl VulkanBackend {
             ],
         });
 
-        // Each workgroup computes 8 output elements, so dispatch N/8 workgroups
+        // Each workgroup computes 4 output elements, so dispatch N/4 workgroups
         let mut enc = self.gpu.create_command_encoder(&Default::default());
         {
             let mut p = enc.begin_compute_pass(&Default::default());
             p.set_pipeline(&pipeline);
             p.set_bind_group(0, &bg, &[]);
-            p.dispatch_workgroups((n as u32).div_ceil(8), 1, 1);
+            p.dispatch_workgroups((n as u32).div_ceil(4), 1, 1);
         }
         self.queue.submit(Some(enc.finish()));
 
