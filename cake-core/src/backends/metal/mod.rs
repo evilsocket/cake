@@ -435,11 +435,9 @@ impl ComputeBackend for MetalBackend {
 
     fn attention(&self, q: &Tensor, k: &Tensor, v: &Tensor, scale: f32, causal: bool) -> Result<Tensor> {
         // Promote to F32 if needed (F16 SDPA produces imprecise results on Metal)
-        let (q, k, v) = if q.dtype() != DType::F32 {
-            (q.to_dtype(DType::F32)?, k.to_dtype(DType::F32)?, v.to_dtype(DType::F32)?)
-        } else {
-            (q.clone(), k.clone(), v.clone())
-        };
+        let q = q.to_dtype(DType::F32)?; // no-op if already F32
+        let k = k.to_dtype(DType::F32)?;
+        let v = v.to_dtype(DType::F32)?;
         // Try fused SDPA first, fall back to manual attention if threadgroup memory exceeded
         match candle_nn::ops::sdpa(&q, &k, &v, None, causal, scale, 1.0) {
             Ok(result) => Ok(result),
