@@ -221,6 +221,7 @@ impl Message {
     }
 
 
+
     /// Create a Message::Batch message.
     pub fn from_batch(x: &Tensor, batch: Vec<(String, usize, usize)>) -> Self {
         Self::Batch {
@@ -272,7 +273,8 @@ impl Message {
     where
         R: AsyncReadExt + Unpin,
     {
-        let mut buf = Vec::new();
+        // Pre-allocate a reasonable buffer for typical inference messages (~2-8 KB).
+        let mut buf = Vec::with_capacity(8 * 1024);
         Self::from_reader_buf(reader, &mut buf).await
     }
 
