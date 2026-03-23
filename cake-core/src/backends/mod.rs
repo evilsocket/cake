@@ -398,6 +398,42 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
     /// Rotary position embedding: apply cos/sin rotation to tensor.
     /// `cos` and `sin` have shape `(seq_len, head_dim/2)` or compatible broadcast shape.
     fn rope(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+        // Fast path: F32 CPU data — process pairs directly
+        if x.dtype() == DType::F32 && cos.dtype() == DType::F32 {
+            let x_shape = x.dims();
+            let head_dim = *x_shape.last().unwrap_or(&0);
+            let half = head_dim / 2;
+            let x_data = x.contiguous()?.flatten_all()?.to_vec1::<f32>()?;
+            let cos_data = cos.contiguous()?.flatten_all()?.to_vec1::<f32>()?;
+            let sin_data = sin.contiguous()?.flatten_all()?.to_vec1::<f32>()?;
+            let total_vecs = x_data.len() / head_dim;
+            let cos_stride = cos_data.len() / half; // number of sequence positions in cos
+            let mut out = vec![0f32; x_data.len()];
+            for v in 0..total_vecs {
+                let x_off = v * head_dim;
+                // Determine which cos/sin row to use (seq position)
+                let seq_idx = if cos_stride > 1 {
+                    // x is (batch, heads, seq, dim), cos is (seq, half)
+                    let seq_len = if x_shape.len() >= 3 {
+                        x_shape[x_shape.len() - 2]
+                    } else {
+                        1
+                    };
+                    (v % seq_len) * half
+                } else {
+                    0
+                };
+                for i in 0..half {
+                    let c = cos_data[seq_idx + i];
+                    let s = sin_data[seq_idx + i];
+                    let x1 = x_data[x_off + i];
+                    let x2 = x_data[x_off + half + i];
+                    out[x_off + i] = x1 * c - x2 * s;
+                    out[x_off + half + i] = x2 * c + x1 * s;
+                }
+            }
+            return Tensor::from_vec(out, x_shape, x.device());
+        }
         candle_nn::rotary_emb::rope(x, cos, sin)
     }
 
