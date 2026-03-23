@@ -130,9 +130,9 @@ fn add3(@builtin(global_invocation_id) gid: vec3<u32>) {
 // ═══════════════════════════════════════════════════════════════════
 // GEMV: y[j] = sum_i(x[i] * W[i * N + j])  for x[1,K] × W[K,N] = y[1,N]
 //
-// One thread per output column. No shared memory — x fits in L1 cache
-// on UMA (4KB for K=1024). No barriers. Maximum throughput from
-// coalesced weight reads.
+// One thread per output column. Adjacent threads read adjacent weight
+// columns (coalesced). x is tiled into shared memory (broadcast to all).
+// No reduction needed — each thread accumulates its own dot product.
 // ═══════════════════════════════════════════════════════════════════
 
 struct GemvParams {
@@ -147,39 +147,43 @@ struct GemvParams {
 @group(0) @binding(2) var<storage, read_write> gemv_y: array<f32>; // [N]
 @group(0) @binding(3) var<uniform> gemv_params: GemvParams;
 
+var<workgroup> gemv_shared: array<f32, 256>;
+
 @compute @workgroup_size(256)
-fn gemv(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let base_col = gid.x * 4u;
+fn gemv(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(local_invocation_id) lid: vec3<u32>) {
+    let col = gid.x;
+    let tid = lid.x;
     let N = gemv_params.N;
     let K = gemv_params.K;
-    if (base_col >= N) { return; }
 
-    // Each thread computes 4 output columns via vec4 for better bandwidth.
-    // x is tiny (fits L1). Weight reads are coalesced across threads.
-    var acc = vec4<f32>(0.0);
-    if (base_col + 3u < N) {
-        // Fast path: full vec4
-        for (var k: u32 = 0u; k < K; k++) {
-            let xk = gemv_x[k];
-            let w_off = k * N + base_col;
-            acc += vec4(xk) * vec4(gemv_w[w_off], gemv_w[w_off + 1u], gemv_w[w_off + 2u], gemv_w[w_off + 3u]);
+    var acc: f32 = 0.0;
+    let num_tiles = (K + 255u) / 256u;
+
+    for (var t: u32 = 0u; t < num_tiles; t++) {
+        // Cooperatively load 256 elements of x into shared memory
+        let x_idx = t * 256u + tid;
+        if (x_idx < K) {
+            gemv_shared[tid] = gemv_x[x_idx];
+        } else {
+            gemv_shared[tid] = 0.0;
         }
-        gemv_y[base_col] = acc.x;
-        gemv_y[base_col + 1u] = acc.y;
-        gemv_y[base_col + 2u] = acc.z;
-        gemv_y[base_col + 3u] = acc.w;
-    } else {
-        // Tail: handle remaining columns
-        for (var j = 0u; j < 4u; j++) {
-            let col = base_col + j;
-            if (col < N) {
-                var s: f32 = 0.0;
-                for (var k: u32 = 0u; k < K; k++) {
-                    s += gemv_x[k] * gemv_w[k * N + col];
-                }
-                gemv_y[col] = s;
+        workgroupBarrier();
+
+        // Each thread accumulates dot product for its output column.
+        // Adjacent threads read adjacent weight columns — coalesced access.
+        if (col < N) {
+            let tile_base = t * 256u;
+            let tile_end = min(256u, K - tile_base);
+            for (var k: u32 = 0u; k < tile_end; k++) {
+                acc += gemv_shared[k] * gemv_w[(tile_base + k) * N + col];
             }
         }
+        workgroupBarrier();
+    }
+
+    if (col < N) {
+        gemv_y[col] = acc;
     }
 }
 
