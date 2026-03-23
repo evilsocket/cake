@@ -7,7 +7,7 @@
 
 // ─── helpers ────────────────────────────────────────────────────────
 template<typename T> __device__ __forceinline__ T expg(T a);
-template<> __device__ __forceinline__ float  expg<float>(float a)   { return expf(a); }
+template<> __device__ __forceinline__ float  expg<float>(float a)   { return __expf(a); }
 template<> __device__ __forceinline__ double expg<double>(double a) { return exp(a); }
 
 #if __CUDA_ARCH__ >= 530
