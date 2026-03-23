@@ -190,23 +190,32 @@ impl Fp8Linear {
                 bias,
             }
         } else {
+            // Pre-transpose and make contiguous for efficient matmul
+            let w_t = weight.t().unwrap().contiguous().unwrap();
             Self {
                 f8_weight: None,
-                weight: std::sync::RwLock::new(Some(weight)),
+                weight: std::sync::RwLock::new(Some(w_t)),
                 bias,
             }
         }
     }
 
     fn get_weight(&self) -> candle_core::Result<candle_core::Tensor> {
+        // Fast path: weight already dequantized and cached
         if let Some(w) = self.weight.read().unwrap().as_ref() {
             return Ok(w.clone());
         }
+        // Slow path: dequantize F8→F32→F16, pre-transpose, and cache
         let f8_w = self
             .f8_weight
             .as_ref()
             .expect("no F8 weight and no cached weight");
-        f8_w.to_dtype(candle_core::DType::F32)?.to_dtype(candle_core::DType::F16)
+        let w = f8_w.to_dtype(candle_core::DType::F32)?.to_dtype(candle_core::DType::F16)?;
+        // Pre-transpose and make contiguous so matmul doesn't have to
+        let w_t = w.t()?.contiguous()?;
+        let mut cache = self.weight.write().unwrap();
+        *cache = Some(w_t.clone());
+        Ok(w_t)
     }
 
     /// Pre-dequantize F8→F16 and cache. Call once before inference loop.
@@ -219,22 +228,29 @@ impl Fp8Linear {
     /// Forward pass: dequantizes weight if needed, computes matmul in weight dtype.
     pub fn forward(&self, x: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor> {
         let in_dtype = x.dtype();
-        let w = self.get_weight()?;
-        let compute = w.dtype();
+        // get_weight returns pre-transposed weight: shape (in_features, out_features)
+        let w_t = self.get_weight()?;
+        let compute = w_t.dtype();
         let x = x.to_dtype(compute)?;
-        let dims = x.dims().to_vec();
-        let last = *dims.last().unwrap();
-        let batch: usize = dims[..dims.len() - 1].iter().product();
-        let x_2d = x.reshape((batch, last))?;
-        let y_2d = x_2d.matmul(&w.t()?)?;
-        let mut out_dims = dims[..dims.len() - 1].to_vec();
-        out_dims.push(w.dim(0)?);
-        let y = y_2d.reshape(out_dims)?;
+
+        // For 2D input, skip reshaping — matmul handles it directly
+        let y = if x.rank() == 2 {
+            x.matmul(&w_t)?
+        } else {
+            let dims = x.dims();
+            let last = dims[dims.len() - 1];
+            let batch: usize = dims[..dims.len() - 1].iter().product();
+            let y_2d = x.reshape((batch, last))?.matmul(&w_t)?;
+            let mut out_dims = dims[..dims.len() - 1].to_vec();
+            out_dims.push(w_t.dim(1)?);
+            y_2d.reshape(out_dims)?
+        };
+
         let y = match &self.bias {
             Some(b) => y.broadcast_add(&b.to_dtype(compute)?)?,
             None => y,
         };
-        y.to_dtype(in_dtype)
+        if y.dtype() == in_dtype { Ok(y) } else { y.to_dtype(in_dtype) }
     }
 }
 
