@@ -41,9 +41,9 @@ pub fn encode_wav_bytes(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 
 /// Save PCM f32 samples as a WAV file (16-bit PCM, mono).
 pub fn save_wav(samples: &[f32], path: &Path, sample_rate: u32) -> Result<()> {
-    use std::io::Write;
+    use std::io::{BufWriter, Write};
     let data_size = (samples.len() * 2) as u32;
-    let mut f = std::fs::File::create(path)?;
+    let mut f = BufWriter::new(std::fs::File::create(path)?);
     f.write_all(b"RIFF")?;
     f.write_all(&(36 + data_size).to_le_bytes())?;
     f.write_all(b"WAVEfmt ")?;
