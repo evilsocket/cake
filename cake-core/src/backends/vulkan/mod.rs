@@ -743,8 +743,8 @@ impl VulkanBackend {
         n: usize,
     ) -> Vec<f32> {
         let buf_c = self.alloc_output(m * n);
-        let wg_m = (m as u32).div_ceil(32);
-        let wg_n = (n as u32).div_ceil(32);
+        let wg_m = (m as u32).div_ceil(64);
+        let wg_n = (n as u32).div_ceil(64);
         let result = self.dispatch_compute(
             "matmul",
             &[buf_a.buffer, buf_b.buffer, buf_c.buffer],
