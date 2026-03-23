@@ -417,7 +417,7 @@ impl<G: Generator + 'static> Worker<G> {
                 }
             }
 
-            let mut x = match x.to_tensor(first_device) {
+            let mut x = match x.into_tensor(first_device) {
                 Ok(t) => t,
                 Err(e) => {
                     let msg = format!("failed to load tensor to device: {e}");
