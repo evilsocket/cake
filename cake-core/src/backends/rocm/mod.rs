@@ -221,6 +221,7 @@ impl RocmBackend {
         Ok(ptr)
     }
 
+    #[inline]
     fn rocblas_gemm(&self, a: *const f32, b: *const f32, m: usize, k: usize, n: usize) -> Result<GpuBuf> {
         let c = self.gpu_alloc(m * n)?;
         let alpha: f32 = 1.0;
