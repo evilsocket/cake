@@ -8,7 +8,7 @@
 //! The `synchronize()` method flushes the command buffer and is called at strategic
 //! points during forward passes (see GatedDeltaNet, Qwen3_5FullAttention).
 
-use candle_core::{backend::BackendStorage as _, CpuStorage, DType, Device, Layout, Result, Shape, Tensor, D};
+use candle_core::{backend::BackendStorage as _, CpuStorage, DType, Device, Layout, Result, Shape, Tensor};
 
 use super::ComputeBackend;
 
@@ -292,6 +292,50 @@ impl candle_core::CustomOp3 for MetalAddScaled {
     }
 }
 
+struct MetalDepthwiseConv1dSilu;
+
+impl candle_core::CustomOp2 for MetalDepthwiseConv1dSilu {
+    fn name(&self) -> &'static str { "metal_depthwise_conv1d_silu" }
+
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("MetalDepthwiseConv1dSilu: expected Metal device")
+    }
+
+    fn metal_fwd(
+        &self,
+        s_win: &candle_core::MetalStorage, l_win: &Layout,
+        s_wt: &candle_core::MetalStorage, l_wt: &Layout,
+    ) -> Result<(candle_core::MetalStorage, Shape)> {
+        let device = s_win.device();
+        // window: (batch, channels, kernel_size), weight: (channels, kernel_size)
+        let win_dims = l_win.shape().dims();
+        let (batch, channels, kernel_size) = (win_dims[0], win_dims[1], win_dims[2]);
+        let out_count = batch * channels;
+        let kernel_name: &'static str = match s_win.dtype() {
+            DType::F32 => "depthwise_conv1d_silu_f32",
+            DType::F16 => "depthwise_conv1d_silu_f16",
+            dt => candle_core::bail!("depthwise_conv1d_silu metal: unsupported dtype {dt:?}"),
+        };
+        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+        let output = device.new_buffer(out_count, s_win.dtype(), "dw_conv1d_silu")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let off_win = l_win.start_offset() * s_win.dtype().size_in_bytes();
+        let off_wt = l_wt.start_offset() * s_wt.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s_win.buffer(), off_win));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (s_wt.buffer(), off_wt));
+        candle_metal_kernels::utils::set_param(&encoder, 2, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 3, out_count as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 4, channels as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 5, kernel_size as u32);
+        let grid = objc2_metal::MTLSize { width: out_count, height: 1, depth: 1 };
+        let group = candle_metal_kernels::utils::get_block_dims(out_count, 1, 1);
+        encoder.dispatch_threads(grid, group);
+        let out_shape = Shape::from(vec![batch, channels]);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), out_count, s_win.dtype()), out_shape))
+    }
+}
+
 // ─── MetalBackend ────────────────────────────────────────────────────
 
 /// Metal backend -- MSL kernels for fused ops, candle tensor ops for everything else.
@@ -365,9 +409,7 @@ impl ComputeBackend for MetalBackend {
         window: &Tensor, weight: &Tensor,
         _kernel_size: usize, _channels: usize,
     ) -> Result<Tensor> {
-        let w = weight.unsqueeze(0)?;
-        let dot = window.broadcast_mul(&w)?.sum(D::Minus1)?;
-        candle_nn::ops::silu(&dot)
+        window.apply_op2_no_bwd(weight, &MetalDepthwiseConv1dSilu)
     }
 
     fn depthwise_conv1d_bias(

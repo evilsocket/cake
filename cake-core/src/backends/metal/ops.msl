@@ -150,6 +150,46 @@ kernel void add_scaled_f16(
     output[idx] = half(av + bv * cv);
 }
 
+// ─── depthwise_conv1d_silu: dot(window, weight) per channel, then silu ──
+// window: (batch, channels, kernel_size), weight: (channels, kernel_size)
+// output: (batch, channels) = silu(sum_k window[b,c,k] * weight[c,k])
+// idx iterates over batch*channels output elements
+kernel void depthwise_conv1d_silu_f32(
+    device const float* window [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& out_count [[buffer(3)]],
+    constant uint& channels [[buffer(4)]],
+    constant uint& kernel_size [[buffer(5)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= out_count) return;
+    uint c = idx % channels;
+    float dot = 0.0f;
+    for (uint k = 0; k < kernel_size; k++) {
+        dot += window[idx * kernel_size + k] * weight[c * kernel_size + k];
+    }
+    output[idx] = dot / (1.0f + exp(-dot));
+}
+
+kernel void depthwise_conv1d_silu_f16(
+    device const half* window [[buffer(0)]],
+    device const half* weight [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant uint& out_count [[buffer(3)]],
+    constant uint& channels [[buffer(4)]],
+    constant uint& kernel_size [[buffer(5)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= out_count) return;
+    uint c = idx % channels;
+    float dot = 0.0f;
+    for (uint k = 0; k < kernel_size; k++) {
+        dot += float(window[idx * kernel_size + k]) * float(weight[c * kernel_size + k]);
+    }
+    output[idx] = half(dot / (1.0f + exp(-dot)));
+}
+
 kernel void sub_mul_f16(
     device const half* a [[buffer(0)]],
     device const half* b [[buffer(1)]],
