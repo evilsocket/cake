@@ -79,8 +79,7 @@ impl ComputeBackend for CudaBackend {
 
     fn rms_norm_gated(&self, x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
         let x = x.contiguous()?;
-        let z = z.contiguous()?;
-        let z = if z.dtype() != x.dtype() { z.to_dtype(x.dtype())? } else { z };
+        let z = z.contiguous()?.to_dtype(x.dtype())?;
         let w = weight.contiguous()?;
         x.apply_op3_no_bwd(&z, &w, &ops::RmsNormGated { eps })
     }
