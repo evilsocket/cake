@@ -63,7 +63,7 @@ kernel void stable_softplus_f32(
     if (idx >= count) return;
     float x = input[idx];
     // Branchless: select avoids warp divergence
-    float sp = select(log1p(fast::exp(x)), x, x > 20.0f);
+    float sp = select(log(1.0f + fast::exp(x)), x, x > 20.0f);
     output[idx] = max(x, sp);
 }
 
@@ -75,7 +75,7 @@ kernel void stable_softplus_f16(
 ) {
     if (idx >= count) return;
     float x = float(input[idx]);
-    float sp = select(log1p(fast::exp(x)), x, x > 20.0f);
+    float sp = select(log(1.0f + fast::exp(x)), x, x > 20.0f);
     output[idx] = half(max(x, sp));
 }
 
@@ -90,7 +90,7 @@ kernel void silu_mul_f32(
     if (idx >= count) return;
     float g = gate[idx];
     // x * sigmoid(x) * up = x * (1 / (1 + exp(-x))) * up
-    float sig = precise::recip(1.0f + fast::exp(-g));
+    float sig = 1.0f / (1.0f + fast::exp(-g));
     output[idx] = g * sig * up[idx];
 }
 
@@ -103,7 +103,7 @@ kernel void silu_mul_f16(
 ) {
     if (idx >= count) return;
     float g = float(gate[idx]);
-    float sig = precise::recip(1.0f + fast::exp(-g));
+    float sig = 1.0f / (1.0f + fast::exp(-g));
     output[idx] = half(g * sig * float(up[idx]));
 }
 
@@ -226,7 +226,7 @@ kernel void depthwise_conv1d_silu_f32(
     float dot = 0.0f;
     for (uint k = 0; k < kernel_size; k++)
         dot = fma(window[idx * kernel_size + k], weight[c * kernel_size + k], dot);
-    float sig = precise::recip(1.0f + fast::exp(-dot));
+    float sig = 1.0f / (1.0f + fast::exp(-dot));
     output[idx] = dot * sig;
 }
 
@@ -244,7 +244,7 @@ kernel void depthwise_conv1d_silu_f16(
     float dot = 0.0f;
     for (uint k = 0; k < kernel_size; k++)
         dot = fma(float(window[idx * kernel_size + k]), float(weight[c * kernel_size + k]), dot);
-    float sig = precise::recip(1.0f + fast::exp(-dot));
+    float sig = 1.0f / (1.0f + fast::exp(-dot));
     output[idx] = half(dot * sig);
 }
 
@@ -316,7 +316,7 @@ kernel void rms_norm_gated_f32(
     SIMD_REDUCE_SUM(val * val, hidden, lane, simd_id)
     float rms = fast::rsqrt(_sr / float(hidden) + eps);
     float zv = z[base + col];
-    float silu_z = zv * precise::recip(1.0f + fast::exp(-zv));
+    float silu_z = zv * 1.0f / (1.0f + fast::exp(-zv));
     output[base + col] = val * rms * weight[col] * silu_z;
 }
 
@@ -338,7 +338,7 @@ kernel void rms_norm_gated_f16(
     SIMD_REDUCE_SUM(val * val, hidden, lane, simd_id)
     float rms = fast::rsqrt(_sr / float(hidden) + eps);
     float zv = float(z[base + col]);
-    float silu_z = zv * precise::recip(1.0f + fast::exp(-zv));
+    float silu_z = zv * 1.0f / (1.0f + fast::exp(-zv));
     output[base + col] = half(val * rms * float(weight[col]) * silu_z);
 }
 
