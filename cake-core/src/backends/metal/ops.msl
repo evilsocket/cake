@@ -158,7 +158,8 @@ kernel void exp_mul_f16(
     uint idx [[thread_position_in_grid]]
 ) {
     if (idx >= count) return;
-    output[idx] = half(float(x[idx]) * fast::exp(float(y[idx])));
+    // exp needs float precision, multiply result back to half
+    output[idx] = x[idx] * half(fast::exp(float(y[idx])));
 }
 
 // ─── sub_mul ────────────────────────────────────────────────────────
@@ -183,7 +184,7 @@ kernel void sub_mul_f16(
     uint idx [[thread_position_in_grid]]
 ) {
     if (idx >= count) return;
-    output[idx] = half((float(a[idx]) - float(b[idx])) * float(c[idx]));
+    output[idx] = (a[idx] - b[idx]) * c[idx];
 }
 
 // ─── add_scaled: a + b * c with channel broadcast ───────────────────
@@ -214,7 +215,7 @@ kernel void add_scaled_f16(
 ) {
     if (idx >= count) return;
     uint chan = (idx / time_len) % channels;
-    output[idx] = half(fma(float(b[idx]), float(c[chan]), float(a[idx])));
+    output[idx] = fma(b[idx], c[chan], a[idx]);
 }
 
 // ─── depthwise_conv1d_silu ──────────────────────────────────────────
