@@ -69,7 +69,21 @@ impl VibeVoice1_5B {
         let common_cfg = config.into_config();
 
         info!("Loading VibeVoice-1.5B...");
-        let dtype = DType::BF16;
+        // Use BF16 on Ampere+ (SM 8.0+), fall back to F16 on older GPUs (Pascal, Turing)
+        let dtype = if device.is_cuda() {
+            // Check if BF16 is supported by attempting a trivial BF16 tensor
+            match candle_core::Tensor::zeros(1, DType::BF16, device)
+                .and_then(|t| t.to_dtype(DType::F32))
+            {
+                Ok(_) => DType::BF16,
+                Err(_) => {
+                    info!("  BF16 not supported on this GPU, using F16");
+                    DType::F16
+                }
+            }
+        } else {
+            DType::BF16
+        };
 
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(weight_paths, dtype, device)?
