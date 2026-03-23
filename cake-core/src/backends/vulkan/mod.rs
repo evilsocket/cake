@@ -132,6 +132,8 @@ pub struct VulkanBackend {
     descriptor_pool: vk::DescriptorPool,
     // Params uniform buffer (16 bytes, persistently mapped)
     params_buf: MappedBuffer,
+    // Dummy buffer for unary dispatches (binding slot filler)
+    dummy_buf: MappedBuffer,
     // Buffer management
     weight_cache: Mutex<WeightCache>,
     buffer_pool: Mutex<BufferPool>,
@@ -358,6 +360,15 @@ impl VulkanBackend {
             uma_memory_type,
         )?;
 
+        // 12. Dummy buffer for unary dispatches (avoids per-dispatch allocation)
+        let dummy_buf = Self::alloc_mapped_buffer(
+            &vk_device,
+            &mut allocator,
+            256,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            uma_memory_type,
+        )?;
+
         let backend = Self {
             device: Device::Cpu,
             _entry: entry,
@@ -369,6 +380,7 @@ impl VulkanBackend {
             fence,
             allocator: Mutex::new(Some(allocator)),
             uma_memory_type,
+            dummy_buf,
             pipelines,
             descriptor_pool,
             params_buf,
@@ -381,13 +393,13 @@ impl VulkanBackend {
         // Warm-up: dispatch every pipeline once to eliminate cold-start penalties.
         // Each first dispatch per pipeline pays a one-time cost (driver JIT, etc).
         {
-            let dummy = backend.upload_uncached(&[0.0f32; 4]);
             let out = backend.alloc_output(4);
+            let dummy = backend.dummy_buf.buffer;
             // Elementwise pipelines (2-input)
             for entry in &["silu_mul", "exp_mul"] {
                 let _ = backend.dispatch_compute(
                     entry,
-                    &[dummy.buffer, dummy.buffer, out.buffer],
+                    &[dummy, dummy, out.buffer],
                     &out, 4, &[4, 0, 0, 0], (1, 1, 1),
                 );
             }
@@ -395,32 +407,32 @@ impl VulkanBackend {
             for entry in &["add3", "sub_mul"] {
                 let _ = backend.dispatch_compute(
                     entry,
-                    &[dummy.buffer, dummy.buffer, out.buffer, dummy.buffer],
+                    &[dummy, dummy, out.buffer, dummy],
                     &out, 4, &[4, 0, 0, 0], (1, 1, 1),
                 );
             }
             // Unary pipeline
             let _ = backend.dispatch_compute(
                 "stable_softplus",
-                &[dummy.buffer, dummy.buffer, out.buffer],
+                &[dummy, dummy, out.buffer],
                 &out, 4, &[4, 0, 0, 0], (1, 1, 1),
             );
             // GEMV: 1×4 * 4×4 = 1×4
             let _ = backend.dispatch_compute(
                 "gemv",
-                &[dummy.buffer, dummy.buffer, out.buffer],
+                &[dummy, dummy, out.buffer],
                 &out, 4, &[4, 4, 0, 0], (1, 1, 1),
             );
             // GEMM: 2×2 * 2×2 = 2×2
             let _ = backend.dispatch_compute(
                 "matmul",
-                &[dummy.buffer, dummy.buffer, out.buffer],
+                &[dummy, dummy, out.buffer],
                 &out, 4, &[2, 2, 2, 0], (1, 1, 1),
             );
             // Small GEMM: 2×2 * 2×2 = 2×2
             let _ = backend.dispatch_compute(
                 "matmul_small",
-                &[dummy.buffer, dummy.buffer, out.buffer],
+                &[dummy, dummy, out.buffer],
                 &out, 4, &[2, 2, 2, 0], (1, 1, 1),
             );
             backend.release_output(out);
@@ -830,13 +842,12 @@ impl VulkanBackend {
         let n = x.elem_count();
 
         let buf_a = self.get_or_upload(x)?;
-        let dummy = self.upload_uncached(&[0.0f32]);
         let buf_out = self.alloc_output(n);
 
         let threads_needed = (n as u32).div_ceil(4);
         let result = self.dispatch_compute(
             entry,
-            &[buf_a.buffer, dummy.buffer, buf_out.buffer],
+            &[buf_a.buffer, self.dummy_buf.buffer, buf_out.buffer],
             &buf_out,
             n,
             &[n as u32, 0, 0, 0],
@@ -865,12 +876,11 @@ impl VulkanBackend {
         let n = input.elem_count();
 
         let buf_in = self.get_or_upload(input)?;
-        let dummy = self.upload_uncached(&[0.0f32]);
         let buf_out = self.alloc_output(n);
 
         let result = self.dispatch_compute(
             "scaled_softmax",
-            &[buf_in.buffer, dummy.buffer, buf_out.buffer],
+            &[buf_in.buffer, self.dummy_buf.buffer, buf_out.buffer],
             &buf_out,
             n,
             &[rows as u32, cols as u32, scale.to_bits(), seq_len as u32],
