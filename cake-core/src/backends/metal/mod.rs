@@ -23,18 +23,28 @@ const FUSED_OPS_MSL: &str = include_str!("ops.msl");
 // Metal shader compilation from MSL source is expensive (~ms). Cache compiled
 // pipeline states keyed by kernel name to avoid recompilation on every op call.
 
+/// All kernel names in the MSL source — compiled eagerly on first access.
+const ALL_KERNELS: &[&str] = &[
+    "stable_softplus_f32", "stable_softplus_f16",
+    "silu_mul_f32", "silu_mul_f16",
+    "add3_f32", "add3_f16",
+    "exp_mul_f32", "exp_mul_f16",
+    "sub_mul_f32", "sub_mul_f16",
+    "add_scaled_f32", "add_scaled_f16",
+    "depthwise_conv1d_silu_f32", "depthwise_conv1d_silu_f16",
+    "depthwise_conv1d_bias_f32", "depthwise_conv1d_bias_f16",
+    "rms_norm_gated_f32", "rms_norm_gated_f16",
+    "add_rms_norm_f32", "add_rms_norm_f16",
+    "rms_norm_channel_f32", "rms_norm_channel_f16",
+];
+
 struct PipelineCache {
-    // Cache the compiled MSL library (compiled once from source) and individual pipelines
-    library: Mutex<Option<candle_metal_kernels::metal::Library>>,
     pipelines: Mutex<HashMap<&'static str, candle_metal_kernels::metal::ComputePipeline>>,
 }
 
 impl PipelineCache {
     fn new() -> Self {
-        Self {
-            library: Mutex::new(None),
-            pipelines: Mutex::new(HashMap::new()),
-        }
+        Self { pipelines: Mutex::new(HashMap::new()) }
     }
 
     fn get_or_create(
@@ -42,31 +52,24 @@ impl PipelineCache {
         device: &candle_core::MetalDevice,
         kernel_name: &'static str,
     ) -> Result<candle_metal_kernels::metal::ComputePipeline> {
-        // Fast path: check pipeline cache first
-        {
-            let cache = self.pipelines.lock().map_err(|e| candle_core::Error::Msg(format!("pipeline cache lock: {e}")))?;
-            if let Some(pipeline) = cache.get(kernel_name) {
-                return Ok(pipeline.clone());
+        let mut cache = self.pipelines.lock().map_err(|e| candle_core::Error::Msg(format!("pipeline cache lock: {e}")))?;
+        if let Some(pipeline) = cache.get(kernel_name) {
+            return Ok(pipeline.clone());
+        }
+        // First access — compile library and create ALL pipelines at once
+        let lib = device.new_library_with_source(FUSED_OPS_MSL, None)
+            .map_err(|e| candle_core::Error::Msg(format!("metal shader compile: {e}")))?;
+        for &name in ALL_KERNELS {
+            if cache.contains_key(name) { continue; }
+            if let Ok(func) = lib.get_function(name, None) {
+                if let Ok(pipeline) = device.new_compute_pipeline_state_with_function(&func) {
+                    cache.insert(name, pipeline);
+                }
             }
         }
-        // Slow path: compile library (once) and create pipeline
-        let mut lib_guard = self.library.lock().map_err(|e| candle_core::Error::Msg(format!("library lock: {e}")))?;
-        let lib = match lib_guard.as_ref() {
-            Some(lib) => lib,
-            None => {
-                let compiled = device.new_library_with_source(FUSED_OPS_MSL, None)
-                    .map_err(|e| candle_core::Error::Msg(format!("metal shader compile: {e}")))?;
-                *lib_guard = Some(compiled);
-                lib_guard.as_ref().unwrap()
-            }
-        };
-        let func = lib.get_function(kernel_name, None)
-            .map_err(|e| candle_core::Error::Msg(format!("metal get_function: {e}")))?;
-        let pipeline = device.new_compute_pipeline_state_with_function(&func)
-            .map_err(|e| candle_core::Error::Msg(format!("metal pipeline: {e}")))?;
-        let mut cache = self.pipelines.lock().map_err(|e| candle_core::Error::Msg(format!("pipeline cache lock: {e}")))?;
-        cache.insert(kernel_name, pipeline.clone());
-        Ok(pipeline)
+        cache.get(kernel_name).cloned().ok_or_else(|| {
+            candle_core::Error::Msg(format!("metal kernel not found: {kernel_name}"))
+        })
     }
 }
 
