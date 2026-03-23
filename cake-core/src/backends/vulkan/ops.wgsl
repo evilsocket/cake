@@ -505,25 +505,25 @@ fn matmul_small(@builtin(global_invocation_id) gid: vec3<u32>,
     for (var t: u32 = 0u; t < num_tiles; t++) {
         let tk = t * STILE_K;
 
-        // Load tile_a[16, 32]: 256 threads, 2 elements each
-        for (var i: u32 = 0u; i < 2u; i++) {
-            let idx = lin * 2u + i;
-            let tr = idx / STILE_K;
-            let tc = idx % STILE_K;
+        // Load tile_a[16, 32]: row-coalesced pattern.
+        // 256 threads cover 8 rows per iteration (32 threads/row), 2 iterations for 16 rows.
+        for (var r: u32 = 0u; r < 2u; r++) {
+            let tr = r * 8u + lin / 32u;
+            let tc = lin % 32u;
             let a_row = wg_row + tr;
             let a_col = tk + tc;
-            if (a_row < M && a_col < K) {
+            if (tr < STILE_M && a_row < M && a_col < K) {
                 stile_a[tr * STILE_A_STRIDE + tc] = smat_a[a_row * K + a_col];
-            } else {
+            } else if (tr < STILE_M) {
                 stile_a[tr * STILE_A_STRIDE + tc] = 0.0;
             }
         }
 
-        // Load tile_b[32, 64]: 256 threads, 8 elements each
-        for (var i: u32 = 0u; i < 8u; i++) {
-            let idx = lin * 8u + i;
-            let tr = idx / STILE_N;
-            let tc = idx % STILE_N;
+        // Load tile_b[32, 64]: row-coalesced pattern.
+        // 256 threads cover 4 rows per iteration (64 threads/row), 8 iterations for 32 rows.
+        for (var r: u32 = 0u; r < 8u; r++) {
+            let tr = r * 4u + lin / 64u;
+            let tc = lin % 64u;
             let b_row = tk + tr;
             let b_col = wg_col + tc;
             if (b_row < K && b_col < N) {
