@@ -44,6 +44,7 @@ pub const ROCBLAS_OPERATION_NONE: c_int = 111;
 impl RocmFfi {
     /// Load HIP and rocBLAS from the library path.
     /// Searches LD_LIBRARY_PATH, then default system paths.
+    #[allow(clippy::missing_transmute_annotations)]
     pub fn load() -> std::result::Result<Self, String> {
         unsafe {
             let hip_lib = libloading::Library::new("libamdhip64.so")
