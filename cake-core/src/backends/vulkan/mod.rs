@@ -837,9 +837,6 @@ impl VulkanBackend {
     }
 
     fn tensor_matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
-        let a = a.to_dtype(DType::F32)?.contiguous()?;
-        let b = b.to_dtype(DType::F32)?.contiguous()?;
-
         let a_dims = a.dims();
         let b_dims = b.dims();
         let a_rank = a_dims.len();
@@ -858,8 +855,9 @@ impl VulkanBackend {
         let mn = m * n;
 
         if batch == 1 {
-            let buf_a = self.get_or_upload(&a)?;
-            let buf_b = self.get_or_upload(&b)?;
+            // get_or_upload handles dtype conversion + contiguity
+            let buf_a = self.get_or_upload(a)?;
+            let buf_b = self.get_or_upload(b)?;
             let out = self.gpu_matmul(&buf_a, &buf_b, m, k, n);
             let mut out_shape: Vec<usize> = a_dims[..a_rank - 2].to_vec();
             out_shape.push(m);
@@ -867,6 +865,9 @@ impl VulkanBackend {
             return Tensor::from_vec(out, out_shape.as_slice(), &Device::Cpu);
         }
 
+        // Batch path: need f32 contiguous data for slicing
+        let a = a.to_dtype(DType::F32)?.contiguous()?;
+        let b = b.to_dtype(DType::F32)?.contiguous()?;
         let a_data: Vec<f32> = a.flatten_all()?.to_vec1()?;
         let b_data: Vec<f32> = b.flatten_all()?.to_vec1()?;
 
