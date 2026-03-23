@@ -193,7 +193,7 @@ impl Qwen3_5FullAttention {
             }
 
             // Metal: mixed-precision attention — F16 matmuls + F32 softmax.
-            // F16 SDPA causes garbage (even for gen), F32 SDPA exceeds threadgroup memory.
+            // F16 SDPA causes garbage, F32 SDPA exceeds threadgroup memory.
             #[cfg(feature = "metal")]
             if matches!(q.device(), candle_core::Device::Metal(_)) {
                 let k = self.repeat_kv(k).map_err(|e| anyhow!("repeat_kv k: {e}"))?;
