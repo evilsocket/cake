@@ -688,42 +688,51 @@ async fn stream_response(
         "stream": true
     });
 
-    let resp = client
-        .post(format!("{}/v1/chat/completions", server))
-        .json(&body)
-        .send()
-        .await?;
+    // Use a blocking thread for the HTTP stream to avoid tokio runtime conflicts
+    // when the server runs on a separate runtime (local chat mode).
+    let url = format!("{}/v1/chat/completions", server);
+    let body_str = serde_json::to_string(&body)?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("API error {}: {}", status, text);
-    }
+    std::thread::spawn(move || {
+        let resp = match reqwest::blocking::Client::new()
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .body(body_str)
+            .send()
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = tx.send(Some(format!("[connection error: {}]", e)));
+                let _ = tx.send(None);
+                return;
+            }
+        };
 
-    let mut byte_stream = resp.bytes_stream();
+        if !resp.status().is_success() {
+            let _ = tx.send(Some(format!("[API error: {}]", resp.status())));
+            let _ = tx.send(None);
+            return;
+        }
 
-    tokio::spawn(async move {
+        let reader = std::io::BufReader::new(resp);
+        use std::io::BufRead;
         let mut buffer = String::new();
 
-        while let Some(chunk) = byte_stream.next().await {
-            let chunk = match chunk {
-                Ok(c) => c,
+        for line_result in reader.lines() {
+            let line = match line_result {
+                Ok(l) => l,
                 Err(_) => break,
             };
 
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-            while let Some(pos) = buffer.find("\n\n") {
-                let event = buffer[..pos].to_string();
-                buffer = buffer[pos + 2..].to_string();
-
-                for line in event.lines() {
-                    let line = line.trim();
-                    if line == "data: [DONE]" {
+            if line.is_empty() {
+                // Process buffered event
+                for event_line in buffer.lines() {
+                    let event_line = event_line.trim();
+                    if event_line == "data: [DONE]" {
                         let _ = tx.send(None);
                         return;
                     }
-                    if let Some(data) = line.strip_prefix("data: ") {
+                    if let Some(data) = event_line.strip_prefix("data: ") {
                         if let Ok(resp) = serde_json::from_str::<StreamResponse>(data) {
                             if let Some(choice) = resp.choices.first() {
                                 if let Some(ref content) = choice.delta.content {
@@ -737,6 +746,10 @@ async fn stream_response(
                         }
                     }
                 }
+                buffer.clear();
+            } else {
+                buffer.push_str(&line);
+                buffer.push('\n');
             }
         }
 
