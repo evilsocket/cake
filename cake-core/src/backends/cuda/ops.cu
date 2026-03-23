@@ -435,6 +435,7 @@ extern "C" __global__ void FN_NAME( \
         float acc = 0.0f; \
         int w_off = batch_idx * channels * kernel_size + chan * kernel_size; \
         int wt_off = chan * kernel_size; \
+        _Pragma("unroll 8") \
         for (int k = 0; k < kernel_size; k++) { \
             acc += static_cast<float>(window[w_off + k]) \
                  * static_cast<float>(weight[wt_off + k]); \
@@ -482,6 +483,7 @@ extern "C" __global__ void FN_NAME( \
         float acc = 0.0f; \
         int in_off = (b * channels + c) * input_len + t; \
         int wt_off = c * kernel_size; \
+        _Pragma("unroll 8") \
         for (int k = 0; k < kernel_size; k++) { \
             acc += static_cast<float>(input[in_off + k]) \
                  * static_cast<float>(weight[wt_off + k]); \
@@ -529,6 +531,7 @@ extern "C" __global__ void FN_NAME( \
         float acc = 0.0f; \
         int wt_off = c * kernel_size; \
         /* Virtual position in [ctx, input]: t + k, where ctx occupies [0, ctx_len) */ \
+        _Pragma("unroll 8") \
         for (int k = 0; k < kernel_size; k++) { \
             int pos = t + k; /* position in virtual [ctx, input] */ \
             float v; \
