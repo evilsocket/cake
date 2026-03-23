@@ -128,8 +128,8 @@ impl Qwen3_5FullAttention {
         let qkv = self.qkv_proj.forward(x)
             .map_err(|e| anyhow!("qkv_proj: {e}"))?;
 
-        // Flush GPU commands after the big QKV matmul
-        // (removing this causes >25 command accumulation = perf regression)
+        // Flush GPU commands after QKV matmul (always needed — full attention
+        // accumulates ~24 commands between syncs, can't afford more)
         let _ = self.backend.synchronize();
 
         // Split: Q (doubled for gating), K, V
