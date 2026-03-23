@@ -259,6 +259,7 @@ fn detect_cuda_version_from_dirs(candidates: &[std::path::PathBuf]) -> Option<St
 
 /// Detect the Apple chip model (e.g. "Apple M2 Max" on macOS, "iPad8,3" on iOS).
 #[cfg(any(target_os = "macos", target_os = "ios"))]
+#[allow(dead_code)] // called only with feature = "metal"
 fn detect_apple_chip() -> Option<String> {
     // Try machdep.cpu.brand_string first (macOS), then hw.machine (iOS).
     for key in &["machdep.cpu.brand_string", "hw.machine"] {
@@ -271,6 +272,7 @@ fn detect_apple_chip() -> Option<String> {
 
 /// Read a sysctl string value using the C API (works in iOS sandbox unlike subprocess).
 #[cfg(any(target_os = "macos", target_os = "ios"))]
+#[allow(dead_code)]
 fn sysctl_string(name: &str) -> Option<String> {
     use std::ffi::CString;
     let c_name = CString::new(name).ok()?;

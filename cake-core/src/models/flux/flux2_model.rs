@@ -18,11 +18,12 @@ pub fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor
     let dev = t.device();
     let half = dim / 2;
     let t = (t * TIME_FACTOR)?;
-    // Compute frequency vector directly as f32 Vec — avoids arange + to_dtype + mul + exp
-    let decay = -MAX_PERIOD.ln() / half as f64;
-    let freqs_data: Vec<f32> = (0..half).map(|j| (j as f64 * decay).exp() as f32).collect();
-    let freqs = Tensor::new(freqs_data.as_slice(), dev)?.unsqueeze(0)?;
-    let args = t.unsqueeze(1)?.to_dtype(DType::F32)?.broadcast_mul(&freqs)?;
+    let arange = Tensor::arange(0, half as u32, dev)?.to_dtype(DType::F32)?;
+    let freqs = (arange * (-MAX_PERIOD.ln() / half as f64))?.exp()?;
+    let args = t
+        .unsqueeze(1)?
+        .to_dtype(DType::F32)?
+        .broadcast_mul(&freqs.unsqueeze(0)?)?;
     Tensor::cat(&[args.cos()?, args.sin()?], D::Minus1)?.to_dtype(dtype)
 }
 
@@ -31,24 +32,18 @@ pub fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor
 #[derive(Debug, Clone)]
 pub struct Flux2PosEmbed {
     axes_dim: Vec<usize>,
-    /// Precomputed inverse frequency tables per axis, each shape (1, dim/2).
-    /// Stored as F64 tensors on CPU; moved to device lazily on first forward.
-    inv_freq_tables: Vec<Vec<f64>>,
+    /// Pre-computed inverse frequencies per axis (cached to avoid reallocation)
+    inv_freqs: Vec<Vec<f64>>,
 }
 
 impl Flux2PosEmbed {
     fn new(theta: usize, axes_dim: Vec<usize>) -> Self {
         let theta_f = theta as f64;
-        let inv_freq_tables: Vec<Vec<f64>> = axes_dim
-            .iter()
-            .map(|&dim| {
-                (0..dim)
-                    .step_by(2)
-                    .map(|j| 1.0 / theta_f.powf(j as f64 / dim as f64))
-                    .collect()
-            })
-            .collect();
-        Self { axes_dim, inv_freq_tables }
+        let inv_freqs: Vec<Vec<f64>> = axes_dim.iter().map(|&dim| {
+            (0..dim).step_by(2).map(|j| 1.0 / theta_f.powf(j as f64 / dim as f64)).collect()
+        }).collect();
+        let _ = theta; // used for inv_freqs computation above
+        Self { axes_dim, inv_freqs }
     }
 
     /// Public constructor for testing.
@@ -58,24 +53,22 @@ impl Flux2PosEmbed {
 
     /// Compute (cos, sin) PE for given position IDs [S, num_axes].
     pub fn forward(&self, ids: &Tensor) -> Result<(Tensor, Tensor)> {
-        let mut all_cos = Vec::new();
-        let mut all_sin = Vec::new();
+        let mut all_cos = Vec::with_capacity(self.axes_dim.len());
+        let mut all_sin = Vec::with_capacity(self.axes_dim.len());
         let pos = ids.to_dtype(DType::F64)?;
         let seq_len = ids.dim(0)?;
 
         for (i, &dim) in self.axes_dim.iter().enumerate() {
             let half = dim / 2;
-            let p = pos.get_on_dim(D::Minus1, i)?; // [S]
+            let p = pos.get_on_dim(D::Minus1, i)?;
 
-            // Use precomputed inv_freq table (no powf per call, just clone the Vec)
-            let inv_freq = Tensor::new(self.inv_freq_tables[i].as_slice(), ids.device())?
-                .reshape((1, half))?;
+            let inv_freq = Tensor::from_slice(&self.inv_freqs[i], (1, half), ids.device())?;
 
-            let freqs = p.unsqueeze(1)?.broadcast_mul(&inv_freq)?; // [S, half]
+            let freqs = p.unsqueeze(1)?.broadcast_mul(&inv_freq)?;
             let cos = freqs.cos()?.to_dtype(DType::F32)?;
             let sin = freqs.sin()?.to_dtype(DType::F32)?;
 
-            // repeat_interleave(2): each frequency applies to a pair of elements
+            // repeat_interleave(2): [S, half] → [S, dim]
             let cos = cos.unsqueeze(2)?.broadcast_as((seq_len, half, 2))?.reshape((seq_len, dim))?;
             let sin = sin.unsqueeze(2)?.broadcast_as((seq_len, half, 2))?.reshape((seq_len, dim))?;
 
@@ -101,18 +94,22 @@ fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
 
     let x = x.to_dtype(DType::F32)?;
 
-    // Split into interleaved pairs: reshape to (..., D/2, 2), unbind last dim
+    // Split into interleaved pairs: [B, H, S, D] → [B, H, S, D/2, 2]
     let x_pairs = x.reshape((b, h, s, d / 2, 2))?;
-    let x_real = x_pairs.narrow(D::Minus1, 0, 1)?.squeeze(D::Minus1)?; // [B, H, S, D/2]
+    let x_real = x_pairs.narrow(D::Minus1, 0, 1)?.squeeze(D::Minus1)?;
     let x_imag = x_pairs.narrow(D::Minus1, 1, 1)?.squeeze(D::Minus1)?;
 
-    // x_rotated = [-x_imag, x_real] interleaved
-    let neg_x_imag = x_imag.neg()?;
-    let x_rotated = Tensor::stack(&[&neg_x_imag, &x_real], D::Minus1)?
-        .reshape((b, h, s, d))?;
+    // Compute real and imaginary parts of rotation separately:
+    // out_real = x_real * cos_half - x_imag * sin_half
+    // out_imag = x_imag * cos_half + x_real * sin_half
+    // Then interleave back to [B, H, S, D]
+    let cos_half = cos.reshape((1, 1, s, d / 2, 2))?.narrow(D::Minus1, 0, 1)?.squeeze(D::Minus1)?;
+    let sin_half = sin.reshape((1, 1, s, d / 2, 2))?.narrow(D::Minus1, 0, 1)?.squeeze(D::Minus1)?;
 
-    // out = x * cos + x_rotated * sin
-    let out = (x.broadcast_mul(&cos)? + x_rotated.broadcast_mul(&sin)?)?;
+    let out_real = (&x_real * &cos_half)? - (&x_imag * &sin_half)?;
+    let out_imag = (&x_imag * &cos_half)? + (&x_real * &sin_half)?;
+
+    let out = Tensor::stack(&[&out_real?, &out_imag?], D::Minus1)?.reshape((b, h, s, d))?;
     out.to_dtype(dtype)
 }
 
@@ -144,7 +141,19 @@ fn attention(q: &Tensor, k: &Tensor, v: &Tensor, pe_cos: &Tensor, pe_sin: &Tenso
         return attn.transpose(1, 2)?.flatten_from(2);
     }
 
-    // CPU/Metal fallback: manual SDPA in F32
+    // Metal: try F32 SDPA (non-causal, no mask — image gen doesn't need causal masking)
+    #[cfg(feature = "metal")]
+    if matches!(q.device(), candle_core::Device::Metal(_)) {
+        let q32 = q.to_dtype(DType::F32)?;
+        let k32 = k.to_dtype(DType::F32)?;
+        let v32 = v.to_dtype(DType::F32)?;
+        if let Ok(attn) = candle_nn::ops::sdpa(&q32, &k32, &v32, None, false, scale as f32, 1.0) {
+            return attn.to_dtype(w_dtype)?.transpose(1, 2)?.flatten_from(2);
+        }
+        // Fallback to manual if SDPA fails (threadgroup memory exceeded)
+    }
+
+    // CPU fallback: manual SDPA in F32
     let mut batch_dims = q.dims().to_vec();
     batch_dims.pop();
     batch_dims.pop();
@@ -402,8 +411,7 @@ pub fn modulate(x: &Tensor, shift: &Tensor, scale: &Tensor) -> Result<Tensor> {
     let x_norm = layer_norm_forward(x)?.to_dtype(dtype)?;
     let scale = scale.unsqueeze(1)?;
     let shift = shift.unsqueeze(1)?;
-    let ones = Tensor::ones_like(&scale)?;
-    x_norm.broadcast_mul(&(scale + ones)?)?.broadcast_add(&shift)
+    x_norm.broadcast_mul(&(scale + 1.0)?)?.broadcast_add(&shift)
 }
 
 /// Manual layer norm (no learned params, eps=1e-6).

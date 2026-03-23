@@ -237,7 +237,7 @@ mod tests {
         // For axes_dim=[16, 56, 56], input needs 3 "columns" concatenated.
         // The actual usage is: Tensor::cat(&[txt_ids, img_ids], 1) which is (batch, total_seq, num_axes)
         // but the Module impl for EmbedNd calls rope() per axis.
-        let pe = EmbedNd { theta: 10000, axes_dim: vec![16, 16] };
+        let pe = EmbedNd::new(10000, vec![16, 16]);
         let ids = Tensor::zeros((1, 20, 2), DType::F32, &candle_core::Device::Cpu).unwrap();
         let out = ids.apply(&pe).unwrap();
         // Output should have proper shape
@@ -272,7 +272,18 @@ fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Te
         return attn.transpose(1, 2)?.to_dtype(q.dtype());
     }
 
-    // CPU/Metal/CUDA-without-flash-attn fallback: manual SDPA in F32
+    // Metal: try F32 SDPA (non-causal, no mask)
+    #[cfg(feature = "metal")]
+    if matches!(q.device(), candle_core::Device::Metal(_)) {
+        let q32 = q.to_dtype(DType::F32)?;
+        let k32 = k.to_dtype(DType::F32)?;
+        let v32 = v.to_dtype(DType::F32)?;
+        if let Ok(attn) = candle_nn::ops::sdpa(&q32, &k32, &v32, None, false, scale_factor as f32, 1.0) {
+            return Ok(attn.to_dtype(q.dtype())?);
+        }
+    }
+
+    // CPU fallback: manual SDPA in F32
     let in_dtype = q.dtype();
     let q = q.flatten_to(batch_dims.len() - 1)?.to_dtype(DType::F32)?;
     let k = k.flatten_to(batch_dims.len() - 1)?.to_dtype(DType::F32)?;
@@ -285,6 +296,7 @@ fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Te
     attn_scores.reshape(batch_dims)
 }
 
+#[cfg(test)]
 fn rope(pos: &Tensor, dim: usize, theta: usize) -> Result<Tensor> {
     if dim % 2 == 1 {
         candle_core::bail!("dim {dim} is odd")
@@ -345,13 +357,18 @@ pub fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor
 
 #[derive(Debug, Clone)]
 pub struct EmbedNd {
-    theta: usize,
     axes_dim: Vec<usize>,
+    /// Pre-computed inverse frequencies per axis (cached to avoid per-call allocation)
+    inv_freqs: Vec<Vec<f32>>,
 }
 
 impl EmbedNd {
     pub fn new(theta: usize, axes_dim: Vec<usize>) -> Self {
-        Self { theta, axes_dim }
+        let theta_f = theta as f64;
+        let inv_freqs: Vec<Vec<f32>> = axes_dim.iter().map(|&dim| {
+            (0..dim).step_by(2).map(|i| 1f32 / theta_f.powf(i as f64 / dim as f64) as f32).collect()
+        }).collect();
+        Self { axes_dim, inv_freqs }
     }
 }
 
@@ -360,12 +377,20 @@ impl Module for EmbedNd {
         let n_axes = ids.dim(D::Minus1)?;
         let mut emb = Vec::with_capacity(n_axes);
         for idx in 0..n_axes {
-            let r = rope(
-                &ids.get_on_dim(D::Minus1, idx)?,
-                self.axes_dim[idx],
-                self.theta,
-            )?;
-            emb.push(r)
+            let pos = ids.get_on_dim(D::Minus1, idx)?;
+            let dim = self.axes_dim[idx];
+            let half = dim / 2;
+            let dev = pos.device();
+
+            let inv_freq = Tensor::from_slice(&self.inv_freqs[idx], (1, 1, half), dev)?;
+            let inv_freq = inv_freq.to_dtype(pos.dtype())?;
+            let freqs = pos.unsqueeze(2)?.broadcast_mul(&inv_freq)?;
+            let cos = freqs.cos()?;
+            let sin = freqs.sin()?;
+            let out = Tensor::stack(&[&cos, &sin.neg()?, &sin, &cos], 3)?;
+            let (b, n, d, _ij) = out.dims4()?;
+            let r = out.reshape((b, n, d, 2, 2))?;
+            emb.push(r);
         }
         let emb = Tensor::cat(&emb, 2)?;
         emb.unsqueeze(1)
@@ -426,9 +451,7 @@ struct ModulationOut {
 
 impl ModulationOut {
     fn scale_shift(&self, xs: &Tensor) -> Result<Tensor> {
-        // Use ones_like to avoid F32 scalar promotion when scale is BF16
-        let one = Tensor::ones_like(&self.scale)?;
-        xs.broadcast_mul(&(&self.scale + one)?)?
+        xs.broadcast_mul(&(&self.scale + 1.0)?)?
             .broadcast_add(&self.shift)
     }
 
@@ -732,7 +755,7 @@ impl LastLayer {
         let (shift, scale) = (&chunks[0], &chunks[1]);
         let xs = xs
             .apply(&self.norm_final)?
-            .broadcast_mul(&(scale.unsqueeze(1)? + Tensor::ones_like(scale)?.unsqueeze(1)?)?)?
+            .broadcast_mul(&(scale.unsqueeze(1)? + 1.0)?)?
             .broadcast_add(&shift.unsqueeze(1)?)?;
         self.linear.forward(&xs)
     }

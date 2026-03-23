@@ -26,4 +26,6 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 024	2026-03-23T10:50:00	22fed04	-	PASS	PASS	keep	Skip full_attn final sync during gen
 025	2026-03-23T11:00:00	13f11af	-	PASS	PASS	keep	Per-block profiling: full_attn 2.9ms, GDN 0.07ms
 026	2026-03-23T11:10:00	7a75324	-	PASS	PASS	revert	F16 SDPA garbage even for gen — confirmed always broken
----	Metal: 34.6 tok/s avg vs CPU: 22.9 tok/s (+51%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
+027	2026-03-23T11:30:00	4dc2dfb	-	PASS	PASS	keep	Fused vector attention MSL kernel (online softmax, ready for wiring)
+028	2026-03-23T11:40:00	2cf1344	-	PASS	PASS	revert	backend.attention() triggers SDPA panic — keep inline path
+---	Metal: 36.4 tok/s avg vs CPU: 22.9 tok/s (+59%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
