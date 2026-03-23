@@ -1,7 +1,20 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// ─── stable_softplus: ln(1 + exp(clamp(x, -inf, 88))) with max(x, result) ───
+// ─── SIMD reduction helper ──────────────────────────────────────────
+// Reduces a per-thread value across all threads in a threadgroup using
+// SIMD group operations (32-wide on Apple Silicon).
+#define SIMD_REDUCE_SUM(val, dim, lane, simd_id) \
+    float _sr = simd_sum(val); \
+    threadgroup float _ps[32]; \
+    if (lane == 0) _ps[simd_id] = _sr; \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    { uint _ns = ((dim) + 31) / 32; \
+      float _t = 0.0f; \
+      if (simd_id == 0 && lane < _ns) _t = _ps[lane]; \
+      _sr = simd_sum(_t); }
+
+// ─── stable_softplus ────────────────────────────────────────────────
 kernel void stable_softplus_f32(
     device const float* input [[buffer(0)]],
     device float* output [[buffer(1)]],
@@ -10,8 +23,6 @@ kernel void stable_softplus_f32(
 ) {
     if (idx >= count) return;
     float x = input[idx];
-    // For large x, softplus(x) ≈ x; for small x, use log1p(exp(x))
-    // log1p is more numerically stable than log(exp(x) + 1)
     float sp = (x > 20.0f) ? x : log1p(exp(x));
     output[idx] = max(x, sp);
 }
@@ -28,7 +39,7 @@ kernel void stable_softplus_f16(
     output[idx] = half(max(x, sp));
 }
 
-// ─── silu_mul: silu(gate) * up = gate * sigmoid(gate) * up ──────────────────
+// ─── silu_mul ───────────────────────────────────────────────────────
 kernel void silu_mul_f32(
     device const float* gate [[buffer(0)]],
     device const float* up [[buffer(1)]],
@@ -38,8 +49,7 @@ kernel void silu_mul_f32(
 ) {
     if (idx >= count) return;
     float g = gate[idx];
-    float sig = 1.0f / (1.0f + exp(-g));
-    output[idx] = g * sig * up[idx];
+    output[idx] = g / (1.0f + exp(-g)) * up[idx];
 }
 
 kernel void silu_mul_f16(
@@ -51,11 +61,10 @@ kernel void silu_mul_f16(
 ) {
     if (idx >= count) return;
     float g = float(gate[idx]);
-    float sig = 1.0f / (1.0f + exp(-g));
-    output[idx] = half(g * sig * float(up[idx]));
+    output[idx] = half(g / (1.0f + exp(-g)) * float(up[idx]));
 }
 
-// ─── add3: a + b + c ────────────────────────────────────────────────
+// ─── add3 ───────────────────────────────────────────────────────────
 kernel void add3_f32(
     device const float* a [[buffer(0)]],
     device const float* b [[buffer(1)]],
@@ -80,7 +89,7 @@ kernel void add3_f16(
     output[idx] = a[idx] + b[idx] + c[idx];
 }
 
-// ─── exp_mul: x * exp(y) ────────────────────────────────────────────
+// ─── exp_mul ────────────────────────────────────────────────────────
 kernel void exp_mul_f32(
     device const float* x [[buffer(0)]],
     device const float* y [[buffer(1)]],
@@ -103,7 +112,7 @@ kernel void exp_mul_f16(
     output[idx] = half(float(x[idx]) * exp(float(y[idx])));
 }
 
-// ─── sub_mul: (a - b) * c ───────────────────────────────────────────
+// ─── sub_mul ────────────────────────────────────────────────────────
 kernel void sub_mul_f32(
     device const float* a [[buffer(0)]],
     device const float* b [[buffer(1)]],
@@ -116,9 +125,19 @@ kernel void sub_mul_f32(
     output[idx] = (a[idx] - b[idx]) * c[idx];
 }
 
-// ─── add_scaled: a + b * c with channel broadcast on c ──────────────
-// a, b: (batch, channels, time), c: (channels,)
-// out[i] = a[i] + b[i] * c[channel_idx]
+kernel void sub_mul_f16(
+    device const half* a [[buffer(0)]],
+    device const half* b [[buffer(1)]],
+    device const half* c [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    output[idx] = half((float(a[idx]) - float(b[idx])) * float(c[idx]));
+}
+
+// ─── add_scaled ─────────────────────────────────────────────────────
 kernel void add_scaled_f32(
     device const float* a [[buffer(0)]],
     device const float* b [[buffer(1)]],
@@ -130,8 +149,7 @@ kernel void add_scaled_f32(
     uint idx [[thread_position_in_grid]]
 ) {
     if (idx >= count) return;
-    uint chan = (idx / time_len) % channels;
-    output[idx] = a[idx] + b[idx] * c[chan];
+    output[idx] = a[idx] + b[idx] * c[(idx / time_len) % channels];
 }
 
 kernel void add_scaled_f16(
@@ -146,16 +164,10 @@ kernel void add_scaled_f16(
 ) {
     if (idx >= count) return;
     uint chan = (idx / time_len) % channels;
-    float av = float(a[idx]);
-    float bv = float(b[idx]);
-    float cv = float(c[chan]);
-    output[idx] = half(av + bv * cv);
+    output[idx] = half(float(a[idx]) + float(b[idx]) * float(c[chan]));
 }
 
-// ─── depthwise_conv1d_silu: dot(window, weight) per channel, then silu ──
-// window: (batch, channels, kernel_size), weight: (channels, kernel_size)
-// output: (batch, channels) = silu(sum_k window[b,c,k] * weight[c,k])
-// idx iterates over batch*channels output elements
+// ─── depthwise_conv1d_silu ──────────────────────────────────────────
 kernel void depthwise_conv1d_silu_f32(
     device const float* window [[buffer(0)]],
     device const float* weight [[buffer(1)]],
@@ -168,9 +180,8 @@ kernel void depthwise_conv1d_silu_f32(
     if (idx >= out_count) return;
     uint c = idx % channels;
     float dot = 0.0f;
-    for (uint k = 0; k < kernel_size; k++) {
+    for (uint k = 0; k < kernel_size; k++)
         dot += window[idx * kernel_size + k] * weight[c * kernel_size + k];
-    }
     float sig = 1.0f / (1.0f + exp(-dot));
     output[idx] = dot * sig;
 }
@@ -187,17 +198,13 @@ kernel void depthwise_conv1d_silu_f16(
     if (idx >= out_count) return;
     uint c = idx % channels;
     float dot = 0.0f;
-    for (uint k = 0; k < kernel_size; k++) {
+    for (uint k = 0; k < kernel_size; k++)
         dot += float(window[idx * kernel_size + k]) * float(weight[c * kernel_size + k]);
-    }
     float sig = 1.0f / (1.0f + exp(-dot));
     output[idx] = half(dot * sig);
 }
 
-// ─── depthwise_conv1d_bias: conv1d + bias for (batch, channels, time) ────
-// padded_input: (batch, channels, t_padded), weight: (channels, 1, kernel_size)
-// bias: (channels,), output: (batch, channels, out_len) where out_len = t_padded - kernel_size + 1
-// Each thread computes one output element at (batch, channel, time_out)
+// ─── depthwise_conv1d_bias ──────────────────────────────────────────
 kernel void depthwise_conv1d_bias_f32(
     device const float* input [[buffer(0)]],
     device const float* weight [[buffer(1)]],
@@ -211,17 +218,14 @@ kernel void depthwise_conv1d_bias_f32(
     uint idx [[thread_position_in_grid]]
 ) {
     if (idx >= out_count) return;
-    // Decode flat index into (batch_idx, channel, time_out)
     uint t_out = idx % out_len;
     uint c = (idx / out_len) % channels;
     uint b = idx / (out_len * channels);
-    // Accumulate convolution
     float acc = 0.0f;
     uint in_base = (b * channels + c) * t_padded + t_out;
     uint w_base = c * kernel_size;
-    for (uint k = 0; k < kernel_size; k++) {
+    for (uint k = 0; k < kernel_size; k++)
         acc += input[in_base + k] * weight[w_base + k];
-    }
     output[idx] = acc + bias[c];
 }
 
@@ -244,18 +248,12 @@ kernel void depthwise_conv1d_bias_f16(
     float acc = 0.0f;
     uint in_base = (b * channels + c) * t_padded + t_out;
     uint w_base = c * kernel_size;
-    for (uint k = 0; k < kernel_size; k++) {
+    for (uint k = 0; k < kernel_size; k++)
         acc += float(input[in_base + k]) * float(weight[w_base + k]);
-    }
     output[idx] = half(acc + float(bias[c]));
 }
 
-// ─── rms_norm_gated: rms_norm(x, weight, eps) * silu(z) ─────────────
-// x, z: (batch, seq, hidden), weight: (hidden,)
-// Each threadgroup handles one (batch, seq) row.
-// Step 1: compute sum_sq = sum(x[i]^2) via SIMD group reduction
-// Step 2: rms = rsqrt(sum_sq / hidden + eps)
-// Step 3: out[i] = x[i] * rms * weight[i] * silu(z[i])
+// ─── rms_norm_gated ─────────────────────────────────────────────────
 kernel void rms_norm_gated_f32(
     device const float* x [[buffer(0)]],
     device const float* z [[buffer(1)]],
@@ -267,42 +265,14 @@ kernel void rms_norm_gated_f32(
     uint lane [[thread_index_in_simdgroup]],
     uint simd_id [[simdgroup_index_in_threadgroup]]
 ) {
-    // gid.y = row index (batch*seq), gid.x = element within hidden
-    uint row = gid.y;
-    uint col = gid.x;
+    uint row = gid.y, col = gid.x;
     if (col >= hidden) return;
-
     uint base = row * hidden;
     float val = x[base + col];
-
-    // Compute partial sum of squares within this SIMD group
-    float sq = val * val;
-    float sum_sq = simd_sum(sq);
-
-    // Only lane 0 of each SIMD group has the full partial sum
-    // For hidden <= 32 (SIMD width), sum_sq is already the full sum
-    // For larger hidden sizes, we need threadgroup reduction
-    threadgroup float partial_sums[32]; // max 32 SIMD groups per threadgroup
-    if (lane == 0) {
-        partial_sums[simd_id] = sum_sq;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    // Final reduction across SIMD groups (done by first SIMD group)
-    uint num_simd_groups = (hidden + 31) / 32;
-    float total = 0.0f;
-    if (simd_id == 0 && lane < num_simd_groups) {
-        total = partial_sums[lane];
-    }
-    total = simd_sum(total);
-
-    float rms = rsqrt(total / float(hidden) + eps);
-
-    // Compute output: x * rms * weight * silu(z)
+    SIMD_REDUCE_SUM(val * val, hidden, lane, simd_id)
+    float rms = rsqrt(_sr / float(hidden) + eps);
     float zv = z[base + col];
-    float sig = 1.0f / (1.0f + exp(-zv));
-    float gate = zv * sig;
-    output[base + col] = val * rms * weight[col] * gate;
+    output[base + col] = val * rms * weight[col] * zv / (1.0f + exp(-zv));
 }
 
 kernel void rms_norm_gated_f16(
@@ -316,37 +286,17 @@ kernel void rms_norm_gated_f16(
     uint lane [[thread_index_in_simdgroup]],
     uint simd_id [[simdgroup_index_in_threadgroup]]
 ) {
-    uint row = gid.y;
-    uint col = gid.x;
+    uint row = gid.y, col = gid.x;
     if (col >= hidden) return;
-
     uint base = row * hidden;
     float val = float(x[base + col]);
-    float sq = val * val;
-    float sum_sq = simd_sum(sq);
-
-    threadgroup float partial_sums[32];
-    if (lane == 0) {
-        partial_sums[simd_id] = sum_sq;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    uint num_simd_groups = (hidden + 31) / 32;
-    float total = 0.0f;
-    if (simd_id == 0 && lane < num_simd_groups) {
-        total = partial_sums[lane];
-    }
-    total = simd_sum(total);
-
-    float rms = rsqrt(total / float(hidden) + eps);
+    SIMD_REDUCE_SUM(val * val, hidden, lane, simd_id)
+    float rms = rsqrt(_sr / float(hidden) + eps);
     float zv = float(z[base + col]);
-    float sig = 1.0f / (1.0f + exp(-zv));
-    float gate = zv * sig;
-    output[base + col] = half(val * rms * float(weight[col]) * gate);
+    output[base + col] = half(val * rms * float(weight[col]) * zv / (1.0f + exp(-zv)));
 }
 
-// ─── add_rms_norm: residual = a + b, normed = rms_norm(residual, weight, eps)
-// Output: packed [residual | normed] in a single buffer (2 * el elements)
+// ─── add_rms_norm ───────────────────────────────────────────────────
 kernel void add_rms_norm_f32(
     device const float* a [[buffer(0)]],
     device const float* b [[buffer(1)]],
@@ -359,32 +309,13 @@ kernel void add_rms_norm_f32(
     uint lane [[thread_index_in_simdgroup]],
     uint simd_id [[simdgroup_index_in_threadgroup]]
 ) {
-    uint row = gid.y;
-    uint col = gid.x;
+    uint row = gid.y, col = gid.x;
     if (col >= hidden) return;
-
     uint base = row * hidden;
     float res = a[base + col] + b[base + col];
-    output[base + col] = res; // residual in first half
-
-    float sq = res * res;
-    float sum_sq = simd_sum(sq);
-
-    threadgroup float partial_sums[32];
-    if (lane == 0) {
-        partial_sums[simd_id] = sum_sq;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    uint num_simd_groups = (hidden + 31) / 32;
-    float total = 0.0f;
-    if (simd_id == 0 && lane < num_simd_groups) {
-        total = partial_sums[lane];
-    }
-    total = simd_sum(total);
-
-    float rms = rsqrt(total / float(hidden) + eps);
-    output[el + base + col] = res * rms * weight[col]; // normed in second half
+    output[base + col] = res;
+    SIMD_REDUCE_SUM(res * res, hidden, lane, simd_id)
+    output[el + base + col] = res * rsqrt(_sr / float(hidden) + eps) * weight[col];
 }
 
 kernel void add_rms_norm_f16(
@@ -399,38 +330,16 @@ kernel void add_rms_norm_f16(
     uint lane [[thread_index_in_simdgroup]],
     uint simd_id [[simdgroup_index_in_threadgroup]]
 ) {
-    uint row = gid.y;
-    uint col = gid.x;
+    uint row = gid.y, col = gid.x;
     if (col >= hidden) return;
-
     uint base = row * hidden;
     float res = float(a[base + col]) + float(b[base + col]);
     output[base + col] = half(res);
-
-    float sq = res * res;
-    float sum_sq = simd_sum(sq);
-
-    threadgroup float partial_sums[32];
-    if (lane == 0) {
-        partial_sums[simd_id] = sum_sq;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    uint num_simd_groups = (hidden + 31) / 32;
-    float total = 0.0f;
-    if (simd_id == 0 && lane < num_simd_groups) {
-        total = partial_sums[lane];
-    }
-    total = simd_sum(total);
-
-    float rms = rsqrt(total / float(hidden) + eps);
-    output[el + base + col] = half(res * rms * float(weight[col]));
+    SIMD_REDUCE_SUM(res * res, hidden, lane, simd_id)
+    output[el + base + col] = half(res * rsqrt(_sr / float(hidden) + eps) * float(weight[col]));
 }
 
-// ─── rms_norm_channel: RMS norm for (batch, channels, time) layout ──────────
-// Normalizes across channels dimension without transpose.
-// Each threadgroup handles one (batch, time) position.
-// weight: (channels,)
+// ─── rms_norm_channel ───────────────────────────────────────────────
 kernel void rms_norm_channel_f32(
     device const float* x [[buffer(0)]],
     device const float* weight [[buffer(1)]],
@@ -442,35 +351,13 @@ kernel void rms_norm_channel_f32(
     uint lane [[thread_index_in_simdgroup]],
     uint simd_id [[simdgroup_index_in_threadgroup]]
 ) {
-    // gid.y = batch*time position, gid.x = channel index
-    uint bt = gid.y;
-    uint c = gid.x;
+    uint bt = gid.y, c = gid.x;
     if (c >= channels) return;
-
-    // Data layout: x[batch, channels, time] -> x[b * channels * time + c * time + t]
-    uint b = bt / time_len;
-    uint t = bt % time_len;
+    uint b = bt / time_len, t = bt % time_len;
     uint idx = b * channels * time_len + c * time_len + t;
     float val = x[idx];
-
-    float sq = val * val;
-    float sum_sq = simd_sum(sq);
-
-    threadgroup float partial_sums[32];
-    if (lane == 0) {
-        partial_sums[simd_id] = sum_sq;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    uint num_simd_groups = (channels + 31) / 32;
-    float total = 0.0f;
-    if (simd_id == 0 && lane < num_simd_groups) {
-        total = partial_sums[lane];
-    }
-    total = simd_sum(total);
-
-    float rms = rsqrt(total / float(channels) + eps);
-    output[idx] = val * rms * weight[c];
+    SIMD_REDUCE_SUM(val * val, channels, lane, simd_id)
+    output[idx] = val * rsqrt(_sr / float(channels) + eps) * weight[c];
 }
 
 kernel void rms_norm_channel_f16(
@@ -484,43 +371,11 @@ kernel void rms_norm_channel_f16(
     uint lane [[thread_index_in_simdgroup]],
     uint simd_id [[simdgroup_index_in_threadgroup]]
 ) {
-    uint bt = gid.y;
-    uint c = gid.x;
+    uint bt = gid.y, c = gid.x;
     if (c >= channels) return;
-
-    uint b = bt / time_len;
-    uint t = bt % time_len;
+    uint b = bt / time_len, t = bt % time_len;
     uint idx = b * channels * time_len + c * time_len + t;
     float val = float(x[idx]);
-
-    float sq = val * val;
-    float sum_sq = simd_sum(sq);
-
-    threadgroup float partial_sums[32];
-    if (lane == 0) {
-        partial_sums[simd_id] = sum_sq;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    uint num_simd_groups = (channels + 31) / 32;
-    float total = 0.0f;
-    if (simd_id == 0 && lane < num_simd_groups) {
-        total = partial_sums[lane];
-    }
-    total = simd_sum(total);
-
-    float rms = rsqrt(total / float(channels) + eps);
-    output[idx] = half(val * rms * float(weight[c]));
-}
-
-kernel void sub_mul_f16(
-    device const half* a [[buffer(0)]],
-    device const half* b [[buffer(1)]],
-    device const half* c [[buffer(2)]],
-    device half* output [[buffer(3)]],
-    constant uint& count [[buffer(4)]],
-    uint idx [[thread_position_in_grid]]
-) {
-    if (idx >= count) return;
-    output[idx] = half((float(a[idx]) - float(b[idx])) * float(c[idx]));
+    SIMD_REDUCE_SUM(val * val, channels, lane, simd_id)
+    output[idx] = half(val * rsqrt(_sr / float(channels) + eps) * float(weight[c]));
 }
