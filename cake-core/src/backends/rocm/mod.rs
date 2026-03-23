@@ -61,8 +61,8 @@ struct GpuBuf {
 }
 
 impl GpuBuf {
-    fn as_ptr(&self) -> *const f32 { self.ptr as *const f32 }
-    fn as_mut_ptr(&self) -> *mut f32 { self.ptr as *mut f32 }
+    #[inline] fn as_ptr(&self) -> *const f32 { self.ptr as *const f32 }
+    #[inline] fn as_mut_ptr(&self) -> *mut f32 { self.ptr as *mut f32 }
 
     /// Async download on the given stream, then sync. Single sync point.
     fn download_on_stream(&self, stream: *mut std::ffi::c_void) -> std::result::Result<Vec<f32>, String> {
