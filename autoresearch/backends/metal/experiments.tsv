@@ -30,3 +30,5 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 027	2026-03-23T09:00:00	cdaf88c	277401088	PASS	PASS	baseline	New Metal baseline (cached binary, real GPU execution)
 028	2026-03-23T09:15:00	392f195	305868800	PASS	PASS	keep	Skip threadgroup barrier for hidden <= 32
 029	2026-03-23T09:30:00	0e22dd7	424173056	PASS	PASS	keep	Pre-warm pipeline cache (moves compile cost to init, +170ms in bench)
+030	2026-03-23T10:00:00	b64ea53	-	PASS	PASS	keep	Add 12 Metal vs CPU correctness tests
+031	2026-03-23T10:15:00	7f854ce	50835899904	PASS	PASS	keep	Re-enable 8 MSL kernels (validated by tests, norms stay on candle ops)
