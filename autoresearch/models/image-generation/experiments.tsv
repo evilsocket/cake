@@ -6,3 +6,5 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 004	2026-03-23T10:10:00	33304cf	-	PASS	PASS	keep	Eliminate ones_like in FLUX.2 modulate
 005	2026-03-23T10:15:00	1624b91	-	PASS	PASS	keep	Eliminate ones_like in FLUX.1 modulation
 006	2026-03-23T10:20:00	02b4615	59361448000	PASS	PASS	keep	Cache inv_freq in Flux2PosEmbed (eliminate per-call Vec alloc)
+007	2026-03-23T10:30:00	a64ea7f	57713702000	PASS	PASS	keep	Metal F32 SDPA for FLUX.2 attention (non-causal)
+008	2026-03-23T10:40:00	d3dff99	63723290000	PASS	PASS	keep	Metal F32 SDPA for FLUX.1 attention (non-causal)
