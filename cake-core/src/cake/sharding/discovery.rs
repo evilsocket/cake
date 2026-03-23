@@ -73,10 +73,14 @@ impl super::WorkerCapacity for DiscoveredWorker {
 
 /// Compute the first 8 hex chars of SHA-256(cluster_key) for filtering.
 pub fn cluster_hash(cluster_key: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(cluster_key.as_bytes());
-    let result = hasher.finalize();
-    hex::encode(&result[..4])
+    let result = Sha256::digest(cluster_key.as_bytes());
+    // Manual hex encode of first 4 bytes avoids heap allocation from hex::encode
+    let mut s = String::with_capacity(8);
+    for &b in &result[..4] {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 /// Detect available compute devices on this system.

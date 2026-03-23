@@ -62,21 +62,20 @@ where
     stream.write_all(&master_nonce).await?;
     stream.flush().await?;
 
-    // Step 2: read worker's HMAC response + worker's nonce
-    let mut worker_hmac = [0u8; HMAC_SIZE];
-    stream.read_exact(&mut worker_hmac).await?;
-
-    let mut worker_nonce = [0u8; NONCE_SIZE];
-    stream.read_exact(&mut worker_nonce).await?;
+    // Step 2: read worker's HMAC response + worker's nonce in one call
+    let mut response = [0u8; HMAC_SIZE + NONCE_SIZE];
+    stream.read_exact(&mut response).await?;
+    let worker_hmac = &response[..HMAC_SIZE];
+    let worker_nonce = &response[HMAC_SIZE..];
 
     // Step 3: verify worker's HMAC
     let expected = compute_hmac(key_bytes, &master_nonce);
-    if !constant_time_eq(&worker_hmac, &expected) {
+    if !constant_time_eq(worker_hmac, &expected) {
         return Err(anyhow!("worker authentication failed: invalid HMAC"));
     }
 
     // Step 4: send master's HMAC response
-    let master_hmac = compute_hmac(key_bytes, &worker_nonce);
+    let master_hmac = compute_hmac(key_bytes, worker_nonce);
     stream.write_all(&master_hmac).await?;
     stream.flush().await?;
 
@@ -96,11 +95,13 @@ where
     let mut master_nonce = [0u8; NONCE_SIZE];
     stream.read_exact(&mut master_nonce).await?;
 
-    // Step 2: send HMAC response + our nonce
+    // Step 2: send HMAC response + our nonce in one write
     let worker_hmac = compute_hmac(key_bytes, &master_nonce);
     let worker_nonce = random_nonce();
-    stream.write_all(&worker_hmac).await?;
-    stream.write_all(&worker_nonce).await?;
+    let mut response = [0u8; HMAC_SIZE + NONCE_SIZE];
+    response[..HMAC_SIZE].copy_from_slice(&worker_hmac);
+    response[HMAC_SIZE..].copy_from_slice(&worker_nonce);
+    stream.write_all(&response).await?;
     stream.flush().await?;
 
     // Step 3: read master's HMAC response
