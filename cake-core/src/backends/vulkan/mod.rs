@@ -317,14 +317,14 @@ impl VulkanBackend {
             self.gpu.create_command_encoder(&Default::default())
         });
         enc.copy_buffer_to_buffer(buf, 0, &staging, 0, size);
-        self.queue.submit(Some(enc.finish()));
+        let sub_idx = self.queue.submit(Some(enc.finish()));
 
         let slice = staging.slice(..size);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             tx.send(r).unwrap();
         });
-        self.gpu.poll(wgpu::Maintain::Wait);
+        self.gpu.poll(wgpu::Maintain::wait_for(sub_idx));
         rx.recv().unwrap().unwrap();
 
         let view = slice.get_mapped_range();
