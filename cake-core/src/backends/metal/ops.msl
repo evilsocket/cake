@@ -491,14 +491,14 @@ kernel void fused_vector_attention_f16(
         // Online softmax update
         float v_val = float(v[bkv * kv_len * head_dim + t * head_dim + d]);
         if (score > max_score) {
-            float correction = exp(max_score - score);
-            sum_exp = sum_exp * correction + 1.0f;
-            acc = acc * correction + v_val;
+            float correction = fast::exp(max_score - score);
+            sum_exp = fma(sum_exp, correction, 1.0f);
+            acc = fma(acc, correction, v_val);
             max_score = score;
         } else {
-            float w = exp(score - max_score);
+            float w = fast::exp(score - max_score);
             sum_exp += w;
-            acc += w * v_val;
+            acc = fma(w, v_val, acc);
         }
     }
 
