@@ -228,20 +228,25 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
 
         workgroupBarrier();
 
-        // Each thread accumulates its 2×2 block over K-tile of 32
+        // Each thread accumulates its 2×2 block over K-tile of 32 (unrolled by 2)
         let r0 = lr * 2u;
         let r1 = r0 + 1u;
         let c0 = lc * 2u;
         let c1 = c0 + 1u;
-        for (var k: u32 = 0u; k < TILE_K; k++) {
-            let a0k = tile_a[r0 * TILE_A_STRIDE + k];
-            let a1k = tile_a[r1 * TILE_A_STRIDE + k];
-            let bk0 = tile_b[k * TILE_B_STRIDE + c0];
-            let bk1 = tile_b[k * TILE_B_STRIDE + c1];
-            acc00 += a0k * bk0;
-            acc01 += a0k * bk1;
-            acc10 += a1k * bk0;
-            acc11 += a1k * bk1;
+        for (var k: u32 = 0u; k < TILE_K; k += 2u) {
+            let a0k0 = tile_a[r0 * TILE_A_STRIDE + k];
+            let a1k0 = tile_a[r1 * TILE_A_STRIDE + k];
+            let bk00 = tile_b[k * TILE_B_STRIDE + c0];
+            let bk01 = tile_b[k * TILE_B_STRIDE + c1];
+            acc00 += a0k0 * bk00; acc01 += a0k0 * bk01;
+            acc10 += a1k0 * bk00; acc11 += a1k0 * bk01;
+
+            let a0k1 = tile_a[r0 * TILE_A_STRIDE + k + 1u];
+            let a1k1 = tile_a[r1 * TILE_A_STRIDE + k + 1u];
+            let bk10 = tile_b[(k + 1u) * TILE_B_STRIDE + c0];
+            let bk11 = tile_b[(k + 1u) * TILE_B_STRIDE + c1];
+            acc00 += a0k1 * bk10; acc01 += a0k1 * bk11;
+            acc10 += a1k1 * bk10; acc11 += a1k1 * bk11;
         }
         workgroupBarrier();
     }
