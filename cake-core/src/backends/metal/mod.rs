@@ -437,23 +437,23 @@ impl ComputeBackend for MetalBackend {
     fn device(&self) -> &Device { &self.device }
 
     fn attention(&self, q: &Tensor, k: &Tensor, v: &Tensor, scale: f32, causal: bool) -> Result<Tensor> {
-        // Convert to F32 for precision, then try fused SDPA.
-        // Fall back to manual attention if SDPA exceeds Metal threadgroup memory limits.
-        let q = q.to_dtype(DType::F32)?;
-        let k = k.to_dtype(DType::F32)?;
-        let v = v.to_dtype(DType::F32)?;
+        // Promote to F32 if needed (F16 SDPA produces imprecise results on Metal)
+        let (q, k, v) = if q.dtype() != DType::F32 {
+            (q.to_dtype(DType::F32)?, k.to_dtype(DType::F32)?, v.to_dtype(DType::F32)?)
+        } else {
+            (q.clone(), k.clone(), v.clone())
+        };
+        // Try fused SDPA first, fall back to manual attention if threadgroup memory exceeded
         match candle_nn::ops::sdpa(&q, &k, &v, None, causal, scale, 1.0) {
             Ok(result) => Ok(result),
             Err(_) => {
-                // Manual attention fallback for large head dimensions
                 let att = (q.matmul(&k.t()?)? * (scale as f64))?;
                 let att = if causal {
                     let seq_len = att.dim(candle_core::D::Minus1)?;
-                    let mask = Tensor::tril2(seq_len, DType::F32, att.device())?
+                    let tril = Tensor::tril2(seq_len, DType::F32, att.device())?
                         .broadcast_as(att.shape())?;
-                    let neg_inf = Tensor::new(f32::NEG_INFINITY, att.device())?
-                        .broadcast_as(att.shape())?;
-                    mask.where_cond(&att, &neg_inf)?
+                    let mask = ((tril - 1.0)? * 1e9)?;
+                    (att + mask)?
                 } else {
                     att
                 };
