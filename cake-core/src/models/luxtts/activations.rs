@@ -7,28 +7,20 @@ use candle_core::Tensor;
 ///
 /// Matches Python's SwooshRForward with offset=1.
 pub fn swoosh_r(x: &Tensor) -> Result<Tensor> {
-    let x_offset = (x - 1.0)?;
-    // Numerically stable softplus: max(z,0) + log(1 + exp(-|z|))
-    let abs_xo = x_offset.abs()?;
-    let relu_xo = x_offset.relu()?;
-    let log_sum = (relu_xo + (abs_xo.neg()?.exp()? + 1.0)?.log()?)?;
-    let linear = (x * 0.08)?;
-    let result = ((log_sum - linear)? - 0.313261687)?;
-    Ok(result)
+    // softplus(x - 1) - 0.08*x - 0.313261687
+    // Numerically stable softplus(z) = relu(z) + log(1 + exp(-|z|))
+    let z = (x - 1.0)?;
+    let sp = (z.relu()? + (z.abs()?.neg()?.exp()? + 1.0)?.log()?)?;
+    Ok(((sp - (x * 0.08)?)? - 0.313261687)?)
 }
 
 /// SwooshL(x) = log(1 + exp(x - 4)) - 0.08*x - 0.035
 ///
 /// Matches Python's SwooshLForward with offset=4.
 pub fn swoosh_l(x: &Tensor) -> Result<Tensor> {
-    let x_offset = (x - 4.0)?;
-    // Numerically stable softplus: max(z,0) + log(1 + exp(-|z|))
-    let abs_xo = x_offset.abs()?;
-    let relu_xo = x_offset.relu()?;
-    let log_sum = (relu_xo + (abs_xo.neg()?.exp()? + 1.0)?.log()?)?;
-    let linear = (x * 0.08)?;
-    let result = ((log_sum - linear)? - 0.035)?;
-    Ok(result)
+    let z = (x - 4.0)?;
+    let sp = (z.relu()? + (z.abs()?.neg()?.exp()? + 1.0)?.log()?)?;
+    Ok(((sp - (x * 0.08)?)? - 0.035)?)
 }
 
 #[cfg(test)]
