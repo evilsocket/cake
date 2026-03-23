@@ -463,8 +463,11 @@ impl GatedDeltaNet {
         let output = self.out_proj.forward(&output)
             .map_err(|e| anyhow!("out_proj: {e}"))?;
 
-        // Flush Metal commands after the conv+recurrent+norm+out_proj section
-        let _ = self.backend.synchronize();
+        // Flush Metal commands — needed for prefill (many accumulated commands),
+        // skip for generation where the next block's ops create implicit data dependency
+        if seq_len > 1 {
+            let _ = self.backend.synchronize();
+        }
 
         Ok(output)
     }
