@@ -1319,10 +1319,9 @@ impl ComputeBackend for VulkanBackend {
         let k = a_dims[a_dims.len() - 1];
         let n = b_dims[b_dims.len() - 1];
         // GPU for all sizes. M=1 uses coalesced GEMV. View cache handles weight.t().
+        // Return F32 always — avoids F32→F16→F32 round-trips between ops.
         log::debug!("matmul GPU: M={m} K={k} N={n}");
-        let orig_dtype = a.dtype();
-        let result = self.tensor_matmul(a, b)?;
-        result.to_dtype(orig_dtype)
+        self.tensor_matmul(a, b)
     }
 
     fn rms_norm_gated(
