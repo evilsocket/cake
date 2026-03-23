@@ -752,19 +752,10 @@ impl VulkanBackend {
                 workgroups.2,
             );
 
-            // Memory barrier: compute writes -> host reads
-            let barrier = vk::MemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                .dst_access_mask(vk::AccessFlags::HOST_READ);
-            self.vk_device.cmd_pipeline_barrier(
-                self.command_buffer,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::HOST,
-                vk::DependencyFlags::empty(),
-                &[barrier],
-                &[],
-                &[],
-            );
+            // No explicit compute→host barrier needed: fence wait provides
+            // execution dependency, and HOST_COHERENT memory (used by all our
+            // buffers via CpuToGpu allocation) makes shader writes visible
+            // to the host automatically after execution completes.
 
             self.vk_device
                 .end_command_buffer(self.command_buffer)
