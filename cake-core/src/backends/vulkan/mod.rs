@@ -343,7 +343,7 @@ impl VulkanBackend {
             uma_memory_type,
         )?;
 
-        Ok(Self {
+        let backend = Self {
             device: Device::Cpu,
             _entry: entry,
             _instance: instance,
@@ -360,7 +360,25 @@ impl VulkanBackend {
             weight_cache: Mutex::new(WeightCache::new()),
             buffer_pool: Mutex::new(BufferPool::new()),
             dispatch_lock: Mutex::new(()),
-        })
+        };
+
+        // Warm-up dispatch: force GPU to process its first command buffer.
+        // Eliminates cold-start penalty from first real dispatch.
+        {
+            let dummy = backend.upload_uncached(&[0.0f32; 4]);
+            let out = backend.alloc_output(4);
+            let _ = backend.dispatch_compute(
+                "silu_mul",
+                &[dummy.buffer, dummy.buffer, out.buffer],
+                &out,
+                4,
+                &[4, 0, 0, 0],
+                (1, 1, 1),
+            );
+            backend.release_output(out);
+        }
+
+        Ok(backend)
     }
 
     // ── Buffer allocation ────────────────────────────────────────────
