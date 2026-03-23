@@ -160,6 +160,8 @@ pub struct VulkanBackend {
     buffer_cache: Mutex<GpuBufferCache>,
     /// Pool of reusable output and staging buffers.
     buffer_pool: Mutex<BufferPool>,
+    /// Shared uniform buffer (16 bytes, reused across all dispatches).
+    uniform_buf: wgpu::Buffer,
 }
 
 impl std::fmt::Debug for VulkanBackend {
@@ -202,6 +204,14 @@ impl VulkanBackend {
             source: wgpu::ShaderSource::Wgsl(WGSL_SOURCE.into()),
         });
 
+        // Shared uniform buffer for dispatch parameters (16 bytes = 4 × u32)
+        let uniform_buf = gpu.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // Pre-compile all compute pipelines to avoid first-call compilation stalls
         let mut pipelines = HashMap::new();
         for entry in &["silu_mul", "stable_softplus", "add3", "exp_mul", "sub_mul", "gemv", "matmul"] {
@@ -224,6 +234,7 @@ impl VulkanBackend {
             module,
             buffer_cache: Mutex::new(GpuBufferCache::new()),
             buffer_pool: Mutex::new(BufferPool::new()),
+            uniform_buf,
         })
     }
 
@@ -291,14 +302,11 @@ impl VulkanBackend {
         self.buffer_pool.lock().unwrap().release_storage(buf);
     }
 
-    /// Create a uniform buffer (small, not pooled).
-    fn uniform(&self, data: &[u32]) -> wgpu::Buffer {
-        use wgpu::util::DeviceExt;
-        self.gpu.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: None,
-            contents: bytemuck::cast_slice(data),
-            usage: wgpu::BufferUsages::UNIFORM,
-        })
+    /// Write params into the shared uniform buffer (16 bytes, reused across dispatches).
+    fn uniform(&self, data: &[u32]) -> &wgpu::Buffer {
+        debug_assert!(data.len() <= 4);
+        self.queue.write_buffer(&self.uniform_buf, 0, bytemuck::cast_slice(data));
+        &self.uniform_buf
     }
 
     /// Download `count` f32 values from a GPU buffer using a pooled staging buffer.
