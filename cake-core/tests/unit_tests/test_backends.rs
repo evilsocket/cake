@@ -144,3 +144,226 @@ fn backend_implements_debug() {
     let debug_str = format!("{:?}", backend);
     assert!(debug_str.contains("CpuBackend"));
 }
+
+// ── Metal vs CPU correctness tests ───────────────────────────
+//
+// These tests compare Metal backend output against CPU reference to catch
+// numerical regressions in MSL kernels. They run only with --features metal
+// and are skipped if no Metal device is available (e.g. CI on Linux).
+
+#[cfg(feature = "metal")]
+fn try_metal_backend() -> Option<(Arc<dyn ComputeBackend>, Device)> {
+    if !candle_core::utils::metal_is_available() {
+        return None;
+    }
+    let dev = Device::new_metal(0).ok()?;
+    Some((backends::create_backend(&dev), dev))
+}
+
+#[cfg(feature = "metal")]
+fn assert_close(cpu: &Tensor, metal: &Tensor, tol: f32, label: &str) {
+    let cpu_vals: Vec<f32> = cpu.to_dtype(DType::F32).unwrap().flatten_all().unwrap().to_vec1().unwrap();
+    let metal_vals: Vec<f32> = metal.to_device(&Device::Cpu).unwrap().to_dtype(DType::F32).unwrap().flatten_all().unwrap().to_vec1().unwrap();
+    assert_eq!(cpu_vals.len(), metal_vals.len(), "{label}: length mismatch");
+    for (i, (c, m)) in cpu_vals.iter().zip(metal_vals.iter()).enumerate() {
+        assert!(
+            (c - m).abs() < tol,
+            "{label}[{i}]: cpu={c} metal={m} diff={}",
+            (c - m).abs()
+        );
+    }
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn metal_silu_mul_matches_cpu() {
+    let Some((metal, dev)) = try_metal_backend() else { return };
+    let cpu = CpuBackend::new();
+    let gate_cpu = super::helpers::make_tensor(&[1, 1, 64], 100);
+    let up_cpu = super::helpers::make_tensor(&[1, 1, 64], 101);
+    let gate_metal = gate_cpu.to_device(&dev).unwrap();
+    let up_metal = up_cpu.to_device(&dev).unwrap();
+
+    let cpu_out = cpu.silu_mul(&gate_cpu, &up_cpu).unwrap();
+    let metal_out = metal.silu_mul(&gate_metal, &up_metal).unwrap();
+    assert_close(&cpu_out, &metal_out, 1e-3, "silu_mul");
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn metal_stable_softplus_matches_cpu() {
+    let Some((metal, dev)) = try_metal_backend() else { return };
+    let cpu = CpuBackend::new();
+    let x_cpu = super::helpers::make_tensor(&[1, 1, 64], 200);
+    let x_metal = x_cpu.to_device(&dev).unwrap();
+
+    let cpu_out = cpu.stable_softplus(&x_cpu).unwrap();
+    let metal_out = metal.stable_softplus(&x_metal).unwrap();
+    assert_close(&cpu_out, &metal_out, 1e-3, "stable_softplus");
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn metal_add3_matches_cpu() {
+    let Some((metal, dev)) = try_metal_backend() else { return };
+    let cpu = CpuBackend::new();
+    let a_cpu = super::helpers::make_tensor(&[1, 1, 64], 300);
+    let b_cpu = super::helpers::make_tensor(&[1, 1, 64], 301);
+    let c_cpu = super::helpers::make_tensor(&[1, 1, 64], 302);
+    let a_m = a_cpu.to_device(&dev).unwrap();
+    let b_m = b_cpu.to_device(&dev).unwrap();
+    let c_m = c_cpu.to_device(&dev).unwrap();
+
+    let cpu_out = cpu.add3(&a_cpu, &b_cpu, &c_cpu).unwrap();
+    let metal_out = metal.add3(&a_m, &b_m, &c_m).unwrap();
+    assert_close(&cpu_out, &metal_out, 1e-5, "add3");
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn metal_exp_mul_matches_cpu() {
+    let Some((metal, dev)) = try_metal_backend() else { return };
+    let cpu = CpuBackend::new();
+    let x_cpu = super::helpers::make_tensor(&[1, 1, 64], 400);
+    let y_cpu = super::helpers::make_tensor(&[1, 1, 64], 401);
+    let x_m = x_cpu.to_device(&dev).unwrap();
+    let y_m = y_cpu.to_device(&dev).unwrap();
+
+    let cpu_out = cpu.exp_mul(&x_cpu, &y_cpu).unwrap();
+    let metal_out = metal.exp_mul(&x_m, &y_m).unwrap();
+    assert_close(&cpu_out, &metal_out, 1e-4, "exp_mul");
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn metal_sub_mul_matches_cpu() {
+    let Some((metal, dev)) = try_metal_backend() else { return };
+    let cpu = CpuBackend::new();
+    let a_cpu = super::helpers::make_tensor(&[1, 1, 64], 500);
+    let b_cpu = super::helpers::make_tensor(&[1, 1, 64], 501);
+    let c_cpu = super::helpers::make_tensor(&[1, 1, 64], 502);
+    let a_m = a_cpu.to_device(&dev).unwrap();
+    let b_m = b_cpu.to_device(&dev).unwrap();
+    let c_m = c_cpu.to_device(&dev).unwrap();
+
+    let cpu_out = cpu.sub_mul(&a_cpu, &b_cpu, &c_cpu).unwrap();
+    let metal_out = metal.sub_mul(&a_m, &b_m, &c_m).unwrap();
+    assert_close(&cpu_out, &metal_out, 1e-5, "sub_mul");
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn metal_rms_norm_gated_matches_cpu() {
+    let Some((metal, dev)) = try_metal_backend() else { return };
+    let cpu = CpuBackend::new();
+    let x_cpu = super::helpers::make_tensor(&[1, 1, 64], 600);
+    let z_cpu = super::helpers::make_tensor(&[1, 1, 64], 601);
+    let w_cpu = Tensor::ones(64, DType::F32, &Device::Cpu).unwrap();
+    let x_m = x_cpu.to_device(&dev).unwrap();
+    let z_m = z_cpu.to_device(&dev).unwrap();
+    let w_m = w_cpu.to_device(&dev).unwrap();
+
+    let cpu_out = cpu.rms_norm_gated(&x_cpu, &z_cpu, &w_cpu, 1e-6).unwrap();
+    let metal_out = metal.rms_norm_gated(&x_m, &z_m, &w_m, 1e-6).unwrap();
+    assert_close(&cpu_out, &metal_out, 1e-3, "rms_norm_gated");
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn metal_add_rms_norm_matches_cpu() {
+    let Some((metal, dev)) = try_metal_backend() else { return };
+    let cpu = CpuBackend::new();
+    let a_cpu = super::helpers::make_tensor(&[1, 1, 64], 700);
+    let b_cpu = super::helpers::make_tensor(&[1, 1, 64], 701);
+    let w_cpu = Tensor::ones(64, DType::F32, &Device::Cpu).unwrap();
+    let a_m = a_cpu.to_device(&dev).unwrap();
+    let b_m = b_cpu.to_device(&dev).unwrap();
+    let w_m = w_cpu.to_device(&dev).unwrap();
+
+    let (cpu_res, cpu_norm) = cpu.add_rms_norm(&a_cpu, &b_cpu, &w_cpu, 1e-6).unwrap();
+    let (metal_res, metal_norm) = metal.add_rms_norm(&a_m, &b_m, &w_m, 1e-6).unwrap();
+    assert_close(&cpu_res, &metal_res, 1e-5, "add_rms_norm residual");
+    assert_close(&cpu_norm, &metal_norm, 1e-3, "add_rms_norm normed");
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn metal_rms_norm_gated_large_hidden_matches_cpu() {
+    // Test with hidden > 32 (multiple SIMD groups needed for reduction)
+    let Some((metal, dev)) = try_metal_backend() else { return };
+    let cpu = CpuBackend::new();
+    let x_cpu = super::helpers::make_tensor(&[1, 1, 1024], 800);
+    let z_cpu = super::helpers::make_tensor(&[1, 1, 1024], 801);
+    let w_cpu = Tensor::ones(1024, DType::F32, &Device::Cpu).unwrap();
+    let x_m = x_cpu.to_device(&dev).unwrap();
+    let z_m = z_cpu.to_device(&dev).unwrap();
+    let w_m = w_cpu.to_device(&dev).unwrap();
+
+    let cpu_out = cpu.rms_norm_gated(&x_cpu, &z_cpu, &w_cpu, 1e-6).unwrap();
+    let metal_out = metal.rms_norm_gated(&x_m, &z_m, &w_m, 1e-6).unwrap();
+    assert_close(&cpu_out, &metal_out, 1e-2, "rms_norm_gated_1024");
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn metal_depthwise_conv1d_silu_matches_cpu() {
+    let Some((metal, dev)) = try_metal_backend() else { return };
+    let cpu = CpuBackend::new();
+    let window_cpu = super::helpers::make_tensor(&[1, 16, 4], 900);
+    let weight_cpu = super::helpers::make_tensor(&[16, 4], 901);
+    let window_m = window_cpu.to_device(&dev).unwrap();
+    let weight_m = weight_cpu.to_device(&dev).unwrap();
+
+    let cpu_out = cpu.depthwise_conv1d_silu(&window_cpu, &weight_cpu, 4, 16).unwrap();
+    let metal_out = metal.depthwise_conv1d_silu(&window_m, &weight_m, 4, 16).unwrap();
+    assert_close(&cpu_out, &metal_out, 1e-3, "depthwise_conv1d_silu");
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn metal_depthwise_conv1d_bias_matches_cpu() {
+    let Some((metal, dev)) = try_metal_backend() else { return };
+    let cpu = CpuBackend::new();
+    let padded_cpu = super::helpers::make_tensor(&[1, 16, 11], 1000); // t_padded = 11
+    let weight_cpu = super::helpers::make_tensor(&[16, 4], 1001); // (channels, kernel_size)
+    let bias_cpu = super::helpers::make_tensor(&[16], 1002);
+    let padded_m = padded_cpu.to_device(&dev).unwrap();
+    let weight_m = weight_cpu.to_device(&dev).unwrap();
+    let bias_m = bias_cpu.to_device(&dev).unwrap();
+
+    let cpu_out = cpu.depthwise_conv1d_bias(&padded_cpu, &weight_cpu, &bias_cpu, 4, 16).unwrap();
+    let metal_out = metal.depthwise_conv1d_bias(&padded_m, &weight_m, &bias_m, 4, 16).unwrap();
+    assert_close(&cpu_out, &metal_out, 1e-3, "depthwise_conv1d_bias");
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn metal_add_scaled_1d_matches_cpu() {
+    let Some((metal, dev)) = try_metal_backend() else { return };
+    let cpu = CpuBackend::new();
+    let a_cpu = super::helpers::make_tensor(&[1, 4, 8], 1100);
+    let b_cpu = super::helpers::make_tensor(&[1, 4, 8], 1101);
+    let c_cpu = super::helpers::make_tensor(&[4], 1102); // 1D channel scale
+    let a_m = a_cpu.to_device(&dev).unwrap();
+    let b_m = b_cpu.to_device(&dev).unwrap();
+    let c_m = c_cpu.to_device(&dev).unwrap();
+
+    let cpu_out = cpu.add_scaled(&a_cpu, &b_cpu, &c_cpu).unwrap();
+    let metal_out = metal.add_scaled(&a_m, &b_m, &c_m).unwrap();
+    assert_close(&cpu_out, &metal_out, 1e-4, "add_scaled_1d");
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn metal_rms_norm_channel_matches_cpu() {
+    let Some((metal, dev)) = try_metal_backend() else { return };
+    let cpu = CpuBackend::new();
+    let x_cpu = super::helpers::make_tensor(&[1, 16, 8], 1200);
+    let w_cpu = Tensor::ones(16, DType::F32, &Device::Cpu).unwrap();
+    let x_m = x_cpu.to_device(&dev).unwrap();
+    let w_m = w_cpu.to_device(&dev).unwrap();
+
+    let cpu_out = cpu.rms_norm_channel(&x_cpu, &w_cpu, 1e-6).unwrap();
+    let metal_out = metal.rms_norm_channel(&x_m, &w_m, 1e-6).unwrap();
+    assert_close(&cpu_out, &metal_out, 1e-3, "rms_norm_channel");
+}
