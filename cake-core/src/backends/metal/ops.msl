@@ -114,6 +114,42 @@ kernel void sub_mul_f32(
     output[idx] = (a[idx] - b[idx]) * c[idx];
 }
 
+// ─── add_scaled: a + b * c with channel broadcast on c ──────────────
+// a, b: (batch, channels, time), c: (channels,)
+// out[i] = a[i] + b[i] * c[channel_idx]
+kernel void add_scaled_f32(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device const float* c [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    constant uint& channels [[buffer(5)]],
+    constant uint& time_len [[buffer(6)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    uint chan = (idx / time_len) % channels;
+    output[idx] = a[idx] + b[idx] * c[chan];
+}
+
+kernel void add_scaled_f16(
+    device const half* a [[buffer(0)]],
+    device const half* b [[buffer(1)]],
+    device const half* c [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& count [[buffer(4)]],
+    constant uint& channels [[buffer(5)]],
+    constant uint& time_len [[buffer(6)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    if (idx >= count) return;
+    uint chan = (idx / time_len) % channels;
+    float av = float(a[idx]);
+    float bv = float(b[idx]);
+    float cv = float(c[chan]);
+    output[idx] = half(av + bv * cv);
+}
+
 kernel void sub_mul_f16(
     device const half* a [[buffer(0)]],
     device const half* b [[buffer(1)]],

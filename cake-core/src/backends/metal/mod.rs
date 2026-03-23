@@ -242,6 +242,56 @@ impl candle_core::CustomOp3 for MetalSubMul {
     }
 }
 
+struct MetalAddScaled;
+
+impl candle_core::CustomOp3 for MetalAddScaled {
+    fn name(&self) -> &'static str { "metal_add_scaled" }
+
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> {
+        candle_core::bail!("MetalAddScaled: expected Metal device")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn metal_fwd(
+        &self,
+        s1: &candle_core::MetalStorage, l1: &Layout,
+        s2: &candle_core::MetalStorage, l2: &Layout,
+        s3: &candle_core::MetalStorage, l3: &Layout,
+    ) -> Result<(candle_core::MetalStorage, Shape)> {
+        let device = s1.device();
+        let el = l1.shape().elem_count();
+        let dims = l1.shape().dims();
+        let (channels, time_len) = if dims.len() >= 3 {
+            (dims[dims.len() - 2], dims[dims.len() - 1])
+        } else {
+            (1u32 as usize, el)
+        };
+        let kernel_name: &'static str = match s1.dtype() {
+            DType::F32 => "add_scaled_f32",
+            DType::F16 => "add_scaled_f16",
+            dt => candle_core::bail!("add_scaled metal: unsupported dtype {dt:?}"),
+        };
+        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+        let output = device.new_buffer(el, s1.dtype(), "add_scaled")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let off1 = l1.start_offset() * s1.dtype().size_in_bytes();
+        let off2 = l2.start_offset() * s2.dtype().size_in_bytes();
+        let off3 = l3.start_offset() * s3.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s1.buffer(), off1));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (s2.buffer(), off2));
+        candle_metal_kernels::utils::set_param(&encoder, 2, (s3.buffer(), off3));
+        candle_metal_kernels::utils::set_param(&encoder, 3, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 4, el as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 5, channels as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 6, time_len as u32);
+        let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
+        let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
+        encoder.dispatch_threads(grid, group);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s1.dtype()), l1.shape().clone()))
+    }
+}
+
 // ─── MetalBackend ────────────────────────────────────────────────────
 
 /// Metal backend -- MSL kernels for fused ops, candle tensor ops for everything else.
@@ -366,12 +416,13 @@ impl ComputeBackend for MetalBackend {
     }
 
     fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        let c_broadcast = if c.dims().len() == 1 {
-            c.unsqueeze(0)?.unsqueeze(2)?
+        if c.dims().len() == 1 {
+            // Use MSL kernel for per-channel broadcast: a + b * c[chan]
+            a.apply_op3_no_bwd(b, c, &MetalAddScaled)
         } else {
-            c.clone()
-        };
-        (a + b.broadcast_mul(&c_broadcast)?)?.contiguous()
+            // Fallback for non-1D c (e.g. benchmark uses same-shape tensors)
+            (a + b.broadcast_mul(c)?)?.contiguous()
+        }
     }
 
     // ── AdaLN (candle tensor ops) ────────────────────────────────────
