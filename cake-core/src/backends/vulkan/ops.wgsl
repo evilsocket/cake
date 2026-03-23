@@ -145,8 +145,9 @@ fn gemv(@builtin(global_invocation_id) gid: vec3<u32>,
 
 // ═══════════════════════════════════════════════════════════════════
 // Tiled GEMM: C[M,N] = A[M,K] × B[K,N]  (for M > 1)
-// 16×16 tiles with 2×2 register tiling: 8×8 workgroup, each thread
-// computes a 2×2 block of outputs for higher arithmetic intensity.
+// 16×16 output tile with 2×2 register tiling, K-tile = 32.
+// 8×8 workgroup (64 threads). Doubled K-tile halves the number of
+// tile iterations and barrier synchronizations.
 // ═══════════════════════════════════════════════════════════════════
 
 struct MatmulParams {
@@ -161,9 +162,10 @@ struct MatmulParams {
 @group(0) @binding(2) var<storage, read_write> mat_c: array<f32>;
 @group(0) @binding(3) var<uniform> mat_params: MatmulParams;
 
-const TILE: u32 = 16;
-var<workgroup> tile_a: array<f32, 256>;
-var<workgroup> tile_b: array<f32, 256>;
+const TILE_MN: u32 = 16;  // output tile M and N dimension
+const TILE_K: u32 = 32;   // K dimension tile (doubled for fewer iterations)
+var<workgroup> tile_a: array<f32, 512>;  // [16, 32]
+var<workgroup> tile_b: array<f32, 512>;  // [32, 16]
 
 @compute @workgroup_size(8, 8)
 fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
@@ -177,56 +179,63 @@ fn matmul(@builtin(global_invocation_id) gid: vec3<u32>,
     let N = mat_params.N;
     let K = mat_params.K;
 
+    // Workgroup base position
+    let wg_row = gid.x * 2u - lid.x * 2u;
+    let wg_col = gid.y * 2u - lid.y * 2u;
+
     // 2×2 accumulators
     var acc00: f32 = 0.0;
     var acc01: f32 = 0.0;
     var acc10: f32 = 0.0;
     var acc11: f32 = 0.0;
-    let num_tiles = (K + TILE - 1) / TILE;
+    let num_tiles = (K + TILE_K - 1u) / TILE_K;
 
-    // Linear thread index for cooperative tile loading (64 threads load 256 elements = 4 each)
+    // Linear thread index (64 threads load 512 elements = 8 per thread)
     let lin = lr * 8u + lc;
 
-    for (var t: u32 = 0; t < num_tiles; t++) {
-        let tile_k = t * TILE;
+    for (var t: u32 = 0u; t < num_tiles; t++) {
+        let tk = t * TILE_K;
 
-        // Cooperative load: 64 threads load 16×16 = 256 elements, 4 per thread
-        for (var i: u32 = 0u; i < 4u; i++) {
-            let idx = lin * 4u + i;
-            let tr = idx / TILE;
-            let tc = idx % TILE;
-
-            // Load tile_a: row = workgroup_row_base + tr, col = tile_k + tc
-            let a_row = gid.x * 2u - lid.x * 2u + tr;  // workgroup base row + tr
-            let a_col = tile_k + tc;
+        // Cooperative load tile_a[16, 32]: 64 threads, 8 elements each
+        for (var i: u32 = 0u; i < 8u; i++) {
+            let idx = lin * 8u + i;
+            let tr = idx / TILE_K;   // row 0..15
+            let tc = idx % TILE_K;   // col 0..31
+            let a_row = wg_row + tr;
+            let a_col = tk + tc;
             if (a_row < M && a_col < K) {
-                tile_a[tr * TILE + tc] = mat_a[a_row * K + a_col];
+                tile_a[idx] = mat_a[a_row * K + a_col];
             } else {
-                tile_a[tr * TILE + tc] = 0.0;
+                tile_a[idx] = 0.0;
             }
+        }
 
-            // Load tile_b: row = tile_k + tr, col = workgroup_col_base + tc
-            let b_row = tile_k + tr;
-            let b_col = gid.y * 2u - lid.y * 2u + tc;  // workgroup base col + tc
+        // Cooperative load tile_b[32, 16]: 64 threads, 8 elements each
+        for (var i: u32 = 0u; i < 8u; i++) {
+            let idx = lin * 8u + i;
+            let tr = idx / TILE_MN;  // row 0..31
+            let tc = idx % TILE_MN;  // col 0..15
+            let b_row = tk + tr;
+            let b_col = wg_col + tc;
             if (b_row < K && b_col < N) {
-                tile_b[tr * TILE + tc] = mat_b[b_row * N + b_col];
+                tile_b[idx] = mat_b[b_row * N + b_col];
             } else {
-                tile_b[tr * TILE + tc] = 0.0;
+                tile_b[idx] = 0.0;
             }
         }
 
         workgroupBarrier();
 
-        // Each thread accumulates its 2×2 block
+        // Each thread accumulates its 2×2 block over K-tile of 32
         let r0 = lr * 2u;
         let r1 = r0 + 1u;
         let c0 = lc * 2u;
         let c1 = c0 + 1u;
-        for (var k: u32 = 0; k < TILE; k++) {
-            let a0k = tile_a[r0 * TILE + k];
-            let a1k = tile_a[r1 * TILE + k];
-            let bk0 = tile_b[k * TILE + c0];
-            let bk1 = tile_b[k * TILE + c1];
+        for (var k: u32 = 0u; k < TILE_K; k++) {
+            let a0k = tile_a[r0 * TILE_K + k];
+            let a1k = tile_a[r1 * TILE_K + k];
+            let bk0 = tile_b[k * TILE_MN + c0];
+            let bk1 = tile_b[k * TILE_MN + c1];
             acc00 += a0k * bk0;
             acc01 += a0k * bk1;
             acc10 += a1k * bk0;
