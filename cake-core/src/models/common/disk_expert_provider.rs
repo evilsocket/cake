@@ -229,38 +229,55 @@ impl ExpertProvider for DiskExpertProvider {
             });
         }
 
-        // Non-GPTQ: optimized batch read paths
-        // For F32→F32 (zero-copy path), individual reads are faster than
-        // batch+split since each read's buffer transfers directly into the
-        // Tensor without copying. The batch path would add 3 memcpys to split
-        // the contiguous buffer.
-        let (gate_data, up_data, down_data) = if self.use_f32_zerocopy {
+        // Non-GPTQ: optimized read paths
+        if self.use_f32_zerocopy {
+            // F32→F32: try zero-copy mmap path first (avoids allocation + memcpy)
+            let target_device = if self.needs_device_transfer { &self.device } else { &Device::Cpu };
+            if let (Some((gb, _, gs)), Some((ub, _, us)), Some((db, _, ds))) = (
+                self.storage.tensor_bytes(&names.gate_proj),
+                self.storage.tensor_bytes(&names.up_proj),
+                self.storage.tensor_bytes(&names.down_proj),
+            ) {
+                // Reinterpret &[u8] as &[f32] directly from mmap — single memcpy into Tensor
+                let gate_f32 = unsafe { std::slice::from_raw_parts(gb.as_ptr() as *const f32, gb.len() / 4) };
+                let up_f32 = unsafe { std::slice::from_raw_parts(ub.as_ptr() as *const f32, ub.len() / 4) };
+                let down_f32 = unsafe { std::slice::from_raw_parts(db.as_ptr() as *const f32, db.len() / 4) };
+                return Ok(ExpertWeights {
+                    gate_proj: Tensor::from_slice(gate_f32, &*gs, target_device)?,
+                    up_proj: Tensor::from_slice(up_f32, &*us, target_device)?,
+                    down_proj: Tensor::from_slice(down_f32, &*ds, target_device)?,
+                });
+            }
+            // Fallback: read via TensorData (non-mmap storage)
             let g = self.storage.read_tensor(&names.gate_proj)
                 .map_err(|e| candle_core::Error::Msg(format!("read_tensor: {e}")))?;
             let u = self.storage.read_tensor(&names.up_proj)
                 .map_err(|e| candle_core::Error::Msg(format!("read_tensor: {e}")))?;
             let d = self.storage.read_tensor(&names.down_proj)
                 .map_err(|e| candle_core::Error::Msg(format!("read_tensor: {e}")))?;
-            (g, u, d)
-        } else {
-            // For dtype conversion path, batch read saves pread syscalls
-            let tensor_names = [
-                names.gate_proj.as_str(),
-                names.up_proj.as_str(),
-                names.down_proj.as_str(),
-            ];
-            let mut data = self.storage.read_tensors(&tensor_names)
-                .map_err(|e| candle_core::Error::Msg(format!("read_tensors: {e}")))?;
-            let d = data.pop().unwrap();
-            let u = data.pop().unwrap();
-            let g = data.pop().unwrap();
-            (g, u, d)
-        };
+            return Ok(ExpertWeights {
+                gate_proj: self.materialize(g)?,
+                up_proj: self.materialize(u)?,
+                down_proj: self.materialize(d)?,
+            });
+        }
+
+        // For dtype conversion path, batch read saves syscalls
+        let tensor_names = [
+            names.gate_proj.as_str(),
+            names.up_proj.as_str(),
+            names.down_proj.as_str(),
+        ];
+        let mut data = self.storage.read_tensors(&tensor_names)
+            .map_err(|e| candle_core::Error::Msg(format!("read_tensors: {e}")))?;
+        let d = data.pop().unwrap();
+        let u = data.pop().unwrap();
+        let g = data.pop().unwrap();
 
         Ok(ExpertWeights {
-            gate_proj: self.materialize(gate_data)?,
-            up_proj: self.materialize(up_data)?,
-            down_proj: self.materialize(down_data)?,
+            gate_proj: self.materialize(g)?,
+            up_proj: self.materialize(u)?,
+            down_proj: self.materialize(d)?,
         })
     }
 
