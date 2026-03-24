@@ -298,7 +298,7 @@ impl SafetensorsStorage {
                 .ok_or_else(|| anyhow::anyhow!("shard header not object"))?;
 
             for (name, meta) in obj {
-                if name == "__metadata__" {
+                if name.starts_with("__") {
                     continue;
                 }
                 if let Some(tm) = Self::parse_tensor_meta(name, meta, shard_idx, header_len)? {
@@ -337,7 +337,7 @@ impl SafetensorsStorage {
         let mut index = HashMap::with_capacity(obj.len());
 
         for (name, meta) in obj {
-            if name == "__metadata__" {
+            if name.starts_with("__") {
                 continue;
             }
             if let Some(tm) = Self::parse_tensor_meta(name, meta, shard_idx, header_len)? {
