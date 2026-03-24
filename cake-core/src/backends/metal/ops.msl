@@ -120,7 +120,7 @@ kernel void stable_softplus_f32(
     if (idx >= count) return;
     float x = input[idx];
     // Branchless: select avoids warp divergence
-    float sp = select(log(1.0f + fast::exp(x)), x, x > 20.0f);
+    float sp = select(fast::log(1.0f + fast::exp(x)), x, x > 20.0f);
     output[idx] = max(x, sp);
 }
 
@@ -133,7 +133,7 @@ kernel void stable_softplus_f16(
     if (idx >= count) return;
     half x = input[idx];
     float xf = float(x);
-    half sp = half(select(log(1.0f + fast::exp(xf)), xf, xf > 20.0f));
+    half sp = half(select(fast::log(1.0f + fast::exp(xf)), xf, xf > 20.0f));
     output[idx] = max(x, sp);
 }
 
