@@ -39,6 +39,7 @@ const ALL_KERNELS: &[&str] = &[
     "rms_norm_channel_f32", "rms_norm_channel_f16",
     "f8e4m3_to_f32", "f8e4m3_to_f16",
     "adaln_modulate_f32", "adaln_modulate_f16",
+    "softmax_last_dim_f32", "softmax_last_dim_f16",
     "fused_vector_attention_f16",
     "fused_vector_attention_f32",
 ];
@@ -228,6 +229,34 @@ impl candle_core::CustomOp1 for MetalSilu {
         candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
         let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
         let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
+        encoder.dispatch_threads(grid, group);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s.dtype()), l.shape().clone()))
+    }
+}
+
+struct MetalSoftmaxLastDim;
+impl candle_core::CustomOp1 for MetalSoftmaxLastDim {
+    fn name(&self) -> &'static str { "metal_softmax_last_dim" }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalSoftmaxLastDim: expected Metal device") }
+    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
+        let device = s.device();
+        let dims = l.shape().dims();
+        let el = l.shape().elem_count();
+        let last_dim = *dims.last().ok_or_else(|| candle_core::Error::Msg("empty shape".into()))?;
+        let num_rows = el / last_dim;
+        let kernel_name: &'static str = match s.dtype() { DType::F32 => "softmax_last_dim_f32", DType::F16 => "softmax_last_dim_f16", dt => candle_core::bail!("softmax metal: unsupported dtype {dt:?}") };
+        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+        let output = device.new_buffer(el, s.dtype(), "softmax")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let offset = l.start_offset() * s.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 2, last_dim as u32);
+        let max_threads = pipeline.max_total_threads_per_threadgroup();
+        let tg_width = last_dim.min(max_threads);
+        let grid = objc2_metal::MTLSize { width: last_dim, height: num_rows, depth: 1 };
+        let group = objc2_metal::MTLSize { width: tg_width, height: 1, depth: 1 };
         encoder.dispatch_threads(grid, group);
         Ok((candle_core::MetalStorage::new(output, device.clone(), el, s.dtype()), l.shape().clone()))
     }
@@ -702,7 +731,7 @@ impl ComputeBackend for MetalBackend {
                 } else {
                     att
                 };
-                let att = candle_nn::ops::softmax_last_dim(&att)?;
+                let att = self.softmax(&att, att.rank() - 1)?;
                 att.matmul(&v.contiguous()?)
             }
         }
@@ -740,6 +769,18 @@ impl ComputeBackend for MetalBackend {
 
     fn silu(&self, x: &Tensor) -> Result<Tensor> {
         x.apply_op1_no_bwd(&MetalSilu)
+    }
+
+    fn softmax(&self, x: &Tensor, dim: usize) -> Result<Tensor> {
+        if dim == x.rank() - 1 && matches!(x.dtype(), DType::F32 | DType::F16) {
+            let x = x.contiguous()?;
+            return x.apply_op1_no_bwd(&MetalSoftmaxLastDim);
+        }
+        // Fallback for non-last dimension
+        let max = x.max_keepdim(dim)?;
+        let exp = x.broadcast_sub(&max)?.exp()?;
+        let sum = exp.sum_keepdim(dim)?;
+        exp.broadcast_div(&sum)
     }
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {

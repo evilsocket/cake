@@ -325,9 +325,7 @@ kernel void depthwise_conv1d_silu_f16(
     float dot = 0.0f;
     for (uint k = 0; k < kernel_size; k++)
         dot = fma(float(window[idx * kernel_size + k]), float(weight[c * kernel_size + k]), dot);
-    // silu: dot * sigmoid(dot) — sigmoid in float, multiply result in half
-    half hd = half(dot);
-    output[idx] = hd * half(fast_sigmoid(dot));
+    output[idx] = half(dot * fast_sigmoid(dot));
 }
 
 // ─── depthwise_conv1d_bias ──────────────────────────────────────────
@@ -377,6 +375,63 @@ kernel void depthwise_conv1d_bias_f16(
     for (uint k = 0; k < kernel_size; k++)
         acc = fma(float(input[in_base + k]), float(weight[w_base + k]), acc);
     output[idx] = half(acc + float(bias[c]));
+}
+
+// ─── SIMD max reduction helper ────────────────────────────────────────
+#define SIMD_REDUCE_MAX(val, dim, lane, simd_id) \
+    float _smx = simd_max(val); \
+    if ((dim) > 32) { \
+        threadgroup float _pmx[32]; \
+        if (lane == 0) _pmx[simd_id] = _smx; \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+        uint _nmx = ((dim) + 31) / 32; \
+        float _tmx = -INFINITY; \
+        if (simd_id == 0 && lane < _nmx) _tmx = _pmx[lane]; \
+        _tmx = simd_max(_tmx); \
+        if (simd_id == 0 && lane == 0) _pmx[0] = _tmx; \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+        _smx = _pmx[0]; \
+    }
+
+// ─── softmax_last_dim ────────────────────────────────────────────────
+kernel void softmax_last_dim_f32(
+    device const float* x [[buffer(0)]],
+    device float* output [[buffer(1)]],
+    constant uint& dim [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = gid.y, col = gid.x;
+    if (col >= dim) return;
+    uint base = row * dim;
+    float val = x[base + col];
+    // Pass 1: max reduction
+    SIMD_REDUCE_MAX(val, dim, lane, simd_id)
+    float e = fast::exp(val - _smx);
+    // Pass 2: sum reduction
+    SIMD_REDUCE_SUM(e, dim, lane, simd_id)
+    output[base + col] = e / _sr;
+}
+
+kernel void softmax_last_dim_f16(
+    device const half* x [[buffer(0)]],
+    device half* output [[buffer(1)]],
+    constant uint& dim [[buffer(2)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = gid.y, col = gid.x;
+    if (col >= dim) return;
+    uint base = row * dim;
+    float val = float(x[base + col]);
+    // Pass 1: max reduction
+    SIMD_REDUCE_MAX(val, dim, lane, simd_id)
+    float e = fast::exp(val - _smx);
+    // Pass 2: sum reduction
+    SIMD_REDUCE_SUM(e, dim, lane, simd_id)
+    output[base + col] = half(e / _sr);
 }
 
 // ─── rms_norm (standalone) ───────────────────────────────────────────
