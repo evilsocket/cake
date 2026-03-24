@@ -291,22 +291,17 @@ impl SafetensorsStorage {
             .and_then(|v| v.as_object())
             .ok_or_else(|| anyhow::anyhow!("missing weight_map in index"))?;
 
-        // Group tensors by shard file
-        let mut shard_tensors: HashMap<String, Vec<String>> = HashMap::new();
-        for (tensor_name, shard_val) in weight_map {
-            let shard = shard_val
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("bad weight_map entry"))?;
-            shard_tensors
-                .entry(shard.to_string())
-                .or_default()
-                .push(tensor_name.clone());
-        }
+        // Collect unique shard filenames (we get tensor metadata from shard headers, not weight_map)
+        let mut shard_names: Vec<&str> = weight_map.values()
+            .filter_map(|v| v.as_str())
+            .collect();
+        shard_names.sort_unstable();
+        shard_names.dedup();
 
         let mut index = HashMap::with_capacity(weight_map.len());
-        let mut shards = Vec::with_capacity(shard_tensors.len());
+        let mut shards = Vec::with_capacity(shard_names.len());
 
-        for shard_name in shard_tensors.keys() {
+        for shard_name in shard_names {
             let shard_path = parent.join(shard_name);
             let shard_idx = shards.len() as u16;
             let f = File::open(&shard_path)?;
