@@ -129,7 +129,7 @@ impl Qwen3_5MoeConfig {
             head_dim: Some(tc.head_dim),
             partial_rotary_factor,
             linear_attn,
-            residual_rms_norm: true,
+            residual_rms_norm: false,
             use_qk_norm: false,
             pre_reshape_qk_norm: false,
             sliding_window: None,
@@ -212,7 +212,7 @@ mod tests {
         assert_eq!(c.shared_expert_intermediate_size, Some(8192));
         assert!(c.attn_output_gate);
         assert!(c.norm_topk_prob);
-        assert!(c.residual_rms_norm);
+        assert!(!c.residual_rms_norm);
         assert_eq!(c.model_prefix, "model.language_model");
         assert_eq!(c.head_dim, Some(256));
         assert_eq!(c.rope_theta, 10_000_000.0);
