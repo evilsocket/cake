@@ -89,15 +89,10 @@ pub fn dequantize_gptq_4bit(
     let (groups, _) = scales.dims2()?;
     debug_assert_eq!(in_features / group_size, groups);
 
-    // Pull to CPU vecs (these are tiny compared to the dequantized result).
-    let qw: Vec<i32> = qweight.to_vec2::<i32>()?.into_iter().flatten().collect();
-    let sc: Vec<f32> = scales
-        .to_dtype(DType::F32)?
-        .to_vec2::<f32>()?
-        .into_iter()
-        .flatten()
-        .collect();
-    let qz: Vec<i32> = qzeros.to_vec2::<i32>()?.into_iter().flatten().collect();
+    // Pull to CPU vecs — use flatten + to_vec1 to avoid intermediate Vec<Vec<T>>.
+    let qw: Vec<i32> = qweight.flatten_all()?.to_vec1()?;
+    let sc: Vec<f32> = scales.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+    let qz: Vec<i32> = qzeros.flatten_all()?.to_vec1()?;
     let zero_cols = out_features / 8; // columns in qzeros
 
     let mut weight = vec![0f32; out_features * in_features];
