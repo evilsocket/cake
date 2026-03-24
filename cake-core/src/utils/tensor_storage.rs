@@ -21,6 +21,17 @@ use std::os::unix::io::AsRawFd;
 use anyhow::{bail, Result};
 use candle_core::DType;
 
+/// Typed safetensors header entry — deserializes directly, avoiding serde_json::Value.
+#[derive(serde::Deserialize)]
+struct HeaderEntry {
+    #[serde(default)]
+    dtype: Option<String>,
+    #[serde(default)]
+    shape: Option<Vec<usize>>,
+    #[serde(default)]
+    data_offsets: Option<(u64, u64)>,
+}
+
 /// Raw tensor data read from storage.
 #[derive(Debug)]
 pub struct TensorData {
@@ -293,17 +304,13 @@ impl SafetensorsStorage {
             let shard = MappedShard::new(f)?;
             shards.push(shard);
 
-            if let serde_json::Value::Object(obj) = header {
-                for (name, meta) in obj {
-                    if name.starts_with("__") {
-                        continue;
-                    }
-                    if let Some(tm) = Self::parse_tensor_meta(&name, &meta, shard_idx, header_len)? {
-                        index.insert(name, tm);
-                    }
+            for (name, entry) in header {
+                if name.starts_with("__") {
+                    continue;
                 }
-            } else {
-                bail!("shard header not object");
+                if let Some(tm) = Self::parse_tensor_meta(&name, &entry, shard_idx, header_len)? {
+                    index.insert(name, tm);
+                }
             }
         }
 
@@ -331,19 +338,14 @@ impl SafetensorsStorage {
         #[cfg(not(unix))]
         let shard = MappedShard::new(f)?;
 
-        let mut index;
-        if let serde_json::Value::Object(obj) = header {
-            index = HashMap::with_capacity(obj.len());
-            for (name, meta) in obj {
-                if name.starts_with("__") {
-                    continue;
-                }
-                if let Some(tm) = Self::parse_tensor_meta(&name, &meta, shard_idx, header_len)? {
-                    index.insert(name, tm);
-                }
+        let mut index = HashMap::with_capacity(header.len());
+        for (name, entry) in header {
+            if name.starts_with("__") {
+                continue;
             }
-        } else {
-            bail!("header not object");
+            if let Some(tm) = Self::parse_tensor_meta(&name, &entry, shard_idx, header_len)? {
+                index.insert(name, tm);
+            }
         }
 
         let shards = vec![shard];
@@ -353,9 +355,9 @@ impl SafetensorsStorage {
         Ok(Self { index, shards })
     }
 
-    /// Parse a shard file's header from mmap'd data. Returns (header_len, parsed JSON).
+    /// Parse a shard file's header from mmap'd data into typed entries.
     #[cfg(unix)]
-    fn parse_shard_header_mmap(shard: &MappedShard) -> Result<(usize, serde_json::Value)> {
+    fn parse_shard_header_mmap(shard: &MappedShard) -> Result<(usize, HashMap<String, HeaderEntry>)> {
         let data = shard.as_slice(0, shard.mmap_len.min(8));
         if data.len() < 8 {
             bail!("shard file too small for header");
@@ -365,13 +367,13 @@ impl SafetensorsStorage {
             bail!("safetensors header too large: {} bytes", header_len);
         }
         let header_data = shard.as_slice(8, header_len);
-        let header: serde_json::Value = serde_json::from_slice(header_data)?;
+        let header: HashMap<String, HeaderEntry> = serde_json::from_slice(header_data)?;
         Ok((header_len, header))
     }
 
-    /// Parse a shard file's header from file I/O. Returns (header_len, parsed JSON).
+    /// Parse a shard file's header from file I/O into typed entries.
     #[cfg(not(unix))]
-    fn parse_shard_header(path: &Path) -> Result<(usize, serde_json::Value)> {
+    fn parse_shard_header(path: &Path) -> Result<(usize, HashMap<String, HeaderEntry>)> {
         let mut f = File::open(path)?;
         let mut len_buf = [0u8; 8];
         f.read_exact(&mut len_buf)?;
@@ -383,35 +385,29 @@ impl SafetensorsStorage {
 
         let mut header_buf = vec![0u8; header_len];
         f.read_exact(&mut header_buf)?;
-        let header: serde_json::Value = serde_json::from_slice(&header_buf)?;
+        let header: HashMap<String, HeaderEntry> = serde_json::from_slice(&header_buf)?;
 
         Ok((header_len, header))
     }
 
-    /// Parse tensor metadata from a shard header entry.
+    /// Parse tensor metadata from a typed header entry.
     #[inline]
     fn parse_tensor_meta(
         name: &str,
-        meta: &serde_json::Value,
+        entry: &HeaderEntry,
         shard_idx: u16,
         header_len: usize,
     ) -> Result<Option<TensorMeta>> {
-        let offsets = match meta.get("data_offsets").and_then(|v| v.as_array()) {
-            Some(o) if o.len() == 2 => o,
-            _ => return Ok(None),
+        let (data_start, data_end) = match entry.data_offsets {
+            Some(offsets) => offsets,
+            None => return Ok(None),
         };
 
-        let data_start = offsets[0].as_u64().unwrap_or(0);
-        let data_end = offsets[1].as_u64().unwrap_or(0);
         let byte_size = data_end.saturating_sub(data_start);
-
         // Absolute offset in file: 8 (length prefix) + header_len + data_start
         let abs_offset = 8 + header_len as u64 + data_start;
 
-        let dtype_str = meta
-            .get("dtype")
-            .and_then(|v| v.as_str())
-            .unwrap_or("F32");
+        let dtype_str = entry.dtype.as_deref().unwrap_or("F32");
         let dtype = match dtype_str {
             "F16" => DType::F16,
             "BF16" => DType::BF16,
@@ -428,22 +424,14 @@ impl SafetensorsStorage {
             }
         };
 
-        let shape_vec: Vec<usize> = meta
-            .get("shape")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_u64().map(|n| n as usize))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let shape_vec = entry.shape.as_deref().unwrap_or(&[]);
 
         Ok(Some(TensorMeta {
             shard_idx,
             abs_offset,
             byte_size,
             dtype,
-            shape: InlineShape::from_vec(&shape_vec),
+            shape: InlineShape::from_vec(shape_vec),
         }))
     }
 }
@@ -585,13 +573,13 @@ mod tests {
 
     #[test]
     fn test_parse_tensor_meta_valid() {
-        let meta_json: serde_json::Value = serde_json::json!({
-            "dtype": "F16",
-            "shape": [1024, 512],
-            "data_offsets": [0, 1048576]
-        });
+        let entry = HeaderEntry {
+            dtype: Some("F16".to_string()),
+            shape: Some(vec![1024, 512]),
+            data_offsets: Some((0, 1048576)),
+        };
         let result =
-            SafetensorsStorage::parse_tensor_meta("test", &meta_json, 0, 200)
+            SafetensorsStorage::parse_tensor_meta("test", &entry, 0, 200)
                 .unwrap();
         let tm = result.unwrap();
         assert_eq!(tm.abs_offset, 8 + 200);
@@ -602,11 +590,13 @@ mod tests {
 
     #[test]
     fn test_parse_tensor_meta_skips_metadata() {
-        let meta_json: serde_json::Value = serde_json::json!({
-            "format": "pt"
-        });
+        let entry = HeaderEntry {
+            dtype: None,
+            shape: None,
+            data_offsets: None,
+        };
         let result =
-            SafetensorsStorage::parse_tensor_meta("__metadata__", &meta_json, 0, 100)
+            SafetensorsStorage::parse_tensor_meta("__metadata__", &entry, 0, 100)
                 .unwrap();
         // No data_offsets → None
         assert!(result.is_none());
