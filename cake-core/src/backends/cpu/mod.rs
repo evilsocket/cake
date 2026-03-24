@@ -57,17 +57,19 @@ impl ComputeBackend for CpuBackend {
         let attn = (attn * scale as f64)?;
         let attn = if causal {
             let seq_len = q.dim(2)?;
-            // Build lower-triangular causal mask (u8 for where_cond)
+            // Build upper-triangular future mask (1 = future/masked position)
             let mut mask_data = vec![0u8; seq_len * seq_len];
             for i in 0..seq_len {
-                for j in 0..=i {
+                for j in (i + 1)..seq_len {
                     mask_data[i * seq_len + j] = 1;
                 }
             }
             let mask = Tensor::from_vec(mask_data, (1, 1, seq_len, seq_len), q.device())?;
-            let neg_inf = Tensor::full(f32::NEG_INFINITY, attn.shape(), q.device())?;
+            // Use scalar broadcast instead of allocating full neg_inf tensor
+            let neg_inf = Tensor::new(f32::NEG_INFINITY, q.device())?
+                .broadcast_as(attn.shape())?;
             mask.broadcast_as(attn.shape())?
-                .where_cond(&attn, &neg_inf)?
+                .where_cond(&neg_inf, &attn)?
         } else {
             attn
         };
