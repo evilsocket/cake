@@ -50,38 +50,57 @@ impl ComputeBackend for CpuBackend {
         causal: bool,
     ) -> Result<Tensor> {
         // Manual SDPA: Q·K^T * scale → softmax → ·V
-        let q = q.to_dtype(DType::F32)?;
-        let k = k.to_dtype(DType::F32)?;
-        let v = v.to_dtype(DType::F32)?;
-        let attn = q.matmul(&k.t()?)?;
+        // Skip dtype conversion when already F32 (avoids alloc check overhead)
+        let q_f32 = if q.dtype() == DType::F32 { q.clone() } else { q.to_dtype(DType::F32)? };
+        let k_f32 = if k.dtype() == DType::F32 { k.clone() } else { k.to_dtype(DType::F32)? };
+        let v_f32 = if v.dtype() == DType::F32 { v.clone() } else { v.to_dtype(DType::F32)? };
+        let attn = q_f32.matmul(&k_f32.t()?)?;
         let attn = (attn * scale as f64)?;
         let attn = if causal {
-            let seq_len = q.dim(2)?;
-            // Build lower-triangular causal mask (u8 for where_cond)
-            let mut mask_data = vec![0u8; seq_len * seq_len];
-            for i in 0..seq_len {
-                for j in 0..=i {
-                    mask_data[i * seq_len + j] = 1;
+            let seq_len = q_f32.dim(2)?;
+            if seq_len <= 1 {
+                // Generation step: single query attends to all KV — no masking needed
+                attn
+            } else {
+                // Build upper-triangular future mask (1 = future/masked position)
+                let mut mask_data = vec![0u8; seq_len * seq_len];
+                for i in 0..seq_len {
+                    for j in (i + 1)..seq_len {
+                        mask_data[i * seq_len + j] = 1;
+                    }
                 }
+                let mask =
+                    Tensor::from_vec(mask_data, (1, 1, seq_len, seq_len), q_f32.device())?;
+                // Use scalar broadcast instead of allocating full neg_inf tensor
+                let neg_inf = Tensor::new(f32::NEG_INFINITY, q_f32.device())?
+                    .broadcast_as(attn.shape())?;
+                mask.broadcast_as(attn.shape())?
+                    .where_cond(&neg_inf, &attn)?
             }
-            let mask = Tensor::from_vec(mask_data, (1, 1, seq_len, seq_len), q.device())?;
-            let neg_inf = Tensor::full(f32::NEG_INFINITY, attn.shape(), q.device())?;
-            mask.broadcast_as(attn.shape())?
-                .where_cond(&attn, &neg_inf)?
         } else {
             attn
         };
         let attn = candle_nn::ops::softmax_last_dim(&attn)?;
-        attn.matmul(&v)
+        attn.matmul(&v_f32)
     }
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-        (candle_nn::ops::silu(&gate.contiguous()?)? * up.contiguous()?)?
-            .contiguous()
+        candle_nn::ops::silu(&gate.contiguous()?)? * up.contiguous()?
     }
 
     fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
         // ln(1 + exp(clamp(x, -inf, 88))) with max(x, result)
+        if x.dtype() == DType::F32 {
+            let data = x.contiguous()?.flatten_all()?.to_vec1::<f32>()?;
+            let shape = x.dims();
+            let mut out = data;
+            for v in out.iter_mut() {
+                let clamped = v.min(88.0);
+                let sp = (1.0 + clamped.exp()).ln();
+                *v = v.max(sp);
+            }
+            return Tensor::from_vec(out, shape, x.device());
+        }
         let t88 = Tensor::full(88.0f32, x.shape(), x.device())?.to_dtype(x.dtype())?;
         let clamped = x.minimum(&t88)?;
         let sp = (clamped.exp()? + 1.0)?.log()?;
@@ -96,8 +115,7 @@ impl ComputeBackend for CpuBackend {
         eps: f32,
     ) -> Result<Tensor> {
         let n = candle_nn::ops::rms_norm(&x.contiguous()?, weight, eps)?;
-        (n * candle_nn::ops::silu(&z.contiguous()?.to_dtype(x.dtype())?)?)?
-            .contiguous()
+        n * candle_nn::ops::silu(&z.contiguous()?.to_dtype(x.dtype())?)?
     }
 
     fn add_rms_norm(
@@ -108,18 +126,45 @@ impl ComputeBackend for CpuBackend {
         eps: f32,
     ) -> Result<(Tensor, Tensor)> {
         let res = (a + b)?;
-        let normed = candle_nn::ops::rms_norm(&res.contiguous()?, weight, eps)?;
+        let normed = candle_nn::ops::rms_norm(&res, weight, eps)?;
         Ok((res, normed))
     }
 
     fn rms_norm_channel(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        // x is (batch, channels, time) — rms_norm expects norm over last dim
-        // Transpose to (batch, time, channels), norm, transpose back
+        // x is (batch, channels, time) — norm over channels at each time step
+        if x.dtype() == DType::F32 {
+            let x = x.contiguous()?;
+            let batch = x.dim(0)?;
+            let channels = x.dim(1)?;
+            let time = x.dim(2)?;
+            let data = x.flatten_all()?.to_vec1::<f32>()?;
+            let w = weight.to_vec1::<f32>()?;
+            let eps64 = eps as f64;
+            let mut out = vec![0f32; data.len()];
+            for b in 0..batch {
+                let batch_off = b * channels * time;
+                for t in 0..time {
+                    // Gather channel values at this time step
+                    let mut sum_sq = 0f64;
+                    for c in 0..channels {
+                        let v = data[batch_off + c * time + t] as f64;
+                        sum_sq += v * v;
+                    }
+                    let rms = (sum_sq / channels as f64 + eps64).sqrt();
+                    let inv_rms = 1.0 / rms;
+                    for (c, &wc) in w.iter().enumerate() {
+                        let idx = batch_off + c * time + t;
+                        out[idx] = (data[idx] as f64 * inv_rms * wc as f64) as f32;
+                    }
+                }
+            }
+            return Tensor::from_vec(out, (batch, channels, time), x.device());
+        }
+        // Fallback: transpose approach
         x.transpose(1, 2)?
             .contiguous()
             .and_then(|t| candle_nn::ops::rms_norm(&t, weight, eps))?
-            .transpose(1, 2)?
-            .contiguous()
+            .transpose(1, 2)
     }
 
     fn depthwise_conv1d_silu(
@@ -147,22 +192,47 @@ impl ComputeBackend for CpuBackend {
         // weight: (channels, kernel_size)
         // bias: (channels,)
         // output: (batch, channels, output_time) where output_time = padded_time - kernel_size + 1
+        let padded_input = padded_input.contiguous()?;
+        let batch = padded_input.dim(0)?;
+        let channels = padded_input.dim(1)?;
         let padded_time = padded_input.dim(2)?;
         let output_time = padded_time - kernel_size + 1;
 
-        let mut slices = Vec::with_capacity(output_time);
-        for t in 0..output_time {
-            // Extract window: (batch, channels, kernel_size)
-            let window = padded_input.narrow(2, t, kernel_size)?;
-            // Elementwise multiply with weight (broadcast over batch), sum over kernel dim
-            let w = weight.unsqueeze(0)?;
-            let conv_t = window.broadcast_mul(&w)?.sum(D::Minus1)?;
-            // Add bias: (channels,) broadcast over (batch, channels)
-            let conv_t = conv_t.broadcast_add(bias)?;
-            // Unsqueeze to (batch, channels, 1) for concatenation
-            slices.push(conv_t.unsqueeze(2)?);
+        // Raw f32 path: single pass, no intermediate tensor allocations
+        if padded_input.dtype() == DType::F32 {
+            let input_data = padded_input.flatten_all()?.to_vec1::<f32>()?;
+            let weight_data = weight.contiguous()?.flatten_all()?.to_vec1::<f32>()?;
+            let bias_data = bias.to_vec1::<f32>()?;
+            let mut out = vec![0f32; batch * channels * output_time];
+
+            for b in 0..batch {
+                for (c, &bias_val) in bias_data.iter().enumerate() {
+                    let in_off = (b * channels + c) * padded_time;
+                    let out_off = (b * channels + c) * output_time;
+                    let w_off = c * kernel_size;
+                    for t in 0..output_time {
+                        let mut sum = bias_val;
+                        for k in 0..kernel_size {
+                            sum += input_data[in_off + t + k] * weight_data[w_off + k];
+                        }
+                        out[out_off + t] = sum;
+                    }
+                }
+            }
+            return Tensor::from_vec(out, (batch, channels, output_time), padded_input.device());
         }
-        Tensor::cat(&slices, 2)
+
+        // Fallback: tensor ops — sum shifted slices weighted by each kernel tap
+        let w = weight.unsqueeze(0)?.unsqueeze(D::Minus1)?; // (1, channels, kernel_size, 1)
+        let mut windows = Vec::with_capacity(kernel_size);
+        for k in 0..kernel_size {
+            windows.push(padded_input.narrow(2, k, output_time)?);
+        }
+        // Stack windows: (batch, channels, kernel_size, output_time)
+        let stacked = Tensor::stack(&windows, 2)?;
+        let conv = stacked.broadcast_mul(&w)?.sum(2)?;
+        let bias_view = bias.unsqueeze(0)?.unsqueeze(2)?; // (1, channels, 1)
+        conv.broadcast_add(&bias_view)
     }
 
     fn depthwise_conv1d_bias_ctx(
@@ -180,15 +250,15 @@ impl ComputeBackend for CpuBackend {
     }
 
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ((a + b)? + c)?.contiguous()
+        (a + b)? + c
     }
 
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
-        (x * y.exp()?)?.contiguous()
+        x * y.exp()?
     }
 
     fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ((a - b)? * c)?.contiguous()
+        (a - b)? * c
     }
 
     fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
@@ -198,7 +268,7 @@ impl ComputeBackend for CpuBackend {
         } else {
             c.clone()
         };
-        (a + b.broadcast_mul(&c_broadcast)?)?.contiguous()
+        a + b.broadcast_mul(&c_broadcast)?
     }
 
     fn adaln_modulate(
@@ -211,7 +281,34 @@ impl ComputeBackend for CpuBackend {
     ) -> Result<Tensor> {
         // rms_norm(x) * (1 + scale) + shift
         let n = candle_nn::ops::rms_norm(&x.contiguous()?, norm_weight, eps)?;
-        (n.broadcast_mul(&(scale + 1.0)?)? + shift)?.contiguous()
+        n.broadcast_mul(&(scale + 1.0)?)? + shift
+    }
+
+    fn sigmoid(&self, x: &Tensor) -> Result<Tensor> {
+        if x.dtype() == DType::F32 {
+            let data = x.contiguous()?.flatten_all()?.to_vec1::<f32>()?;
+            let shape = x.dims();
+            let mut out = data;
+            for v in out.iter_mut() {
+                *v = 1.0 / (1.0 + (-*v).exp());
+            }
+            return Tensor::from_vec(out, shape, x.device());
+        }
+        candle_nn::ops::sigmoid(x)
+    }
+
+    fn silu(&self, x: &Tensor) -> Result<Tensor> {
+        if x.dtype() == DType::F32 {
+            let data = x.contiguous()?.flatten_all()?.to_vec1::<f32>()?;
+            let shape = x.dims();
+            let mut out = data;
+            for v in out.iter_mut() {
+                let x = *v;
+                *v = x / (1.0 + (-x).exp());
+            }
+            return Tensor::from_vec(out, shape, x.device());
+        }
+        candle_nn::ops::silu(x)
     }
 
     fn f8e4m3_to_f32(&self, x: &Tensor) -> Result<Tensor> {
