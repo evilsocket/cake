@@ -50,13 +50,14 @@ impl ComputeBackend for CpuBackend {
         causal: bool,
     ) -> Result<Tensor> {
         // Manual SDPA: Q·K^T * scale → softmax → ·V
-        let q = q.to_dtype(DType::F32)?;
-        let k = k.to_dtype(DType::F32)?;
-        let v = v.to_dtype(DType::F32)?;
-        let attn = q.matmul(&k.t()?)?;
+        // Skip dtype conversion when already F32 (avoids alloc check overhead)
+        let q_f32 = if q.dtype() == DType::F32 { q.clone() } else { q.to_dtype(DType::F32)? };
+        let k_f32 = if k.dtype() == DType::F32 { k.clone() } else { k.to_dtype(DType::F32)? };
+        let v_f32 = if v.dtype() == DType::F32 { v.clone() } else { v.to_dtype(DType::F32)? };
+        let attn = q_f32.matmul(&k_f32.t()?)?;
         let attn = (attn * scale as f64)?;
         let attn = if causal {
-            let seq_len = q.dim(2)?;
+            let seq_len = q_f32.dim(2)?;
             if seq_len <= 1 {
                 // Generation step: single query attends to all KV — no masking needed
                 attn
@@ -69,9 +70,9 @@ impl ComputeBackend for CpuBackend {
                     }
                 }
                 let mask =
-                    Tensor::from_vec(mask_data, (1, 1, seq_len, seq_len), q.device())?;
+                    Tensor::from_vec(mask_data, (1, 1, seq_len, seq_len), q_f32.device())?;
                 // Use scalar broadcast instead of allocating full neg_inf tensor
-                let neg_inf = Tensor::new(f32::NEG_INFINITY, q.device())?
+                let neg_inf = Tensor::new(f32::NEG_INFINITY, q_f32.device())?
                     .broadcast_as(attn.shape())?;
                 mask.broadcast_as(attn.shape())?
                     .where_cond(&neg_inf, &attn)?
@@ -80,7 +81,7 @@ impl ComputeBackend for CpuBackend {
             attn
         };
         let attn = candle_nn::ops::softmax_last_dim(&attn)?;
-        attn.matmul(&v)
+        attn.matmul(&v_f32)
     }
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
