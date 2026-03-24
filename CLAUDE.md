@@ -24,6 +24,22 @@ cargo build --release --features metal
 cargo build --release --features vulkan
 ```
 
+## Acceleration Features
+
+| Feature | Platform | Backend | Best For | Notes |
+|---------|----------|---------|----------|-------|
+| `metal` | macOS (Apple Silicon) | GPU via MPS + custom MSL kernels | Primary inference on Mac | Fastest option on Apple Silicon (~42 tok/s on M3 Pro) |
+| `cuda` | Linux (NVIDIA GPU) | GPU via cuBLAS/cuDNN | Primary inference on Linux | Requires CUDA toolkit matching driver version |
+| `accelerate` | macOS | CPU via Apple Accelerate (AMX) | CPU-only F32 inference on Mac | 2.7x faster than pure-Rust for F32 matmul; no F16 support |
+| `vulkan` | Any (Vulkan 1.3+) | GPU via Vulkan compute shaders | Steam Deck, AMD GPUs | Portable but less optimized than Metal/CUDA |
+| (none) | Any | CPU via pure-Rust `gemm` | Portable CPU fallback | F16 weights stay F16, avoids bandwidth doubling |
+
+**When to use which:**
+- **Apple Silicon (stevie.local):** Use `--features metal`. Metal is 1.6x faster than CPU F16 (42 vs 26 tok/s). The `accelerate` feature doesn't help with Metal and doesn't support F16 matmul, so CPU F16 (default, no features) is actually faster than `accelerate` with F32 (26 vs 23 tok/s).
+- **NVIDIA GPU (blade/bahamut):** Use `--features cuda`. Add `flash-attn` for flash attention support.
+- **CPU-only with F32 models:** Use `--features accelerate` on macOS for 2.7x faster F32 matmul. On Linux, consider linking against MKL or OpenBLAS.
+- **CPU-only with F16 models:** Use no features — pure-Rust `gemm` with F16 avoids the 2x memory bandwidth penalty of converting to F32.
+
 ## Interactive Chat
 
 ```bash

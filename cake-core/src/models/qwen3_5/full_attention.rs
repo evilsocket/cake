@@ -238,18 +238,16 @@ impl Qwen3_5FullAttention {
                     .map_err(|e| anyhow!("att matmul v: {e}"))?;
             }
 
-            // CPU fallback: manual attention with GQA head expansion
+            // CPU: manual attention with GQA head expansion
             let k = self.repeat_kv(k).map_err(|e| anyhow!("repeat_kv k: {e}"))?;
             let v = self.repeat_kv(v).map_err(|e| anyhow!("repeat_kv v: {e}"))?;
             let att = (q.matmul(&k.t()?)? / (self.head_dim as f64).sqrt())?;
-            let att = if seq_len == 1 { att } else {
-                let mask = cache.mask(seq_len, att.device())
-                    .map_err(|e| anyhow!("mask: {e}"))?
-                    .broadcast_as(att.shape())
-                    .map_err(|e| anyhow!("mask broadcast: {e}"))?;
-                masked_fill(&att, &mask, f32::NEG_INFINITY)
-                    .map_err(|e| anyhow!("masked_fill: {e}"))?
-            };
+            let mask = cache.mask(seq_len, att.device())
+                .map_err(|e| anyhow!("mask: {e}"))?
+                .broadcast_as(att.shape())
+                .map_err(|e| anyhow!("mask broadcast: {e}"))?;
+            let att = masked_fill(&att, &mask, f32::NEG_INFINITY)
+                .map_err(|e| anyhow!("masked_fill: {e}"))?;
             let att = self.backend.softmax(&att, att.rank() - 1)?;
             att.matmul(&v.contiguous()?)?
         };
