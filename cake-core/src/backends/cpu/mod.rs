@@ -147,22 +147,47 @@ impl ComputeBackend for CpuBackend {
         // weight: (channels, kernel_size)
         // bias: (channels,)
         // output: (batch, channels, output_time) where output_time = padded_time - kernel_size + 1
+        let padded_input = padded_input.contiguous()?;
+        let batch = padded_input.dim(0)?;
+        let channels = padded_input.dim(1)?;
         let padded_time = padded_input.dim(2)?;
         let output_time = padded_time - kernel_size + 1;
 
-        let mut slices = Vec::with_capacity(output_time);
-        for t in 0..output_time {
-            // Extract window: (batch, channels, kernel_size)
-            let window = padded_input.narrow(2, t, kernel_size)?;
-            // Elementwise multiply with weight (broadcast over batch), sum over kernel dim
-            let w = weight.unsqueeze(0)?;
-            let conv_t = window.broadcast_mul(&w)?.sum(D::Minus1)?;
-            // Add bias: (channels,) broadcast over (batch, channels)
-            let conv_t = conv_t.broadcast_add(bias)?;
-            // Unsqueeze to (batch, channels, 1) for concatenation
-            slices.push(conv_t.unsqueeze(2)?);
+        // Raw f32 path: single pass, no intermediate tensor allocations
+        if padded_input.dtype() == DType::F32 {
+            let input_data = padded_input.flatten_all()?.to_vec1::<f32>()?;
+            let weight_data = weight.contiguous()?.flatten_all()?.to_vec1::<f32>()?;
+            let bias_data = bias.to_vec1::<f32>()?;
+            let mut out = vec![0f32; batch * channels * output_time];
+
+            for b in 0..batch {
+                for (c, &bias_val) in bias_data.iter().enumerate() {
+                    let in_off = (b * channels + c) * padded_time;
+                    let out_off = (b * channels + c) * output_time;
+                    let w_off = c * kernel_size;
+                    for t in 0..output_time {
+                        let mut sum = bias_val;
+                        for k in 0..kernel_size {
+                            sum += input_data[in_off + t + k] * weight_data[w_off + k];
+                        }
+                        out[out_off + t] = sum;
+                    }
+                }
+            }
+            return Tensor::from_vec(out, (batch, channels, output_time), padded_input.device());
         }
-        Tensor::cat(&slices, 2)
+
+        // Fallback: tensor ops — sum shifted slices weighted by each kernel tap
+        let w = weight.unsqueeze(0)?.unsqueeze(D::Minus1)?; // (1, channels, kernel_size, 1)
+        let mut windows = Vec::with_capacity(kernel_size);
+        for k in 0..kernel_size {
+            windows.push(padded_input.narrow(2, k, output_time)?);
+        }
+        // Stack windows: (batch, channels, kernel_size, output_time)
+        let stacked = Tensor::stack(&windows, 2)?;
+        let conv = stacked.broadcast_mul(&w)?.sum(2)?;
+        let bias_view = bias.unsqueeze(0)?.unsqueeze(2)?; // (1, channels, 1)
+        conv.broadcast_add(&bias_view)
     }
 
     fn depthwise_conv1d_bias_ctx(
