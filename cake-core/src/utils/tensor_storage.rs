@@ -388,6 +388,7 @@ impl SafetensorsStorage {
     }
 
     /// Parse tensor metadata from a shard header entry.
+    #[inline]
     fn parse_tensor_meta(
         name: &str,
         meta: &serde_json::Value,
