@@ -41,6 +41,7 @@ const ALL_KERNELS: &[&str] = &[
     "adaln_modulate_f32", "adaln_modulate_f16",
     "softmax_last_dim_f32", "softmax_last_dim_f16",
     "layer_norm_f32", "layer_norm_f16",
+    "rope_f32", "rope_f16",
     "fused_vector_attention_f16",
     "fused_vector_attention_f32",
 ];
@@ -240,6 +241,37 @@ impl candle_core::CustomOp1 for MetalSoftmaxLastDim {
         let group = objc2_metal::MTLSize { width: tg_width, height: 1, depth: 1 };
         encoder.dispatch_threads(grid, group);
         Ok((candle_core::MetalStorage::new(output, device.clone(), el, s.dtype()), l.shape().clone()))
+    }
+}
+
+struct MetalRope;
+impl candle_core::CustomOp3 for MetalRope {
+    fn name(&self) -> &'static str { "metal_rope" }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalRope: expected Metal device") }
+    #[allow(clippy::too_many_arguments)]
+    fn metal_fwd(&self, s_x: &candle_core::MetalStorage, l_x: &Layout, s_cos: &candle_core::MetalStorage, l_cos: &Layout, s_sin: &candle_core::MetalStorage, l_sin: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
+        let device = s_x.device();
+        let dims = l_x.shape().dims();
+        let el = l_x.shape().elem_count();
+        let (head_dim, seq_len) = (dims[dims.len() - 1], dims[dims.len() - 2]);
+        let kernel_name: &'static str = match s_x.dtype() { DType::F32 => "rope_f32", DType::F16 => "rope_f16", dt => candle_core::bail!("rope metal: unsupported dtype {dt:?}") };
+        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+        let output = device.new_buffer(el, s_x.dtype(), "rope")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let off_x = l_x.start_offset() * s_x.dtype().size_in_bytes();
+        let off_cos = l_cos.start_offset() * s_cos.dtype().size_in_bytes();
+        let off_sin = l_sin.start_offset() * s_sin.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s_x.buffer(), off_x));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (s_cos.buffer(), off_cos));
+        candle_metal_kernels::utils::set_param(&encoder, 2, (s_sin.buffer(), off_sin));
+        candle_metal_kernels::utils::set_param(&encoder, 3, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 4, head_dim as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 5, seq_len as u32);
+        let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
+        let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
+        encoder.dispatch_threads(grid, group);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s_x.dtype()), l_x.shape().clone()))
     }
 }
 
@@ -860,6 +892,32 @@ impl ComputeBackend for MetalBackend {
     }
 
     // ── MSL-accelerated normalization ──────────────────────────────────
+
+    fn rope(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+        if matches!(x.dtype(), DType::F32 | DType::F16) && x.is_contiguous() && cos.is_contiguous() && sin.is_contiguous() {
+            let x_dims = x.dims();
+            if x_dims.len() == 4 {
+                let (_b, _h, seq_len, head_dim) = (x_dims[0], x_dims[1], x_dims[2], x_dims[3]);
+                let cos_dims = cos.dims();
+                // Handle common cos/sin shapes: (seq_len, half_dim) or (1, 1, seq_len, half_dim) etc.
+                let half_dim = head_dim / 2;
+                let cos_last = cos_dims[cos_dims.len() - 1];
+                if cos_last == half_dim {
+                    // Flatten cos/sin to (seq_len, half_dim) if needed
+                    let cos_flat = cos.reshape(((), half_dim))?;
+                    let sin_flat = sin.reshape(((), half_dim))?;
+                    // Narrow to actual seq_len if cos has more positions
+                    let cos_narrow = if cos_flat.dim(0)? > seq_len { cos_flat.narrow(0, 0, seq_len)? } else { cos_flat };
+                    let sin_narrow = if sin_flat.dim(0)? > seq_len { sin_flat.narrow(0, 0, seq_len)? } else { sin_flat };
+                    let cos_c = cos_narrow.contiguous()?;
+                    let sin_c = sin_narrow.contiguous()?;
+                    return x.apply_op3_no_bwd(&cos_c, &sin_c, &MetalRope);
+                }
+            }
+        }
+        // Fallback to candle's rope
+        candle_nn::rotary_emb::rope(x, cos, sin)
+    }
 
     fn rms_norm(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
         let x = x.contiguous()?;

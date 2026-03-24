@@ -21,6 +21,56 @@ inline float fast_sigmoid(float x) {
     return 1.0f / (1.0f + fast::exp(-x));
 }
 
+// ─── Rotary position embedding (contiguous, non-interleaved) ─────────
+// x: (total_el,) flattened from (batch, heads, seq_len, head_dim)
+// cos/sin: (seq_len, head_dim/2)
+// For each element at flat index i: d = i % head_dim, s = (i / head_dim) % seq_len
+// y[..., :half_d] = x[..., :half_d] * cos - x[..., half_d:] * sin
+// y[..., half_d:] = x[..., half_d:] * cos + x[..., :half_d] * sin
+kernel void rope_f32(
+    device const float* x [[buffer(0)]],
+    device const float* cos [[buffer(1)]],
+    device const float* sin [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& head_dim [[buffer(4)]],
+    constant uint& seq_len [[buffer(5)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    uint half_dim = head_dim / 2;
+    uint d = idx % head_dim;
+    uint s = (idx / head_dim) % seq_len;
+    uint cs_idx = s * half_dim;
+    if (d < half_dim) {
+        output[idx] = fma(x[idx], cos[cs_idx + d], -x[idx + half_dim] * sin[cs_idx + d]);
+    } else {
+        uint d2 = d - half_dim;
+        output[idx] = fma(x[idx], cos[cs_idx + d2], x[idx - half_dim] * sin[cs_idx + d2]);
+    }
+}
+
+kernel void rope_f16(
+    device const half* x [[buffer(0)]],
+    device const half* cos [[buffer(1)]],
+    device const half* sin [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& head_dim [[buffer(4)]],
+    constant uint& seq_len [[buffer(5)]],
+    uint idx [[thread_position_in_grid]]
+) {
+    uint half_dim = head_dim / 2;
+    uint d = idx % head_dim;
+    uint s = (idx / head_dim) % seq_len;
+    uint cs_idx = s * half_dim;
+    if (d < half_dim) {
+        float c = float(cos[cs_idx + d]), sn = float(sin[cs_idx + d]);
+        output[idx] = half(fma(float(x[idx]), c, -float(x[idx + half_dim]) * sn));
+    } else {
+        uint d2 = d - half_dim;
+        float c = float(cos[cs_idx + d2]), sn = float(sin[cs_idx + d2]);
+        output[idx] = half(fma(float(x[idx]), c, float(x[idx - half_dim]) * sn));
+    }
+}
+
 // ─── F8E4M3 dequantization ──────────────────────────────────────────
 // Decode F8E4M3 (1 sign + 4 exponent + 3 mantissa) to float32.
 // Uses branchless bitwise decode for uniform execution on GPU.
