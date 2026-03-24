@@ -9,7 +9,7 @@
 //! plus whatever the OS decides to keep in the page cache.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use candle_core::{DType, Device, Result, Tensor};
 
@@ -20,7 +20,7 @@ use super::expert_provider::{ExpertProvider, ExpertWeights};
 /// Simple LRU cache for dequantized expert weights.
 /// Avoids re-dequantizing the same popular experts across tokens.
 struct ExpertCache {
-    entries: Mutex<HashMap<usize, ExpertWeights>>,
+    entries: RwLock<HashMap<usize, ExpertWeights>>,
     capacity: usize,
 }
 
@@ -298,7 +298,7 @@ impl DiskExpertProvider {
             // Enable cache for quantized experts — dequantization is expensive
             cache: if is_affine {
                 Some(ExpertCache {
-                    entries: Mutex::new(HashMap::with_capacity(num_experts)),
+                    entries: RwLock::new(HashMap::with_capacity(num_experts)),
                     capacity: num_experts,
                 })
             } else {
@@ -312,7 +312,7 @@ impl DiskExpertProvider {
             for i in 0..num_experts {
                 if let Ok(ew) = provider.get_expert_uncached(i) {
                     if let Some(ref cache) = provider.cache {
-                        if let Ok(mut entries) = cache.entries.lock() {
+                        if let Ok(mut entries) = cache.entries.write() {
                             entries.insert(i, ew);
                         }
                     }
@@ -449,7 +449,7 @@ impl ExpertProvider for DiskExpertProvider {
 
         // Check cache first — stores CPU-side dequantized tensors to avoid repeated dequant
         if let Some(ref cache) = self.cache {
-            if let Ok(entries) = cache.entries.lock() {
+            if let Ok(entries) = cache.entries.read() {
                 if let Some(ew) = entries.get(&idx) {
                     // Cache hit: transfer CPU tensors to target device
                     return if self.needs_device_transfer {
@@ -470,7 +470,7 @@ impl ExpertProvider for DiskExpertProvider {
 
         // Store CPU tensors in cache
         if let Some(ref cache) = self.cache {
-            if let Ok(mut entries) = cache.entries.lock() {
+            if let Ok(mut entries) = cache.entries.write() {
                 if entries.len() < cache.capacity {
                     entries.insert(idx, cpu_result.clone());
                 }
