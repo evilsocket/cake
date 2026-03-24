@@ -20,6 +20,11 @@ using namespace metal;
         _sr = _ps[0]; \
     }
 
+// ─── Fast sigmoid helper ─────────────────────────────────────────────
+inline float fast_sigmoid(float x) {
+    return 1.0f / (1.0f + fast::exp(-x));
+}
+
 // ─── F8E4M3 dequantization ──────────────────────────────────────────
 // Decode F8E4M3 (1 sign + 4 exponent + 3 mantissa) to float32.
 // Uses branchless bitwise decode for uniform execution on GPU.
@@ -122,7 +127,7 @@ kernel void sigmoid_f32(
     uint idx [[thread_position_in_grid]]
 ) {
     if (idx >= count) return;
-    output[idx] = 1.0f / (1.0f + fast::exp(-input[idx]));
+    output[idx] = fast_sigmoid(input[idx]);
 }
 
 kernel void sigmoid_f16(
@@ -132,7 +137,7 @@ kernel void sigmoid_f16(
     uint idx [[thread_position_in_grid]]
 ) {
     if (idx >= count) return;
-    output[idx] = half(1.0f / (1.0f + fast::exp(-float(input[idx]))));
+    output[idx] = half(fast_sigmoid(float(input[idx])));
 }
 
 // ─── silu (standalone) ──────────────────────────────────────────────
@@ -144,7 +149,7 @@ kernel void silu_f32(
 ) {
     if (idx >= count) return;
     float x = input[idx];
-    output[idx] = x / (1.0f + fast::exp(-x));
+    output[idx] = x * fast_sigmoid(x);
 }
 
 kernel void silu_f16(
@@ -155,7 +160,7 @@ kernel void silu_f16(
 ) {
     if (idx >= count) return;
     half x = input[idx];
-    output[idx] = x * half(1.0f / (1.0f + fast::exp(-float(x))));
+    output[idx] = x * half(fast_sigmoid(float(x)));
 }
 
 // ─── silu_mul ───────────────────────────────────────────────────────
@@ -168,9 +173,7 @@ kernel void silu_mul_f32(
 ) {
     if (idx >= count) return;
     float g = gate[idx];
-    // x * sigmoid(x) * up — fast::exp safe for activation functions
-    float sig = 1.0f / (1.0f + fast::exp(-g));
-    output[idx] = g * sig * up[idx];
+    output[idx] = g * fast_sigmoid(g) * up[idx];
 }
 
 kernel void silu_mul_f16(
@@ -182,9 +185,7 @@ kernel void silu_mul_f16(
 ) {
     if (idx >= count) return;
     half g = gate[idx];
-    // sigmoid in float (exp precision), final multiply in half (2x ALU)
-    half sig = half(1.0f / (1.0f + fast::exp(-float(g))));
-    output[idx] = g * sig * up[idx];
+    output[idx] = g * half(fast_sigmoid(float(g))) * up[idx];
 }
 
 // ─── add3 ───────────────────────────────────────────────────────────
@@ -307,8 +308,7 @@ kernel void depthwise_conv1d_silu_f32(
     float dot = 0.0f;
     for (uint k = 0; k < kernel_size; k++)
         dot = fma(window[idx * kernel_size + k], weight[c * kernel_size + k], dot);
-    float sig = 1.0f / (1.0f + fast::exp(-dot));
-    output[idx] = dot * sig;
+    output[idx] = dot * fast_sigmoid(dot);
 }
 
 kernel void depthwise_conv1d_silu_f16(
@@ -327,8 +327,7 @@ kernel void depthwise_conv1d_silu_f16(
         dot = fma(float(window[idx * kernel_size + k]), float(weight[c * kernel_size + k]), dot);
     // silu: dot * sigmoid(dot) — sigmoid in float, multiply result in half
     half hd = half(dot);
-    half sig = half(1.0f / (1.0f + fast::exp(-dot)));
-    output[idx] = hd * sig;
+    output[idx] = hd * half(fast_sigmoid(dot));
 }
 
 // ─── depthwise_conv1d_bias ──────────────────────────────────────────
@@ -436,7 +435,7 @@ kernel void rms_norm_gated_f32(
     SIMD_REDUCE_SUM(val * val, hidden, lane, simd_id)
     float rms = fast::rsqrt(_sr / float(hidden) + eps);
     float zv = z[base + col];
-    float silu_z = zv / (1.0f + fast::exp(-zv));
+    float silu_z = zv * fast_sigmoid(zv);
     output[base + col] = val * rms * weight[col] * silu_z;
 }
 
@@ -458,7 +457,7 @@ kernel void rms_norm_gated_f16(
     SIMD_REDUCE_SUM(val * val, hidden, lane, simd_id)
     float rms = fast::rsqrt(_sr / float(hidden) + eps);
     float zv = float(z[base + col]);
-    float silu_z = zv / (1.0f + fast::exp(-zv));
+    float silu_z = zv * fast_sigmoid(zv);
     output[base + col] = half(val * rms * float(weight[col]) * silu_z);
 }
 
