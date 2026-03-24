@@ -49,4 +49,5 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 047	2026-03-24T02:00:00	c5ea7dd	46829362176	PASS	PASS	keep	Custom MSL softmax + SIMD max reduction macro
 048	2026-03-24T02:20:00	ce650d8	47499072000	PASS	PASS	keep	Fused MSL layer_norm (mean+var in single dispatch)
 049	2026-03-24T02:40:00	8cbd88e	46665136896	PASS	PASS	keep	Pre-transpose linear weights + skip per-call t()
+050	2026-03-24T03:00:00	70913ec	46811774976	PASS	PASS	keep	Single-barrier SIMD reduction (2→1 barriers in norms + attention)
 ---	Metal: 36.4 tok/s avg vs CPU: 22.9 tok/s (+59%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
