@@ -8,13 +8,21 @@
 //! Memory usage: O(num_experts_per_tok × expert_size) for the buffer pool,
 //! plus whatever the OS decides to keep in the page cache.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use candle_core::{DType, Device, Result, Tensor};
 
 use crate::utils::tensor_storage::TensorStorageProvider;
 
 use super::expert_provider::{ExpertProvider, ExpertWeights};
+
+/// Simple LRU cache for dequantized expert weights.
+/// Avoids re-dequantizing the same popular experts across tokens.
+struct ExpertCache {
+    entries: Mutex<HashMap<usize, ExpertWeights>>,
+    capacity: usize,
+}
 
 /// Pre-computed tensor names for a single expert (avoids format! on hot path).
 struct ExpertNames {
@@ -86,6 +94,8 @@ pub struct DiskExpertProvider {
     stacked_meta: Option<StackedMeta>,
     /// Pre-computed stacked quantization tensor names.
     stacked_quant_names: Option<StackedQuantNames>,
+    /// Cache of dequantized expert weights (avoids repeated dequantization for popular experts).
+    cache: Option<ExpertCache>,
 }
 
 impl std::fmt::Debug for DiskExpertProvider {
@@ -170,6 +180,7 @@ impl DiskExpertProvider {
             gptq_group_size,
             stacked_meta: None,
             stacked_quant_names: None,
+            cache: None,
         }
     }
 
@@ -284,6 +295,15 @@ impl DiskExpertProvider {
             gptq_group_size: None,
             stacked_meta,
             stacked_quant_names,
+            // Enable cache for quantized experts — dequantization is expensive
+            cache: if is_affine {
+                Some(ExpertCache {
+                    entries: Mutex::new(HashMap::with_capacity(num_experts)),
+                    capacity: num_experts,
+                })
+            } else {
+                None
+            },
         }
     }
 
@@ -410,6 +430,84 @@ impl ExpertProvider for DiskExpertProvider {
             )));
         }
 
+        // Check cache first — stores CPU-side dequantized tensors to avoid repeated dequant
+        if let Some(ref cache) = self.cache {
+            if let Ok(entries) = cache.entries.lock() {
+                if let Some(ew) = entries.get(&idx) {
+                    // Cache hit: transfer CPU tensors to target device
+                    return if self.needs_device_transfer {
+                        Ok(ExpertWeights {
+                            gate_proj: ew.gate_proj.to_device(&self.device)?,
+                            up_proj: ew.up_proj.to_device(&self.device)?,
+                            down_proj: ew.down_proj.to_device(&self.device)?,
+                        })
+                    } else {
+                        Ok(ew.clone())
+                    };
+                }
+            }
+        }
+
+        // get_expert_uncached returns CPU tensors when cache is enabled (stacked affine path)
+        let cpu_result = self.get_expert_uncached(idx)?;
+
+        // Store CPU tensors in cache
+        if let Some(ref cache) = self.cache {
+            if let Ok(mut entries) = cache.entries.lock() {
+                if entries.len() < cache.capacity {
+                    entries.insert(idx, cpu_result.clone());
+                }
+            }
+        }
+
+        // Transfer to target device
+        if self.needs_device_transfer {
+            Ok(ExpertWeights {
+                gate_proj: cpu_result.gate_proj.to_device(&self.device)?,
+                up_proj: cpu_result.up_proj.to_device(&self.device)?,
+                down_proj: cpu_result.down_proj.to_device(&self.device)?,
+            })
+        } else {
+            Ok(cpu_result)
+        }
+    }
+
+    fn num_experts(&self) -> usize {
+        self.num_experts
+    }
+
+    #[cfg(unix)]
+    fn prefetch_experts(&self, indices: &[usize]) {
+        for &idx in indices {
+            if idx >= self.num_experts {
+                continue;
+            }
+            let names = &self.expert_names[idx];
+            for name in [&names.gate_proj, &names.up_proj, &names.down_proj] {
+                if let Some((bytes, _, _)) = self.storage.tensor_bytes(name) {
+                    unsafe {
+                        libc::posix_madvise(
+                            bytes.as_ptr() as *mut _,
+                            bytes.len(),
+                            libc::POSIX_MADV_WILLNEED,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl DiskExpertProvider {
+    /// Internal: load expert weights without cache lookup.
+    fn get_expert_uncached(&self, idx: usize) -> Result<ExpertWeights> {
+        if idx >= self.num_experts {
+            return Err(candle_core::Error::Msg(format!(
+                "expert index {idx} out of range (num_experts={})",
+                self.num_experts
+            )));
+        }
+
         let names = &self.expert_names[idx];
 
         // GPTQ path: read and dequantize each weight individually
@@ -443,8 +541,8 @@ impl ExpertProvider for DiskExpertProvider {
                     let scales = Tensor::from_raw_buffer(s_bytes, DType::BF16, &proj.scales_shape, &Device::Cpu)?;
                     let biases = Tensor::from_raw_buffer(b_bytes, DType::BF16, &proj.scales_shape, &Device::Cpu)?;
                     let weight = crate::utils::gptq::dequantize_packed_4bit(&packed, &scales, &biases, sm.group_size)?;
-                    let weight = weight.to_dtype(self.dtype)?;
-                    if self.needs_device_transfer { weight.to_device(target_device) } else { Ok(weight) }
+                    // Return CPU tensor — device transfer happens in get_expert after caching
+                    weight.to_dtype(self.dtype)
                 };
                 return Ok(ExpertWeights {
                     gate_proj: read_dequant(&names.gate_proj, &sm.gate, &qn.gate_scales, &qn.gate_biases)?,
@@ -563,31 +661,6 @@ impl ExpertProvider for DiskExpertProvider {
         })
     }
 
-    fn num_experts(&self) -> usize {
-        self.num_experts
-    }
-
-    #[cfg(unix)]
-    fn prefetch_experts(&self, indices: &[usize]) {
-        for &idx in indices {
-            if idx >= self.num_experts {
-                continue;
-            }
-            let names = &self.expert_names[idx];
-            // Issue madvise(WILLNEED) for each projection's mmap region
-            for name in [&names.gate_proj, &names.up_proj, &names.down_proj] {
-                if let Some((bytes, _, _)) = self.storage.tensor_bytes(name) {
-                    unsafe {
-                        libc::posix_madvise(
-                            bytes.as_ptr() as *mut _,
-                            bytes.len(),
-                            libc::POSIX_MADV_WILLNEED,
-                        );
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
