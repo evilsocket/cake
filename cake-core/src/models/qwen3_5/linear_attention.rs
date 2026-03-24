@@ -106,6 +106,7 @@ impl GatedDeltaNet {
             let z_w = vb.pp("in_proj_z").get((value_dim, h_size), "weight")?;
             Tensor::cat(&[&qkv_w, &a_w, &b_w, &z_w], 0)?
         };
+        let in_proj_weight = backend.preprocess_linear_weight(&in_proj_weight)?;
 
         // Absorb dt_bias into the projection bias so `a` output already includes it.
         // Bias layout: [zeros for QKV | dt_bias for A | zeros for B | zeros for Z]
@@ -117,7 +118,9 @@ impl GatedDeltaNet {
         let in_proj_bias = Tensor::from_slice(&bias_data, total_out, &dev_for_bias)?
             .to_dtype(in_proj_weight.dtype())?;
 
-        let out_proj_weight = vb.pp("out_proj").get((h_size, value_dim), "weight")?;
+        let out_proj_weight = backend.preprocess_linear_weight(
+            &vb.pp("out_proj").get((h_size, value_dim), "weight")?,
+        )?;
 
         // Conv1d weight: stored as F32 (matches post-projection F32 data path).
         // Some models store as [C, K, 1] instead of [C, 1, K] — detect and transpose.
