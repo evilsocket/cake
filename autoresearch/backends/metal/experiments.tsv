@@ -54,4 +54,5 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 052	2026-03-24T03:40:00	762662d	46166507008	PASS	PASS	keep	Extract dispatch_unary helper (-60 lines boilerplate)
 053	2026-03-24T04:00:00	7e06d8a	46905399040	PASS	PASS	keep	Extract dispatch_unary_cast helper for F8 dequant
 054	2026-03-24T04:20:00	8107fbc	690937856	PASS	PASS	keep	Cached build run — actual benchmark time (no compilation)
+055	2026-03-24T04:30:00	f29d0b4	40542924032	PASS	PASS	keep	Forced recompile — matches all-time best 40.1B (session optimizations net positive)
 ---	Metal: 36.4 tok/s avg vs CPU: 22.9 tok/s (+59%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
