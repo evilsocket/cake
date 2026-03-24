@@ -264,21 +264,17 @@ impl ExpertProvider for DiskExpertProvider {
 
         // Non-GPTQ: optimized read paths
         if self.use_f32_zerocopy {
-            // F32→F32: try zero-copy mmap path first (avoids allocation + memcpy)
+            // F32→F32: read from mmap directly into Tensor
             let target_device = if self.needs_device_transfer { &self.device } else { &Device::Cpu };
             if let (Some((gb, _, gs)), Some((ub, _, us)), Some((db, _, ds))) = (
                 self.storage.tensor_bytes(&names.gate_proj),
                 self.storage.tensor_bytes(&names.up_proj),
                 self.storage.tensor_bytes(&names.down_proj),
             ) {
-                // Reinterpret &[u8] as &[f32] directly from mmap — single memcpy into Tensor
-                let gate_f32 = unsafe { std::slice::from_raw_parts(gb.as_ptr() as *const f32, gb.len() / 4) };
-                let up_f32 = unsafe { std::slice::from_raw_parts(ub.as_ptr() as *const f32, ub.len() / 4) };
-                let down_f32 = unsafe { std::slice::from_raw_parts(db.as_ptr() as *const f32, db.len() / 4) };
                 return Ok(ExpertWeights {
-                    gate_proj: Tensor::from_slice(gate_f32, gs, target_device)?,
-                    up_proj: Tensor::from_slice(up_f32, us, target_device)?,
-                    down_proj: Tensor::from_slice(down_f32, ds, target_device)?,
+                    gate_proj: Tensor::from_raw_buffer(gb, DType::F32, gs, target_device)?,
+                    up_proj: Tensor::from_raw_buffer(ub, DType::F32, us, target_device)?,
+                    down_proj: Tensor::from_raw_buffer(db, DType::F32, ds, target_device)?,
                 });
             }
             // Fallback: read via TensorData (non-mmap storage)
