@@ -21,11 +21,35 @@ use std::os::unix::io::AsRawFd;
 use anyhow::{bail, Result};
 use candle_core::DType;
 
+/// DType enum that deserializes from safetensors dtype strings without intermediate String allocation.
+#[derive(serde::Deserialize, Clone, Copy)]
+enum HeaderDType {
+    F16, BF16, F32, F64, I32, I64, U32, U8,
+    #[serde(alias = "F8_E4M3")]
+    F8E4M3,
+}
+
+impl HeaderDType {
+    fn to_candle(self) -> Option<DType> {
+        match self {
+            Self::F16 => Some(DType::F16),
+            Self::BF16 => Some(DType::BF16),
+            Self::F32 => Some(DType::F32),
+            Self::F64 => Some(DType::F64),
+            Self::I32 => Some(DType::I32),
+            Self::I64 => Some(DType::I64),
+            Self::U32 => Some(DType::U32),
+            Self::U8 => Some(DType::U8),
+            Self::F8E4M3 => Some(DType::F8E4M3),
+        }
+    }
+}
+
 /// Typed safetensors header entry — deserializes directly, avoiding serde_json::Value.
 #[derive(serde::Deserialize)]
 struct HeaderEntry {
     #[serde(default)]
-    dtype: Option<String>,
+    dtype: Option<HeaderDType>,
     #[serde(default)]
     shape: Option<Vec<usize>>,
     #[serde(default)]
@@ -420,19 +444,10 @@ impl SafetensorsStorage {
         // Absolute offset in file: 8 (length prefix) + header_len + data_start
         let abs_offset = 8 + header_len as u64 + data_start;
 
-        let dtype_str = entry.dtype.as_deref().unwrap_or("F32");
-        let dtype = match dtype_str {
-            "F16" => DType::F16,
-            "BF16" => DType::BF16,
-            "F32" => DType::F32,
-            "F64" => DType::F64,
-            "I32" => DType::I32,
-            "I64" => DType::I64,
-            "U32" => DType::U32,
-            "U8" => DType::U8,
-            "F8_E4M3" | "F8E4M3" => DType::F8E4M3,
-            other => {
-                log::warn!("unknown dtype '{other}' for tensor '{name}', skipping");
+        let dtype = match entry.dtype.unwrap_or(HeaderDType::F32).to_candle() {
+            Some(dt) => dt,
+            None => {
+                log::warn!("unsupported dtype for tensor '{name}', skipping");
                 return Ok(None);
             }
         };
@@ -610,7 +625,7 @@ mod tests {
     #[test]
     fn test_parse_tensor_meta_valid() {
         let entry = HeaderEntry {
-            dtype: Some("F16".to_string()),
+            dtype: Some(HeaderDType::F16),
             shape: Some(vec![1024, 512]),
             data_offsets: Some((0, 1048576)),
         };
