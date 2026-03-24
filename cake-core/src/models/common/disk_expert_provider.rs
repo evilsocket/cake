@@ -101,8 +101,10 @@ impl DiskExpertProvider {
         // Detect storage dtype from first expert (skip for GPTQ — qweight is int32, not weights)
         let storage_dtype = if gptq_group_size.is_none() {
             expert_names.first().and_then(|names| {
-                // Prefer zero-copy metadata query (avoids reading full tensor data)
-                if let Some((_, dt, _)) = storage.tensor_bytes(&names.gate_proj) {
+                // Use metadata-only lookup (no data read) → tensor_bytes fallback → full read
+                if let Some((dt, _)) = storage.tensor_meta(&names.gate_proj) {
+                    Some(dt)
+                } else if let Some((_, dt, _)) = storage.tensor_bytes(&names.gate_proj) {
                     Some(dt)
                 } else {
                     storage.read_tensor(&names.gate_proj).ok().map(|d| d.dtype)
