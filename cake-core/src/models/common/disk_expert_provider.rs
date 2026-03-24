@@ -283,7 +283,7 @@ impl DiskExpertProvider {
         let storage_dtype = stacked_meta.as_ref().map(|m| m.storage_dtype);
         let use_f32_zerocopy = !is_affine && dtype == DType::F32
             && storage_dtype.is_some_and(|sd| sd == DType::F32);
-        Self {
+        let provider = Self {
             storage,
             layer_prefix,
             expert_names,
@@ -304,7 +304,24 @@ impl DiskExpertProvider {
             } else {
                 None
             },
+        };
+
+        // Pre-warm: dequantize all experts at construction (moves cost from first token to loading)
+        if provider.cache.is_some() {
+            log::info!("pre-warming expert cache for {} experts...", num_experts);
+            for i in 0..num_experts {
+                if let Ok(ew) = provider.get_expert_uncached(i) {
+                    if let Some(ref cache) = provider.cache {
+                        if let Ok(mut entries) = cache.entries.lock() {
+                            entries.insert(i, ew);
+                        }
+                    }
+                }
+            }
+            log::info!("expert cache warmed ({} entries)", num_experts);
         }
+
+        provider
     }
 
     /// Reinterpret a `Vec<u8>` as `Vec<f32>` without copying.
