@@ -61,6 +61,7 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 059	2026-03-24T05:20:00	52a7163	46452673024	PASS	PASS	keep	Prefetch V before SIMD reduction in fused attention
 060	2026-03-24T05:30:00	40d3806	46145633024	PASS	PASS	keep	Running pointer in attention loop (avoid per-step multiply)
 061	2026-03-24T05:50:00	46b2e93	46008987904	PASS	PASS	keep	Multiply-by-reciprocal in attention output
+062	2026-03-24T06:00:00	16b9f78	46447365888	PASS	PASS	keep	Multiply-by-reciprocal in softmax output
 ---	Metal: 36.4 tok/s avg vs CPU: 22.9 tok/s (+59%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
 --- Session 2 summary (experiments 044-057):
 ---   Added: rms_norm, layer_norm, softmax, rope MSL kernels
