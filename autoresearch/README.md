@@ -20,6 +20,7 @@ autoresearch/
 │   ├── tts/                    # TTS: diffusion head, DDPM, VAE, vocoder, mel
 │   └── image-generation/       # FLUX/Stable Diffusion components
 ├── backends/                   # Backend-specific GPU/CPU optimization
+│   ├── cpu/                    # CPU fused ops and inference primitives
 │   ├── cuda/                   # NVIDIA CUDA kernels (ops.cu, ops.rs)
 │   ├── metal/                  # Apple Metal shaders (ops.msl)
 │   └── vulkan/                 # Vulkan/wgpu compute shaders (ops.wgsl)
@@ -110,6 +111,7 @@ bash prepare.sh
 
 | Task | Branch | Hardware | Benchmarks |
 |------|--------|----------|------------|
+| cpu | `autoresearch/backends/cpu` | Any CPU | fused ops (CPU path), backend ops, attention |
 | cuda | `autoresearch/backends/cuda` | NVIDIA GPU | fused ops (GPU path) |
 | metal | `autoresearch/backends/metal` | Apple Silicon | fused ops (GPU path) |
 | vulkan | `autoresearch/backends/vulkan` | Vulkan 1.3+ GPU | vulkan benchmarks |
