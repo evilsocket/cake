@@ -591,21 +591,22 @@ impl TensorStorageProvider for SafetensorsStorage {
                 name, byte_offset, byte_len, meta.byte_size
             );
         }
-        let file = self.files.get(&meta.shard_path)
-            .ok_or_else(|| anyhow::anyhow!("shard file not open: {:?}", meta.shard_path))?;
-        let mut buf = vec![0u8; byte_len];
+        let shard = self.shards.get(meta.shard_idx as usize)
+            .ok_or_else(|| anyhow::anyhow!("shard index {} out of range", meta.shard_idx))?;
+
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            file.read_at(&mut buf, abs_start)?;
-        }
+        let buf = shard.read_bytes(abs_start, byte_len);
+
         #[cfg(not(unix))]
-        {
-            use std::io::{Read as _, Seek, SeekFrom};
-            let mut f = file.try_clone()?;
+        let buf = {
+            use std::io::{Seek, SeekFrom};
+            let mut f = shard.file.try_clone()?;
+            let mut buf = vec![0u8; byte_len];
             f.seek(SeekFrom::Start(abs_start))?;
             f.read_exact(&mut buf)?;
-        }
+            buf
+        };
+
         Ok(buf)
     }
 
