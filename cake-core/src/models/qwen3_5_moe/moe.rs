@@ -232,16 +232,6 @@ impl Qwen3_5MoeSparseMlp {
 
                 let ew = self.expert_provider.get_expert(exp)
                     .map_err(|e| anyhow!("get_expert({exp}): {e}"))?;
-                // Debug: log first expert's gate_proj values for verification
-                if exp == 0 && idx == 0 {
-                    if let Ok(vals) = ew.gate_proj.to_dtype(candle_core::DType::F32)
-                        .and_then(|t| t.flatten_all())
-                        .and_then(|t| t.narrow(0, 0, 16.min(t.elem_count())))
-                        .and_then(|t| t.to_vec1::<f32>()) {
-                        log::info!("EXPERT[0] gate_proj row0[:16] = {:?} shape={:?} dtype={:?}",
-                            vals, ew.gate_proj.shape(), ew.gate_proj.dtype());
-                    }
-                }
                 let gate_out = x_flat.matmul(&ew.gate_proj.t()
                     .map_err(|e| anyhow!("gate_proj t: {e}"))?)
                     .map_err(|e| anyhow!("expert gate matmul: {e}"))?;

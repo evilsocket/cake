@@ -184,14 +184,6 @@ pub fn dequantize_packed_4bit(
         .flatten_all()?
         .to_vec1::<f32>()?;
 
-    // Debug: log first packed value for verification
-    if !pw.is_empty() {
-        log::debug!(
-            "dequantize_packed_4bit: rows={rows} packed_cols={packed_cols} groups={groups} pw[0]=0x{:08x} sc[0]={} bi[0]={}",
-            pw[0], sc[0], bi[0]
-        );
-    }
-
     use rayon::prelude::*;
     let weight: Vec<f32> = (0..rows)
         .into_par_iter()
@@ -234,11 +226,6 @@ impl GptqBackend {
     ) -> candle_core::Result<Tensor> {
         // Strip the ".weight" suffix to get the parameter prefix.
         let prefix = name.strip_suffix(".weight").unwrap_or(name);
-        if name.contains("layers.0.linear_attn") {
-            let has_qw = self.inner.get(&format!("{prefix}.qweight")).is_ok();
-            let has_sc = self.inner.get(&format!("{prefix}.scales")).is_ok();
-            log::info!("GPTQ load_tensor: name={name} has_qweight={has_qw} has_scales={has_sc}");
-        }
         let qweight_name = format!("{prefix}.qweight");
         let scales_name = format!("{prefix}.scales");
         let qzeros_name = format!("{prefix}.qzeros");
@@ -257,17 +244,7 @@ impl GptqBackend {
             let packed = self.inner.load(name, &Device::Cpu)?;
             let scales = self.inner.load(&scales_name, &Device::Cpu)?;
             let biases = self.inner.load(&biases_name, &Device::Cpu)?;
-            log::debug!(
-                "affine dequant: {} packed={:?} scales={:?} biases={:?} group_size={}",
-                name, packed.shape(), scales.shape(), biases.shape(), self.group_size
-            );
             let weight = dequantize_packed_4bit(&packed, &scales, &biases, self.group_size)?;
-            log::debug!("  -> dequantized: {:?}, dtype={:?}", weight.shape(), weight.dtype());
-            // Debug: print first 4 values for verification
-            if name.contains("layers.0.linear_attn.in_proj_qkv") {
-                let vals: Vec<f32> = weight.flatten_all()?.narrow(0, 0, 4)?.to_vec1()?;
-                log::info!("DEQUANT CHECK in_proj_qkv[0,:4] = {:?}", vals);
-            }
             weight.to_dtype(dtype)?.to_device(dev)
         } else {
             // Non-quantized tensor — load directly.

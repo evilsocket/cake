@@ -442,22 +442,6 @@ impl ExpertProvider for DiskExpertProvider {
                     let packed = Tensor::from_raw_buffer(w_bytes, sm.storage_dtype, &proj.weight_shape, &Device::Cpu)?;
                     let scales = Tensor::from_raw_buffer(s_bytes, DType::BF16, &proj.scales_shape, &Device::Cpu)?;
                     let biases = Tensor::from_raw_buffer(b_bytes, DType::BF16, &proj.scales_shape, &Device::Cpu)?;
-                    // Debug: log packed+scales+result for first gate_proj access
-                    if weight_name.contains("gate_proj") {
-                        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                        if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                            if let Ok(pw) = packed.flatten_all().and_then(|t| t.to_dtype(DType::U32)).and_then(|t| t.narrow(0, 0, 4)).and_then(|t| t.to_vec1::<u32>()) {
-                                log::info!("STACKED_DEQUANT expert={idx} {weight_name}: pw[:4]=[{:#010x}, {:#010x}, {:#010x}, {:#010x}]",
-                                    pw[0], pw[1], pw[2], pw[3]);
-                            }
-                            if let Ok(sc) = scales.flatten_all().and_then(|t| t.to_dtype(DType::F32)).and_then(|t| t.narrow(0, 0, 2)).and_then(|t| t.to_vec1::<f32>()) {
-                                log::info!("  scales[:2]=[{}, {}] shape={:?}", sc[0], sc[1], scales.shape());
-                            }
-                            if let Ok(bi) = biases.flatten_all().and_then(|t| t.to_dtype(DType::F32)).and_then(|t| t.narrow(0, 0, 2)).and_then(|t| t.to_vec1::<f32>()) {
-                                log::info!("  biases[:2]=[{}, {}]", bi[0], bi[1]);
-                            }
-                        }
-                    }
                     let weight = crate::utils::gptq::dequantize_packed_4bit(&packed, &scales, &biases, sm.group_size)?;
                     let weight = weight.to_dtype(self.dtype)?;
                     if self.needs_device_transfer { weight.to_device(target_device) } else { Ok(weight) }
