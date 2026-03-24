@@ -43,4 +43,10 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 041	2026-03-24T00:25:00	7a2e153	56889797888	PASS	PASS	keep	Remove unused tid param + pre-scale Q + cleanup
 042	2026-03-24T00:35:00	5d4c45c	55529732096	PASS	PASS	revert	Lazy pipeline — worse steady-state (per-kernel compile delay)
 043	2026-03-24T00:50:00	42dcd80	40097496064	PASS	PASS	keep	Session best score (warm pipeline cache)
+044	2026-03-24T01:05:00	505402f	48174664960	PASS	PASS	revert	Single-SIMD attention (fewer barriers but more per-thread loads — slower)
+045	2026-03-24T01:30:00	4369953	49278162944	PASS	PASS	keep	Custom MSL rms_norm kernel with SIMD reduction (replaces candle default)
+046	2026-03-24T01:45:00	ef5d140	48382511104	PASS	PASS	keep	Extract fast_sigmoid helper, reduce MSL duplication
+047	2026-03-24T02:00:00	c5ea7dd	46829362176	PASS	PASS	keep	Custom MSL softmax + SIMD max reduction macro
+048	2026-03-24T02:20:00	ce650d8	47499072000	PASS	PASS	keep	Fused MSL layer_norm (mean+var in single dispatch)
+049	2026-03-24T02:40:00	8cbd88e	46665136896	PASS	PASS	keep	Pre-transpose linear weights + skip per-call t()
 ---	Metal: 36.4 tok/s avg vs CPU: 22.9 tok/s (+59%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
