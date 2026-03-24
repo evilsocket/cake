@@ -50,4 +50,5 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 048	2026-03-24T02:20:00	ce650d8	47499072000	PASS	PASS	keep	Fused MSL layer_norm (mean+var in single dispatch)
 049	2026-03-24T02:40:00	8cbd88e	46665136896	PASS	PASS	keep	Pre-transpose linear weights + skip per-call t()
 050	2026-03-24T03:00:00	70913ec	46811774976	PASS	PASS	keep	Single-barrier SIMD reduction (2→1 barriers in norms + attention)
+051	2026-03-24T03:20:00	b878ab2	45736095232	PASS	PASS	keep	Optimize partial sum loop init (skip zero-init)
 ---	Metal: 36.4 tok/s avg vs CPU: 22.9 tok/s (+59%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
