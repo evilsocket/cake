@@ -838,3 +838,4 @@ kernel void fused_vector_attention_f32(
 
     output[bh * head_dim + d] = acc * (1.0f / sum_exp);
 }
+
