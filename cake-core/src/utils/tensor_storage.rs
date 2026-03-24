@@ -48,6 +48,12 @@ pub trait TensorStorageProvider: Send + Sync {
     fn has_tensor(&self, name: &str) -> bool;
     /// List all tensor names available in this storage.
     fn tensor_names(&self) -> Vec<String>;
+    /// Get a borrowed slice of tensor bytes without copying (if supported).
+    /// Returns None if the implementation doesn't support zero-copy access.
+    /// When available, this is faster than `read_tensor()` since it avoids allocation.
+    fn tensor_bytes(&self, _name: &str) -> Option<(&[u8], DType, Vec<usize>)> {
+        None
+    }
 }
 
 /// Max tensor dimensions supported (covers all practical shapes).
@@ -153,6 +159,13 @@ impl MappedShard {
             buf.set_len(size);
         }
         buf
+    }
+
+    /// Get a zero-copy slice into the mmap'd region.
+    #[cfg(unix)]
+    #[inline]
+    fn as_slice(&self, offset: u64, size: usize) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.mmap_ptr.add(offset as usize), size) }
     }
 }
 
@@ -521,6 +534,13 @@ impl TensorStorageProvider for SafetensorsStorage {
 
     fn tensor_names(&self) -> Vec<String> {
         self.index.keys().cloned().collect()
+    }
+
+    #[cfg(unix)]
+    fn tensor_bytes(&self, name: &str) -> Option<(&[u8], DType, Vec<usize>)> {
+        let meta = self.index.get(name)?;
+        let shard = self.shards.get(meta.shard_idx as usize)?;
+        Some((shard.as_slice(meta.abs_offset, meta.byte_size as usize), meta.dtype, meta.shape.to_vec()))
     }
 }
 
