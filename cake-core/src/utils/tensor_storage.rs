@@ -71,6 +71,17 @@ pub trait TensorStorageProvider: Send + Sync {
     fn tensor_meta(&self, _name: &str) -> Option<(DType, &[usize])> {
         None
     }
+    /// Read a byte-range slice from a tensor (for sub-tensor access like stacked experts).
+    /// `byte_offset` is relative to the tensor's data start, `byte_len` is the number of bytes.
+    /// Returns None if the implementation doesn't support it.
+    fn read_tensor_slice(&self, _name: &str, _byte_offset: usize, _byte_len: usize) -> Option<Vec<u8>> {
+        None
+    }
+    /// Get a borrowed byte-range slice from a tensor without copying (mmap path).
+    /// `byte_offset` is relative to the tensor's data start, `byte_len` is the number of bytes.
+    fn tensor_slice_bytes(&self, _name: &str, _byte_offset: usize, _byte_len: usize) -> Option<&[u8]> {
+        None
+    }
 }
 
 /// Max tensor dimensions supported (covers all practical shapes).
@@ -561,6 +572,24 @@ impl TensorStorageProvider for SafetensorsStorage {
     fn tensor_meta(&self, name: &str) -> Option<(DType, &[usize])> {
         let meta = self.index.get(name)?;
         Some((meta.dtype, meta.shape.as_slice()))
+    }
+
+    fn read_tensor_slice(&self, name: &str, byte_offset: usize, byte_len: usize) -> Option<Vec<u8>> {
+        let meta = self.index.get(name)?;
+        let shard = self.shards.get(meta.shard_idx as usize)?;
+        let abs_offset = meta.abs_offset as usize + byte_offset;
+        #[cfg(unix)]
+        { Some(shard.read_bytes(abs_offset as u64, byte_len)) }
+        #[cfg(not(unix))]
+        { None }
+    }
+
+    #[cfg(unix)]
+    fn tensor_slice_bytes(&self, name: &str, byte_offset: usize, byte_len: usize) -> Option<&[u8]> {
+        let meta = self.index.get(name)?;
+        let shard = self.shards.get(meta.shard_idx as usize)?;
+        let abs_offset = meta.abs_offset as usize + byte_offset;
+        Some(shard.as_slice(abs_offset as u64, byte_len))
     }
 }
 
