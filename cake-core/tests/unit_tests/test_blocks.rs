@@ -36,6 +36,7 @@ fn make_context(cfg: Config, vb: VarBuilder<'static>) -> Context {
         quant: Arc::new(cake_core::utils::NoQuantization),
         listener_override: Arc::new(Mutex::new(None)),
             tensor_storage: None,
+            layer_devices: None,
         backend: Arc::new(cake_core::backends::CpuBackend::new()),
     }
 }

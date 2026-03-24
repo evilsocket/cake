@@ -86,6 +86,7 @@ impl Forwarder for Qwen3_5MoeBlock {
         let moe = if let Some(storage) = &ctx.tensor_storage {
             let layer_prefix = format!("{name}.mlp");
             let mlp_vb = vb.pp("mlp");
+            let layer_device = ctx.device.clone();
             // Detect stacked switch_mlp format vs individual experts
             let switch_mlp_name = format!("{layer_prefix}.switch_mlp.gate_proj.weight");
             let has_switch_mlp = storage.has_tensor(&switch_mlp_name)
@@ -95,12 +96,12 @@ impl Forwarder for Qwen3_5MoeBlock {
                 // Stacked switch_mlp format — use disk provider with switch_mlp namespace
                 std::sync::Arc::new(crate::models::common::disk_expert_provider::DiskExpertProvider::new_stacked(
                     storage.clone(), format!("{layer_prefix}.switch_mlp"), cfg.num_experts,
-                    ctx.device.clone(), ctx.dtype,
+                    layer_device, ctx.dtype,
                 ))
             } else {
                 // Individual experts: stream from disk
                 std::sync::Arc::new(crate::models::common::disk_expert_provider::DiskExpertProvider::new(
-                    storage.clone(), layer_prefix, cfg.num_experts, ctx.device.clone(), ctx.dtype,
+                    storage.clone(), layer_prefix, cfg.num_experts, layer_device, ctx.dtype,
                     ctx.quant.gptq_group_size(),
                 ))
             };

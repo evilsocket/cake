@@ -279,6 +279,7 @@ impl VibeVoice1_5B {
                 quant: std::sync::Arc::new(crate::utils::NoQuantization),
                 listener_override: std::sync::Arc::new(std::sync::Mutex::new(None)),
             tensor_storage: None,
+            layer_devices: None,
                 backend: crate::backends::create_backend(device),
             },
         })

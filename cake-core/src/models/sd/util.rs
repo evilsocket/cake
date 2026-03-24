@@ -314,6 +314,7 @@ mod tests {
             quant: Arc::new(crate::utils::NoQuantization),
             listener_override: Arc::new(Mutex::new(None)),
             tensor_storage: None,
+            layer_devices: None,
             backend: Arc::new(crate::backends::CpuBackend::new()),
         }
     }

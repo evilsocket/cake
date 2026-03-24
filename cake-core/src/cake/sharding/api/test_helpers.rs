@@ -282,6 +282,7 @@ fn dummy_context() -> Context {
         quant: std::sync::Arc::new(crate::utils::NoQuantization),
         listener_override: std::sync::Mutex::new(None).into(),
             tensor_storage: None,
+            layer_devices: None,
         backend: std::sync::Arc::new(crate::backends::CpuBackend::new()),
     }
 }

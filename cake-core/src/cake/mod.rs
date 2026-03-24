@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fmt::{Debug, Display},
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -58,6 +59,9 @@ pub struct Context {
     /// Tensor storage for expert offloading (pread from safetensors).
     /// None when expert_offload is disabled.
     pub tensor_storage: Option<Arc<dyn utils::tensor_storage::TensorStorageProvider>>,
+    /// Per-layer device overrides for multi-GPU support.
+    /// When set, layers are split across GPUs instead of using `self.device` for all.
+    pub layer_devices: Option<HashMap<String, Device>>,
 }
 
 /// Parse a dtype string ("f16", "bf16", "f32") into a candle DType.
@@ -497,6 +501,7 @@ impl Context {
             listener_override: Arc::new(Mutex::new(None)),
             backend,
             tensor_storage,
+            layer_devices: None,
         })
     }
 }
