@@ -162,6 +162,8 @@ impl MappedShard {
         if ptr == libc::MAP_FAILED {
             anyhow::bail!("mmap failed: {}", std::io::Error::last_os_error());
         }
+        // Hint: sequential access pattern — triggers aggressive readahead on NVMe
+        unsafe { libc::posix_madvise(ptr, len, libc::POSIX_MADV_SEQUENTIAL); }
         Ok(Self { mmap_ptr: ptr as *const u8, mmap_len: len })
     }
 
