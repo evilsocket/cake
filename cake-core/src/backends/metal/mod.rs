@@ -40,6 +40,7 @@ const ALL_KERNELS: &[&str] = &[
     "f8e4m3_to_f32", "f8e4m3_to_f16",
     "adaln_modulate_f32", "adaln_modulate_f16",
     "softmax_last_dim_f32", "softmax_last_dim_f16",
+    "layer_norm_f32", "layer_norm_f16",
     "fused_vector_attention_f16",
     "fused_vector_attention_f32",
 ];
@@ -259,6 +260,42 @@ impl candle_core::CustomOp1 for MetalSoftmaxLastDim {
         let group = objc2_metal::MTLSize { width: tg_width, height: 1, depth: 1 };
         encoder.dispatch_threads(grid, group);
         Ok((candle_core::MetalStorage::new(output, device.clone(), el, s.dtype()), l.shape().clone()))
+    }
+}
+
+struct MetalLayerNorm {
+    eps: f32,
+    bias_storage: candle_core::MetalStorage,
+    bias_layout: Layout,
+}
+impl candle_core::CustomOp2 for MetalLayerNorm {
+    fn name(&self) -> &'static str { "metal_layer_norm" }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalLayerNorm: expected Metal device") }
+    fn metal_fwd(&self, s_x: &candle_core::MetalStorage, l_x: &Layout, s_w: &candle_core::MetalStorage, _l_w: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
+        let device = s_x.device();
+        let dims = l_x.shape().dims();
+        let el = l_x.shape().elem_count();
+        let hidden = *dims.last().ok_or_else(|| candle_core::Error::Msg("empty shape".into()))?;
+        let num_rows = el / hidden;
+        let kernel_name: &'static str = match s_x.dtype() { DType::F32 => "layer_norm_f32", DType::F16 => "layer_norm_f16", dt => candle_core::bail!("layer_norm metal: unsupported dtype {dt:?}") };
+        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+        let output = device.new_buffer(el, s_x.dtype(), "layer_norm")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let off_x = l_x.start_offset() * s_x.dtype().size_in_bytes();
+        let off_bias = self.bias_layout.start_offset() * self.bias_storage.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s_x.buffer(), off_x));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (s_w.buffer(), 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 2, (self.bias_storage.buffer(), off_bias));
+        candle_metal_kernels::utils::set_param(&encoder, 3, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 4, hidden as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 5, self.eps);
+        let max_threads = pipeline.max_total_threads_per_threadgroup();
+        let tg_width = hidden.min(max_threads);
+        let grid = objc2_metal::MTLSize { width: hidden, height: num_rows, depth: 1 };
+        let group = objc2_metal::MTLSize { width: tg_width, height: 1, depth: 1 };
+        encoder.dispatch_threads(grid, group);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s_x.dtype()), l_x.shape().clone()))
     }
 }
 
@@ -830,6 +867,39 @@ impl ComputeBackend for MetalBackend {
     fn rms_norm(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
         let x = x.contiguous()?;
         x.apply_op2_no_bwd(weight, &MetalRmsNorm { eps })
+    }
+
+    fn layer_norm(&self, x: &Tensor, weight: &Tensor, bias: Option<&Tensor>, eps: f32) -> Result<Tensor> {
+        if let Some(b) = bias {
+            if x.is_contiguous() && matches!(x.dtype(), DType::F32 | DType::F16) {
+                let x = x.contiguous()?;
+                let b = b.contiguous()?;
+                if let Device::Metal(_) = x.device() {
+                    let (bias_storage, bias_layout) = b.storage_and_layout();
+                    if let candle_core::Storage::Metal(ms) = &*bias_storage {
+                        let op = MetalLayerNorm { eps, bias_storage: ms.clone(), bias_layout: bias_layout.clone() };
+                        return x.apply_op2_no_bwd(weight, &op);
+                    }
+                }
+            }
+        }
+        // Fallback to default implementation
+        use candle_core::{DType as D2, D};
+        if x.is_contiguous() {
+            if let Some(b) = bias {
+                return candle_nn::ops::layer_norm(x, weight, b, eps);
+            }
+        }
+        let x_dtype = x.dtype();
+        let internal_dtype = match x_dtype { D2::F16 | D2::BF16 => D2::F32, d => d };
+        let hidden_size = x.dim(D::Minus1)?;
+        let x = x.to_dtype(internal_dtype)?;
+        let mean_x = (x.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
+        let x = x.broadcast_sub(&mean_x)?;
+        let norm_x = (x.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
+        let x_normed = x.broadcast_div(&(norm_x + eps as f64)?.sqrt()?)?;
+        let x = x_normed.to_dtype(x_dtype)?.broadcast_mul(weight)?;
+        match bias { Some(b) => x.broadcast_add(b), None => Ok(x) }
     }
 
     fn rms_norm_gated(&self, x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {

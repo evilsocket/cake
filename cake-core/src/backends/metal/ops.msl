@@ -434,6 +434,55 @@ kernel void softmax_last_dim_f16(
     output[base + col] = half(e / _sr);
 }
 
+// ─── layer_norm ──────────────────────────────────────────────────────
+kernel void layer_norm_f32(
+    device const float* x [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* output [[buffer(3)]],
+    constant uint& hidden [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = gid.y, col = gid.x;
+    if (col >= hidden) return;
+    uint base = row * hidden;
+    float val = x[base + col];
+    // Pass 1: mean
+    float mean;
+    { SIMD_REDUCE_SUM(val, hidden, lane, simd_id) mean = _sr / float(hidden); }
+    // Pass 2: variance
+    float centered = val - mean;
+    float inv_std;
+    { SIMD_REDUCE_SUM(centered * centered, hidden, lane, simd_id) inv_std = fast::rsqrt(_sr / float(hidden) + eps); }
+    output[base + col] = fma(centered * inv_std, weight[col], bias[col]);
+}
+
+kernel void layer_norm_f16(
+    device const half* x [[buffer(0)]],
+    device const half* weight [[buffer(1)]],
+    device const half* bias [[buffer(2)]],
+    device half* output [[buffer(3)]],
+    constant uint& hidden [[buffer(4)]],
+    constant float& eps [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = gid.y, col = gid.x;
+    if (col >= hidden) return;
+    uint base = row * hidden;
+    float val = float(x[base + col]);
+    float mean;
+    { SIMD_REDUCE_SUM(val, hidden, lane, simd_id) mean = _sr / float(hidden); }
+    float centered = val - mean;
+    float inv_std;
+    { SIMD_REDUCE_SUM(centered * centered, hidden, lane, simd_id) inv_std = fast::rsqrt(_sr / float(hidden) + eps); }
+    output[base + col] = half(fma(centered * inv_std, float(weight[col]), float(bias[col])));
+}
+
 // ─── rms_norm (standalone) ───────────────────────────────────────────
 kernel void rms_norm_f32(
     device const float* x [[buffer(0)]],
