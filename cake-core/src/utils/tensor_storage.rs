@@ -66,6 +66,11 @@ pub trait TensorStorageProvider: Send + Sync {
     fn tensor_bytes(&self, _name: &str) -> Option<(&[u8], DType, &[usize])> {
         None
     }
+    /// Get tensor metadata (dtype and shape) without reading data.
+    /// Returns None if the tensor doesn't exist or the implementation doesn't support it.
+    fn tensor_meta(&self, _name: &str) -> Option<(DType, &[usize])> {
+        None
+    }
 }
 
 /// Max tensor dimensions supported (covers all practical shapes).
@@ -551,6 +556,11 @@ impl TensorStorageProvider for SafetensorsStorage {
         let meta = self.index.get(name)?;
         let shard = self.shards.get(meta.shard_idx as usize)?;
         Some((shard.as_slice(meta.abs_offset, meta.byte_size as usize), meta.dtype, meta.shape.as_slice()))
+    }
+
+    fn tensor_meta(&self, name: &str) -> Option<(DType, &[usize])> {
+        let meta = self.index.get(name)?;
+        Some((meta.dtype, meta.shape.as_slice()))
     }
 }
 
