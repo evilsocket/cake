@@ -130,6 +130,46 @@ impl DiskExpertProvider {
         }
     }
 
+    /// Create a disk-backed expert provider for the stacked switch_mlp format.
+    ///
+    /// In this format, expert weights are stored as 3D stacked tensors:
+    /// `"{prefix}.gate_proj.weight"` with shape `(num_experts, intermediate, hidden)`.
+    /// Individual expert slices are read via `tensor_slice_bytes()`.
+    pub fn new_stacked(
+        storage: Arc<dyn TensorStorageProvider>,
+        layer_prefix: String,
+        num_experts: usize,
+        device: Device,
+        dtype: DType,
+    ) -> Self {
+        let expert_names: Vec<ExpertNames> = (0..num_experts)
+            .map(|_| {
+                ExpertNames {
+                    gate_proj: format!("{layer_prefix}.gate_proj.weight"),
+                    up_proj: format!("{layer_prefix}.up_proj.weight"),
+                    down_proj: format!("{layer_prefix}.down_proj.weight"),
+                }
+            })
+            .collect();
+        let needs_device_transfer = !device.is_cpu();
+        // Detect storage dtype from the stacked tensor
+        let storage_dtype = storage.tensor_meta(&expert_names[0].gate_proj)
+            .map(|(dt, _)| dt);
+        let use_f32_zerocopy = dtype == DType::F32
+            && storage_dtype.is_some_and(|sd| sd == DType::F32);
+        Self {
+            storage,
+            layer_prefix,
+            expert_names,
+            num_experts,
+            device,
+            dtype,
+            needs_device_transfer,
+            use_f32_zerocopy,
+            gptq_group_size: None,
+        }
+    }
+
     /// Reinterpret a `Vec<u8>` as `Vec<f32>` without copying.
     ///
     /// # Safety
