@@ -60,9 +60,12 @@ impl Qwen3_5FullAttention {
             let v_w = vb.pp("v_proj").get((kv_size, h_size), "weight")?;
             Tensor::cat(&[&q_w, &k_w, &v_w], 0)?
         };
+        let qkv_proj_weight = backend.preprocess_linear_weight(&qkv_proj_weight)?;
 
         let o_size = cfg.num_attention_heads * head_dim;
-        let o_proj_weight = vb.pp("o_proj").get((h_size, o_size), "weight")?;
+        let o_proj_weight = backend.preprocess_linear_weight(
+            &vb.pp("o_proj").get((h_size, o_size), "weight")?,
+        )?;
 
         let q_norm_weight = load_rms_norm_weight(
             head_dim, cfg.residual_rms_norm, vb.pp("q_norm"),
