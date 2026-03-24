@@ -148,6 +148,34 @@ impl DiskExpertProvider {
         unsafe { Vec::from_raw_parts(ptr as *mut f32, f32_len, cap / 4) }
     }
 
+    /// Convert raw bytes from mmap directly to an F32 tensor, skipping the intermediate
+    /// typed tensor allocation. For F16→F32 and BF16→F32, this saves one allocation + memcpy.
+    #[inline]
+    fn convert_bytes_to_f32_tensor(bytes: &[u8], src_dtype: DType, shape: &[usize], device: &Device) -> Result<Tensor> {
+        match src_dtype {
+            DType::F16 => {
+                let f16_slice = unsafe {
+                    std::slice::from_raw_parts(bytes.as_ptr() as *const half::f16, bytes.len() / 2)
+                };
+                let f32_vec: Vec<f32> = f16_slice.iter().map(|x| x.to_f32()).collect();
+                Tensor::from_vec(f32_vec, shape, device)
+            }
+            DType::BF16 => {
+                let bf16_slice = unsafe {
+                    std::slice::from_raw_parts(bytes.as_ptr() as *const half::bf16, bytes.len() / 2)
+                };
+                let f32_vec: Vec<f32> = bf16_slice.iter().map(|x| x.to_f32()).collect();
+                Tensor::from_vec(f32_vec, shape, device)
+            }
+            _ => {
+                // Fallback: construct typed tensor, then convert
+                let tensor = Tensor::from_raw_buffer(bytes, src_dtype, shape, &Device::Cpu)?;
+                let tensor = tensor.to_dtype(DType::F32)?;
+                if !device.is_cpu() { tensor.to_device(device) } else { Ok(tensor) }
+            }
+        }
+    }
+
     /// Read an expert weight, handling GPTQ dequantization if needed.
     fn read_expert_weight(&self, weight_name: &str) -> Result<Tensor> {
         if let Some(group_size) = self.gptq_group_size {
@@ -274,16 +302,27 @@ impl ExpertProvider for DiskExpertProvider {
             self.storage.tensor_bytes(&names.up_proj),
             self.storage.tensor_bytes(&names.down_proj),
         ) {
-            // Build tensors directly from mmap'd bytes — avoids allocation + copy
-            let gate = Tensor::from_raw_buffer(gb, gdt, gs, &Device::Cpu)?;
-            let up = Tensor::from_raw_buffer(ub, udt, us, &Device::Cpu)?;
-            let down = Tensor::from_raw_buffer(db, ddt, ds, &Device::Cpu)?;
-            let (gate, up, down) = if gdt != self.dtype {
+            let (gate, up, down) = if gdt != self.dtype && self.dtype == DType::F32 {
+                // Fused conversion: F16/BF16 → F32 directly from mmap bytes,
+                // skipping intermediate typed tensor allocation
+                (
+                    Self::convert_bytes_to_f32_tensor(gb, gdt, gs, target_device)?,
+                    Self::convert_bytes_to_f32_tensor(ub, udt, us, target_device)?,
+                    Self::convert_bytes_to_f32_tensor(db, ddt, ds, target_device)?,
+                )
+            } else if gdt != self.dtype {
+                let gate = Tensor::from_raw_buffer(gb, gdt, gs, &Device::Cpu)?;
+                let up = Tensor::from_raw_buffer(ub, udt, us, &Device::Cpu)?;
+                let down = Tensor::from_raw_buffer(db, ddt, ds, &Device::Cpu)?;
                 (gate.to_dtype(self.dtype)?, up.to_dtype(self.dtype)?, down.to_dtype(self.dtype)?)
             } else {
-                (gate, up, down)
+                (
+                    Tensor::from_raw_buffer(gb, gdt, gs, target_device)?,
+                    Tensor::from_raw_buffer(ub, udt, us, target_device)?,
+                    Tensor::from_raw_buffer(db, ddt, ds, target_device)?,
+                )
             };
-            return if self.needs_device_transfer {
+            return if self.needs_device_transfer && gdt == self.dtype {
                 Ok(ExpertWeights {
                     gate_proj: gate.to_device(target_device)?,
                     up_proj: up.to_device(target_device)?,
