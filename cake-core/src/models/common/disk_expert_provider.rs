@@ -31,6 +31,20 @@ struct ExpertNames {
 /// Supports GPTQ-quantized experts: when `gptq_group_size` is set, reads
 /// `{prefix}.qweight`, `{prefix}.scales`, `{prefix}.qzeros` and dequantizes
 /// on the fly using `dequantize_gptq_4bit`.
+/// Pre-computed metadata for stacked expert tensors.
+struct StackedMeta {
+    /// Byte stride per expert per projection (dim1 * dim2 * sizeof(dtype)).
+    gate_byte_stride: usize,
+    up_byte_stride: usize,
+    down_byte_stride: usize,
+    /// Shape of a single expert slice (2D).
+    gate_shape: [usize; 2],
+    up_shape: [usize; 2],
+    down_shape: [usize; 2],
+    /// Storage dtype of the stacked tensors.
+    storage_dtype: DType,
+}
+
 pub struct DiskExpertProvider {
     storage: Arc<dyn TensorStorageProvider>,
     layer_prefix: String,
@@ -45,6 +59,8 @@ pub struct DiskExpertProvider {
     use_f32_zerocopy: bool,
     /// GPTQ group size — when Some, experts are GPTQ-quantized and need dequantization.
     gptq_group_size: Option<usize>,
+    /// Stacked format metadata — set when using new_stacked().
+    stacked_meta: Option<StackedMeta>,
 }
 
 impl std::fmt::Debug for DiskExpertProvider {
@@ -127,6 +143,7 @@ impl DiskExpertProvider {
             needs_device_transfer,
             use_f32_zerocopy,
             gptq_group_size,
+            stacked_meta: None,
         }
     }
 
@@ -152,9 +169,28 @@ impl DiskExpertProvider {
             })
             .collect();
         let needs_device_transfer = !device.is_cpu();
-        // Detect storage dtype from the stacked tensor
-        let storage_dtype = storage.tensor_meta(&expert_names[0].gate_proj)
-            .map(|(dt, _)| dt);
+        // Pre-compute stacked metadata from the 3D tensor shapes
+        let stacked_meta = {
+            let gate_meta = storage.tensor_meta(&expert_names[0].gate_proj);
+            let up_meta = storage.tensor_meta(&expert_names[0].up_proj);
+            let down_meta = storage.tensor_meta(&expert_names[0].down_proj);
+            match (gate_meta, up_meta, down_meta) {
+                (Some((gdt, gs)), Some((_, us)), Some((_, ds))) if gs.len() == 3 && us.len() == 3 && ds.len() == 3 => {
+                    let dtype_size = gdt.size_in_bytes();
+                    Some(StackedMeta {
+                        gate_byte_stride: gs[1] * gs[2] * dtype_size,
+                        up_byte_stride: us[1] * us[2] * dtype_size,
+                        down_byte_stride: ds[1] * ds[2] * dtype_size,
+                        gate_shape: [gs[1], gs[2]],
+                        up_shape: [us[1], us[2]],
+                        down_shape: [ds[1], ds[2]],
+                        storage_dtype: gdt,
+                    })
+                }
+                _ => None,
+            }
+        };
+        let storage_dtype = stacked_meta.as_ref().map(|m| m.storage_dtype);
         let use_f32_zerocopy = dtype == DType::F32
             && storage_dtype.is_some_and(|sd| sd == DType::F32);
         Self {
@@ -167,6 +203,7 @@ impl DiskExpertProvider {
             needs_device_transfer,
             use_f32_zerocopy,
             gptq_group_size: None,
+            stacked_meta,
         }
     }
 
@@ -301,6 +338,32 @@ impl ExpertProvider for DiskExpertProvider {
                 gate_proj: self.read_expert_weight(&names.gate_proj)?,
                 up_proj: self.read_expert_weight(&names.up_proj)?,
                 down_proj: self.read_expert_weight(&names.down_proj)?,
+            });
+        }
+
+        // Stacked format: read per-expert slices from 3D stacked tensors
+        if let Some(ref sm) = self.stacked_meta {
+            let target_device = if self.needs_device_transfer { &self.device } else { &Device::Cpu };
+            let read_slice = |name: &str, byte_stride: usize, shape: &[usize; 2]| -> Result<Tensor> {
+                let byte_offset = idx * byte_stride;
+                if let Some(bytes) = self.storage.tensor_slice_bytes(name, byte_offset, byte_stride) {
+                    if sm.storage_dtype == self.dtype {
+                        Tensor::from_raw_buffer(bytes, sm.storage_dtype, shape, target_device)
+                    } else if self.dtype == DType::F32 {
+                        Self::convert_bytes_to_f32_tensor(bytes, sm.storage_dtype, shape, target_device)
+                    } else {
+                        let t = Tensor::from_raw_buffer(bytes, sm.storage_dtype, shape, &Device::Cpu)?;
+                        let t = t.to_dtype(self.dtype)?;
+                        if self.needs_device_transfer { t.to_device(target_device) } else { Ok(t) }
+                    }
+                } else {
+                    Err(candle_core::Error::Msg(format!("tensor_slice_bytes failed for {name}")))
+                }
+            };
+            return Ok(ExpertWeights {
+                gate_proj: read_slice(&names.gate_proj, sm.gate_byte_stride, &sm.gate_shape)?,
+                up_proj: read_slice(&names.up_proj, sm.up_byte_stride, &sm.up_shape)?,
+                down_proj: read_slice(&names.down_proj, sm.down_byte_stride, &sm.down_shape)?,
             });
         }
 
