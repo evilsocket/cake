@@ -138,9 +138,11 @@ impl Qwen3_5FullAttention {
         let qkv = self.backend.linear_forward(x, &self.qkv_proj_weight, None)
             .map_err(|e| anyhow!("qkv_proj: {e}"))?;
 
-        // Flush GPU commands after QKV matmul (always needed — full attention
-        // accumulates ~24 commands between syncs, can't afford more)
-        let _ = self.backend.synchronize();
+        // Flush GPU commands after QKV matmul — needed for prefill where many
+        // operations follow. Generation (seq_len=1) uses fused SDPA with few commands.
+        if seq_len > 1 {
+            let _ = self.backend.synchronize();
+        }
 
         // Split: Q (doubled for gating), K, V
         let q_out = qkv.narrow(D::Minus1, 0, self.q_size)
