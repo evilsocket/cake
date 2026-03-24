@@ -284,6 +284,33 @@ impl ComputeBackend for CpuBackend {
         n.broadcast_mul(&(scale + 1.0)?)? + shift
     }
 
+    fn sigmoid(&self, x: &Tensor) -> Result<Tensor> {
+        if x.dtype() == DType::F32 {
+            let data = x.contiguous()?.flatten_all()?.to_vec1::<f32>()?;
+            let shape = x.dims();
+            let mut out = data;
+            for v in out.iter_mut() {
+                *v = 1.0 / (1.0 + (-*v).exp());
+            }
+            return Tensor::from_vec(out, shape, x.device());
+        }
+        candle_nn::ops::sigmoid(x)
+    }
+
+    fn silu(&self, x: &Tensor) -> Result<Tensor> {
+        if x.dtype() == DType::F32 {
+            let data = x.contiguous()?.flatten_all()?.to_vec1::<f32>()?;
+            let shape = x.dims();
+            let mut out = data;
+            for v in out.iter_mut() {
+                let x = *v;
+                *v = x / (1.0 + (-x).exp());
+            }
+            return Tensor::from_vec(out, shape, x.device());
+        }
+        candle_nn::ops::silu(x)
+    }
+
     fn f8e4m3_to_f32(&self, x: &Tensor) -> Result<Tensor> {
         x.to_dtype(DType::F32)
     }
