@@ -23,6 +23,16 @@ struct ExpertNames {
     down_proj: String,
 }
 
+/// Pre-computed tensor names for stacked affine-quantized projections.
+struct StackedQuantNames {
+    gate_scales: String,
+    gate_biases: String,
+    up_scales: String,
+    up_biases: String,
+    down_scales: String,
+    down_biases: String,
+}
+
 /// Streams expert weights from disk via `TensorStorageProvider`.
 ///
 /// Expert tensors are read from safetensors files by name, e.g.:
@@ -31,18 +41,31 @@ struct ExpertNames {
 /// Supports GPTQ-quantized experts: when `gptq_group_size` is set, reads
 /// `{prefix}.qweight`, `{prefix}.scales`, `{prefix}.qzeros` and dequantizes
 /// on the fly using `dequantize_gptq_4bit`.
+/// Pre-computed metadata for one stacked projection (gate, up, or down).
+struct StackedProjMeta {
+    /// Byte stride per expert for the weight tensor.
+    weight_byte_stride: usize,
+    /// Shape of a single expert's weight slice (2D).
+    weight_shape: [usize; 2],
+    /// Byte stride per expert for the scales tensor (0 if not quantized).
+    scales_byte_stride: usize,
+    /// Shape of a single expert's scales slice (2D).
+    scales_shape: [usize; 2],
+    /// Byte stride per expert for the biases tensor (0 if not quantized).
+    biases_byte_stride: usize,
+}
+
 /// Pre-computed metadata for stacked expert tensors.
 struct StackedMeta {
-    /// Byte stride per expert per projection (dim1 * dim2 * sizeof(dtype)).
-    gate_byte_stride: usize,
-    up_byte_stride: usize,
-    down_byte_stride: usize,
-    /// Shape of a single expert slice (2D).
-    gate_shape: [usize; 2],
-    up_shape: [usize; 2],
-    down_shape: [usize; 2],
-    /// Storage dtype of the stacked tensors.
+    gate: StackedProjMeta,
+    up: StackedProjMeta,
+    down: StackedProjMeta,
+    /// Storage dtype of the packed weight tensors.
     storage_dtype: DType,
+    /// Whether the stacked tensors use affine 4-bit quantization (has scales+biases).
+    is_affine_quantized: bool,
+    /// Group size for affine quantization.
+    group_size: usize,
 }
 
 pub struct DiskExpertProvider {
@@ -61,6 +84,8 @@ pub struct DiskExpertProvider {
     gptq_group_size: Option<usize>,
     /// Stacked format metadata — set when using new_stacked().
     stacked_meta: Option<StackedMeta>,
+    /// Pre-computed stacked quantization tensor names.
+    stacked_quant_names: Option<StackedQuantNames>,
 }
 
 impl std::fmt::Debug for DiskExpertProvider {
@@ -144,6 +169,7 @@ impl DiskExpertProvider {
             use_f32_zerocopy,
             gptq_group_size,
             stacked_meta: None,
+            stacked_quant_names: None,
         }
     }
 
@@ -174,24 +200,77 @@ impl DiskExpertProvider {
             let gate_meta = storage.tensor_meta(&expert_names[0].gate_proj);
             let up_meta = storage.tensor_meta(&expert_names[0].up_proj);
             let down_meta = storage.tensor_meta(&expert_names[0].down_proj);
+            // Check for affine 4-bit quantization (scales + biases companions)
+            let scales_name = expert_names[0].gate_proj.replace(".weight", ".scales");
+            let is_affine = storage.has_tensor(&scales_name);
             match (gate_meta, up_meta, down_meta) {
                 (Some((gdt, gs)), Some((_, us)), Some((_, ds))) if gs.len() == 3 && us.len() == 3 && ds.len() == 3 => {
                     let dtype_size = gdt.size_in_bytes();
+                    let make_proj = |wshape: &[usize], proj_name: &str| -> StackedProjMeta {
+                        let w_stride = wshape[1] * wshape[2] * dtype_size;
+                        let (s_stride, s_shape) = if is_affine {
+                            let sn = proj_name.replace(".weight", ".scales");
+                            if let Some((sdt, ss)) = storage.tensor_meta(&sn) {
+                                let ss_size = sdt.size_in_bytes();
+                                (ss[1] * ss[2] * ss_size, [ss[1], ss[2]])
+                            } else {
+                                (0, [0, 0])
+                            }
+                        } else {
+                            (0, [0, 0])
+                        };
+                        let b_stride = if is_affine {
+                            let bn = proj_name.replace(".weight", ".biases");
+                            if let Some((bdt, bs)) = storage.tensor_meta(&bn) {
+                                bs[1] * bs[2] * bdt.size_in_bytes()
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        };
+                        StackedProjMeta {
+                            weight_byte_stride: w_stride,
+                            weight_shape: [wshape[1], wshape[2]],
+                            scales_byte_stride: s_stride,
+                            scales_shape: s_shape,
+                            biases_byte_stride: b_stride,
+                        }
+                    };
+                    // Determine group_size from scales shape: group_size = packed_cols * 8 / groups
+                    let group_size = if is_affine {
+                        let sn = expert_names[0].gate_proj.replace(".weight", ".scales");
+                        if let Some((_, ss)) = storage.tensor_meta(&sn) {
+                            if ss.len() == 3 && ss[2] > 0 { (gs[2] * 8) / ss[2] } else { 64 }
+                        } else { 64 }
+                    } else { 64 };
                     Some(StackedMeta {
-                        gate_byte_stride: gs[1] * gs[2] * dtype_size,
-                        up_byte_stride: us[1] * us[2] * dtype_size,
-                        down_byte_stride: ds[1] * ds[2] * dtype_size,
-                        gate_shape: [gs[1], gs[2]],
-                        up_shape: [us[1], us[2]],
-                        down_shape: [ds[1], ds[2]],
+                        gate: make_proj(gs, &expert_names[0].gate_proj),
+                        up: make_proj(us, &expert_names[0].up_proj),
+                        down: make_proj(ds, &expert_names[0].down_proj),
                         storage_dtype: gdt,
+                        is_affine_quantized: is_affine,
+                        group_size,
                     })
                 }
                 _ => None,
             }
         };
+        let is_affine = stacked_meta.as_ref().is_some_and(|m| m.is_affine_quantized);
+        let stacked_quant_names = if is_affine {
+            Some(StackedQuantNames {
+                gate_scales: format!("{layer_prefix}.gate_proj.scales"),
+                gate_biases: format!("{layer_prefix}.gate_proj.biases"),
+                up_scales: format!("{layer_prefix}.up_proj.scales"),
+                up_biases: format!("{layer_prefix}.up_proj.biases"),
+                down_scales: format!("{layer_prefix}.down_proj.scales"),
+                down_biases: format!("{layer_prefix}.down_proj.biases"),
+            })
+        } else {
+            None
+        };
         let storage_dtype = stacked_meta.as_ref().map(|m| m.storage_dtype);
-        let use_f32_zerocopy = dtype == DType::F32
+        let use_f32_zerocopy = !is_affine && dtype == DType::F32
             && storage_dtype.is_some_and(|sd| sd == DType::F32);
         Self {
             storage,
@@ -204,6 +283,7 @@ impl DiskExpertProvider {
             use_f32_zerocopy,
             gptq_group_size: None,
             stacked_meta,
+            stacked_quant_names,
         }
     }
 
@@ -344,15 +424,61 @@ impl ExpertProvider for DiskExpertProvider {
         // Stacked format: read per-expert slices from 3D stacked tensors
         if let Some(ref sm) = self.stacked_meta {
             let target_device = if self.needs_device_transfer { &self.device } else { &Device::Cpu };
-            let read_slice = |name: &str, byte_stride: usize, shape: &[usize; 2]| -> Result<Tensor> {
-                let byte_offset = idx * byte_stride;
-                if let Some(bytes) = self.storage.tensor_slice_bytes(name, byte_offset, byte_stride) {
+
+            if sm.is_affine_quantized {
+                // Affine 4-bit: read packed weight + scales + biases slices, dequantize
+                let qn = self.stacked_quant_names.as_ref().unwrap();
+                let read_dequant = |weight_name: &str, proj: &StackedProjMeta,
+                                     scales_name: &str, biases_name: &str| -> Result<Tensor> {
+                    let w_off = idx * proj.weight_byte_stride;
+                    let s_off = idx * proj.scales_byte_stride;
+                    let b_off = idx * proj.biases_byte_stride;
+                    let w_bytes = self.storage.tensor_slice_bytes(weight_name, w_off, proj.weight_byte_stride)
+                        .ok_or_else(|| candle_core::Error::Msg(format!("read weight slice: {weight_name}")))?;
+                    let s_bytes = self.storage.tensor_slice_bytes(scales_name, s_off, proj.scales_byte_stride)
+                        .ok_or_else(|| candle_core::Error::Msg(format!("read scales slice: {scales_name}")))?;
+                    let b_bytes = self.storage.tensor_slice_bytes(biases_name, b_off, proj.biases_byte_stride)
+                        .ok_or_else(|| candle_core::Error::Msg(format!("read biases slice: {biases_name}")))?;
+                    let packed = Tensor::from_raw_buffer(w_bytes, sm.storage_dtype, &proj.weight_shape, &Device::Cpu)?;
+                    let scales = Tensor::from_raw_buffer(s_bytes, DType::BF16, &proj.scales_shape, &Device::Cpu)?;
+                    let biases = Tensor::from_raw_buffer(b_bytes, DType::BF16, &proj.scales_shape, &Device::Cpu)?;
+                    // Debug: log packed+scales+result for first gate_proj access
+                    if weight_name.contains("gate_proj") {
+                        static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                        if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                            if let Ok(pw) = packed.flatten_all().and_then(|t| t.to_dtype(DType::U32)).and_then(|t| t.narrow(0, 0, 4)).and_then(|t| t.to_vec1::<u32>()) {
+                                log::info!("STACKED_DEQUANT expert={idx} {weight_name}: pw[:4]=[{:#010x}, {:#010x}, {:#010x}, {:#010x}]",
+                                    pw[0], pw[1], pw[2], pw[3]);
+                            }
+                            if let Ok(sc) = scales.flatten_all().and_then(|t| t.to_dtype(DType::F32)).and_then(|t| t.narrow(0, 0, 2)).and_then(|t| t.to_vec1::<f32>()) {
+                                log::info!("  scales[:2]=[{}, {}] shape={:?}", sc[0], sc[1], scales.shape());
+                            }
+                            if let Ok(bi) = biases.flatten_all().and_then(|t| t.to_dtype(DType::F32)).and_then(|t| t.narrow(0, 0, 2)).and_then(|t| t.to_vec1::<f32>()) {
+                                log::info!("  biases[:2]=[{}, {}]", bi[0], bi[1]);
+                            }
+                        }
+                    }
+                    let weight = crate::utils::gptq::dequantize_packed_4bit(&packed, &scales, &biases, sm.group_size)?;
+                    let weight = weight.to_dtype(self.dtype)?;
+                    if self.needs_device_transfer { weight.to_device(target_device) } else { Ok(weight) }
+                };
+                return Ok(ExpertWeights {
+                    gate_proj: read_dequant(&names.gate_proj, &sm.gate, &qn.gate_scales, &qn.gate_biases)?,
+                    up_proj: read_dequant(&names.up_proj, &sm.up, &qn.up_scales, &qn.up_biases)?,
+                    down_proj: read_dequant(&names.down_proj, &sm.down, &qn.down_scales, &qn.down_biases)?,
+                });
+            }
+
+            // Non-quantized stacked: direct byte read
+            let read_slice = |name: &str, proj: &StackedProjMeta| -> Result<Tensor> {
+                let byte_offset = idx * proj.weight_byte_stride;
+                if let Some(bytes) = self.storage.tensor_slice_bytes(name, byte_offset, proj.weight_byte_stride) {
                     if sm.storage_dtype == self.dtype {
-                        Tensor::from_raw_buffer(bytes, sm.storage_dtype, shape, target_device)
+                        Tensor::from_raw_buffer(bytes, sm.storage_dtype, &proj.weight_shape, target_device)
                     } else if self.dtype == DType::F32 {
-                        Self::convert_bytes_to_f32_tensor(bytes, sm.storage_dtype, shape, target_device)
+                        Self::convert_bytes_to_f32_tensor(bytes, sm.storage_dtype, &proj.weight_shape, target_device)
                     } else {
-                        let t = Tensor::from_raw_buffer(bytes, sm.storage_dtype, shape, &Device::Cpu)?;
+                        let t = Tensor::from_raw_buffer(bytes, sm.storage_dtype, &proj.weight_shape, &Device::Cpu)?;
                         let t = t.to_dtype(self.dtype)?;
                         if self.needs_device_transfer { t.to_device(target_device) } else { Ok(t) }
                     }
@@ -361,9 +487,9 @@ impl ExpertProvider for DiskExpertProvider {
                 }
             };
             return Ok(ExpertWeights {
-                gate_proj: read_slice(&names.gate_proj, sm.gate_byte_stride, &sm.gate_shape)?,
-                up_proj: read_slice(&names.up_proj, sm.up_byte_stride, &sm.up_shape)?,
-                down_proj: read_slice(&names.down_proj, sm.down_byte_stride, &sm.down_shape)?,
+                gate_proj: read_slice(&names.gate_proj, &sm.gate)?,
+                up_proj: read_slice(&names.up_proj, &sm.up)?,
+                down_proj: read_slice(&names.down_proj, &sm.down)?,
             });
         }
 

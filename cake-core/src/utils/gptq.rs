@@ -173,22 +173,24 @@ pub fn dequantize_packed_4bit(
 
     let pw: Vec<u32> = packed
         .to_dtype(DType::U32)?
-        .to_vec2::<u32>()?
-        .into_iter()
-        .flatten()
-        .collect();
+        .flatten_all()?
+        .to_vec1::<u32>()?;
     let sc: Vec<f32> = scales
         .to_dtype(DType::F32)?
-        .to_vec2::<f32>()?
-        .into_iter()
-        .flatten()
-        .collect();
+        .flatten_all()?
+        .to_vec1::<f32>()?;
     let bi: Vec<f32> = biases
         .to_dtype(DType::F32)?
-        .to_vec2::<f32>()?
-        .into_iter()
-        .flatten()
-        .collect();
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+
+    // Debug: log first packed value for verification
+    if !pw.is_empty() {
+        log::debug!(
+            "dequantize_packed_4bit: rows={rows} packed_cols={packed_cols} groups={groups} pw[0]=0x{:08x} sc[0]={} bi[0]={}",
+            pw[0], sc[0], bi[0]
+        );
+    }
 
     use rayon::prelude::*;
     let weight: Vec<f32> = (0..rows)

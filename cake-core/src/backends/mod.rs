@@ -555,7 +555,12 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
     /// Top-K selection: returns `(values, indices)` for the largest K elements
     /// along the last dimension. Uses partial sort O(N + K log K) for large N.
     fn topk(&self, x: &Tensor, k: usize) -> Result<(Tensor, Tensor)> {
-        let x = x.contiguous()?;
+        // Ensure F32 — sort/partial_sort and to_vec2::<f32> require F32 input
+        let x = if x.dtype() != candle_core::DType::F32 {
+            x.to_dtype(candle_core::DType::F32)?.contiguous()?
+        } else {
+            x.contiguous()?
+        };
         let shape = x.shape();
         let last = shape.dims().last().copied().unwrap_or(0);
         if last <= 32 || k * 2 >= last {
