@@ -1154,10 +1154,11 @@ pub async fn run_local(ctx: &mut Context) -> Result<()> {
         });
     });
 
-    // Wait for the API server to be ready (model loading can take seconds)
+    // Wait for the API server to be ready (large MoE models with expert pre-warming can take minutes)
     let client = Client::new();
     let mut ready = false;
-    for i in 0..120 {
+    let max_wait_iters = 1200; // 600 seconds = 10 minutes
+    for i in 0..max_wait_iters {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         match client.get(format!("{server_url}/v1/models")).send().await {
             Ok(resp) if resp.status().is_success() => {
@@ -1173,7 +1174,7 @@ pub async fn run_local(ctx: &mut Context) -> Result<()> {
     }
 
     if !ready {
-        anyhow::bail!("local server did not start within 60 seconds");
+        anyhow::bail!("local server did not start within {} seconds", max_wait_iters / 2);
     }
 
     // Suppress logs and take over terminal for TUI
