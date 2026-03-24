@@ -104,55 +104,36 @@ pub fn dequantize_gptq_4bit(
     let (groups, _) = scales.dims2()?;
     debug_assert_eq!(in_features / group_size, groups);
 
-    // Pull to CPU vecs (these are tiny compared to the dequantized result).
-    let qw: Vec<i32> = qweight.to_vec2::<i32>()?.into_iter().flatten().collect();
-    let sc: Vec<f32> = scales
-        .to_dtype(DType::F32)?
-        .to_vec2::<f32>()?
-        .into_iter()
-        .flatten()
-        .collect();
-    let qz: Vec<i32> = qzeros.to_vec2::<i32>()?.into_iter().flatten().collect();
+    // Pull to CPU vecs — use flatten + to_vec1 to avoid intermediate Vec<Vec<T>>.
+    let qw: Vec<i32> = qweight.flatten_all()?.to_vec1()?;
+    let sc: Vec<f32> = scales.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
+    let qz: Vec<i32> = qzeros.flatten_all()?.to_vec1()?;
     let zero_cols = out_features / 8; // columns in qzeros
 
     let mut weight = vec![0f32; out_features * in_features];
 
-    // Since group_size is always a multiple of 8 (standard GPTQ: 32/64/128),
-    // all 8 input indices packed into one int32 belong to the same group.
-    // We iterate over packed rows and output neurons together, then unpack
-    // the 8 bits from each int32 in the inner loop.
+    // Parallelize over output rows (j), writing directly to the output buffer.
+    // Each output row is independent: row j reads qw[pr * out_features + j] for
+    // all packed_rows, extracts nibbles, and writes to weight[j * in_features ..].
+    // This eliminates the intermediate Vec<Vec<f32>> and sequential scatter pass.
     use rayon::prelude::*;
-    let rows: Vec<Vec<f32>> = (0..packed_rows)
-        .into_par_iter()
-        .map(|pr| {
-            let in_start = pr * 8;
-            let g = in_start / group_size;
-            let mut row = vec![0f32; out_features * 8];
-            for j in 0..out_features {
+    weight
+        .par_chunks_mut(in_features)
+        .enumerate()
+        .for_each(|(j, row)| {
+            for pr in 0..packed_rows {
+                let in_start = pr * 8;
+                let g = in_start / group_size;
                 let packed_w = qw[pr * out_features + j];
                 let scale = sc[g * out_features + j];
                 let zero_packed = qz[g * zero_cols + j / 8];
                 let zero = ((zero_packed >> ((j % 8) * 4)) & 0xF) + 1; // AutoGPTQ +1 convention
                 for bit in 0..8i32 {
                     let w4 = (packed_w >> (bit * 4)) & 0xF;
-                    // Output layout: (out_features, in_features) row-major
-                    // → element [j, in_start + bit] = j * in_features + in_start + bit
-                    row[j * 8 + bit as usize] = (w4 - zero) as f32 * scale;
+                    row[in_start + bit as usize] = (w4 - zero) as f32 * scale;
                 }
             }
-            row
-        })
-        .collect();
-
-    // Assemble: rows[pr][j*8 + bit] → weight[j * in_features + pr*8 + bit]
-    for (pr, row) in rows.into_iter().enumerate() {
-        let in_start = pr * 8;
-        for j in 0..out_features {
-            for bit in 0..8 {
-                weight[j * in_features + in_start + bit] = row[j * 8 + bit];
-            }
-        }
-    }
+        });
 
     Tensor::from_vec(weight, (out_features, in_features), &Device::Cpu)
 }

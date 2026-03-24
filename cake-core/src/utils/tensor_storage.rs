@@ -21,6 +21,41 @@ use std::os::unix::io::AsRawFd;
 use anyhow::{bail, Result};
 use candle_core::DType;
 
+/// DType enum that deserializes from safetensors dtype strings without intermediate String allocation.
+#[derive(serde::Deserialize, Clone, Copy)]
+enum HeaderDType {
+    F16, BF16, F32, F64, I32, I64, U32, U8,
+    #[serde(alias = "F8_E4M3")]
+    F8E4M3,
+}
+
+impl HeaderDType {
+    fn to_candle(self) -> Option<DType> {
+        match self {
+            Self::F16 => Some(DType::F16),
+            Self::BF16 => Some(DType::BF16),
+            Self::F32 => Some(DType::F32),
+            Self::F64 => Some(DType::F64),
+            Self::I32 => Some(DType::I32),
+            Self::I64 => Some(DType::I64),
+            Self::U32 => Some(DType::U32),
+            Self::U8 => Some(DType::U8),
+            Self::F8E4M3 => Some(DType::F8E4M3),
+        }
+    }
+}
+
+/// Typed safetensors header entry — deserializes directly, avoiding serde_json::Value.
+#[derive(serde::Deserialize)]
+struct HeaderEntry {
+    #[serde(default)]
+    dtype: Option<HeaderDType>,
+    #[serde(default)]
+    shape: Option<Vec<usize>>,
+    #[serde(default)]
+    data_offsets: Option<(u64, u64)>,
+}
+
 /// Raw tensor data read from storage.
 #[derive(Debug)]
 pub struct TensorData {
@@ -45,41 +80,34 @@ pub trait TensorStorageProvider: Send + Sync {
     fn read_tensors(&self, names: &[&str]) -> Result<Vec<TensorData>> {
         names.iter().map(|n| self.read_tensor(n)).collect()
     }
-    /// Read a slice of a tensor's raw bytes at a given byte offset and length.
-    /// Used to read a single expert's 2D slice from a stacked 3D tensor without
-    /// loading the entire tensor into memory.
-    fn read_tensor_slice(
-        &self,
-        name: &str,
-        byte_offset: usize,
-        byte_len: usize,
-    ) -> Result<Vec<u8>> {
-        // Default: read full tensor and slice (suboptimal but works)
-        let data = self.read_tensor(name)?;
-        if byte_offset + byte_len > data.bytes.len() {
-            anyhow::bail!(
-                "slice out of bounds for '{}': offset={} len={} total={}",
-                name, byte_offset, byte_len, data.bytes.len()
-            );
-        }
-        Ok(data.bytes[byte_offset..byte_offset + byte_len].to_vec())
-    }
-
-    /// Get tensor metadata (dtype, shape) without reading the data bytes.
-    /// Default reads the full tensor — implementations should override for efficiency.
-    fn tensor_meta(&self, name: &str) -> Result<(candle_core::DType, Vec<usize>)> {
-        let data = self.read_tensor(name)?;
-        Ok((data.dtype, data.shape))
-    }
-
     /// Check if a tensor exists in this storage.
     fn has_tensor(&self, name: &str) -> bool;
     /// List all tensor names available in this storage.
     fn tensor_names(&self) -> Vec<String>;
+    /// Number of tensors in this storage (O(1), avoids tensor_names() clone).
+    fn tensor_count(&self) -> usize {
+        self.tensor_names().len()
+    }
     /// Get a borrowed slice of tensor bytes without copying (if supported).
     /// Returns None if the implementation doesn't support zero-copy access.
     /// When available, this is faster than `read_tensor()` since it avoids allocation.
-    fn tensor_bytes(&self, _name: &str) -> Option<(&[u8], DType, Vec<usize>)> {
+    fn tensor_bytes(&self, _name: &str) -> Option<(&[u8], DType, &[usize])> {
+        None
+    }
+    /// Get tensor metadata (dtype and shape) without reading data.
+    /// Returns None if the tensor doesn't exist or the implementation doesn't support it.
+    fn tensor_meta(&self, _name: &str) -> Option<(DType, &[usize])> {
+        None
+    }
+    /// Read a byte-range slice from a tensor (for sub-tensor access like stacked experts).
+    /// `byte_offset` is relative to the tensor's data start, `byte_len` is the number of bytes.
+    /// Returns None if the implementation doesn't support it.
+    fn read_tensor_slice(&self, _name: &str, _byte_offset: usize, _byte_len: usize) -> Option<Vec<u8>> {
+        None
+    }
+    /// Get a borrowed byte-range slice from a tensor without copying (mmap path).
+    /// `byte_offset` is relative to the tensor's data start, `byte_len` is the number of bytes.
+    fn tensor_slice_bytes(&self, _name: &str, _byte_offset: usize, _byte_len: usize) -> Option<&[u8]> {
         None
     }
 }
@@ -162,6 +190,8 @@ impl MappedShard {
         if ptr == libc::MAP_FAILED {
             anyhow::bail!("mmap failed: {}", std::io::Error::last_os_error());
         }
+        // Hint: sequential access pattern — triggers aggressive readahead on NVMe
+        unsafe { libc::posix_madvise(ptr, len, libc::POSIX_MADV_SEQUENTIAL); }
         Ok(Self { mmap_ptr: ptr as *const u8, mmap_len: len })
     }
 
@@ -269,10 +299,10 @@ impl SafetensorsStorage {
         dtype: candle_core::DType,
         device: &candle_core::Device,
     ) -> Result<HashMap<String, candle_core::Tensor>> {
-        let mut map = HashMap::new();
-        for name in self.tensor_names() {
-            let tensor = self.load_tensor(&name, dtype, device)?;
-            map.insert(name, tensor);
+        let mut map = HashMap::with_capacity(self.index.len());
+        for name in self.index.keys() {
+            let tensor = self.load_tensor(name, dtype, device)?;
+            map.insert(name.clone(), tensor);
         }
         Ok(map)
     }
@@ -291,22 +321,17 @@ impl SafetensorsStorage {
             .and_then(|v| v.as_object())
             .ok_or_else(|| anyhow::anyhow!("missing weight_map in index"))?;
 
-        // Group tensors by shard file
-        let mut shard_tensors: HashMap<String, Vec<String>> = HashMap::new();
-        for (tensor_name, shard_val) in weight_map {
-            let shard = shard_val
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("bad weight_map entry"))?;
-            shard_tensors
-                .entry(shard.to_string())
-                .or_default()
-                .push(tensor_name.clone());
-        }
+        // Collect unique shard filenames (we get tensor metadata from shard headers, not weight_map)
+        let mut shard_names: Vec<&str> = weight_map.values()
+            .filter_map(|v| v.as_str())
+            .collect();
+        shard_names.sort_unstable();
+        shard_names.dedup();
 
         let mut index = HashMap::with_capacity(weight_map.len());
-        let mut shards = Vec::with_capacity(shard_tensors.len());
+        let mut shards = Vec::with_capacity(shard_names.len());
 
-        for shard_name in shard_tensors.keys() {
+        for shard_name in shard_names {
             let shard_path = parent.join(shard_name);
             let shard_idx = shards.len() as u16;
             let f = File::open(&shard_path)?;
@@ -320,16 +345,12 @@ impl SafetensorsStorage {
             let shard = MappedShard::new(f)?;
             shards.push(shard);
 
-            let obj = header
-                .as_object()
-                .ok_or_else(|| anyhow::anyhow!("shard header not object"))?;
-
-            for (name, meta) in obj {
+            for (name, entry) in header {
                 if name.starts_with("__") {
                     continue;
                 }
-                if let Some(tm) = Self::parse_tensor_meta(name, meta, shard_idx, header_len)? {
-                    index.insert(name.clone(), tm);
+                if let Some(tm) = Self::parse_tensor_meta(&name, &entry, shard_idx, header_len)? {
+                    index.insert(name, tm);
                 }
             }
         }
@@ -358,17 +379,13 @@ impl SafetensorsStorage {
         #[cfg(not(unix))]
         let shard = MappedShard::new(f)?;
 
-        let obj = header
-            .as_object()
-            .ok_or_else(|| anyhow::anyhow!("header not object"))?;
-        let mut index = HashMap::with_capacity(obj.len());
-
-        for (name, meta) in obj {
+        let mut index = HashMap::with_capacity(header.len());
+        for (name, entry) in header {
             if name.starts_with("__") {
                 continue;
             }
-            if let Some(tm) = Self::parse_tensor_meta(name, meta, shard_idx, header_len)? {
-                index.insert(name.clone(), tm);
+            if let Some(tm) = Self::parse_tensor_meta(&name, &entry, shard_idx, header_len)? {
+                index.insert(name, tm);
             }
         }
 
@@ -379,9 +396,9 @@ impl SafetensorsStorage {
         Ok(Self { index, shards })
     }
 
-    /// Parse a shard file's header from mmap'd data. Returns (header_len, parsed JSON).
+    /// Parse a shard file's header from mmap'd data into typed entries.
     #[cfg(unix)]
-    fn parse_shard_header_mmap(shard: &MappedShard) -> Result<(usize, serde_json::Value)> {
+    fn parse_shard_header_mmap(shard: &MappedShard) -> Result<(usize, HashMap<String, HeaderEntry>)> {
         let data = shard.as_slice(0, shard.mmap_len.min(8));
         if data.len() < 8 {
             bail!("shard file too small for header");
@@ -391,13 +408,13 @@ impl SafetensorsStorage {
             bail!("safetensors header too large: {} bytes", header_len);
         }
         let header_data = shard.as_slice(8, header_len);
-        let header: serde_json::Value = serde_json::from_slice(header_data)?;
+        let header: HashMap<String, HeaderEntry> = serde_json::from_slice(header_data)?;
         Ok((header_len, header))
     }
 
-    /// Parse a shard file's header from file I/O. Returns (header_len, parsed JSON).
+    /// Parse a shard file's header from file I/O into typed entries.
     #[cfg(not(unix))]
-    fn parse_shard_header(path: &Path) -> Result<(usize, serde_json::Value)> {
+    fn parse_shard_header(path: &Path) -> Result<(usize, HashMap<String, HeaderEntry>)> {
         let mut f = File::open(path)?;
         let mut len_buf = [0u8; 8];
         f.read_exact(&mut len_buf)?;
@@ -409,67 +426,44 @@ impl SafetensorsStorage {
 
         let mut header_buf = vec![0u8; header_len];
         f.read_exact(&mut header_buf)?;
-        let header: serde_json::Value = serde_json::from_slice(&header_buf)?;
+        let header: HashMap<String, HeaderEntry> = serde_json::from_slice(&header_buf)?;
 
         Ok((header_len, header))
     }
 
-    /// Parse tensor metadata from a shard header entry.
+    /// Parse tensor metadata from a typed header entry.
     #[inline]
     fn parse_tensor_meta(
         name: &str,
-        meta: &serde_json::Value,
+        entry: &HeaderEntry,
         shard_idx: u16,
         header_len: usize,
     ) -> Result<Option<TensorMeta>> {
-        let offsets = match meta.get("data_offsets").and_then(|v| v.as_array()) {
-            Some(o) if o.len() == 2 => o,
-            _ => return Ok(None),
+        let (data_start, data_end) = match entry.data_offsets {
+            Some(offsets) => offsets,
+            None => return Ok(None),
         };
 
-        let data_start = offsets[0].as_u64().unwrap_or(0);
-        let data_end = offsets[1].as_u64().unwrap_or(0);
         let byte_size = data_end.saturating_sub(data_start);
-
         // Absolute offset in file: 8 (length prefix) + header_len + data_start
         let abs_offset = 8 + header_len as u64 + data_start;
 
-        let dtype_str = meta
-            .get("dtype")
-            .and_then(|v| v.as_str())
-            .unwrap_or("F32");
-        let dtype = match dtype_str {
-            "F16" => DType::F16,
-            "BF16" => DType::BF16,
-            "F32" => DType::F32,
-            "F64" => DType::F64,
-            "I32" => DType::I32,
-            "I64" => DType::I64,
-            "U32" => DType::U32,
-            "U8" => DType::U8,
-            "F8_E4M3" | "F8E4M3" => DType::F8E4M3,
-            other => {
-                log::warn!("unknown dtype '{other}' for tensor '{name}', skipping");
+        let dtype = match entry.dtype.unwrap_or(HeaderDType::F32).to_candle() {
+            Some(dt) => dt,
+            None => {
+                log::warn!("unsupported dtype for tensor '{name}', skipping");
                 return Ok(None);
             }
         };
 
-        let shape_vec: Vec<usize> = meta
-            .get("shape")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_u64().map(|n| n as usize))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let shape_vec = entry.shape.as_deref().unwrap_or(&[]);
 
         Ok(Some(TensorMeta {
             shard_idx,
             abs_offset,
             byte_size,
             dtype,
-            shape: InlineShape::from_vec(&shape_vec),
+            shape: InlineShape::from_vec(shape_vec),
         }))
     }
 }
@@ -576,46 +570,6 @@ impl TensorStorageProvider for SafetensorsStorage {
         }
     }
 
-    fn read_tensor_slice(
-        &self,
-        name: &str,
-        byte_offset: usize,
-        byte_len: usize,
-    ) -> Result<Vec<u8>> {
-        let meta = self.index.get(name)
-            .ok_or_else(|| anyhow::anyhow!("tensor '{}' not found in storage", name))?;
-        let abs_start = meta.abs_offset + byte_offset as u64;
-        if byte_offset as u64 + byte_len as u64 > meta.byte_size {
-            anyhow::bail!(
-                "slice out of bounds for '{}': offset={} len={} tensor_bytes={}",
-                name, byte_offset, byte_len, meta.byte_size
-            );
-        }
-        let shard = self.shards.get(meta.shard_idx as usize)
-            .ok_or_else(|| anyhow::anyhow!("shard index {} out of range", meta.shard_idx))?;
-
-        #[cfg(unix)]
-        let buf = shard.read_bytes(abs_start, byte_len);
-
-        #[cfg(not(unix))]
-        let buf = {
-            use std::io::{Seek, SeekFrom};
-            let mut f = shard.file.try_clone()?;
-            let mut buf = vec![0u8; byte_len];
-            f.seek(SeekFrom::Start(abs_start))?;
-            f.read_exact(&mut buf)?;
-            buf
-        };
-
-        Ok(buf)
-    }
-
-    fn tensor_meta(&self, name: &str) -> Result<(candle_core::DType, Vec<usize>)> {
-        let meta = self.index.get(name)
-            .ok_or_else(|| anyhow::anyhow!("tensor '{}' not found", name))?;
-        Ok((meta.dtype, meta.shape.to_vec()))
-    }
-
     fn has_tensor(&self, name: &str) -> bool {
         self.index.contains_key(name)
     }
@@ -624,11 +578,38 @@ impl TensorStorageProvider for SafetensorsStorage {
         self.index.keys().cloned().collect()
     }
 
+    fn tensor_count(&self) -> usize {
+        self.index.len()
+    }
+
     #[cfg(unix)]
-    fn tensor_bytes(&self, name: &str) -> Option<(&[u8], DType, Vec<usize>)> {
+    fn tensor_bytes(&self, name: &str) -> Option<(&[u8], DType, &[usize])> {
         let meta = self.index.get(name)?;
         let shard = self.shards.get(meta.shard_idx as usize)?;
-        Some((shard.as_slice(meta.abs_offset, meta.byte_size as usize), meta.dtype, meta.shape.to_vec()))
+        Some((shard.as_slice(meta.abs_offset, meta.byte_size as usize), meta.dtype, meta.shape.as_slice()))
+    }
+
+    fn tensor_meta(&self, name: &str) -> Option<(DType, &[usize])> {
+        let meta = self.index.get(name)?;
+        Some((meta.dtype, meta.shape.as_slice()))
+    }
+
+    fn read_tensor_slice(&self, name: &str, byte_offset: usize, byte_len: usize) -> Option<Vec<u8>> {
+        let meta = self.index.get(name)?;
+        let shard = self.shards.get(meta.shard_idx as usize)?;
+        let abs_offset = meta.abs_offset as usize + byte_offset;
+        #[cfg(unix)]
+        { Some(shard.read_bytes(abs_offset as u64, byte_len)) }
+        #[cfg(not(unix))]
+        { None }
+    }
+
+    #[cfg(unix)]
+    fn tensor_slice_bytes(&self, name: &str, byte_offset: usize, byte_len: usize) -> Option<&[u8]> {
+        let meta = self.index.get(name)?;
+        let shard = self.shards.get(meta.shard_idx as usize)?;
+        let abs_offset = meta.abs_offset as usize + byte_offset;
+        Some(shard.as_slice(abs_offset as u64, byte_len))
     }
 }
 
@@ -651,13 +632,13 @@ mod tests {
 
     #[test]
     fn test_parse_tensor_meta_valid() {
-        let meta_json: serde_json::Value = serde_json::json!({
-            "dtype": "F16",
-            "shape": [1024, 512],
-            "data_offsets": [0, 1048576]
-        });
+        let entry = HeaderEntry {
+            dtype: Some(HeaderDType::F16),
+            shape: Some(vec![1024, 512]),
+            data_offsets: Some((0, 1048576)),
+        };
         let result =
-            SafetensorsStorage::parse_tensor_meta("test", &meta_json, 0, 200)
+            SafetensorsStorage::parse_tensor_meta("test", &entry, 0, 200)
                 .unwrap();
         let tm = result.unwrap();
         assert_eq!(tm.abs_offset, 8 + 200);
@@ -668,11 +649,13 @@ mod tests {
 
     #[test]
     fn test_parse_tensor_meta_skips_metadata() {
-        let meta_json: serde_json::Value = serde_json::json!({
-            "format": "pt"
-        });
+        let entry = HeaderEntry {
+            dtype: None,
+            shape: None,
+            data_offsets: None,
+        };
         let result =
-            SafetensorsStorage::parse_tensor_meta("__metadata__", &meta_json, 0, 100)
+            SafetensorsStorage::parse_tensor_meta("__metadata__", &entry, 0, 100)
                 .unwrap();
         // No data_offsets → None
         assert!(result.is_none());

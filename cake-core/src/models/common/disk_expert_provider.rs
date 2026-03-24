@@ -31,10 +31,20 @@ struct ExpertNames {
 /// Supports GPTQ-quantized experts: when `gptq_group_size` is set, reads
 /// `{prefix}.qweight`, `{prefix}.scales`, `{prefix}.qzeros` and dequantizes
 /// on the fly using `dequantize_gptq_4bit`.
-///
-/// Also supports stacked switch_mlp format: `{prefix}.switch_mlp.{proj}.weight`
-/// with shape `[num_experts, ...]`. Reads the full stacked tensor, dequantizes
-/// once per projection, and slices per expert.
+/// Pre-computed metadata for stacked expert tensors.
+struct StackedMeta {
+    /// Byte stride per expert per projection (dim1 * dim2 * sizeof(dtype)).
+    gate_byte_stride: usize,
+    up_byte_stride: usize,
+    down_byte_stride: usize,
+    /// Shape of a single expert slice (2D).
+    gate_shape: [usize; 2],
+    up_shape: [usize; 2],
+    down_shape: [usize; 2],
+    /// Storage dtype of the stacked tensors.
+    storage_dtype: DType,
+}
+
 pub struct DiskExpertProvider {
     storage: Arc<dyn TensorStorageProvider>,
     layer_prefix: String,
@@ -49,15 +59,8 @@ pub struct DiskExpertProvider {
     use_f32_zerocopy: bool,
     /// GPTQ group size — when Some, experts are GPTQ-quantized and need dequantization.
     gptq_group_size: Option<usize>,
-    /// Stacked switch_mlp tensor names (for models that use stacked 3D expert format).
-    stacked_names: Option<StackedNames>,
-}
-
-/// Pre-computed names for stacked switch_mlp format.
-struct StackedNames {
-    gate_proj: String,
-    up_proj: String,
-    down_proj: String,
+    /// Stacked format metadata — set when using new_stacked().
+    stacked_meta: Option<StackedMeta>,
 }
 
 impl std::fmt::Debug for DiskExpertProvider {
@@ -113,9 +116,16 @@ impl DiskExpertProvider {
         };
         // Detect storage dtype from first expert (skip for GPTQ — qweight is int32, not weights)
         let storage_dtype = if gptq_group_size.is_none() {
-            expert_names
-                .first()
-                .and_then(|names| storage.read_tensor(&names.gate_proj).ok().map(|d| d.dtype))
+            expert_names.first().and_then(|names| {
+                // Use metadata-only lookup (no data read) → tensor_bytes fallback → full read
+                if let Some((dt, _)) = storage.tensor_meta(&names.gate_proj) {
+                    Some(dt)
+                } else if let Some((_, dt, _)) = storage.tensor_bytes(&names.gate_proj) {
+                    Some(dt)
+                } else {
+                    storage.read_tensor(&names.gate_proj).ok().map(|d| d.dtype)
+                }
+            })
         } else {
             None
         };
@@ -133,128 +143,68 @@ impl DiskExpertProvider {
             needs_device_transfer,
             use_f32_zerocopy,
             gptq_group_size,
-            stacked_names: None,
+            stacked_meta: None,
         }
     }
 
-    /// Create a disk-backed expert provider for stacked switch_mlp format.
+    /// Create a disk-backed expert provider for the stacked switch_mlp format.
     ///
-    /// In this format, all experts are stored in a single 3D tensor per projection:
-    /// `{prefix}.switch_mlp.gate_proj.weight` shape `[num_experts, intermediate, packed_hidden]`
-    ///
-    /// Each expert is read by loading the full stacked tensor, dequantizing, and slicing.
-    #[allow(clippy::too_many_arguments)]
+    /// In this format, expert weights are stored as 3D stacked tensors:
+    /// `"{prefix}.gate_proj.weight"` with shape `(num_experts, intermediate, hidden)`.
+    /// Individual expert slices are read via `tensor_slice_bytes()`.
     pub fn new_stacked(
         storage: Arc<dyn TensorStorageProvider>,
         layer_prefix: String,
         num_experts: usize,
-        intermediate: usize,
-        hidden: usize,
         device: Device,
         dtype: DType,
-        gptq_group_size: Option<usize>,
     ) -> Self {
+        let expert_names: Vec<ExpertNames> = (0..num_experts)
+            .map(|_| {
+                ExpertNames {
+                    gate_proj: format!("{layer_prefix}.gate_proj.weight"),
+                    up_proj: format!("{layer_prefix}.up_proj.weight"),
+                    down_proj: format!("{layer_prefix}.down_proj.weight"),
+                }
+            })
+            .collect();
         let needs_device_transfer = !device.is_cpu();
-        let _ = (intermediate, hidden); // used by callers for shape info
-        let stacked_names = StackedNames {
-            gate_proj: format!("{layer_prefix}.switch_mlp.gate_proj.weight"),
-            up_proj: format!("{layer_prefix}.switch_mlp.up_proj.weight"),
-            down_proj: format!("{layer_prefix}.switch_mlp.down_proj.weight"),
+        // Pre-compute stacked metadata from the 3D tensor shapes
+        let stacked_meta = {
+            let gate_meta = storage.tensor_meta(&expert_names[0].gate_proj);
+            let up_meta = storage.tensor_meta(&expert_names[0].up_proj);
+            let down_meta = storage.tensor_meta(&expert_names[0].down_proj);
+            match (gate_meta, up_meta, down_meta) {
+                (Some((gdt, gs)), Some((_, us)), Some((_, ds))) if gs.len() == 3 && us.len() == 3 && ds.len() == 3 => {
+                    let dtype_size = gdt.size_in_bytes();
+                    Some(StackedMeta {
+                        gate_byte_stride: gs[1] * gs[2] * dtype_size,
+                        up_byte_stride: us[1] * us[2] * dtype_size,
+                        down_byte_stride: ds[1] * ds[2] * dtype_size,
+                        gate_shape: [gs[1], gs[2]],
+                        up_shape: [us[1], us[2]],
+                        down_shape: [ds[1], ds[2]],
+                        storage_dtype: gdt,
+                    })
+                }
+                _ => None,
+            }
         };
-        log::info!("expert offload: stacked switch_mlp format (GPTQ={:?})", gptq_group_size);
+        let storage_dtype = stacked_meta.as_ref().map(|m| m.storage_dtype);
+        let use_f32_zerocopy = dtype == DType::F32
+            && storage_dtype.is_some_and(|sd| sd == DType::F32);
         Self {
             storage,
             layer_prefix,
-            expert_names: Vec::new(), // not used for stacked format
+            expert_names,
             num_experts,
             device,
             dtype,
             needs_device_transfer,
-            use_f32_zerocopy: false,
-            gptq_group_size,
-            stacked_names: Some(stacked_names),
+            use_f32_zerocopy,
+            gptq_group_size: None,
+            stacked_meta,
         }
-    }
-
-    /// Read a single expert's 2D slice from a stacked 3D tensor using targeted pread.
-    /// Only reads the bytes for one expert, not the entire [256, ...] tensor.
-    fn read_stacked_expert_slice(
-        &self,
-        tensor_name: &str,
-        expert_idx: usize,
-    ) -> Result<Tensor> {
-        if let Some(group_size) = self.gptq_group_size {
-            // Affine quantized: read slices of weight + scales + biases
-            let prefix = tensor_name.strip_suffix(".weight").unwrap_or(tensor_name);
-            let scales_name = format!("{prefix}.scales");
-            if self.storage.has_tensor(&scales_name) {
-                let biases_name = format!("{prefix}.biases");
-
-                // Get full tensor metadata for shape info (no data read)
-                let (w_dtype, w_shape) = self.storage.tensor_meta(tensor_name)
-                    .map_err(|e| candle_core::Error::Msg(format!("meta: {e}")))?;
-                let (s_dtype, s_shape) = self.storage.tensor_meta(&scales_name)
-                    .map_err(|e| candle_core::Error::Msg(format!("meta: {e}")))?;
-                let (b_dtype, b_shape) = self.storage.tensor_meta(&biases_name)
-                    .map_err(|e| candle_core::Error::Msg(format!("meta: {e}")))?;
-
-                // Compute per-expert byte ranges from 3D shapes
-                let w_elem_size = w_dtype.size_in_bytes();
-                let w_slice_elems: usize = w_shape[1..].iter().product();
-                let w_slice_bytes = w_slice_elems * w_elem_size;
-                let w_offset = expert_idx * w_slice_bytes;
-
-                let s_elem_size = s_dtype.size_in_bytes();
-                let s_slice_elems: usize = s_shape[1..].iter().product();
-                let s_slice_bytes = s_slice_elems * s_elem_size;
-                let s_offset = expert_idx * s_slice_bytes;
-
-                let b_elem_size = b_dtype.size_in_bytes();
-                let b_slice_elems: usize = b_shape[1..].iter().product();
-                let b_slice_bytes = b_slice_elems * b_elem_size;
-                let b_offset = expert_idx * b_slice_bytes;
-
-                // Targeted pread: only read this expert's bytes
-                let w_bytes = self.storage.read_tensor_slice(tensor_name, w_offset, w_slice_bytes)
-                    .map_err(|e| candle_core::Error::Msg(format!("slice weight: {e}")))?;
-                let s_bytes = self.storage.read_tensor_slice(&scales_name, s_offset, s_slice_bytes)
-                    .map_err(|e| candle_core::Error::Msg(format!("slice scales: {e}")))?;
-                let b_bytes = self.storage.read_tensor_slice(&biases_name, b_offset, b_slice_bytes)
-                    .map_err(|e| candle_core::Error::Msg(format!("slice biases: {e}")))?;
-
-                // Build 2D tensors from sliced bytes
-                let w_2d_shape: Vec<usize> = w_shape[1..].to_vec();
-                let s_2d_shape: Vec<usize> = s_shape[1..].to_vec();
-                let b_2d_shape: Vec<usize> = b_shape[1..].to_vec();
-
-                let packed = Tensor::from_raw_buffer(&w_bytes, w_dtype, &w_2d_shape, &Device::Cpu)?;
-                let scales = Tensor::from_raw_buffer(&s_bytes, s_dtype, &s_2d_shape, &Device::Cpu)?;
-                let biases = Tensor::from_raw_buffer(&b_bytes, b_dtype, &b_2d_shape, &Device::Cpu)?;
-
-                let weight = crate::utils::gptq::dequantize_packed_4bit(&packed, &scales, &biases, group_size)?;
-                let weight = weight.to_dtype(self.dtype)?;
-                return if self.needs_device_transfer {
-                    weight.to_device(&self.device)
-                } else {
-                    Ok(weight)
-                };
-            }
-        }
-
-        // Non-quantized: targeted pread of one expert's 2D slice
-        let (dtype, shape) = self.storage.tensor_meta(tensor_name)
-            .map_err(|e| candle_core::Error::Msg(format!("meta: {e}")))?;
-        let elem_size = dtype.size_in_bytes();
-        let slice_elems: usize = shape[1..].iter().product();
-        let slice_bytes = slice_elems * elem_size;
-        let offset = expert_idx * slice_bytes;
-
-        let bytes = self.storage.read_tensor_slice(tensor_name, offset, slice_bytes)
-            .map_err(|e| candle_core::Error::Msg(format!("slice: {e}")))?;
-        let slice_shape: Vec<usize> = shape[1..].to_vec();
-        let tensor = Tensor::from_raw_buffer(&bytes, dtype, &slice_shape, &Device::Cpu)?;
-        let tensor = if tensor.dtype() != self.dtype { tensor.to_dtype(self.dtype)? } else { tensor };
-        if self.needs_device_transfer { tensor.to_device(&self.device) } else { Ok(tensor) }
     }
 
     /// Reinterpret a `Vec<u8>` as `Vec<f32>` without copying.
@@ -275,6 +225,34 @@ impl DiskExpertProvider {
         // satisfying f32's alignment of 4. Length and capacity are adjusted
         // from u8 to f32 units. Data is valid F32 from safetensors.
         unsafe { Vec::from_raw_parts(ptr as *mut f32, f32_len, cap / 4) }
+    }
+
+    /// Convert raw bytes from mmap directly to an F32 tensor, skipping the intermediate
+    /// typed tensor allocation. For F16→F32 and BF16→F32, this saves one allocation + memcpy.
+    #[inline]
+    fn convert_bytes_to_f32_tensor(bytes: &[u8], src_dtype: DType, shape: &[usize], device: &Device) -> Result<Tensor> {
+        match src_dtype {
+            DType::F16 => {
+                let f16_slice = unsafe {
+                    std::slice::from_raw_parts(bytes.as_ptr() as *const half::f16, bytes.len() / 2)
+                };
+                let f32_vec: Vec<f32> = f16_slice.iter().map(|x| x.to_f32()).collect();
+                Tensor::from_vec(f32_vec, shape, device)
+            }
+            DType::BF16 => {
+                let bf16_slice = unsafe {
+                    std::slice::from_raw_parts(bytes.as_ptr() as *const half::bf16, bytes.len() / 2)
+                };
+                let f32_vec: Vec<f32> = bf16_slice.iter().map(|x| x.to_f32()).collect();
+                Tensor::from_vec(f32_vec, shape, device)
+            }
+            _ => {
+                // Fallback: construct typed tensor, then convert
+                let tensor = Tensor::from_raw_buffer(bytes, src_dtype, shape, &Device::Cpu)?;
+                let tensor = tensor.to_dtype(DType::F32)?;
+                if !device.is_cpu() { tensor.to_device(device) } else { Ok(tensor) }
+            }
+        }
     }
 
     /// Read an expert weight, handling GPTQ dequantization if needed.
@@ -352,15 +330,6 @@ impl ExpertProvider for DiskExpertProvider {
             )));
         }
 
-        // Stacked switch_mlp path: read 3D tensor, slice per expert
-        if let Some(stacked) = &self.stacked_names {
-            return Ok(ExpertWeights {
-                gate_proj: self.read_stacked_expert_slice(&stacked.gate_proj, idx)?,
-                up_proj: self.read_stacked_expert_slice(&stacked.up_proj, idx)?,
-                down_proj: self.read_stacked_expert_slice(&stacked.down_proj, idx)?,
-            });
-        }
-
         let names = &self.expert_names[idx];
 
         // GPTQ path: read and dequantize each weight individually
@@ -372,23 +341,45 @@ impl ExpertProvider for DiskExpertProvider {
             });
         }
 
+        // Stacked format: read per-expert slices from 3D stacked tensors
+        if let Some(ref sm) = self.stacked_meta {
+            let target_device = if self.needs_device_transfer { &self.device } else { &Device::Cpu };
+            let read_slice = |name: &str, byte_stride: usize, shape: &[usize; 2]| -> Result<Tensor> {
+                let byte_offset = idx * byte_stride;
+                if let Some(bytes) = self.storage.tensor_slice_bytes(name, byte_offset, byte_stride) {
+                    if sm.storage_dtype == self.dtype {
+                        Tensor::from_raw_buffer(bytes, sm.storage_dtype, shape, target_device)
+                    } else if self.dtype == DType::F32 {
+                        Self::convert_bytes_to_f32_tensor(bytes, sm.storage_dtype, shape, target_device)
+                    } else {
+                        let t = Tensor::from_raw_buffer(bytes, sm.storage_dtype, shape, &Device::Cpu)?;
+                        let t = t.to_dtype(self.dtype)?;
+                        if self.needs_device_transfer { t.to_device(target_device) } else { Ok(t) }
+                    }
+                } else {
+                    Err(candle_core::Error::Msg(format!("tensor_slice_bytes failed for {name}")))
+                }
+            };
+            return Ok(ExpertWeights {
+                gate_proj: read_slice(&names.gate_proj, sm.gate_byte_stride, &sm.gate_shape)?,
+                up_proj: read_slice(&names.up_proj, sm.up_byte_stride, &sm.up_shape)?,
+                down_proj: read_slice(&names.down_proj, sm.down_byte_stride, &sm.down_shape)?,
+            });
+        }
+
         // Non-GPTQ: optimized read paths
         if self.use_f32_zerocopy {
-            // F32→F32: try zero-copy mmap path first (avoids allocation + memcpy)
+            // F32→F32: read from mmap directly into Tensor
             let target_device = if self.needs_device_transfer { &self.device } else { &Device::Cpu };
             if let (Some((gb, _, gs)), Some((ub, _, us)), Some((db, _, ds))) = (
                 self.storage.tensor_bytes(&names.gate_proj),
                 self.storage.tensor_bytes(&names.up_proj),
                 self.storage.tensor_bytes(&names.down_proj),
             ) {
-                // Reinterpret &[u8] as &[f32] directly from mmap — single memcpy into Tensor
-                let gate_f32 = unsafe { std::slice::from_raw_parts(gb.as_ptr() as *const f32, gb.len() / 4) };
-                let up_f32 = unsafe { std::slice::from_raw_parts(ub.as_ptr() as *const f32, ub.len() / 4) };
-                let down_f32 = unsafe { std::slice::from_raw_parts(db.as_ptr() as *const f32, db.len() / 4) };
                 return Ok(ExpertWeights {
-                    gate_proj: Tensor::from_slice(gate_f32, &*gs, target_device)?,
-                    up_proj: Tensor::from_slice(up_f32, &*us, target_device)?,
-                    down_proj: Tensor::from_slice(down_f32, &*ds, target_device)?,
+                    gate_proj: Tensor::from_raw_buffer(gb, DType::F32, gs, target_device)?,
+                    up_proj: Tensor::from_raw_buffer(ub, DType::F32, us, target_device)?,
+                    down_proj: Tensor::from_raw_buffer(db, DType::F32, ds, target_device)?,
                 });
             }
             // Fallback: read via TensorData (non-mmap storage)
@@ -412,16 +403,27 @@ impl ExpertProvider for DiskExpertProvider {
             self.storage.tensor_bytes(&names.up_proj),
             self.storage.tensor_bytes(&names.down_proj),
         ) {
-            // Build tensors directly from mmap'd bytes — avoids allocation + copy
-            let gate = Tensor::from_raw_buffer(gb, gdt, &gs, &Device::Cpu)?;
-            let up = Tensor::from_raw_buffer(ub, udt, &us, &Device::Cpu)?;
-            let down = Tensor::from_raw_buffer(db, ddt, &ds, &Device::Cpu)?;
-            let (gate, up, down) = if gdt != self.dtype {
+            let (gate, up, down) = if gdt != self.dtype && self.dtype == DType::F32 {
+                // Fused conversion: F16/BF16 → F32 directly from mmap bytes,
+                // skipping intermediate typed tensor allocation
+                (
+                    Self::convert_bytes_to_f32_tensor(gb, gdt, gs, target_device)?,
+                    Self::convert_bytes_to_f32_tensor(ub, udt, us, target_device)?,
+                    Self::convert_bytes_to_f32_tensor(db, ddt, ds, target_device)?,
+                )
+            } else if gdt != self.dtype {
+                let gate = Tensor::from_raw_buffer(gb, gdt, gs, &Device::Cpu)?;
+                let up = Tensor::from_raw_buffer(ub, udt, us, &Device::Cpu)?;
+                let down = Tensor::from_raw_buffer(db, ddt, ds, &Device::Cpu)?;
                 (gate.to_dtype(self.dtype)?, up.to_dtype(self.dtype)?, down.to_dtype(self.dtype)?)
             } else {
-                (gate, up, down)
+                (
+                    Tensor::from_raw_buffer(gb, gdt, gs, target_device)?,
+                    Tensor::from_raw_buffer(ub, udt, us, target_device)?,
+                    Tensor::from_raw_buffer(db, ddt, ds, target_device)?,
+                )
             };
-            return if self.needs_device_transfer {
+            return if self.needs_device_transfer && gdt == self.dtype {
                 Ok(ExpertWeights {
                     gate_proj: gate.to_device(target_device)?,
                     up_proj: up.to_device(target_device)?,
@@ -453,6 +455,28 @@ impl ExpertProvider for DiskExpertProvider {
 
     fn num_experts(&self) -> usize {
         self.num_experts
+    }
+
+    #[cfg(unix)]
+    fn prefetch_experts(&self, indices: &[usize]) {
+        for &idx in indices {
+            if idx >= self.num_experts {
+                continue;
+            }
+            let names = &self.expert_names[idx];
+            // Issue madvise(WILLNEED) for each projection's mmap region
+            for name in [&names.gate_proj, &names.up_proj, &names.down_proj] {
+                if let Some((bytes, _, _)) = self.storage.tensor_bytes(name) {
+                    unsafe {
+                        libc::posix_madvise(
+                            bytes.as_ptr() as *mut _,
+                            bytes.len(),
+                            libc::POSIX_MADV_WILLNEED,
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 

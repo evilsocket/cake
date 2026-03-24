@@ -30,6 +30,9 @@ pub trait ExpertProvider: Send + Sync + std::fmt::Debug {
     fn get_expert(&self, idx: usize) -> Result<ExpertWeights>;
     /// Number of experts available.
     fn num_experts(&self) -> usize;
+    /// Hint that these experts will be needed soon (triggers OS readahead for disk-backed).
+    /// Default implementation is a no-op. Override in DiskExpertProvider to issue madvise.
+    fn prefetch_experts(&self, _indices: &[usize]) {}
     /// Downcast support for provider-specific fast paths.
     fn as_any(&self) -> Option<&dyn std::any::Any> {
         None
