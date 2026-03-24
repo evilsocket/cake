@@ -182,6 +182,7 @@ impl TextModelBase {
                     }
                 })?
         };
+        let lm_head_weight = ctx.backend.preprocess_linear_weight(&lm_head_weight)?;
 
         log::info!("loading {prefix}.norm ...");
         let ln_f_weight = crate::models::common::load_rms_norm_weight(
