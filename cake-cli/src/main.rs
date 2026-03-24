@@ -66,6 +66,9 @@ enum Commands {
         /// Server URL for remote chat mode.
         #[arg(long, default_value = "http://localhost:8080")]
         server: String,
+        /// Offload expert weights to disk for MoE models larger than available RAM.
+        #[arg(long, default_value_t = false)]
+        expert_offload: bool,
     },
     /// Delete a cached model.
     Rm {
@@ -163,7 +166,7 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Commands::Chat { model, server } => {
+        Commands::Chat { model, server, expert_offload } => {
             if let Some(model_name) = model {
                 // Local chat: load model, run TUI with local inference
                 let args = Args {
@@ -172,6 +175,7 @@ async fn main() -> Result<()> {
                     sample_len: 2048,
                     temperature: 1.0,
                     repeat_penalty: 1.1,
+                    expert_offload,
                     ..Args::default()
                 };
                 let mut ctx = cake_core::cake::Context::from_args(args)?;
