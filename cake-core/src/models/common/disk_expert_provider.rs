@@ -100,9 +100,14 @@ impl DiskExpertProvider {
         };
         // Detect storage dtype from first expert (skip for GPTQ — qweight is int32, not weights)
         let storage_dtype = if gptq_group_size.is_none() {
-            expert_names
-                .first()
-                .and_then(|names| storage.read_tensor(&names.gate_proj).ok().map(|d| d.dtype))
+            expert_names.first().and_then(|names| {
+                // Prefer zero-copy metadata query (avoids reading full tensor data)
+                if let Some((_, dt, _)) = storage.tensor_bytes(&names.gate_proj) {
+                    Some(dt)
+                } else {
+                    storage.read_tensor(&names.gate_proj).ok().map(|d| d.dtype)
+                }
+            })
         } else {
             None
         };
@@ -243,9 +248,9 @@ impl ExpertProvider for DiskExpertProvider {
                 let up_f32 = unsafe { std::slice::from_raw_parts(ub.as_ptr() as *const f32, ub.len() / 4) };
                 let down_f32 = unsafe { std::slice::from_raw_parts(db.as_ptr() as *const f32, db.len() / 4) };
                 return Ok(ExpertWeights {
-                    gate_proj: Tensor::from_slice(gate_f32, &*gs, target_device)?,
-                    up_proj: Tensor::from_slice(up_f32, &*us, target_device)?,
-                    down_proj: Tensor::from_slice(down_f32, &*ds, target_device)?,
+                    gate_proj: Tensor::from_slice(gate_f32, gs, target_device)?,
+                    up_proj: Tensor::from_slice(up_f32, us, target_device)?,
+                    down_proj: Tensor::from_slice(down_f32, ds, target_device)?,
                 });
             }
             // Fallback: read via TensorData (non-mmap storage)
@@ -270,9 +275,9 @@ impl ExpertProvider for DiskExpertProvider {
             self.storage.tensor_bytes(&names.down_proj),
         ) {
             // Build tensors directly from mmap'd bytes — avoids allocation + copy
-            let gate = Tensor::from_raw_buffer(gb, gdt, &gs, &Device::Cpu)?;
-            let up = Tensor::from_raw_buffer(ub, udt, &us, &Device::Cpu)?;
-            let down = Tensor::from_raw_buffer(db, ddt, &ds, &Device::Cpu)?;
+            let gate = Tensor::from_raw_buffer(gb, gdt, gs, &Device::Cpu)?;
+            let up = Tensor::from_raw_buffer(ub, udt, us, &Device::Cpu)?;
+            let down = Tensor::from_raw_buffer(db, ddt, ds, &Device::Cpu)?;
             let (gate, up, down) = if gdt != self.dtype {
                 (gate.to_dtype(self.dtype)?, up.to_dtype(self.dtype)?, down.to_dtype(self.dtype)?)
             } else {

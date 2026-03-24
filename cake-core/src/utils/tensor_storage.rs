@@ -52,7 +52,7 @@ pub trait TensorStorageProvider: Send + Sync {
     /// Get a borrowed slice of tensor bytes without copying (if supported).
     /// Returns None if the implementation doesn't support zero-copy access.
     /// When available, this is faster than `read_tensor()` since it avoids allocation.
-    fn tensor_bytes(&self, _name: &str) -> Option<(&[u8], DType, Vec<usize>)> {
+    fn tensor_bytes(&self, _name: &str) -> Option<(&[u8], DType, &[usize])> {
         None
     }
 }
@@ -293,17 +293,17 @@ impl SafetensorsStorage {
             let shard = MappedShard::new(f)?;
             shards.push(shard);
 
-            let obj = header
-                .as_object()
-                .ok_or_else(|| anyhow::anyhow!("shard header not object"))?;
-
-            for (name, meta) in obj {
-                if name.starts_with("__") {
-                    continue;
+            if let serde_json::Value::Object(obj) = header {
+                for (name, meta) in obj {
+                    if name.starts_with("__") {
+                        continue;
+                    }
+                    if let Some(tm) = Self::parse_tensor_meta(&name, &meta, shard_idx, header_len)? {
+                        index.insert(name, tm);
+                    }
                 }
-                if let Some(tm) = Self::parse_tensor_meta(name, meta, shard_idx, header_len)? {
-                    index.insert(name.clone(), tm);
-                }
+            } else {
+                bail!("shard header not object");
             }
         }
 
@@ -331,18 +331,19 @@ impl SafetensorsStorage {
         #[cfg(not(unix))]
         let shard = MappedShard::new(f)?;
 
-        let obj = header
-            .as_object()
-            .ok_or_else(|| anyhow::anyhow!("header not object"))?;
-        let mut index = HashMap::with_capacity(obj.len());
-
-        for (name, meta) in obj {
-            if name.starts_with("__") {
-                continue;
+        let mut index;
+        if let serde_json::Value::Object(obj) = header {
+            index = HashMap::with_capacity(obj.len());
+            for (name, meta) in obj {
+                if name.starts_with("__") {
+                    continue;
+                }
+                if let Some(tm) = Self::parse_tensor_meta(&name, &meta, shard_idx, header_len)? {
+                    index.insert(name, tm);
+                }
             }
-            if let Some(tm) = Self::parse_tensor_meta(name, meta, shard_idx, header_len)? {
-                index.insert(name.clone(), tm);
-            }
+        } else {
+            bail!("header not object");
         }
 
         let shards = vec![shard];
@@ -558,10 +559,10 @@ impl TensorStorageProvider for SafetensorsStorage {
     }
 
     #[cfg(unix)]
-    fn tensor_bytes(&self, name: &str) -> Option<(&[u8], DType, Vec<usize>)> {
+    fn tensor_bytes(&self, name: &str) -> Option<(&[u8], DType, &[usize])> {
         let meta = self.index.get(name)?;
         let shard = self.shards.get(meta.shard_idx as usize)?;
-        Some((shard.as_slice(meta.abs_offset, meta.byte_size as usize), meta.dtype, meta.shape.to_vec()))
+        Some((shard.as_slice(meta.abs_offset, meta.byte_size as usize), meta.dtype, meta.shape.as_slice()))
     }
 }
 
