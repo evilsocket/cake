@@ -26,9 +26,10 @@ expert weights into RAM. Lower is better.
 
 ## Files You May Modify
 
-- `cake-core/src/utils/tensor_storage.rs` — SafetensorsStorage: pread implementation, header parsing, offset computation, buffer management.
-- `cake-core/src/models/common/disk_expert_provider.rs` — DiskExpertProvider: read_weight, dtype conversion, buffer reuse, prefetching.
+- `cake-core/src/utils/tensor_storage.rs` — SafetensorsStorage: mmap-based reads, read_tensor_slice for byte-range access, tensor_meta for metadata-only queries.
+- `cake-core/src/models/common/disk_expert_provider.rs` — DiskExpertProvider: read_expert_weight (GPTQ path), read_stacked_expert_slice (stacked switch_mlp format with per-expert byte-range pread + affine dequant), new_stacked constructor.
 - `cake-core/src/models/common/expert_provider.rs` — ExpertProvider trait, ExpertWeights struct.
+- `cake-core/src/utils/gptq.rs` — dequantize_packed_4bit (affine 4-bit dequant, handles 2D and 3D), dequantize_gptq_4bit (standard GPTQ).
 
 ## Files You Must NOT Modify
 
@@ -79,25 +80,47 @@ tensor. The MoE forward pass relies on this contract — do not change the inter
 
 ## Promising Areas to Explore
 
-1. **Buffer reuse** — `read_weight()` allocates a new `Vec<u8>` per tensor read. A reusable
-   buffer pool could reduce allocation pressure (3 tensors × K experts per token).
+### High Priority (biggest impact on 35B model at 0.22 tok/s)
 
-2. **Prefetching** — after the router selects top-K experts, issue `posix_fadvise(WILLNEED)`
-   or background reads for the K experts while the shared expert runs.
+1. **GPTQ affine dequantization speed** — Each expert read requires dequantizing a 2D
+   slice from the stacked 3D tensor: `read_stacked_expert_slice()` reads raw bytes via mmap,
+   builds a Tensor, then calls `dequantize_packed_4bit()` (CPU-bound, uses rayon). With 8
+   active experts × 3 projections × 40 layers = 960 dequantizations per token. Profile and
+   optimize the inner loop (bit extraction, scale/bias multiply, F32→F16 conversion).
 
-3. **Batch pread** — read gate_proj+up_proj+down_proj in a single pread if they're contiguous
-   in the safetensors file (they often are within the same shard).
+2. **Expert weight caching** — Currently every token re-reads and re-dequantizes all 8
+   active experts per layer from disk. An LRU cache of recently-used dequantized expert
+   weights (in GPU memory) could eliminate redundant dequantizations. MoE models often
+   route to the same popular experts — cache hit rate could be 50-80%.
 
-4. **Header indexing** — `from_model_path()` re-parses shard headers every time. Cache parsed
-   headers or use a more compact in-memory index.
+3. **Parallel expert dequantization** — The 8 active experts per layer are dequantized
+   sequentially. Launch dequantization on a thread pool while the shared expert runs
+   (shared expert always executes, providing a natural overlap window).
 
-5. **Dtype conversion fusion** — combine pread + dtype conversion in a single pass instead
-   of constructing an intermediate tensor.
+4. **Stacked tensor byte-range optimization** — `read_stacked_expert_slice()` calls
+   `tensor_meta()` + `read_tensor_slice()` separately. Fuse into a single operation that
+   computes the byte range and reads in one step. Also consider reading all 3 projections
+   (gate+up+down) for one expert in a single contiguous read if they're adjacent in the shard.
 
-6. **Memory-mapped fallback** — for hot experts that are accessed every token, mmap might
-   beat pread. Detect hot experts and switch strategy.
+5. **Prefetching with madvise** — After the router selects top-K experts, issue
+   `posix_madvise(WILLNEED)` on the mmap'd regions for the K experts' weight slices
+   while the shared expert runs. This triggers OS readahead on NVMe.
 
-7. **Parallel expert reads** — read K expert weight sets in parallel using thread pool or
+### Medium Priority
+
+6. **Buffer reuse** — `read_stacked_expert_slice()` allocates new `Vec<u8>` per read.
+   A reusable buffer pool could reduce allocation pressure.
+
+7. **Batch pread for individual experts** — For non-stacked format, read
+   gate_proj+up_proj+down_proj in a single pread if they're contiguous in the shard.
+   Already partially implemented via `read_tensors()` contiguity detection.
+
+8. **Dtype conversion fusion** — Combine mmap read + dequantization + F16 conversion
+   in a single pass instead of materializing intermediate F32 tensors.
+
+### Lower Priority (already fast enough)
+
+9. **Parallel expert reads** — read K expert weight sets in parallel using thread pool or
    io_uring (on Linux).
 
 8. **Tensor construction** — `Tensor::from_raw_buffer` does a memcpy. Can we construct
