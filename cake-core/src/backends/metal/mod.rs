@@ -794,6 +794,46 @@ impl ComputeBackend for MetalBackend {
         candle_nn::ops::sdpa(q, k, v, mask, causal, scale, 1.0)
     }
 
+    // ── Weight preprocessing ─────────────────────────────────────────
+
+    fn preprocess_linear_weight(&self, weight: &Tensor) -> Result<Tensor> {
+        // Pre-transpose weight to (in_features, out_features) and make contiguous.
+        // This avoids a non-contiguous view from t() on every linear_forward call.
+        weight.t()?.contiguous()
+    }
+
+    fn linear_forward(&self, x: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
+        // Weight is pre-transposed by preprocess_linear_weight: shape (in_features, out_features).
+        // No t() needed — just matmul directly.
+        let out = match x.dims() {
+            [b1, b2, m, k] => {
+                if x.is_contiguous() {
+                    x.reshape((b1 * b2 * m, *k))?
+                        .matmul(weight)?
+                        .reshape((*b1, *b2, *m, ()))?
+                } else {
+                    let w = weight.broadcast_left((*b1, *b2))?;
+                    x.matmul(&w)?
+                }
+            }
+            [bsize, m, k] => {
+                if x.is_contiguous() {
+                    x.reshape((bsize * m, *k))?
+                        .matmul(weight)?
+                        .reshape((*bsize, *m, ()))?
+                } else {
+                    let w = weight.broadcast_left(*bsize)?;
+                    x.matmul(&w)?
+                }
+            }
+            _ => x.matmul(weight)?,
+        };
+        match bias {
+            Some(b) => out.broadcast_add(b),
+            None => Ok(out),
+        }
+    }
+
     // ── MSL-accelerated ops (validated by Metal vs CPU tests) ────────
 
     fn gelu(&self, x: &Tensor) -> Result<Tensor> {
