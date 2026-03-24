@@ -453,7 +453,7 @@ kernel void softmax_last_dim_f32(
     float e = fast::exp(val - _smx);
     // Pass 2: sum reduction
     SIMD_REDUCE_SUM(e, dim, lane, simd_id)
-    output[base + col] = e / _sr;
+    output[base + col] = e * (1.0f / _sr);
 }
 
 kernel void softmax_last_dim_f16(
@@ -473,7 +473,7 @@ kernel void softmax_last_dim_f16(
     float e = fast::exp(val - _smx);
     // Pass 2: sum reduction
     SIMD_REDUCE_SUM(e, dim, lane, simd_id)
-    output[base + col] = half(e / _sr);
+    output[base + col] = half(e * (1.0f / _sr));
 }
 
 // ─── layer_norm ──────────────────────────────────────────────────────
