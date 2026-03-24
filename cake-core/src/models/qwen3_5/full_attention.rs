@@ -206,38 +206,41 @@ impl Qwen3_5FullAttention {
                 ).map_err(|e| anyhow!("flash_attn: {e}"))?;
             }
 
-            // Metal: mixed-precision attention — F16 matmuls + F32 softmax.
-            // F16 SDPA causes garbage, F32 SDPA exceeds threadgroup memory.
+            // Metal path: fused SDPA for generation, mixed-precision for prefill.
             #[cfg(feature = "metal")]
             if matches!(q.device(), candle_core::Device::Metal(_)) {
+                // Generation (seq_len=1): fused kernel — single dispatch with native
+                // GQA (no repeat_kv), online softmax, no attention matrix materialization.
+                // Replaces 4+ separate dispatches (repeat_kv + 2 matmuls + softmax + dtype casts).
+                if seq_len == 1 {
+                    let scale = 1.0 / (self.head_dim as f32).sqrt();
+                    break 'attn self.backend.sdpa(&q, &k, &v, None, false, scale)
+                        .map_err(|e| anyhow!("sdpa: {e}"))?;
+                }
+
+                // Prefill (seq_len > 1): F16 matmuls + F32 softmax (F16 SDPA causes
+                // garbage, F32 SDPA exceeds threadgroup memory).
                 let k = self.repeat_kv(k).map_err(|e| anyhow!("repeat_kv k: {e}"))?;
                 let v = self.repeat_kv(v).map_err(|e| anyhow!("repeat_kv v: {e}"))?;
                 let att = (q.matmul(&k.t()?)? / (self.head_dim as f64).sqrt())?;
                 let att = att.to_dtype(candle_core::DType::F32)?;
-                let att = if seq_len == 1 {
-                    att
-                } else {
-                    let tril = Tensor::tril2(seq_len, candle_core::DType::F32, att.device())
-                        .map_err(|e| anyhow!("tril: {e}"))?;
-                    let mask = ((tril - 1.0)? * 1e9)?;
-                    let mask = mask.broadcast_as(att.shape())
-                        .map_err(|e| anyhow!("mask broadcast: {e}"))?;
-                    (att + mask).map_err(|e| anyhow!("mask add: {e}"))?
-                };
+                let tril = Tensor::tril2(seq_len, candle_core::DType::F32, att.device())
+                    .map_err(|e| anyhow!("tril: {e}"))?;
+                let mask = ((tril - 1.0)? * 1e9)?;
+                let mask = mask.broadcast_as(att.shape())
+                    .map_err(|e| anyhow!("mask broadcast: {e}"))?;
+                let att = (att + mask).map_err(|e| anyhow!("mask add: {e}"))?;
                 let att = self.backend.softmax(&att, att.rank() - 1)?;
                 let att = att.to_dtype(v.dtype())?;
                 break 'attn att.matmul(&v.contiguous()?)
                     .map_err(|e| anyhow!("att matmul v: {e}"))?;
             }
 
-            // Manual attention with GQA head expansion (CPU fallback)
+            // CPU fallback: manual attention with GQA head expansion
             let k = self.repeat_kv(k).map_err(|e| anyhow!("repeat_kv k: {e}"))?;
             let v = self.repeat_kv(v).map_err(|e| anyhow!("repeat_kv v: {e}"))?;
-
             let att = (q.matmul(&k.t()?)? / (self.head_dim as f64).sqrt())?;
-            let att = if seq_len == 1 {
-                att
-            } else {
+            let att = if seq_len == 1 { att } else {
                 let mask = cache.mask(seq_len, att.device())
                     .map_err(|e| anyhow!("mask: {e}"))?
                     .broadcast_as(att.shape())
