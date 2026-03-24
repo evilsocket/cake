@@ -729,10 +729,10 @@ kernel void fused_vector_attention_f16(
     for (uint t = 0; t < kv_len; t++) {
         uint kt = kv_base + t * head_dim;
         float qk = q_val * float(k[kt + d]);
+        float v_val = float(v[kt + d]);  // Prefetch V — overlaps with SIMD reduction
         SIMD_REDUCE_SUM(qk, head_dim, lane, simd_id)
         float score = _sr;
 
-        float v_val = float(v[kt + d]);
         if (score > max_score) {
             float correction = fast::exp(max_score - score);
             sum_exp = fma(sum_exp, correction, 1.0f);
@@ -822,10 +822,10 @@ kernel void fused_vector_attention_f32(
     for (uint t = 0; t < kv_len; t++) {
         uint kt = kv_base + t * head_dim;
         float qk = q_val * k[kt + d];
+        float v_val = v[kt + d];  // Prefetch V — overlaps with SIMD reduction
         SIMD_REDUCE_SUM(qk, head_dim, lane, simd_id)
         float score = _sr;
 
-        float v_val = v[kt + d];
         if (score > max_score) {
             float correction = fast::exp(max_score - score);
             sum_exp = fma(sum_exp, correction, 1.0f);
