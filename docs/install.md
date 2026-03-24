@@ -98,14 +98,17 @@ make mobile_ios
 
 By default, inference runs on CPU. Enable GPU acceleration with:
 
-| Feature | Backend | Platforms |
-|---------|---------|-----------|
-| `cuda` | NVIDIA CUDA (PTX kernels + flash-attn) | Linux, Windows |
-| `metal` | Apple Metal (MSL shaders + fused SDPA) | macOS, iOS |
-| `vulkan` | Vulkan via wgpu | Linux, Windows, Steam Deck |
-| `flash-attn` | Flash Attention 2 (implies `cuda`) | Linux, Windows |
+| Feature | Backend | Platforms | Notes |
+|---------|---------|-----------|-------|
+| `cuda` | NVIDIA CUDA (PTX kernels + flash-attn) | Linux, Windows | Best for NVIDIA GPUs |
+| `metal` | Apple Metal (MSL shaders + fused SDPA) | macOS, iOS | Best for Apple Silicon (~42 tok/s on M3 Pro with 0.8B model) |
+| `accelerate` | Apple Accelerate (AMX hardware) | macOS | CPU-only; 2.7x faster F32 matmul via Apple BLAS. No F16 support — use `metal` for F16 models |
+| `vulkan` | Vulkan via wgpu | Linux, Windows, Steam Deck | Portable GPU backend |
+| `flash-attn` | Flash Attention 2 (implies `cuda`) | Linux, Windows | Fused attention kernel for long sequences |
 
 Multiple backends can be compiled together — the runtime auto-selects based on available hardware.
+
+**Apple Silicon guidance:** Use `metal` for best performance. The `accelerate` feature only helps CPU inference with F32 models — for F16 models (default), CPU without `accelerate` is actually faster (26 vs 23 tok/s) because F16 halves memory bandwidth vs the F32 conversion Accelerate requires.
 
 ### Model Features
 

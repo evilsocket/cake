@@ -32,10 +32,11 @@ Cake is a **multimodal AI inference server** written in Rust that can run models
 ### Build
 
 ```sh
-cargo build --release --features cuda   # Linux (NVIDIA)
-cargo build --release --features metal  # macOS (Apple Silicon)
-cargo build --release --features vulkan # Linux (AMD/Intel/Steam Deck)
-cargo build --release                   # CPU only
+cargo build --release --features cuda        # Linux (NVIDIA)
+cargo build --release --features metal       # macOS (Apple Silicon GPU)
+cargo build --release --features accelerate  # macOS (Apple Silicon CPU, F32 models)
+cargo build --release --features vulkan      # Linux (AMD/Intel/Steam Deck)
+cargo build --release                        # CPU only (portable)
 ```
 
 ### Models

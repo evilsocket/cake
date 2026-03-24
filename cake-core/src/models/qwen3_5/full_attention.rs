@@ -138,9 +138,11 @@ impl Qwen3_5FullAttention {
         let qkv = self.backend.linear_forward(x, &self.qkv_proj_weight, None)
             .map_err(|e| anyhow!("qkv_proj: {e}"))?;
 
-        // Flush GPU commands after QKV matmul (always needed — full attention
-        // accumulates ~24 commands between syncs, can't afford more)
-        let _ = self.backend.synchronize();
+        // Flush GPU commands after QKV matmul — needed for prefill where many
+        // operations follow. Generation (seq_len=1) uses fused SDPA with few commands.
+        if seq_len > 1 {
+            let _ = self.backend.synchronize();
+        }
 
         // Split: Q (doubled for gating), K, V
         let q_out = qkv.narrow(D::Minus1, 0, self.q_size)
@@ -206,45 +208,46 @@ impl Qwen3_5FullAttention {
                 ).map_err(|e| anyhow!("flash_attn: {e}"))?;
             }
 
-            // Metal: mixed-precision attention — F16 matmuls + F32 softmax.
-            // F16 SDPA causes garbage, F32 SDPA exceeds threadgroup memory.
+            // Metal path: fused SDPA for generation, mixed-precision for prefill.
             #[cfg(feature = "metal")]
             if matches!(q.device(), candle_core::Device::Metal(_)) {
+                // Generation (seq_len=1): fused kernel — single dispatch with native
+                // GQA (no repeat_kv), online softmax, no attention matrix materialization.
+                // Replaces 4+ separate dispatches (repeat_kv + 2 matmuls + softmax + dtype casts).
+                if seq_len == 1 {
+                    let scale = 1.0 / (self.head_dim as f32).sqrt();
+                    break 'attn self.backend.sdpa(&q, &k, &v, None, false, scale)
+                        .map_err(|e| anyhow!("sdpa: {e}"))?;
+                }
+
+                // Prefill (seq_len > 1): F16 matmuls + F32 softmax (F16 SDPA causes
+                // garbage, F32 SDPA exceeds threadgroup memory).
                 let k = self.repeat_kv(k).map_err(|e| anyhow!("repeat_kv k: {e}"))?;
                 let v = self.repeat_kv(v).map_err(|e| anyhow!("repeat_kv v: {e}"))?;
                 let att = (q.matmul(&k.t()?)? / (self.head_dim as f64).sqrt())?;
                 let att = att.to_dtype(candle_core::DType::F32)?;
-                let att = if seq_len == 1 {
-                    att
-                } else {
-                    let tril = Tensor::tril2(seq_len, candle_core::DType::F32, att.device())
-                        .map_err(|e| anyhow!("tril: {e}"))?;
-                    let mask = ((tril - 1.0)? * 1e9)?;
-                    let mask = mask.broadcast_as(att.shape())
-                        .map_err(|e| anyhow!("mask broadcast: {e}"))?;
-                    (att + mask).map_err(|e| anyhow!("mask add: {e}"))?
-                };
+                let tril = Tensor::tril2(seq_len, candle_core::DType::F32, att.device())
+                    .map_err(|e| anyhow!("tril: {e}"))?;
+                let mask = ((tril - 1.0)? * 1e9)?;
+                let mask = mask.broadcast_as(att.shape())
+                    .map_err(|e| anyhow!("mask broadcast: {e}"))?;
+                let att = (att + mask).map_err(|e| anyhow!("mask add: {e}"))?;
                 let att = self.backend.softmax(&att, att.rank() - 1)?;
                 let att = att.to_dtype(v.dtype())?;
                 break 'attn att.matmul(&v.contiguous()?)
                     .map_err(|e| anyhow!("att matmul v: {e}"))?;
             }
 
-            // Manual attention with GQA head expansion (CPU fallback)
+            // CPU: manual attention with GQA head expansion
             let k = self.repeat_kv(k).map_err(|e| anyhow!("repeat_kv k: {e}"))?;
             let v = self.repeat_kv(v).map_err(|e| anyhow!("repeat_kv v: {e}"))?;
-
             let att = (q.matmul(&k.t()?)? / (self.head_dim as f64).sqrt())?;
-            let att = if seq_len == 1 {
-                att
-            } else {
-                let mask = cache.mask(seq_len, att.device())
-                    .map_err(|e| anyhow!("mask: {e}"))?
-                    .broadcast_as(att.shape())
-                    .map_err(|e| anyhow!("mask broadcast: {e}"))?;
-                masked_fill(&att, &mask, f32::NEG_INFINITY)
-                    .map_err(|e| anyhow!("masked_fill: {e}"))?
-            };
+            let mask = cache.mask(seq_len, att.device())
+                .map_err(|e| anyhow!("mask: {e}"))?
+                .broadcast_as(att.shape())
+                .map_err(|e| anyhow!("mask broadcast: {e}"))?;
+            let att = masked_fill(&att, &mask, f32::NEG_INFINITY)
+                .map_err(|e| anyhow!("masked_fill: {e}"))?;
             let att = self.backend.softmax(&att, att.rank() - 1)?;
             att.matmul(&v.contiguous()?)?
         };
