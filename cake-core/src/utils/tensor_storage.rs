@@ -271,10 +271,10 @@ impl SafetensorsStorage {
         dtype: candle_core::DType,
         device: &candle_core::Device,
     ) -> Result<HashMap<String, candle_core::Tensor>> {
-        let mut map = HashMap::new();
-        for name in self.tensor_names() {
-            let tensor = self.load_tensor(&name, dtype, device)?;
-            map.insert(name, tensor);
+        let mut map = HashMap::with_capacity(self.index.len());
+        for name in self.index.keys() {
+            let tensor = self.load_tensor(name, dtype, device)?;
+            map.insert(name.clone(), tensor);
         }
         Ok(map)
     }
