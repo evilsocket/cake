@@ -306,15 +306,20 @@ impl DiskExpertProvider {
             },
         };
 
-        // Pre-warm: dequantize all experts at construction (moves cost from first token to loading)
+        // Pre-warm: dequantize all experts in parallel (moves cost from first token to loading)
         if provider.cache.is_some() {
             log::info!("pre-warming expert cache for {} experts...", num_experts);
-            for i in 0..num_experts {
-                if let Ok(ew) = provider.get_expert_uncached(i) {
-                    if let Some(ref cache) = provider.cache {
-                        if let Ok(mut entries) = cache.entries.write() {
-                            entries.insert(i, ew);
-                        }
+            use rayon::prelude::*;
+            let results: Vec<(usize, ExpertWeights)> = (0..num_experts)
+                .into_par_iter()
+                .filter_map(|i| {
+                    provider.get_expert_uncached(i).ok().map(|ew| (i, ew))
+                })
+                .collect();
+            if let Some(ref cache) = provider.cache {
+                if let Ok(mut entries) = cache.entries.write() {
+                    for (i, ew) in results {
+                        entries.insert(i, ew);
                     }
                 }
             }

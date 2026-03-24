@@ -171,24 +171,17 @@ pub fn dequantize_packed_4bit(
     let cols = packed_cols * 8;
     let (_, groups) = scales.dims2()?;
 
-    let pw: Vec<u32> = packed
-        .to_dtype(DType::U32)?
-        .flatten_all()?
-        .to_vec1::<u32>()?;
-    let sc: Vec<f32> = scales
-        .to_dtype(DType::F32)?
-        .flatten_all()?
-        .to_vec1::<f32>()?;
-    let bi: Vec<f32> = biases
-        .to_dtype(DType::F32)?
-        .flatten_all()?
-        .to_vec1::<f32>()?;
+    // Extract raw data — avoid Tensor intermediates for the hot path
+    let pw: Vec<u32> = packed.flatten_all()?.to_vec1::<u32>()?;
+    let sc: Vec<f32> = scales.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+    let bi: Vec<f32> = biases.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
 
     use rayon::prelude::*;
-    let weight: Vec<f32> = (0..rows)
-        .into_par_iter()
-        .flat_map(|i| {
-            let mut row = vec![0f32; cols];
+    let mut weight = vec![0f32; rows * cols];
+    weight
+        .par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(i, row)| {
             for pc in 0..packed_cols {
                 let packed_val = pw[i * packed_cols + pc];
                 for bit in 0..8u32 {
@@ -200,9 +193,7 @@ pub fn dequantize_packed_4bit(
                     row[j] = w4 * scale + bias;
                 }
             }
-            row
-        })
-        .collect();
+        });
 
     Tensor::from_vec(weight, (rows, cols), &Device::Cpu)
 }
