@@ -462,9 +462,14 @@ impl ExpertProvider for DiskExpertProvider {
 
         // Transfer to target device
         if self.needs_device_transfer {
+            // Batch gate+up (same shape) into one transfer, down separately
+            let gate_up = Tensor::cat(&[&cpu_result.gate_proj, &cpu_result.up_proj], 0)?;
+            let gate_up_gpu = gate_up.to_device(&self.device)?;
+            let g_rows = cpu_result.gate_proj.dim(0)?;
+            let u_rows = cpu_result.up_proj.dim(0)?;
             Ok(ExpertWeights {
-                gate_proj: cpu_result.gate_proj.to_device(&self.device)?,
-                up_proj: cpu_result.up_proj.to_device(&self.device)?,
+                gate_proj: gate_up_gpu.narrow(0, 0, g_rows)?,
+                up_proj: gate_up_gpu.narrow(0, g_rows, u_rows)?,
                 down_proj: cpu_result.down_proj.to_device(&self.device)?,
             })
         } else {
