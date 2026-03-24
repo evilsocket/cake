@@ -12,8 +12,8 @@ using namespace metal;
         threadgroup_barrier(mem_flags::mem_threadgroup); \
         /* All threads read partial sums — single barrier, no broadcast needed */ \
         uint _ns = ((dim) + 31) / 32; \
-        _sr = 0.0f; \
-        for (uint _g = 0; _g < _ns; _g++) _sr += _ps[_g]; \
+        _sr = _ps[0]; \
+        for (uint _g = 1; _g < _ns; _g++) _sr += _ps[_g]; \
     }
 
 // ─── Fast sigmoid helper ─────────────────────────────────────────────
