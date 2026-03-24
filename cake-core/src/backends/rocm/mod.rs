@@ -357,19 +357,24 @@ impl ComputeBackend for RocmBackend {
     fn device(&self) -> &Device { &self.device }
 
     fn preprocess_linear_weight(&self, weight: &Tensor) -> Result<Tensor> {
-        // Pre-convert to F32 contiguous so tensor_matmul skips conversion in the hot path
-        if weight.dtype() == DType::F32 && weight.is_contiguous() {
-            Ok(weight.clone())
-        } else {
-            weight.to_dtype(DType::F32)?.contiguous()
-        }
+        // Pre-ensure contiguous layout at load time to avoid runtime copies.
+        // Don't change dtype — linear_forward expects matching dtypes with input.
+        if weight.is_contiguous() { Ok(weight.clone()) } else { weight.contiguous() }
     }
 
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
+        let orig = a.dtype();
         let m = a.dims()[a.dims().len() - 2];
-        if m <= 4 { return a.matmul(b); }
+        if m <= 4 {
+            // CPU fallback — ensure matching dtypes (weight may be pre-converted to F32)
+            return if a.dtype() != b.dtype() {
+                a.to_dtype(DType::F32)?.matmul(&b.to_dtype(DType::F32)?)?.to_dtype(orig)
+            } else {
+                a.matmul(b)
+            };
+        }
         let out = self.tensor_matmul(a, b)?;
-        if a.dtype() == DType::F32 { Ok(out) } else { out.to_dtype(a.dtype()) }
+        if orig == DType::F32 { Ok(out) } else { out.to_dtype(orig) }
     }
 
     fn attention(&self, q: &Tensor, k: &Tensor, v: &Tensor, scale: f32, causal: bool) -> Result<Tensor> {

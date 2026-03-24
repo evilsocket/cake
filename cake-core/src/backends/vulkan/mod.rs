@@ -1343,21 +1343,18 @@ impl ComputeBackend for VulkanBackend {
     }
 
     fn preprocess_linear_weight(&self, weight: &Tensor) -> Result<Tensor> {
-        // Pre-convert to F32 contiguous and pre-upload to GPU.
+        // Pre-upload F32 version to GPU cache (tensor_matmul will find it via get_or_upload).
+        // Return original dtype weight so linear_forward's x.matmul(&w) has matching dtypes.
         let w = weight.to_dtype(DType::F32)?.contiguous()?;
-        // Pre-upload F32 to GPU weight cache
         let _ = self.get_or_upload(&w)?;
 
         // Also pre-upload the TRANSPOSED F16 data for GEMV (halves bandwidth).
-        // weight.t() is what linear_forward passes to matmul.
         if weight.dtype() == DType::F16 {
-            let wt_f16 = weight.t()?.contiguous()?; // [in, out] F16 contiguous
+            let wt_f16 = weight.t()?.contiguous()?;
             let f16_data: Vec<f32> = wt_f16.to_dtype(DType::F32)?.flatten_all()?.to_vec1()?;
-            // Store as raw F16 bytes (u32 packed pairs)
             let n = wt_f16.elem_count();
             let f16_vals: Vec<half::f16> = f16_data.iter().map(|&v| half::f16::from_f32(v)).collect();
             let f16_bytes: &[u8] = bytemuck::cast_slice(&f16_vals);
-            // Upload as u32 buffer
             let buf_bytes = (f16_bytes.len()) as u64;
             let mut alloc_guard = self.allocator.lock().unwrap();
             let alloc = alloc_guard.as_mut().unwrap();
@@ -1368,8 +1365,7 @@ impl ComputeBackend for VulkanBackend {
             unsafe {
                 std::ptr::copy_nonoverlapping(f16_bytes.as_ptr(), buf.mapped_ptr, f16_bytes.len());
             }
-            // Cache by the view key of the F32 weight's .t() (what get_or_upload will see)
-            let wt_f32 = w.t()?; // F32 non-contiguous [in, out]
+            let wt_f32 = w.t()?;
             if let Some(key) = Self::view_key(&wt_f32) {
                 let mut cache = self.weight_cache.lock().unwrap();
                 cache.f16_views.insert(key, Arc::new(buf));
@@ -1378,7 +1374,9 @@ impl ComputeBackend for VulkanBackend {
             drop(alloc_guard);
         }
 
-        Ok(w)
+        // Return original dtype — don't break linear_forward's dtype assumptions
+        let w_orig = if weight.is_contiguous() { weight.clone() } else { weight.contiguous()? };
+        Ok(w_orig)
     }
 
     fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
