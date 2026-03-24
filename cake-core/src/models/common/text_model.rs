@@ -332,10 +332,18 @@ impl TextModelBase {
         }
 
         let head_start = std::time::Instant::now();
+
+        // Final norm + lm_head in F32 for logit precision — F16 through 24 layers
+        // accumulates small errors that get amplified across 248k vocab entries,
+        // shifting the sampling distribution enough to cause wrong-language output.
+        let x_f32 = x.to_dtype(candle_core::DType::F32)
+            .map_err(|e| anyhow!("error in ln_f x to_f32: {e}"))?;
+        let w_f32 = self.ln_f_weight.to_dtype(candle_core::DType::F32)
+            .map_err(|e| anyhow!("error in ln_f w to_f32: {e}"))?;
         let x = self
             .ctx
             .backend
-            .rms_norm(&x, &self.ln_f_weight, self.ln_f_eps)
+            .rms_norm(&x_f32, &w_f32, self.ln_f_eps)
             .map_err(|e| anyhow!("error in ln_f.forward: {e}"))?;
 
         let x = x
@@ -344,10 +352,12 @@ impl TextModelBase {
             .contiguous()
             .map_err(|e| anyhow!("error in x.i.contiguous: {e}"))?;
 
+        let lm_w_f32 = self.lm_head_weight.to_dtype(candle_core::DType::F32)
+            .map_err(|e| anyhow!("error in lm_head w to_f32: {e}"))?;
         let logits = self
             .ctx
             .backend
-            .linear_forward(&x, &self.lm_head_weight, None)
+            .linear_forward(&x, &lm_w_f32, None)
             .map_err(|e| anyhow!("error in lm_head.forward: {e}"))?;
         // Note: no explicit sync needed here — the CPU-side logits sampling
         // (to_vec1 in LogitsProcessor) implicitly synchronizes the Metal command buffer.

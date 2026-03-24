@@ -67,8 +67,10 @@ impl TextGenerator for Qwen3_5Moe {
     }
 
     async fn next_token(&mut self, index: usize) -> Result<Token> {
+        // Qwen3.5's chat template appends an empty <think> block to skip
+        // reasoning mode and generate the response directly in the user's language.
         if self.base.generated == 0 {
-            let dialog = self.history.encode_dialog_to_prompt();
+            let dialog = self.history.encode_dialog_to_prompt() + "<think>\n\n</think>\n\n";
             self.base.prepare_prompt(&dialog)?;
         }
         self.base.next_token(index).await

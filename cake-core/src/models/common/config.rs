@@ -159,20 +159,14 @@ pub fn load_rms_norm_weight(
 ) -> candle_core::Result<candle_core::Tensor> {
     let weight = vb.get(size, "weight")?;
     if residual {
-        // Auto-detect: some quantized model variants (e.g., MLX-quantized) already apply
-        // the (1+w) transformation during quantization, storing the final weight directly.
-        // Detect by checking if the mean is closer to 0 (residual) or 1 (already transformed).
-        let mean: f32 = weight.to_dtype(candle_core::DType::F32)?
-            .mean_all()?
-            .to_scalar()?;
-        if mean.abs() < 0.5 {
-            // Weights near 0: residual pattern, add 1.0
-            Ok((weight + 1.0)?)
-        } else {
-            // Weights near 1: already transformed (e.g., MLX quantized), use as-is
-            log::debug!("rms_norm weight mean={mean:.3}: skipping residual +1.0");
-            Ok(weight)
-        }
+        // Residual RMS norm: forward = (1 + weight) * rms_norm(x).
+        // Weights are stored as deltas from 0, so add 1.0 at load time.
+        // Compute in F32 to match HF reference: (1.0 + self.weight.float()),
+        // then cast back to model dtype. Adding 1.0 in F16 loses precision for
+        // small deltas near 0.
+        let w_f32 = weight.to_dtype(candle_core::DType::F32)?;
+        let w_res = (w_f32 + 1.0)?;
+        Ok(w_res.to_dtype(weight.dtype())?)
     } else {
         Ok(weight)
     }
