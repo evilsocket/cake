@@ -10,14 +10,10 @@ using namespace metal;
         threadgroup float _ps[32]; \
         if (lane == 0) _ps[simd_id] = _sr; \
         threadgroup_barrier(mem_flags::mem_threadgroup); \
+        /* All threads read partial sums — single barrier, no broadcast needed */ \
         uint _ns = ((dim) + 31) / 32; \
-        float _t = 0.0f; \
-        if (simd_id == 0 && lane < _ns) _t = _ps[lane]; \
-        _t = simd_sum(_t); \
-        /* Broadcast total to ALL threads via threadgroup memory */ \
-        if (simd_id == 0 && lane == 0) _ps[0] = _t; \
-        threadgroup_barrier(mem_flags::mem_threadgroup); \
-        _sr = _ps[0]; \
+        _sr = 0.0f; \
+        for (uint _g = 0; _g < _ns; _g++) _sr += _ps[_g]; \
     }
 
 // ─── Fast sigmoid helper ─────────────────────────────────────────────
@@ -385,12 +381,8 @@ kernel void depthwise_conv1d_bias_f16(
         if (lane == 0) _pmx[simd_id] = _smx; \
         threadgroup_barrier(mem_flags::mem_threadgroup); \
         uint _nmx = ((dim) + 31) / 32; \
-        float _tmx = -INFINITY; \
-        if (simd_id == 0 && lane < _nmx) _tmx = _pmx[lane]; \
-        _tmx = simd_max(_tmx); \
-        if (simd_id == 0 && lane == 0) _pmx[0] = _tmx; \
-        threadgroup_barrier(mem_flags::mem_threadgroup); \
         _smx = _pmx[0]; \
+        for (uint _g = 1; _g < _nmx; _g++) _smx = max(_smx, _pmx[_g]); \
     }
 
 // ─── softmax_last_dim ────────────────────────────────────────────────
@@ -687,19 +679,8 @@ kernel void fused_vector_attention_f16(
     for (uint t = 0; t < kv_len; t++) {
         uint kt = kv_base + t * head_dim;
         float qk = q_val * float(k[kt + d]);
-        float score = simd_sum(qk);
-        threadgroup float partial[32];
-        if (head_dim > 32) {
-            if (lane == 0) partial[simd_id] = score;
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            uint ns = (head_dim + 31) / 32;
-            float t2 = 0.0f;
-            if (simd_id == 0 && lane < ns) t2 = partial[lane];
-            t2 = simd_sum(t2);
-            if (simd_id == 0 && lane == 0) partial[0] = t2;
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            score = partial[0];
-        }
+        SIMD_REDUCE_SUM(qk, head_dim, lane, simd_id)
+        float score = _sr;
 
         float v_val = float(v[kt + d]);
         if (score > max_score) {
@@ -791,19 +772,8 @@ kernel void fused_vector_attention_f32(
     for (uint t = 0; t < kv_len; t++) {
         uint kt = kv_base + t * head_dim;
         float qk = q_val * k[kt + d];
-        float score = simd_sum(qk);
-        threadgroup float partial[32];
-        if (head_dim > 32) {
-            if (lane == 0) partial[simd_id] = score;
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            uint ns = (head_dim + 31) / 32;
-            float t2 = 0.0f;
-            if (simd_id == 0 && lane < ns) t2 = partial[lane];
-            t2 = simd_sum(t2);
-            if (simd_id == 0 && lane == 0) partial[0] = t2;
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            score = partial[0];
-        }
+        SIMD_REDUCE_SUM(qk, head_dim, lane, simd_id)
+        float score = _sr;
 
         float v_val = v[kt + d];
         if (score > max_score) {
