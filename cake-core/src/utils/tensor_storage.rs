@@ -84,6 +84,10 @@ pub trait TensorStorageProvider: Send + Sync {
     fn has_tensor(&self, name: &str) -> bool;
     /// List all tensor names available in this storage.
     fn tensor_names(&self) -> Vec<String>;
+    /// Number of tensors in this storage (O(1), avoids tensor_names() clone).
+    fn tensor_count(&self) -> usize {
+        self.tensor_names().len()
+    }
     /// Get a borrowed slice of tensor bytes without copying (if supported).
     /// Returns None if the implementation doesn't support zero-copy access.
     /// When available, this is faster than `read_tensor()` since it avoids allocation.
@@ -572,6 +576,10 @@ impl TensorStorageProvider for SafetensorsStorage {
 
     fn tensor_names(&self) -> Vec<String> {
         self.index.keys().cloned().collect()
+    }
+
+    fn tensor_count(&self) -> usize {
+        self.index.len()
     }
 
     #[cfg(unix)]
