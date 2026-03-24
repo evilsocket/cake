@@ -725,11 +725,10 @@ kernel void fused_vector_attention_f16(
     float sum_exp = 0.0f;
     float acc = 0.0f;
 
-    uint kv_base = bkv * kv_len * head_dim;
-    for (uint t = 0; t < kv_len; t++) {
-        uint kt = kv_base + t * head_dim;
-        float qk = q_val * float(k[kt + d]);
-        float v_val = float(v[kt + d]);  // Prefetch V — overlaps with SIMD reduction
+    uint kt = bkv * kv_len * head_dim + d;  // Start at first KV position + thread's dim offset
+    for (uint t = 0; t < kv_len; t++, kt += head_dim) {
+        float qk = q_val * float(k[kt]);
+        float v_val = float(v[kt]);  // Prefetch V — overlaps with SIMD reduction
         SIMD_REDUCE_SUM(qk, head_dim, lane, simd_id)
         float score = _sr;
 
@@ -818,11 +817,10 @@ kernel void fused_vector_attention_f32(
     float sum_exp = 0.0f;
     float acc = 0.0f;
 
-    uint kv_base = bkv * kv_len * head_dim;
-    for (uint t = 0; t < kv_len; t++) {
-        uint kt = kv_base + t * head_dim;
-        float qk = q_val * k[kt + d];
-        float v_val = v[kt + d];  // Prefetch V — overlaps with SIMD reduction
+    uint kt = bkv * kv_len * head_dim + d;
+    for (uint t = 0; t < kv_len; t++, kt += head_dim) {
+        float qk = q_val * k[kt];
+        float v_val = v[kt];  // Prefetch V — overlaps with SIMD reduction
         SIMD_REDUCE_SUM(qk, head_dim, lane, simd_id)
         float score = _sr;
 
