@@ -26,8 +26,9 @@ struct RmsNormGated {
 
 impl RmsNormGated {
     fn load(size: usize, eps: f64, vb: VarBuilder, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
-        // Store weight as F32 to match the recurrent step's F32 output.
-        let weight = vb.get(size, "weight")?.to_dtype(DType::F32)?;
+        // Residual RMS norm: forward = (1 + weight) * rms_norm(x) * silu(z).
+        // Store as F32 to match the recurrent step's F32 output.
+        let weight = (vb.get(size, "weight")?.to_dtype(DType::F32)? + 1.0)?;
         Ok(Self { weight, eps: eps as f32, backend })
     }
 
