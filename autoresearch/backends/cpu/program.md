@@ -116,8 +116,8 @@ through the pipeline.
    build masks more efficiently.
 
 5. **Fused attention softmax** — The attention implementation creates separate tensors for
-   `attn * scale`, mask application, and softmax. Fusing scale+mask+softmax could reduce
-   three allocations to one.
+   scaling (`attn * scale`), masking (`where_cond`), and softmax. Fusing these three steps
+   could reduce intermediate allocations.
 
 6. **Optimized topk** — The default `topk` (inherited from the trait) uses a full sort.
    A CPU-specific partial selection algorithm (O(N + K log K) instead of O(N log N))
