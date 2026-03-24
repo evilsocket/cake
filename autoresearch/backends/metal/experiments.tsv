@@ -53,4 +53,5 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 051	2026-03-24T03:20:00	b878ab2	45736095232	PASS	PASS	keep	Optimize partial sum loop init (skip zero-init)
 052	2026-03-24T03:40:00	762662d	46166507008	PASS	PASS	keep	Extract dispatch_unary helper (-60 lines boilerplate)
 053	2026-03-24T04:00:00	7e06d8a	46905399040	PASS	PASS	keep	Extract dispatch_unary_cast helper for F8 dequant
+054	2026-03-24T04:20:00	8107fbc	690937856	PASS	PASS	keep	Cached build run — actual benchmark time (no compilation)
 ---	Metal: 36.4 tok/s avg vs CPU: 22.9 tok/s (+59%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
