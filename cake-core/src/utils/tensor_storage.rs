@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
+#[cfg(not(unix))]
 use std::io::Read;
 use std::path::Path;
 
@@ -280,18 +281,17 @@ impl SafetensorsStorage {
 
         for shard_name in shard_tensors.keys() {
             let shard_path = parent.join(shard_name);
-            let (header_len, header) = Self::parse_shard_header(&shard_path)?;
             let shard_idx = shards.len() as u16;
             let f = File::open(&shard_path)?;
             #[cfg(unix)]
-            {
-                let shard = MappedShard::new(&f)?;
-                shards.push(shard);
-            }
+            let shard = MappedShard::new(&f)?;
+            #[cfg(unix)]
+            let (header_len, header) = Self::parse_shard_header_mmap(&shard)?;
             #[cfg(not(unix))]
-            {
-                shards.push(MappedShard::new(f)?);
-            }
+            let (header_len, header) = Self::parse_shard_header(&shard_path)?;
+            #[cfg(not(unix))]
+            let shard = MappedShard::new(f)?;
+            shards.push(shard);
 
             let obj = header
                 .as_object()
@@ -318,9 +318,18 @@ impl SafetensorsStorage {
 
     /// Build from a single safetensors file (non-sharded model).
     fn from_single_file(path: &Path) -> Result<Self> {
-        let (header_len, header) = Self::parse_shard_header(path)?;
         let f = File::open(path)?;
         let shard_idx = 0u16;
+
+        // mmap first, then parse header from mmap'd memory (avoids separate read + allocation)
+        #[cfg(unix)]
+        let shard = MappedShard::new(&f)?;
+        #[cfg(unix)]
+        let (header_len, header) = Self::parse_shard_header_mmap(&shard)?;
+        #[cfg(not(unix))]
+        let (header_len, header) = Self::parse_shard_header(path)?;
+        #[cfg(not(unix))]
+        let shard = MappedShard::new(f)?;
 
         let obj = header
             .as_object()
@@ -336,17 +345,31 @@ impl SafetensorsStorage {
             }
         }
 
-        #[cfg(unix)]
-        let shards = vec![MappedShard::new(&f)?];
-        #[cfg(not(unix))]
-        let shards = vec![MappedShard::new(f)?];
+        let shards = vec![shard];
 
         log::info!("SafetensorsStorage: indexed {} tensors from single file", index.len());
 
         Ok(Self { index, shards })
     }
 
-    /// Parse a shard file's header. Returns (header_len, parsed JSON).
+    /// Parse a shard file's header from mmap'd data. Returns (header_len, parsed JSON).
+    #[cfg(unix)]
+    fn parse_shard_header_mmap(shard: &MappedShard) -> Result<(usize, serde_json::Value)> {
+        let data = shard.as_slice(0, shard.mmap_len.min(8));
+        if data.len() < 8 {
+            bail!("shard file too small for header");
+        }
+        let header_len = u64::from_le_bytes(data[..8].try_into().unwrap()) as usize;
+        if header_len > 50 * 1024 * 1024 {
+            bail!("safetensors header too large: {} bytes", header_len);
+        }
+        let header_data = shard.as_slice(8, header_len);
+        let header: serde_json::Value = serde_json::from_slice(header_data)?;
+        Ok((header_len, header))
+    }
+
+    /// Parse a shard file's header from file I/O. Returns (header_len, parsed JSON).
+    #[cfg(not(unix))]
     fn parse_shard_header(path: &Path) -> Result<(usize, serde_json::Value)> {
         let mut f = File::open(path)?;
         let mut len_buf = [0u8; 8];
