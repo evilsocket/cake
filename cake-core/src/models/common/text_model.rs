@@ -137,6 +137,8 @@ pub struct TextModelBase {
     pub ln_f_weight: Tensor,
     pub ln_f_eps: f32,
     pub lm_head_weight: Tensor,
+    /// Cached F32 lm_head weight for logit precision (avoids 1 GB allocation per token).
+    pub lm_head_weight_f32: Tensor,
 
     pub logits_processor: LogitsProcessor,
 
@@ -245,6 +247,9 @@ impl TextModelBase {
 
         let generated = 0;
 
+        // Pre-cache F32 lm_head weight to avoid 1 GB allocation+copy per token.
+        let lm_head_weight_f32 = lm_head_weight.to_dtype(candle_core::DType::F32)?;
+
         Ok(Self {
             tokenizer,
             tokens,
@@ -258,6 +263,7 @@ impl TextModelBase {
             ln_f_weight,
             ln_f_eps,
             lm_head_weight,
+            lm_head_weight_f32,
             logits_processor,
         })
     }
@@ -347,14 +353,13 @@ impl TextModelBase {
 
         // lm_head in F32 for logit precision — F16 matmul over 248k vocab
         // amplifies accumulated errors, shifting the sampling distribution.
+        // Uses pre-cached F32 weight to avoid 1 GB allocation per token.
         let x_f32 = x.to_dtype(candle_core::DType::F32)
             .map_err(|e| anyhow!("error in lm_head x to_f32: {e}"))?;
-        let lm_w_f32 = self.lm_head_weight.to_dtype(candle_core::DType::F32)
-            .map_err(|e| anyhow!("error in lm_head w to_f32: {e}"))?;
         let logits = self
             .ctx
             .backend
-            .linear_forward(&x_f32, &lm_w_f32, None)
+            .linear_forward(&x_f32, &self.lm_head_weight_f32, None)
             .map_err(|e| anyhow!("error in lm_head.forward: {e}"))?;
         // Note: no explicit sync needed here — the CPU-side logits sampling
         // (to_vec1 in LogitsProcessor) implicitly synchronizes the Metal command buffer.
