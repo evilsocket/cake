@@ -744,7 +744,7 @@ kernel void fused_vector_attention_f16(
         }
     }
 
-    output[bh * head_dim + d] = half(acc / sum_exp);
+    output[bh * head_dim + d] = half(acc * (1.0f / sum_exp));
 }
 
 // ─── adaln_modulate: rms_norm(x)*weight*(scale+1) + shift ───────────
@@ -836,5 +836,5 @@ kernel void fused_vector_attention_f32(
         }
     }
 
-    output[bh * head_dim + d] = acc / sum_exp;
+    output[bh * head_dim + d] = acc * (1.0f / sum_exp);
 }
