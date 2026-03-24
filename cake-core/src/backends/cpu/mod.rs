@@ -122,8 +122,36 @@ impl ComputeBackend for CpuBackend {
     }
 
     fn rms_norm_channel(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-        // x is (batch, channels, time) — rms_norm expects norm over last dim
-        // Transpose to (batch, time, channels), norm, transpose back
+        // x is (batch, channels, time) — norm over channels at each time step
+        if x.dtype() == DType::F32 {
+            let x = x.contiguous()?;
+            let batch = x.dim(0)?;
+            let channels = x.dim(1)?;
+            let time = x.dim(2)?;
+            let data = x.flatten_all()?.to_vec1::<f32>()?;
+            let w = weight.to_vec1::<f32>()?;
+            let eps64 = eps as f64;
+            let mut out = vec![0f32; data.len()];
+            for b in 0..batch {
+                let batch_off = b * channels * time;
+                for t in 0..time {
+                    // Gather channel values at this time step
+                    let mut sum_sq = 0f64;
+                    for c in 0..channels {
+                        let v = data[batch_off + c * time + t] as f64;
+                        sum_sq += v * v;
+                    }
+                    let rms = (sum_sq / channels as f64 + eps64).sqrt();
+                    let inv_rms = 1.0 / rms;
+                    for (c, &wc) in w.iter().enumerate() {
+                        let idx = batch_off + c * time + t;
+                        out[idx] = (data[idx] as f64 * inv_rms * wc as f64) as f32;
+                    }
+                }
+            }
+            return Tensor::from_vec(out, (batch, channels, time), x.device());
+        }
+        // Fallback: transpose approach
         x.transpose(1, 2)?
             .contiguous()
             .and_then(|t| candle_nn::ops::rms_norm(&t, weight, eps))?
