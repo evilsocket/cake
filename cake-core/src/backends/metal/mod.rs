@@ -33,6 +33,7 @@ const ALL_KERNELS: &[&str] = &[
     "add_scaled_f32", "add_scaled_f16",
     "depthwise_conv1d_silu_f32", "depthwise_conv1d_silu_f16",
     "depthwise_conv1d_bias_f32", "depthwise_conv1d_bias_f16",
+    "rms_norm_f32", "rms_norm_f16",
     "rms_norm_gated_f32", "rms_norm_gated_f16",
     "add_rms_norm_f32", "add_rms_norm_f16",
     "rms_norm_channel_f32", "rms_norm_channel_f16",
@@ -386,6 +387,36 @@ impl candle_core::CustomOp3 for MetalDepthwiseConv1dBias {
         let group = candle_metal_kernels::utils::get_block_dims(out_count, 1, 1);
         encoder.dispatch_threads(grid, group);
         Ok((candle_core::MetalStorage::new(output, device.clone(), out_count, s_in.dtype()), Shape::from(vec![batch, channels, out_len])))
+    }
+}
+
+struct MetalRmsNorm { eps: f32 }
+impl candle_core::CustomOp2 for MetalRmsNorm {
+    fn name(&self) -> &'static str { "metal_rms_norm" }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalRmsNorm: expected Metal device") }
+    fn metal_fwd(&self, s_x: &candle_core::MetalStorage, l_x: &Layout, s_w: &candle_core::MetalStorage, _l_w: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
+        let device = s_x.device();
+        let dims = l_x.shape().dims();
+        let el = l_x.shape().elem_count();
+        let hidden = *dims.last().ok_or_else(|| candle_core::Error::Msg("empty shape".into()))?;
+        let num_rows = el / hidden;
+        let kernel_name: &'static str = match s_x.dtype() { DType::F32 => "rms_norm_f32", DType::F16 => "rms_norm_f16", dt => candle_core::bail!("rms_norm metal: unsupported dtype {dt:?}") };
+        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+        let output = device.new_buffer(el, s_x.dtype(), "rms_norm")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let off_x = l_x.start_offset() * s_x.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s_x.buffer(), off_x));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (s_w.buffer(), 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 2, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 3, hidden as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 4, self.eps);
+        let max_threads = pipeline.max_total_threads_per_threadgroup();
+        let tg_width = hidden.min(max_threads);
+        let grid = objc2_metal::MTLSize { width: hidden, height: num_rows, depth: 1 };
+        let group = objc2_metal::MTLSize { width: tg_width, height: 1, depth: 1 };
+        encoder.dispatch_threads(grid, group);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s_x.dtype()), l_x.shape().clone()))
     }
 }
 
@@ -753,7 +784,12 @@ impl ComputeBackend for MetalBackend {
         self.depthwise_conv1d_bias(&merged, weight, bias, kernel_size, channels)
     }
 
-    // ── Candle tensor ops (norm + remaining ops) ─────────────────────
+    // ── MSL-accelerated normalization ──────────────────────────────────
+
+    fn rms_norm(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+        let x = x.contiguous()?;
+        x.apply_op2_no_bwd(weight, &MetalRmsNorm { eps })
+    }
 
     fn rms_norm_gated(&self, x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
         let x = x.contiguous()?;

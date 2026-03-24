@@ -380,6 +380,43 @@ kernel void depthwise_conv1d_bias_f16(
     output[idx] = half(acc + float(bias[c]));
 }
 
+// ─── rms_norm (standalone) ───────────────────────────────────────────
+kernel void rms_norm_f32(
+    device const float* x [[buffer(0)]],
+    device const float* weight [[buffer(1)]],
+    device float* output [[buffer(2)]],
+    constant uint& hidden [[buffer(3)]],
+    constant float& eps [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = gid.y, col = gid.x;
+    if (col >= hidden) return;
+    uint base = row * hidden;
+    float val = x[base + col];
+    SIMD_REDUCE_SUM(val * val, hidden, lane, simd_id)
+    output[base + col] = val * fast::rsqrt(_sr / float(hidden) + eps) * weight[col];
+}
+
+kernel void rms_norm_f16(
+    device const half* x [[buffer(0)]],
+    device const half* weight [[buffer(1)]],
+    device half* output [[buffer(2)]],
+    constant uint& hidden [[buffer(3)]],
+    constant float& eps [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    uint row = gid.y, col = gid.x;
+    if (col >= hidden) return;
+    uint base = row * hidden;
+    float val = float(x[base + col]);
+    SIMD_REDUCE_SUM(val * val, hidden, lane, simd_id)
+    output[base + col] = half(val * fast::rsqrt(_sr / float(hidden) + eps) * float(weight[col]));
+}
+
 // ─── rms_norm_gated ─────────────────────────────────────────────────
 kernel void rms_norm_gated_f32(
     device const float* x [[buffer(0)]],
