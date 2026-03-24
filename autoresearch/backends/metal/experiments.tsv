@@ -58,6 +58,7 @@ id	timestamp	commit	score_ns	tests	clippy	status	notes
 056	2026-03-24T04:50:00	0bfc5c9	46291085824	PASS	PASS	keep	Fused MSL rope kernel (eliminates GPU→CPU→GPU roundtrip)
 057	2026-03-24T05:00:00	64fd413	614875136	PASS	PASS	keep	Cached: 615ms actual benchmark time (new session-best)
 058	2026-03-24T05:10:00	404a27f	46304710912	PASS	PASS	keep	Use fast::log in stable_softplus (consistent fast-math)
+059	2026-03-24T05:20:00	52a7163	46452673024	PASS	PASS	keep	Prefetch V before SIMD reduction in fused attention
 ---	Metal: 36.4 tok/s avg vs CPU: 22.9 tok/s (+59%, 30% less memory) on Qwen3.5-0.8B (M3 Pro)
 --- Session 2 summary (experiments 044-057):
 ---   Added: rms_norm, layer_norm, softmax, rope MSL kernels
