@@ -21,7 +21,7 @@ use candle_core::{DType, Result, Tensor, D};
 use candle_nn::VarBuilder;
 
 use crate::backends::ComputeBackend;
-use crate::models::common::expert_provider::{IndividualResidentProvider, SharedExpertProvider};
+use crate::models::common::expert_provider::{IndividualResidentProvider, SharedExpertProvider, StackedResidentProvider};
 use crate::models::common::Config;
 
 /// Sparse MoE FFN block with shared expert (Qwen3.5 MoE).
@@ -55,23 +55,31 @@ impl Qwen3_5MoeSparseMlp {
         // Router
         let gate_weight = vb.pp("gate").get((n, h), "weight")?;
 
-        // Per-expert projections — GPTQ backend transparently dequantizes
-        // each *.weight request by looking for *.qweight + *.scales + *.qzeros.
-        let mut expert_gate_weights = Vec::with_capacity(n);
-        let mut expert_up_weights = Vec::with_capacity(n);
-        let mut expert_down_weights = Vec::with_capacity(n);
-        let experts_vb = vb.pp("experts");
-        for j in 0..n {
-            let evb = experts_vb.pp(j.to_string());
-            expert_gate_weights.push(evb.pp("gate_proj").get((i, h), "weight")?);
-            expert_up_weights.push(evb.pp("up_proj").get((i, h), "weight")?);
-            expert_down_weights.push(evb.pp("down_proj").get((h, i), "weight")?);
-        }
-
-        // Wrap loaded weights in IndividualResidentProvider
-        let expert_provider: SharedExpertProvider = Arc::new(
-            IndividualResidentProvider::new(expert_gate_weights, expert_up_weights, expert_down_weights),
-        );
+        // Per-expert projections — two formats:
+        // 1. switch_mlp: stacked 3D tensors (num_experts, intermediate, hidden)
+        // 2. experts.{N}: individual per-expert weights
+        let expert_provider: SharedExpertProvider = if vb.pp("switch_mlp").pp("gate_proj").contains_tensor("weight") {
+            // Stacked format: load 3D tensors directly
+            let sw = vb.pp("switch_mlp");
+            let gate_proj = sw.pp("gate_proj").get((n, i, h), "weight")?;
+            let up_proj = sw.pp("up_proj").get((n, i, h), "weight")?;
+            let down_proj = sw.pp("down_proj").get((n, h, i), "weight")?;
+            Arc::new(StackedResidentProvider::new(gate_proj, up_proj, down_proj, n))
+        } else {
+            // Individual format: GPTQ backend transparently dequantizes
+            // each *.weight request by looking for *.qweight + *.scales + *.qzeros.
+            let mut expert_gate_weights = Vec::with_capacity(n);
+            let mut expert_up_weights = Vec::with_capacity(n);
+            let mut expert_down_weights = Vec::with_capacity(n);
+            let experts_vb = vb.pp("experts");
+            for j in 0..n {
+                let evb = experts_vb.pp(j.to_string());
+                expert_gate_weights.push(evb.pp("gate_proj").get((i, h), "weight")?);
+                expert_up_weights.push(evb.pp("up_proj").get((i, h), "weight")?);
+                expert_down_weights.push(evb.pp("down_proj").get((h, i), "weight")?);
+            }
+            Arc::new(IndividualResidentProvider::new(expert_gate_weights, expert_up_weights, expert_down_weights))
+        };
 
         // Shared expert (standard SwiGLU MLP, not quantized)
         let se = vb.pp("shared_expert");

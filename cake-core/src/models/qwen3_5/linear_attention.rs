@@ -92,18 +92,24 @@ impl GatedDeltaNet {
         let conv_dim = key_dim * 2 + value_dim; // Q + K + V
         let h_size = cfg.hidden_size;
 
-        // Fuse all 4 input projections into a single Linear:
-        // in_proj_qkv (conv_dim) + in_proj_a (num_heads) + in_proj_b (num_heads) + in_proj_z (value_dim)
-        let qkv_w = vb.pp("in_proj_qkv").get((conv_dim, h_size), "weight")?;
-        let a_w = vb.pp("in_proj_a").get((num_heads, h_size), "weight")?;
-        let b_w = vb.pp("in_proj_b").get((num_heads, h_size), "weight")?;
-        let z_w = vb.pp("in_proj_z").get((value_dim, h_size), "weight")?;
-        let in_proj_weight = Tensor::cat(&[&qkv_w, &a_w, &b_w, &z_w], 0)?;
+        // Load input projections: either fused (in_proj) or split (in_proj_qkv + in_proj_a/b/z).
+        // The 0.8B model uses a single fused in_proj; the 35B model splits into separate projections.
+        let total_out = conv_dim + num_heads + num_heads + value_dim;
+        let in_proj_weight = if vb.pp("in_proj").contains_tensor("weight") {
+            // Fused format: single in_proj with all projections concatenated
+            vb.pp("in_proj").get((total_out, h_size), "weight")?
+        } else {
+            // Split format: separate in_proj_qkv, in_proj_a, in_proj_b, in_proj_z
+            let qkv_w = vb.pp("in_proj_qkv").get((conv_dim, h_size), "weight")?;
+            let a_w = vb.pp("in_proj_a").get((num_heads, h_size), "weight")?;
+            let b_w = vb.pp("in_proj_b").get((num_heads, h_size), "weight")?;
+            let z_w = vb.pp("in_proj_z").get((value_dim, h_size), "weight")?;
+            Tensor::cat(&[&qkv_w, &a_w, &b_w, &z_w], 0)?
+        };
 
         // Absorb dt_bias into the projection bias so `a` output already includes it.
         // Bias layout: [zeros for QKV | dt_bias for A | zeros for B | zeros for Z]
         let dt_bias = vb.get(num_heads, "dt_bias")?;
-        let total_out = conv_dim + num_heads + num_heads + value_dim;
         let dt_bias_vec = dt_bias.to_dtype(DType::F32)?.to_vec1::<f32>()?;
         let mut bias_data = vec![0.0f32; total_out];
         bias_data[conv_dim..(num_heads + conv_dim)].copy_from_slice(&dt_bias_vec[..num_heads]);
@@ -114,7 +120,16 @@ impl GatedDeltaNet {
         let out_proj_weight = vb.pp("out_proj").get((h_size, value_dim), "weight")?;
 
         // Conv1d weight: stored as F32 (matches post-projection F32 data path).
-        let conv1d_weight = vb.get((conv_dim, 1, la.conv_kernel_dim), "conv1d.weight")?
+        // Some models store as [C, K, 1] instead of [C, 1, K] — detect and transpose.
+        let conv1d_raw = vb.get((conv_dim, 1, la.conv_kernel_dim), "conv1d.weight")
+            .or_else(|_| vb.get((conv_dim, la.conv_kernel_dim, 1), "conv1d.weight"))?;
+        let conv1d_raw = if conv1d_raw.dims() == [conv_dim, la.conv_kernel_dim, 1] {
+            // Transpose [C, K, 1] -> [C, 1, K]
+            conv1d_raw.transpose(1, 2)?
+        } else {
+            conv1d_raw
+        };
+        let conv1d_weight = conv1d_raw
             .to_dtype(DType::F32)?
             .squeeze(1)?;
 

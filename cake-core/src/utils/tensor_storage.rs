@@ -45,6 +45,33 @@ pub trait TensorStorageProvider: Send + Sync {
     fn read_tensors(&self, names: &[&str]) -> Result<Vec<TensorData>> {
         names.iter().map(|n| self.read_tensor(n)).collect()
     }
+    /// Read a slice of a tensor's raw bytes at a given byte offset and length.
+    /// Used to read a single expert's 2D slice from a stacked 3D tensor without
+    /// loading the entire tensor into memory.
+    fn read_tensor_slice(
+        &self,
+        name: &str,
+        byte_offset: usize,
+        byte_len: usize,
+    ) -> Result<Vec<u8>> {
+        // Default: read full tensor and slice (suboptimal but works)
+        let data = self.read_tensor(name)?;
+        if byte_offset + byte_len > data.bytes.len() {
+            anyhow::bail!(
+                "slice out of bounds for '{}': offset={} len={} total={}",
+                name, byte_offset, byte_len, data.bytes.len()
+            );
+        }
+        Ok(data.bytes[byte_offset..byte_offset + byte_len].to_vec())
+    }
+
+    /// Get tensor metadata (dtype, shape) without reading the data bytes.
+    /// Default reads the full tensor — implementations should override for efficiency.
+    fn tensor_meta(&self, name: &str) -> Result<(candle_core::DType, Vec<usize>)> {
+        let data = self.read_tensor(name)?;
+        Ok((data.dtype, data.shape))
+    }
+
     /// Check if a tensor exists in this storage.
     fn has_tensor(&self, name: &str) -> bool;
     /// List all tensor names available in this storage.
@@ -547,6 +574,45 @@ impl TensorStorageProvider for SafetensorsStorage {
             // Fall back to individual reads
             names.iter().map(|n| self.read_tensor(n)).collect()
         }
+    }
+
+    fn read_tensor_slice(
+        &self,
+        name: &str,
+        byte_offset: usize,
+        byte_len: usize,
+    ) -> Result<Vec<u8>> {
+        let meta = self.index.get(name)
+            .ok_or_else(|| anyhow::anyhow!("tensor '{}' not found in storage", name))?;
+        let abs_start = meta.abs_offset + byte_offset as u64;
+        if byte_offset as u64 + byte_len as u64 > meta.byte_size {
+            anyhow::bail!(
+                "slice out of bounds for '{}': offset={} len={} tensor_bytes={}",
+                name, byte_offset, byte_len, meta.byte_size
+            );
+        }
+        let file = self.files.get(&meta.shard_path)
+            .ok_or_else(|| anyhow::anyhow!("shard file not open: {:?}", meta.shard_path))?;
+        let mut buf = vec![0u8; byte_len];
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            file.read_at(&mut buf, abs_start)?;
+        }
+        #[cfg(not(unix))]
+        {
+            use std::io::{Read as _, Seek, SeekFrom};
+            let mut f = file.try_clone()?;
+            f.seek(SeekFrom::Start(abs_start))?;
+            f.read_exact(&mut buf)?;
+        }
+        Ok(buf)
+    }
+
+    fn tensor_meta(&self, name: &str) -> Result<(candle_core::DType, Vec<usize>)> {
+        let meta = self.index.get(name)
+            .ok_or_else(|| anyhow::anyhow!("tensor '{}' not found", name))?;
+        Ok((meta.dtype, meta.shape.to_vec()))
     }
 
     fn has_tensor(&self, name: &str) -> bool {

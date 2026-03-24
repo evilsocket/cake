@@ -165,16 +165,22 @@ impl TextModelBase {
             log::info!("  using tied word embeddings (lm_head = embed_tokens)");
             embed_weight.clone()
         } else {
-            // Try root-level lm_head first (LLaMA/Qwen2), then prefixed (Qwen3.5)
-            match var_builder
-                .pp("lm_head")
-                .get((config.vocab_size, config.hidden_size), "weight")
-            {
-                Ok(w) => w,
-                Err(_) => var_builder
-                    .pp(format!("{prefix}.lm_head"))
-                    .get((config.vocab_size, config.hidden_size), "weight")?,
-            }
+            // Try multiple lm_head locations:
+            // 1. Root: lm_head.weight (LLaMA, Qwen2)
+            // 2. Prefixed: {prefix}.lm_head.weight (Qwen3.5)
+            // 3. Parent: {parent}.lm_head.weight (ConditionalGeneration models where
+            //    prefix="language_model.model" but lm_head is at "language_model.lm_head")
+            let lm_head_shape = (config.vocab_size, config.hidden_size);
+            var_builder.pp("lm_head").get(lm_head_shape, "weight")
+                .or_else(|_| var_builder.pp(format!("{prefix}.lm_head")).get(lm_head_shape, "weight"))
+                .or_else(|_| {
+                    // Try parent prefix (strip last component: "a.b.c" -> "a.b")
+                    if let Some(parent) = prefix.rsplit_once('.').map(|(p, _)| p) {
+                        var_builder.pp(format!("{parent}.lm_head")).get(lm_head_shape, "weight")
+                    } else {
+                        Err(candle_core::Error::Msg(format!("cannot find lm_head.weight (tried root, {prefix}.lm_head)")))
+                    }
+                })?
         };
 
         log::info!("loading {prefix}.norm ...");

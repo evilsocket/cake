@@ -276,7 +276,7 @@ impl Context {
                 #[cfg(not(feature = "luxtts"))]
                 let luxtts_override = false;
 
-                let config_internal = if luxtts_override {
+                let mut config_internal = if luxtts_override {
                     {
                         #[cfg(feature = "luxtts")]
                         {
@@ -325,7 +325,33 @@ impl Context {
                         crate::dispatch_config_load!(text_model_arch, &config_filename)
                     };
 
+                // Auto-detect the correct weight prefix from the safetensors index.
+                // Some models (e.g. GPTQ Qwen3.5-MoE) use "language_model.model" instead
+                // of "model.language_model".
                 let model_tensors_index: PathBuf = data_path.join("model.safetensors.index.json");
+                if model_tensors_index.exists() {
+                    if let Ok(idx_data) = std::fs::read_to_string(&model_tensors_index) {
+                        if let Ok(idx_json) = serde_json::from_str::<serde_json::Value>(&idx_data) {
+                            if let Some(wm) = idx_json.get("weight_map").and_then(|v| v.as_object()) {
+                                // Find any key containing ".layers.0." and extract prefix
+                                for key in wm.keys() {
+                                    if let Some(pos) = key.find(".layers.0.") {
+                                        let detected = &key[..pos];
+                                        if detected != config_internal.model_prefix {
+                                            log::info!(
+                                                "auto-detected model prefix '{}' (config had '{}')",
+                                                detected, config_internal.model_prefix
+                                            );
+                                            config_internal.model_prefix = detected.to_string();
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 quant = Arc::from(utils::detect_quantization(&config_filename));
                 let is_master = matches!(args.mode, Mode::Master);
                 let my_layers: Vec<String> = if !is_master {

@@ -31,6 +31,10 @@ struct ExpertNames {
 /// Supports GPTQ-quantized experts: when `gptq_group_size` is set, reads
 /// `{prefix}.qweight`, `{prefix}.scales`, `{prefix}.qzeros` and dequantizes
 /// on the fly using `dequantize_gptq_4bit`.
+///
+/// Also supports stacked switch_mlp format: `{prefix}.switch_mlp.{proj}.weight`
+/// with shape `[num_experts, ...]`. Reads the full stacked tensor, dequantizes
+/// once per projection, and slices per expert.
 pub struct DiskExpertProvider {
     storage: Arc<dyn TensorStorageProvider>,
     layer_prefix: String,
@@ -45,6 +49,15 @@ pub struct DiskExpertProvider {
     use_f32_zerocopy: bool,
     /// GPTQ group size — when Some, experts are GPTQ-quantized and need dequantization.
     gptq_group_size: Option<usize>,
+    /// Stacked switch_mlp tensor names (for models that use stacked 3D expert format).
+    stacked_names: Option<StackedNames>,
+}
+
+/// Pre-computed names for stacked switch_mlp format.
+struct StackedNames {
+    gate_proj: String,
+    up_proj: String,
+    down_proj: String,
 }
 
 impl std::fmt::Debug for DiskExpertProvider {
@@ -120,7 +133,128 @@ impl DiskExpertProvider {
             needs_device_transfer,
             use_f32_zerocopy,
             gptq_group_size,
+            stacked_names: None,
         }
+    }
+
+    /// Create a disk-backed expert provider for stacked switch_mlp format.
+    ///
+    /// In this format, all experts are stored in a single 3D tensor per projection:
+    /// `{prefix}.switch_mlp.gate_proj.weight` shape `[num_experts, intermediate, packed_hidden]`
+    ///
+    /// Each expert is read by loading the full stacked tensor, dequantizing, and slicing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_stacked(
+        storage: Arc<dyn TensorStorageProvider>,
+        layer_prefix: String,
+        num_experts: usize,
+        intermediate: usize,
+        hidden: usize,
+        device: Device,
+        dtype: DType,
+        gptq_group_size: Option<usize>,
+    ) -> Self {
+        let needs_device_transfer = !device.is_cpu();
+        let _ = (intermediate, hidden); // used by callers for shape info
+        let stacked_names = StackedNames {
+            gate_proj: format!("{layer_prefix}.switch_mlp.gate_proj.weight"),
+            up_proj: format!("{layer_prefix}.switch_mlp.up_proj.weight"),
+            down_proj: format!("{layer_prefix}.switch_mlp.down_proj.weight"),
+        };
+        log::info!("expert offload: stacked switch_mlp format (GPTQ={:?})", gptq_group_size);
+        Self {
+            storage,
+            layer_prefix,
+            expert_names: Vec::new(), // not used for stacked format
+            num_experts,
+            device,
+            dtype,
+            needs_device_transfer,
+            use_f32_zerocopy: false,
+            gptq_group_size,
+            stacked_names: Some(stacked_names),
+        }
+    }
+
+    /// Read a single expert's 2D slice from a stacked 3D tensor using targeted pread.
+    /// Only reads the bytes for one expert, not the entire [256, ...] tensor.
+    fn read_stacked_expert_slice(
+        &self,
+        tensor_name: &str,
+        expert_idx: usize,
+    ) -> Result<Tensor> {
+        if let Some(group_size) = self.gptq_group_size {
+            // Affine quantized: read slices of weight + scales + biases
+            let prefix = tensor_name.strip_suffix(".weight").unwrap_or(tensor_name);
+            let scales_name = format!("{prefix}.scales");
+            if self.storage.has_tensor(&scales_name) {
+                let biases_name = format!("{prefix}.biases");
+
+                // Get full tensor metadata for shape info (no data read)
+                let (w_dtype, w_shape) = self.storage.tensor_meta(tensor_name)
+                    .map_err(|e| candle_core::Error::Msg(format!("meta: {e}")))?;
+                let (s_dtype, s_shape) = self.storage.tensor_meta(&scales_name)
+                    .map_err(|e| candle_core::Error::Msg(format!("meta: {e}")))?;
+                let (b_dtype, b_shape) = self.storage.tensor_meta(&biases_name)
+                    .map_err(|e| candle_core::Error::Msg(format!("meta: {e}")))?;
+
+                // Compute per-expert byte ranges from 3D shapes
+                let w_elem_size = w_dtype.size_in_bytes();
+                let w_slice_elems: usize = w_shape[1..].iter().product();
+                let w_slice_bytes = w_slice_elems * w_elem_size;
+                let w_offset = expert_idx * w_slice_bytes;
+
+                let s_elem_size = s_dtype.size_in_bytes();
+                let s_slice_elems: usize = s_shape[1..].iter().product();
+                let s_slice_bytes = s_slice_elems * s_elem_size;
+                let s_offset = expert_idx * s_slice_bytes;
+
+                let b_elem_size = b_dtype.size_in_bytes();
+                let b_slice_elems: usize = b_shape[1..].iter().product();
+                let b_slice_bytes = b_slice_elems * b_elem_size;
+                let b_offset = expert_idx * b_slice_bytes;
+
+                // Targeted pread: only read this expert's bytes
+                let w_bytes = self.storage.read_tensor_slice(tensor_name, w_offset, w_slice_bytes)
+                    .map_err(|e| candle_core::Error::Msg(format!("slice weight: {e}")))?;
+                let s_bytes = self.storage.read_tensor_slice(&scales_name, s_offset, s_slice_bytes)
+                    .map_err(|e| candle_core::Error::Msg(format!("slice scales: {e}")))?;
+                let b_bytes = self.storage.read_tensor_slice(&biases_name, b_offset, b_slice_bytes)
+                    .map_err(|e| candle_core::Error::Msg(format!("slice biases: {e}")))?;
+
+                // Build 2D tensors from sliced bytes
+                let w_2d_shape: Vec<usize> = w_shape[1..].to_vec();
+                let s_2d_shape: Vec<usize> = s_shape[1..].to_vec();
+                let b_2d_shape: Vec<usize> = b_shape[1..].to_vec();
+
+                let packed = Tensor::from_raw_buffer(&w_bytes, w_dtype, &w_2d_shape, &Device::Cpu)?;
+                let scales = Tensor::from_raw_buffer(&s_bytes, s_dtype, &s_2d_shape, &Device::Cpu)?;
+                let biases = Tensor::from_raw_buffer(&b_bytes, b_dtype, &b_2d_shape, &Device::Cpu)?;
+
+                let weight = crate::utils::gptq::dequantize_packed_4bit(&packed, &scales, &biases, group_size)?;
+                let weight = weight.to_dtype(self.dtype)?;
+                return if self.needs_device_transfer {
+                    weight.to_device(&self.device)
+                } else {
+                    Ok(weight)
+                };
+            }
+        }
+
+        // Non-quantized: targeted pread of one expert's 2D slice
+        let (dtype, shape) = self.storage.tensor_meta(tensor_name)
+            .map_err(|e| candle_core::Error::Msg(format!("meta: {e}")))?;
+        let elem_size = dtype.size_in_bytes();
+        let slice_elems: usize = shape[1..].iter().product();
+        let slice_bytes = slice_elems * elem_size;
+        let offset = expert_idx * slice_bytes;
+
+        let bytes = self.storage.read_tensor_slice(tensor_name, offset, slice_bytes)
+            .map_err(|e| candle_core::Error::Msg(format!("slice: {e}")))?;
+        let slice_shape: Vec<usize> = shape[1..].to_vec();
+        let tensor = Tensor::from_raw_buffer(&bytes, dtype, &slice_shape, &Device::Cpu)?;
+        let tensor = if tensor.dtype() != self.dtype { tensor.to_dtype(self.dtype)? } else { tensor };
+        if self.needs_device_transfer { tensor.to_device(&self.device) } else { Ok(tensor) }
     }
 
     /// Reinterpret a `Vec<u8>` as `Vec<f32>` without copying.
@@ -216,6 +350,15 @@ impl ExpertProvider for DiskExpertProvider {
                 "expert index {idx} out of range (num_experts={})",
                 self.num_experts
             )));
+        }
+
+        // Stacked switch_mlp path: read 3D tensor, slice per expert
+        if let Some(stacked) = &self.stacked_names {
+            return Ok(ExpertWeights {
+                gate_proj: self.read_stacked_expert_slice(&stacked.gate_proj, idx)?,
+                up_proj: self.read_stacked_expert_slice(&stacked.up_proj, idx)?,
+                down_proj: self.read_stacked_expert_slice(&stacked.down_proj, idx)?,
+            });
         }
 
         let names = &self.expert_names[idx];
