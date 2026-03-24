@@ -456,6 +456,28 @@ impl ExpertProvider for DiskExpertProvider {
     fn num_experts(&self) -> usize {
         self.num_experts
     }
+
+    #[cfg(unix)]
+    fn prefetch_experts(&self, indices: &[usize]) {
+        for &idx in indices {
+            if idx >= self.num_experts {
+                continue;
+            }
+            let names = &self.expert_names[idx];
+            // Issue madvise(WILLNEED) for each projection's mmap region
+            for name in [&names.gate_proj, &names.up_proj, &names.down_proj] {
+                if let Some((bytes, _, _)) = self.storage.tensor_bytes(name) {
+                    unsafe {
+                        libc::posix_madvise(
+                            bytes.as_ptr() as *mut _,
+                            bytes.len(),
+                            libc::POSIX_MADV_WILLNEED,
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
