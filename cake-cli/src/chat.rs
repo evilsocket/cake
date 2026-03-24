@@ -135,7 +135,10 @@ impl App {
     fn new(server: &str) -> Self {
         Self {
             tab: Tab::Chat,
-            messages: Vec::new(),
+            messages: vec![ChatMessage {
+                role: "system".to_string(),
+                content: "You are a helpful AI assistant.".to_string(),
+            }],
             input: String::new(),
             cursor_pos: 0,
             scroll_offset: 0,
@@ -193,6 +196,10 @@ fn build_message_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     for (i, msg) in app.messages.iter().enumerate() {
         if i > 0 {
             lines.push(Line::from(""));
+        }
+
+        if msg.role == "system" {
+            continue;
         }
 
         let is_last = i == app.messages.len() - 1;

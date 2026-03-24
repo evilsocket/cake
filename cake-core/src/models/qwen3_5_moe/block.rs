@@ -84,14 +84,27 @@ impl Forwarder for Qwen3_5MoeBlock {
             load_rms_norm_weight(h, cfg.residual_rms_norm, vb.pp("post_attention_layernorm"))?;
         let rms_eps = cfg.rms_norm_eps as f32;
         let moe = if let Some(storage) = &ctx.tensor_storage {
-            // Expert offload: stream routed expert weights from disk
             let layer_prefix = format!("{name}.mlp");
-            let provider: std::sync::Arc<dyn crate::models::common::expert_provider::ExpertProvider> =
+            let mlp_vb = vb.pp("mlp");
+            // Detect stacked switch_mlp format vs individual experts
+            let switch_mlp_name = format!("{layer_prefix}.switch_mlp.gate_proj.weight");
+            let has_switch_mlp = storage.has_tensor(&switch_mlp_name)
+                || mlp_vb.pp("switch_mlp").pp("gate_proj").contains_tensor("weight");
+
+            let provider: std::sync::Arc<dyn crate::models::common::expert_provider::ExpertProvider> = if has_switch_mlp {
+                // Stacked switch_mlp format — use disk provider with switch_mlp namespace
+                std::sync::Arc::new(crate::models::common::disk_expert_provider::DiskExpertProvider::new_stacked(
+                    storage.clone(), format!("{layer_prefix}.switch_mlp"), cfg.num_experts,
+                    ctx.device.clone(), ctx.dtype,
+                ))
+            } else {
+                // Individual experts: stream from disk
                 std::sync::Arc::new(crate::models::common::disk_expert_provider::DiskExpertProvider::new(
                     storage.clone(), layer_prefix, cfg.num_experts, ctx.device.clone(), ctx.dtype,
                     ctx.quant.gptq_group_size(),
-                ));
-            let mlp_vb = vb.pp("mlp");
+                ))
+            };
+
             let gate_weight = mlp_vb.pp("gate").get((cfg.num_experts, h), "weight")?;
             let si = cfg.shared_expert_intermediate_size.expect("shared_expert_intermediate_size");
             let se = mlp_vb.pp("shared_expert");

@@ -33,11 +33,15 @@ const ALL_KERNELS: &[&str] = &[
     "add_scaled_f32", "add_scaled_f16",
     "depthwise_conv1d_silu_f32", "depthwise_conv1d_silu_f16",
     "depthwise_conv1d_bias_f32", "depthwise_conv1d_bias_f16",
+    "rms_norm_f32", "rms_norm_f16",
     "rms_norm_gated_f32", "rms_norm_gated_f16",
     "add_rms_norm_f32", "add_rms_norm_f16",
     "rms_norm_channel_f32", "rms_norm_channel_f16",
     "f8e4m3_to_f32", "f8e4m3_to_f16",
     "adaln_modulate_f32", "adaln_modulate_f16",
+    "softmax_last_dim_f32", "softmax_last_dim_f16",
+    "layer_norm_f32", "layer_norm_f16",
+    "rope_f32", "rope_f16",
     "fused_vector_attention_f16",
     "fused_vector_attention_f32",
 ];
@@ -161,74 +165,149 @@ fn dispatch_ternary(
 const ADD3_KERNEL: TernaryKernel = TernaryKernel { f32_kernel: "add3_f32", f16_kernel: "add3_f16", label: "add3" };
 const SUB_MUL_KERNEL: TernaryKernel = TernaryKernel { f32_kernel: "sub_mul_f32", f16_kernel: "sub_mul_f16", label: "sub_mul" };
 
+// ─── Helper: dispatch a unary elementwise kernel ─────────────────────
+
+#[inline]
+fn dispatch_unary(
+    s: &candle_core::MetalStorage, l: &Layout,
+    f32_kernel: &'static str, f16_kernel: &'static str, label: &'static str,
+) -> Result<(candle_core::MetalStorage, Shape)> {
+    let device = s.device();
+    let el = l.shape().elem_count();
+    let kernel_name: &'static str = match s.dtype() {
+        DType::F32 => f32_kernel,
+        DType::F16 => f16_kernel,
+        dt => candle_core::bail!("{label} metal: unsupported dtype {dt:?}"),
+    };
+    let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+    let output = device.new_buffer(el, s.dtype(), label)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_compute_pipeline_state(&pipeline);
+    let offset = l.start_offset() * s.dtype().size_in_bytes();
+    candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
+    candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
+    candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
+    let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
+    let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
+    encoder.dispatch_threads(grid, group);
+    Ok((candle_core::MetalStorage::new(output, device.clone(), el, s.dtype()), l.shape().clone()))
+}
+
 // ─── CustomOp structs ───────────────────────────────────────────────
 
 struct MetalGelu;
 impl candle_core::CustomOp1 for MetalGelu {
     fn name(&self) -> &'static str { "metal_gelu" }
     fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalGelu: expected Metal device") }
-    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
-        let device = s.device();
-        let el = l.shape().elem_count();
-        let kernel_name: &'static str = match s.dtype() { DType::F32 => "gelu_f32", DType::F16 => "gelu_f16", dt => candle_core::bail!("gelu metal: unsupported dtype {dt:?}") };
-        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
-        let output = device.new_buffer(el, s.dtype(), "gelu")?;
-        let encoder = device.command_encoder()?;
-        encoder.set_compute_pipeline_state(&pipeline);
-        let offset = l.start_offset() * s.dtype().size_in_bytes();
-        candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
-        candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
-        candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
-        let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
-        let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
-        encoder.dispatch_threads(grid, group);
-        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s.dtype()), l.shape().clone()))
-    }
+    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> { dispatch_unary(s, l, "gelu_f32", "gelu_f16", "gelu") }
 }
 
 struct MetalSigmoid;
 impl candle_core::CustomOp1 for MetalSigmoid {
     fn name(&self) -> &'static str { "metal_sigmoid" }
     fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalSigmoid: expected Metal device") }
-    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
-        let device = s.device();
-        let el = l.shape().elem_count();
-        let kernel_name: &'static str = match s.dtype() { DType::F32 => "sigmoid_f32", DType::F16 => "sigmoid_f16", dt => candle_core::bail!("sigmoid metal: unsupported dtype {dt:?}") };
-        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
-        let output = device.new_buffer(el, s.dtype(), "sigmoid")?;
-        let encoder = device.command_encoder()?;
-        encoder.set_compute_pipeline_state(&pipeline);
-        let offset = l.start_offset() * s.dtype().size_in_bytes();
-        candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
-        candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
-        candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
-        let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
-        let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
-        encoder.dispatch_threads(grid, group);
-        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s.dtype()), l.shape().clone()))
-    }
+    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> { dispatch_unary(s, l, "sigmoid_f32", "sigmoid_f16", "sigmoid") }
 }
 
 struct MetalSilu;
 impl candle_core::CustomOp1 for MetalSilu {
     fn name(&self) -> &'static str { "metal_silu" }
     fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalSilu: expected Metal device") }
+    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> { dispatch_unary(s, l, "silu_f32", "silu_f16", "silu") }
+}
+
+struct MetalSoftmaxLastDim;
+impl candle_core::CustomOp1 for MetalSoftmaxLastDim {
+    fn name(&self) -> &'static str { "metal_softmax_last_dim" }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalSoftmaxLastDim: expected Metal device") }
     fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
         let device = s.device();
+        let dims = l.shape().dims();
         let el = l.shape().elem_count();
-        let kernel_name: &'static str = match s.dtype() { DType::F32 => "silu_f32", DType::F16 => "silu_f16", dt => candle_core::bail!("silu metal: unsupported dtype {dt:?}") };
+        let last_dim = *dims.last().ok_or_else(|| candle_core::Error::Msg("empty shape".into()))?;
+        let num_rows = el / last_dim;
+        let kernel_name: &'static str = match s.dtype() { DType::F32 => "softmax_last_dim_f32", DType::F16 => "softmax_last_dim_f16", dt => candle_core::bail!("softmax metal: unsupported dtype {dt:?}") };
         let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
-        let output = device.new_buffer(el, s.dtype(), "silu")?;
+        let output = device.new_buffer(el, s.dtype(), "softmax")?;
         let encoder = device.command_encoder()?;
         encoder.set_compute_pipeline_state(&pipeline);
         let offset = l.start_offset() * s.dtype().size_in_bytes();
         candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
         candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
-        candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 2, last_dim as u32);
+        let max_threads = pipeline.max_total_threads_per_threadgroup();
+        let tg_width = last_dim.min(max_threads);
+        let grid = objc2_metal::MTLSize { width: last_dim, height: num_rows, depth: 1 };
+        let group = objc2_metal::MTLSize { width: tg_width, height: 1, depth: 1 };
+        encoder.dispatch_threads(grid, group);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s.dtype()), l.shape().clone()))
+    }
+}
+
+struct MetalRope;
+impl candle_core::CustomOp3 for MetalRope {
+    fn name(&self) -> &'static str { "metal_rope" }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalRope: expected Metal device") }
+    #[allow(clippy::too_many_arguments)]
+    fn metal_fwd(&self, s_x: &candle_core::MetalStorage, l_x: &Layout, s_cos: &candle_core::MetalStorage, l_cos: &Layout, s_sin: &candle_core::MetalStorage, l_sin: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
+        let device = s_x.device();
+        let dims = l_x.shape().dims();
+        let el = l_x.shape().elem_count();
+        let (head_dim, seq_len) = (dims[dims.len() - 1], dims[dims.len() - 2]);
+        let kernel_name: &'static str = match s_x.dtype() { DType::F32 => "rope_f32", DType::F16 => "rope_f16", dt => candle_core::bail!("rope metal: unsupported dtype {dt:?}") };
+        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+        let output = device.new_buffer(el, s_x.dtype(), "rope")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let off_x = l_x.start_offset() * s_x.dtype().size_in_bytes();
+        let off_cos = l_cos.start_offset() * s_cos.dtype().size_in_bytes();
+        let off_sin = l_sin.start_offset() * s_sin.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s_x.buffer(), off_x));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (s_cos.buffer(), off_cos));
+        candle_metal_kernels::utils::set_param(&encoder, 2, (s_sin.buffer(), off_sin));
+        candle_metal_kernels::utils::set_param(&encoder, 3, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 4, head_dim as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 5, seq_len as u32);
         let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
         let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
         encoder.dispatch_threads(grid, group);
-        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s.dtype()), l.shape().clone()))
+        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s_x.dtype()), l_x.shape().clone()))
+    }
+}
+
+struct MetalLayerNorm {
+    eps: f32,
+    bias_storage: candle_core::MetalStorage,
+    bias_layout: Layout,
+}
+impl candle_core::CustomOp2 for MetalLayerNorm {
+    fn name(&self) -> &'static str { "metal_layer_norm" }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalLayerNorm: expected Metal device") }
+    fn metal_fwd(&self, s_x: &candle_core::MetalStorage, l_x: &Layout, s_w: &candle_core::MetalStorage, _l_w: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
+        let device = s_x.device();
+        let dims = l_x.shape().dims();
+        let el = l_x.shape().elem_count();
+        let hidden = *dims.last().ok_or_else(|| candle_core::Error::Msg("empty shape".into()))?;
+        let num_rows = el / hidden;
+        let kernel_name: &'static str = match s_x.dtype() { DType::F32 => "layer_norm_f32", DType::F16 => "layer_norm_f16", dt => candle_core::bail!("layer_norm metal: unsupported dtype {dt:?}") };
+        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+        let output = device.new_buffer(el, s_x.dtype(), "layer_norm")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let off_x = l_x.start_offset() * s_x.dtype().size_in_bytes();
+        let off_bias = self.bias_layout.start_offset() * self.bias_storage.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s_x.buffer(), off_x));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (s_w.buffer(), 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 2, (self.bias_storage.buffer(), off_bias));
+        candle_metal_kernels::utils::set_param(&encoder, 3, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 4, hidden as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 5, self.eps);
+        let max_threads = pipeline.max_total_threads_per_threadgroup();
+        let tg_width = hidden.min(max_threads);
+        let grid = objc2_metal::MTLSize { width: hidden, height: num_rows, depth: 1 };
+        let group = objc2_metal::MTLSize { width: tg_width, height: 1, depth: 1 };
+        encoder.dispatch_threads(grid, group);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s_x.dtype()), l_x.shape().clone()))
     }
 }
 
@@ -245,22 +324,7 @@ struct MetalStableSoftplus;
 impl candle_core::CustomOp1 for MetalStableSoftplus {
     fn name(&self) -> &'static str { "metal_stable_softplus" }
     fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalStableSoftplus: expected Metal device") }
-    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
-        let device = s.device();
-        let el = l.shape().elem_count();
-        let kernel_name: &'static str = match s.dtype() { DType::F32 => "stable_softplus_f32", DType::F16 => "stable_softplus_f16", dt => candle_core::bail!("stable_softplus metal: unsupported dtype {dt:?}") };
-        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
-        let output = device.new_buffer(el, s.dtype(), "stable_softplus")?;
-        let encoder = device.command_encoder()?;
-        encoder.set_compute_pipeline_state(&pipeline);
-        let offset = l.start_offset() * s.dtype().size_in_bytes();
-        candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
-        candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
-        candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
-        let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
-        let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
-        encoder.dispatch_threads(grid, group);
-        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s.dtype()), l.shape().clone()))
+    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> { dispatch_unary(s, l, "stable_softplus_f32", "stable_softplus_f16", "stable_softplus")
     }
 }
 
@@ -389,6 +453,36 @@ impl candle_core::CustomOp3 for MetalDepthwiseConv1dBias {
     }
 }
 
+struct MetalRmsNorm { eps: f32 }
+impl candle_core::CustomOp2 for MetalRmsNorm {
+    fn name(&self) -> &'static str { "metal_rms_norm" }
+    fn cpu_fwd(&self, _: &CpuStorage, _: &Layout, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalRmsNorm: expected Metal device") }
+    fn metal_fwd(&self, s_x: &candle_core::MetalStorage, l_x: &Layout, s_w: &candle_core::MetalStorage, _l_w: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
+        let device = s_x.device();
+        let dims = l_x.shape().dims();
+        let el = l_x.shape().elem_count();
+        let hidden = *dims.last().ok_or_else(|| candle_core::Error::Msg("empty shape".into()))?;
+        let num_rows = el / hidden;
+        let kernel_name: &'static str = match s_x.dtype() { DType::F32 => "rms_norm_f32", DType::F16 => "rms_norm_f16", dt => candle_core::bail!("rms_norm metal: unsupported dtype {dt:?}") };
+        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+        let output = device.new_buffer(el, s_x.dtype(), "rms_norm")?;
+        let encoder = device.command_encoder()?;
+        encoder.set_compute_pipeline_state(&pipeline);
+        let off_x = l_x.start_offset() * s_x.dtype().size_in_bytes();
+        candle_metal_kernels::utils::set_param(&encoder, 0, (s_x.buffer(), off_x));
+        candle_metal_kernels::utils::set_param(&encoder, 1, (s_w.buffer(), 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 2, (&*output, 0usize));
+        candle_metal_kernels::utils::set_param(&encoder, 3, hidden as u32);
+        candle_metal_kernels::utils::set_param(&encoder, 4, self.eps);
+        let max_threads = pipeline.max_total_threads_per_threadgroup();
+        let tg_width = hidden.min(max_threads);
+        let grid = objc2_metal::MTLSize { width: hidden, height: num_rows, depth: 1 };
+        let group = objc2_metal::MTLSize { width: tg_width, height: 1, depth: 1 };
+        encoder.dispatch_threads(grid, group);
+        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s_x.dtype()), l_x.shape().clone()))
+    }
+}
+
 struct MetalRmsNormGated { eps: f32 }
 impl candle_core::CustomOp3 for MetalRmsNormGated {
     fn name(&self) -> &'static str { "metal_rms_norm_gated" }
@@ -490,48 +584,40 @@ impl candle_core::CustomOp2 for MetalRmsNormChannel {
     }
 }
 
+/// Like dispatch_unary but with a fixed kernel name and output dtype (for type-casting kernels).
+#[inline]
+fn dispatch_unary_cast(
+    s: &candle_core::MetalStorage, l: &Layout,
+    kernel_name: &'static str, out_dtype: DType, label: &'static str,
+) -> Result<(candle_core::MetalStorage, Shape)> {
+    let device = s.device();
+    let el = l.shape().elem_count();
+    let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+    let output = device.new_buffer(el, out_dtype, label)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_compute_pipeline_state(&pipeline);
+    let offset = l.start_offset() * s.dtype().size_in_bytes();
+    candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
+    candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
+    candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
+    let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
+    let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
+    encoder.dispatch_threads(grid, group);
+    Ok((candle_core::MetalStorage::new(output, device.clone(), el, out_dtype), l.shape().clone()))
+}
+
 struct MetalF8ToF32;
 impl candle_core::CustomOp1 for MetalF8ToF32 {
     fn name(&self) -> &'static str { "metal_f8e4m3_to_f32" }
     fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalF8ToF32: expected Metal device") }
-    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
-        let device = s.device();
-        let el = l.shape().elem_count();
-        let pipeline = PIPELINE_CACHE.get_or_create(device, "f8e4m3_to_f32")?;
-        let output = device.new_buffer(el, DType::F32, "f8_to_f32")?;
-        let encoder = device.command_encoder()?;
-        encoder.set_compute_pipeline_state(&pipeline);
-        let offset = l.start_offset() * s.dtype().size_in_bytes();
-        candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
-        candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
-        candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
-        let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
-        let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
-        encoder.dispatch_threads(grid, group);
-        Ok((candle_core::MetalStorage::new(output, device.clone(), el, DType::F32), l.shape().clone()))
-    }
+    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> { dispatch_unary_cast(s, l, "f8e4m3_to_f32", DType::F32, "f8_to_f32") }
 }
 
 struct MetalF8ToF16;
 impl candle_core::CustomOp1 for MetalF8ToF16 {
     fn name(&self) -> &'static str { "metal_f8e4m3_to_f16" }
     fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalF8ToF16: expected Metal device") }
-    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
-        let device = s.device();
-        let el = l.shape().elem_count();
-        let pipeline = PIPELINE_CACHE.get_or_create(device, "f8e4m3_to_f16")?;
-        let output = device.new_buffer(el, DType::F16, "f8_to_f16")?;
-        let encoder = device.command_encoder()?;
-        encoder.set_compute_pipeline_state(&pipeline);
-        let offset = l.start_offset() * s.dtype().size_in_bytes();
-        candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
-        candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
-        candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
-        let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
-        let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
-        encoder.dispatch_threads(grid, group);
-        Ok((candle_core::MetalStorage::new(output, device.clone(), el, DType::F16), l.shape().clone()))
-    }
+    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> { dispatch_unary_cast(s, l, "f8e4m3_to_f16", DType::F16, "f8_to_f16") }
 }
 
 struct MetalAdalnModulate {
@@ -671,7 +757,7 @@ impl ComputeBackend for MetalBackend {
                 } else {
                     att
                 };
-                let att = candle_nn::ops::softmax_last_dim(&att)?;
+                let att = self.softmax(&att, att.rank() - 1)?;
                 att.matmul(&v.contiguous()?)
             }
         }
@@ -697,6 +783,46 @@ impl ComputeBackend for MetalBackend {
         candle_nn::ops::sdpa(q, k, v, mask, causal, scale, 1.0)
     }
 
+    // ── Weight preprocessing ─────────────────────────────────────────
+
+    fn preprocess_linear_weight(&self, weight: &Tensor) -> Result<Tensor> {
+        // Pre-transpose weight to (in_features, out_features) and make contiguous.
+        // This avoids a non-contiguous view from t() on every linear_forward call.
+        weight.t()?.contiguous()
+    }
+
+    fn linear_forward(&self, x: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
+        // Weight is pre-transposed by preprocess_linear_weight: shape (in_features, out_features).
+        // No t() needed — just matmul directly.
+        let out = match x.dims() {
+            [b1, b2, m, k] => {
+                if x.is_contiguous() {
+                    x.reshape((b1 * b2 * m, *k))?
+                        .matmul(weight)?
+                        .reshape((*b1, *b2, *m, ()))?
+                } else {
+                    let w = weight.broadcast_left((*b1, *b2))?;
+                    x.matmul(&w)?
+                }
+            }
+            [bsize, m, k] => {
+                if x.is_contiguous() {
+                    x.reshape((bsize * m, *k))?
+                        .matmul(weight)?
+                        .reshape((*bsize, *m, ()))?
+                } else {
+                    let w = weight.broadcast_left(*bsize)?;
+                    x.matmul(&w)?
+                }
+            }
+            _ => x.matmul(weight)?,
+        };
+        match bias {
+            Some(b) => out.broadcast_add(b),
+            None => Ok(out),
+        }
+    }
+
     // ── MSL-accelerated ops (validated by Metal vs CPU tests) ────────
 
     fn gelu(&self, x: &Tensor) -> Result<Tensor> {
@@ -709,6 +835,18 @@ impl ComputeBackend for MetalBackend {
 
     fn silu(&self, x: &Tensor) -> Result<Tensor> {
         x.apply_op1_no_bwd(&MetalSilu)
+    }
+
+    fn softmax(&self, x: &Tensor, dim: usize) -> Result<Tensor> {
+        if dim == x.rank() - 1 && matches!(x.dtype(), DType::F32 | DType::F16) {
+            let x = x.contiguous()?;
+            return x.apply_op1_no_bwd(&MetalSoftmaxLastDim);
+        }
+        // Fallback for non-last dimension
+        let max = x.max_keepdim(dim)?;
+        let exp = x.broadcast_sub(&max)?.exp()?;
+        let sum = exp.sum_keepdim(dim)?;
+        exp.broadcast_div(&sum)
     }
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
@@ -753,7 +891,71 @@ impl ComputeBackend for MetalBackend {
         self.depthwise_conv1d_bias(&merged, weight, bias, kernel_size, channels)
     }
 
-    // ── Candle tensor ops (norm + remaining ops) ─────────────────────
+    // ── MSL-accelerated normalization ──────────────────────────────────
+
+    fn rope(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
+        if matches!(x.dtype(), DType::F32 | DType::F16) && x.is_contiguous() && cos.is_contiguous() && sin.is_contiguous() {
+            let x_dims = x.dims();
+            if x_dims.len() == 4 {
+                let (_b, _h, seq_len, head_dim) = (x_dims[0], x_dims[1], x_dims[2], x_dims[3]);
+                let cos_dims = cos.dims();
+                // Handle common cos/sin shapes: (seq_len, half_dim) or (1, 1, seq_len, half_dim) etc.
+                let half_dim = head_dim / 2;
+                let cos_last = cos_dims[cos_dims.len() - 1];
+                if cos_last == half_dim {
+                    // Flatten cos/sin to (seq_len, half_dim) if needed
+                    let cos_flat = cos.reshape(((), half_dim))?;
+                    let sin_flat = sin.reshape(((), half_dim))?;
+                    // Narrow to actual seq_len if cos has more positions
+                    let cos_narrow = if cos_flat.dim(0)? > seq_len { cos_flat.narrow(0, 0, seq_len)? } else { cos_flat };
+                    let sin_narrow = if sin_flat.dim(0)? > seq_len { sin_flat.narrow(0, 0, seq_len)? } else { sin_flat };
+                    let cos_c = cos_narrow.contiguous()?;
+                    let sin_c = sin_narrow.contiguous()?;
+                    return x.apply_op3_no_bwd(&cos_c, &sin_c, &MetalRope);
+                }
+            }
+        }
+        // Fallback to candle's rope
+        candle_nn::rotary_emb::rope(x, cos, sin)
+    }
+
+    fn rms_norm(&self, x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+        let x = x.contiguous()?;
+        x.apply_op2_no_bwd(weight, &MetalRmsNorm { eps })
+    }
+
+    fn layer_norm(&self, x: &Tensor, weight: &Tensor, bias: Option<&Tensor>, eps: f32) -> Result<Tensor> {
+        if let Some(b) = bias {
+            if x.is_contiguous() && matches!(x.dtype(), DType::F32 | DType::F16) {
+                let x = x.contiguous()?;
+                let b = b.contiguous()?;
+                if let Device::Metal(_) = x.device() {
+                    let (bias_storage, bias_layout) = b.storage_and_layout();
+                    if let candle_core::Storage::Metal(ms) = &*bias_storage {
+                        let op = MetalLayerNorm { eps, bias_storage: ms.clone(), bias_layout: bias_layout.clone() };
+                        return x.apply_op2_no_bwd(weight, &op);
+                    }
+                }
+            }
+        }
+        // Fallback to default implementation
+        use candle_core::{DType as D2, D};
+        if x.is_contiguous() {
+            if let Some(b) = bias {
+                return candle_nn::ops::layer_norm(x, weight, b, eps);
+            }
+        }
+        let x_dtype = x.dtype();
+        let internal_dtype = match x_dtype { D2::F16 | D2::BF16 => D2::F32, d => d };
+        let hidden_size = x.dim(D::Minus1)?;
+        let x = x.to_dtype(internal_dtype)?;
+        let mean_x = (x.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
+        let x = x.broadcast_sub(&mean_x)?;
+        let norm_x = (x.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
+        let x_normed = x.broadcast_div(&(norm_x + eps as f64)?.sqrt()?)?;
+        let x = x_normed.to_dtype(x_dtype)?.broadcast_mul(weight)?;
+        match bias { Some(b) => x.broadcast_add(b), None => Ok(x) }
+    }
 
     fn rms_norm_gated(&self, x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
         let x = x.contiguous()?;

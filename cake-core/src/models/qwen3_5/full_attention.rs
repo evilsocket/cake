@@ -49,14 +49,23 @@ impl Qwen3_5FullAttention {
         let q_size = cfg.num_attention_heads * head_dim * 2;
         let kv_size = cfg.num_key_value_heads * head_dim;
 
-        // Fuse Q, K, V projections into a single weight
-        let q_w = vb.pp("q_proj").get((q_size, h_size), "weight")?;
-        let k_w = vb.pp("k_proj").get((kv_size, h_size), "weight")?;
-        let v_w = vb.pp("v_proj").get((kv_size, h_size), "weight")?;
-        let qkv_proj_weight = Tensor::cat(&[&q_w, &k_w, &v_w], 0)?;
+        // Load QKV projections: either fused (qkv_proj) or split (q_proj + k_proj + v_proj).
+        // The 0.8B model may have a fused qkv_proj; the 35B model has separate projections.
+        let total_qkv = q_size + kv_size + kv_size;
+        let qkv_proj_weight = if vb.pp("qkv_proj").contains_tensor("weight") {
+            vb.pp("qkv_proj").get((total_qkv, h_size), "weight")?
+        } else {
+            let q_w = vb.pp("q_proj").get((q_size, h_size), "weight")?;
+            let k_w = vb.pp("k_proj").get((kv_size, h_size), "weight")?;
+            let v_w = vb.pp("v_proj").get((kv_size, h_size), "weight")?;
+            Tensor::cat(&[&q_w, &k_w, &v_w], 0)?
+        };
+        let qkv_proj_weight = backend.preprocess_linear_weight(&qkv_proj_weight)?;
 
         let o_size = cfg.num_attention_heads * head_dim;
-        let o_proj_weight = vb.pp("o_proj").get((h_size, o_size), "weight")?;
+        let o_proj_weight = backend.preprocess_linear_weight(
+            &vb.pp("o_proj").get((h_size, o_size), "weight")?,
+        )?;
 
         let q_norm_weight = load_rms_norm_weight(
             head_dim, cfg.residual_rms_norm, vb.pp("q_norm"),

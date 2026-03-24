@@ -27,7 +27,9 @@ use std::path::Path;
 use candle_core::{safetensors::MmapedSafetensors, DType, Device, Shape, Tensor};
 use candle_nn::{var_builder::SimpleBackend, Init, VarBuilder};
 
-/// Check whether a model uses GPTQ quantization by inspecting its config.json.
+/// Check whether a model uses 4-bit quantization by inspecting its config.json.
+/// Detects both standard GPTQ (`quant_method: "gptq"`) and affine 4-bit
+/// (`mode: "affine"`, `bits: 4`) used by some quantized models.
 pub fn is_gptq_quantized(config_path: &Path) -> bool {
     let Ok(data) = std::fs::read_to_string(config_path) else {
         return false;
@@ -37,14 +39,27 @@ pub fn is_gptq_quantized(config_path: &Path) -> bool {
     };
     // Check top-level and nested text_config for quantization_config
     for root in [&json, json.get("text_config").unwrap_or(&json)] {
-        let is_gptq = root
-            .get("quantization_config")
-            .and_then(|qc| qc.get("quant_method"))
-            .and_then(|qm| qm.as_str())
-            .map(|s| s == "gptq")
-            .unwrap_or(false);
-        if is_gptq {
-            return true;
+        if let Some(qc) = root.get("quantization_config") {
+            // Standard GPTQ: quant_method == "gptq"
+            let is_gptq = qc.get("quant_method")
+                .and_then(|qm| qm.as_str())
+                .map(|s| s == "gptq")
+                .unwrap_or(false);
+            if is_gptq {
+                return true;
+            }
+            // Affine 4-bit: mode == "affine" && bits == 4
+            let is_affine_4bit = qc.get("mode")
+                .and_then(|m| m.as_str())
+                .map(|s| s == "affine")
+                .unwrap_or(false)
+                && qc.get("bits")
+                    .and_then(|b| b.as_u64())
+                    .map(|b| b == 4)
+                    .unwrap_or(false);
+            if is_affine_4bit {
+                return true;
+            }
         }
     }
     false
@@ -123,6 +138,81 @@ pub fn dequantize_gptq_4bit(
     Tensor::from_vec(weight, (out_features, in_features), &Device::Cpu)
 }
 
+/// Dequantize a packed 4-bit weight tensor with per-group scales and biases.
+///
+/// Used for embeddings in some GPTQ models where the format is:
+/// - `weight`: uint32, shape `(rows, packed_cols)` where `packed_cols = cols / 8`
+/// - `scales`: f16/bf16, shape `(rows, groups)`
+/// - `biases`: f16/bf16, shape `(rows, groups)`
+///
+/// Formula: `w_dequant[i, j] = w4(i, j) * scale(i, group(j)) + bias(i, group(j))`
+///
+/// Output: F32 tensor of shape `(rows, cols)`.
+pub fn dequantize_packed_4bit(
+    packed: &Tensor,
+    scales: &Tensor,
+    biases: &Tensor,
+    group_size: usize,
+) -> candle_core::Result<Tensor> {
+    // Handle 3D stacked tensors (e.g., [num_experts, rows, packed_cols])
+    if packed.rank() == 3 {
+        let n = packed.dim(0)?;
+        let slices: Vec<Tensor> = (0..n)
+            .map(|i| {
+                let p = packed.get(i)?;
+                let s = scales.get(i)?;
+                let b = biases.get(i)?;
+                dequantize_packed_4bit(&p, &s, &b, group_size)
+            })
+            .collect::<candle_core::Result<_>>()?;
+        return Tensor::stack(&slices, 0);
+    }
+    let (rows, packed_cols) = packed.dims2()?;
+    let cols = packed_cols * 8;
+    let (_, groups) = scales.dims2()?;
+
+    let pw: Vec<u32> = packed
+        .to_dtype(DType::U32)?
+        .to_vec2::<u32>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    let sc: Vec<f32> = scales
+        .to_dtype(DType::F32)?
+        .to_vec2::<f32>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    let bi: Vec<f32> = biases
+        .to_dtype(DType::F32)?
+        .to_vec2::<f32>()?
+        .into_iter()
+        .flatten()
+        .collect();
+
+    use rayon::prelude::*;
+    let weight: Vec<f32> = (0..rows)
+        .into_par_iter()
+        .flat_map(|i| {
+            let mut row = vec![0f32; cols];
+            for pc in 0..packed_cols {
+                let packed_val = pw[i * packed_cols + pc];
+                for bit in 0..8u32 {
+                    let j = pc * 8 + bit as usize;
+                    let w4 = ((packed_val >> (bit * 4)) & 0xF) as f32;
+                    let g = j / group_size;
+                    let scale = sc[i * groups + g];
+                    let bias = bi[i * groups + g];
+                    row[j] = w4 * scale + bias;
+                }
+            }
+            row
+        })
+        .collect();
+
+    Tensor::from_vec(weight, (rows, cols), &Device::Cpu)
+}
+
 /// Custom VarBuilder backend that transparently dequantizes GPTQ weights.
 ///
 /// When asked for `foo.weight`, checks if `foo.qweight` exists and, if so,
@@ -142,16 +232,40 @@ impl GptqBackend {
     ) -> candle_core::Result<Tensor> {
         // Strip the ".weight" suffix to get the parameter prefix.
         let prefix = name.strip_suffix(".weight").unwrap_or(name);
+        if name.contains("layers.0.linear_attn") {
+            let has_qw = self.inner.get(&format!("{prefix}.qweight")).is_ok();
+            let has_sc = self.inner.get(&format!("{prefix}.scales")).is_ok();
+            log::info!("GPTQ load_tensor: name={name} has_qweight={has_qw} has_scales={has_sc}");
+        }
         let qweight_name = format!("{prefix}.qweight");
         let scales_name = format!("{prefix}.scales");
         let qzeros_name = format!("{prefix}.qzeros");
 
         if self.inner.get(&qweight_name).is_ok() {
-            // GPTQ quantized tensor — dequantize on CPU then cast + move to device.
+            // Standard GPTQ: qweight + scales + qzeros
             let qweight = self.inner.load(&qweight_name, &Device::Cpu)?;
             let scales = self.inner.load(&scales_name, &Device::Cpu)?;
             let qzeros = self.inner.load(&qzeros_name, &Device::Cpu)?;
             let weight = dequantize_gptq_4bit(&qweight, &scales, &qzeros, self.group_size)?;
+            weight.to_dtype(dtype)?.to_device(dev)
+        } else if self.inner.get(&scales_name).is_ok() {
+            // Affine 4-bit quantization: packed uint32 weight + scales + biases
+            // Formula: w4 * scale + bias (no zero-point)
+            let biases_name = format!("{prefix}.biases");
+            let packed = self.inner.load(name, &Device::Cpu)?;
+            let scales = self.inner.load(&scales_name, &Device::Cpu)?;
+            let biases = self.inner.load(&biases_name, &Device::Cpu)?;
+            log::debug!(
+                "affine dequant: {} packed={:?} scales={:?} biases={:?} group_size={}",
+                name, packed.shape(), scales.shape(), biases.shape(), self.group_size
+            );
+            let weight = dequantize_packed_4bit(&packed, &scales, &biases, self.group_size)?;
+            log::debug!("  -> dequantized: {:?}, dtype={:?}", weight.shape(), weight.dtype());
+            // Debug: print first 4 values for verification
+            if name.contains("layers.0.linear_attn.in_proj_qkv") {
+                let vals: Vec<f32> = weight.flatten_all()?.narrow(0, 0, 4)?.to_vec1()?;
+                log::info!("DEQUANT CHECK in_proj_qkv[0,:4] = {:?}", vals);
+            }
             weight.to_dtype(dtype)?.to_device(dev)
         } else {
             // Non-quantized tensor — load directly.
@@ -186,12 +300,13 @@ impl SimpleBackend for GptqBackend {
     }
 
     fn contains_tensor(&self, name: &str) -> bool {
-        // A tensor is "present" if either its direct name or its GPTQ qweight exists.
+        // A tensor is "present" if either its direct name, GPTQ qweight, or scales exist.
         if self.inner.get(name).is_ok() {
             return true;
         }
         let prefix = name.strip_suffix(".weight").unwrap_or(name);
         self.inner.get(&format!("{prefix}.qweight")).is_ok()
+            || self.inner.get(&format!("{prefix}.scales")).is_ok()
     }
 }
 

@@ -8,6 +8,7 @@ use std::ffi::c_void;
 use std::os::raw::c_int;
 
 /// Loaded HIP + rocBLAS function pointers.
+#[allow(dead_code)]
 pub struct RocmFfi {
     _hip_lib: libloading::Library,
     _blas_lib: libloading::Library,
@@ -18,18 +19,34 @@ pub struct RocmFfi {
     pub hip_device_get_name: unsafe extern "C" fn(*mut i8, c_int, c_int) -> c_int,
     pub hip_malloc: unsafe extern "C" fn(*mut *mut c_void, usize) -> c_int,
     pub hip_free: unsafe extern "C" fn(*mut c_void) -> c_int,
+    pub hip_host_malloc: unsafe extern "C" fn(*mut *mut c_void, usize, u32) -> c_int,
+    pub hip_host_free: unsafe extern "C" fn(*mut c_void) -> c_int,
     pub hip_memcpy: unsafe extern "C" fn(*mut c_void, *const c_void, usize, c_int) -> c_int,
     pub hip_mem_get_info: unsafe extern "C" fn(*mut usize, *mut usize) -> c_int,
     pub hip_device_synchronize: unsafe extern "C" fn() -> c_int,
+    pub hip_stream_create: unsafe extern "C" fn(*mut *mut c_void) -> c_int,
+    pub hip_stream_synchronize: unsafe extern "C" fn(*mut c_void) -> c_int,
+    pub hip_memcpy_async: unsafe extern "C" fn(*mut c_void, *const c_void, usize, c_int, *mut c_void) -> c_int,
 
     pub rocblas_create_handle: unsafe extern "C" fn(*mut *mut c_void) -> c_int,
     pub rocblas_destroy_handle: unsafe extern "C" fn(*mut c_void) -> c_int,
+    pub rocblas_set_stream: unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int,
     pub rocblas_sgemm: unsafe extern "C" fn(
         *mut c_void, c_int, c_int,
         c_int, c_int, c_int,
         *const f32, *const f32, c_int,
         *const f32, c_int,
         *const f32, *mut f32, c_int,
+    ) -> c_int,
+    pub rocblas_sgemm_strided_batched: unsafe extern "C" fn(
+        *mut c_void, c_int, c_int,
+        c_int, c_int, c_int,
+        *const f32,
+        *const f32, c_int, i64,  // A, lda, stride_a
+        *const f32, c_int, i64,  // B, ldb, stride_b
+        *const f32,
+        *mut f32, c_int, i64,    // C, ldc, stride_c
+        c_int,                   // batch_count
     ) -> c_int,
 }
 
@@ -70,13 +87,20 @@ impl RocmFfi {
                 hip_device_get_name: sym!(hip_lib, b"hipDeviceGetName\0"),
                 hip_malloc: sym!(hip_lib, b"hipMalloc\0"),
                 hip_free: sym!(hip_lib, b"hipFree\0"),
+                hip_host_malloc: sym!(hip_lib, b"hipHostMalloc\0"),
+                hip_host_free: sym!(hip_lib, b"hipHostFree\0"),
                 hip_memcpy: sym!(hip_lib, b"hipMemcpy\0"),
                 hip_mem_get_info: sym!(hip_lib, b"hipMemGetInfo\0"),
                 hip_device_synchronize: sym!(hip_lib, b"hipDeviceSynchronize\0"),
+                hip_stream_create: sym!(hip_lib, b"hipStreamCreate\0"),
+                hip_stream_synchronize: sym!(hip_lib, b"hipStreamSynchronize\0"),
+                hip_memcpy_async: sym!(hip_lib, b"hipMemcpyAsync\0"),
 
                 rocblas_create_handle: sym!(blas_lib, b"rocblas_create_handle\0"),
                 rocblas_destroy_handle: sym!(blas_lib, b"rocblas_destroy_handle\0"),
+                rocblas_set_stream: sym!(blas_lib, b"rocblas_set_stream\0"),
                 rocblas_sgemm: sym!(blas_lib, b"rocblas_sgemm\0"),
+                rocblas_sgemm_strided_batched: sym!(blas_lib, b"rocblas_sgemm_strided_batched\0"),
 
                 _hip_lib: hip_lib,
                 _blas_lib: blas_lib,
