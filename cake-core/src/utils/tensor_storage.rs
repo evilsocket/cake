@@ -121,9 +121,6 @@ impl MappedShard {
     #[cfg(unix)]
     fn new(file: &File) -> anyhow::Result<Self> {
         let len = file.metadata()?.len() as usize;
-        if len == 0 {
-            return Ok(Self { mmap_ptr: std::ptr::null(), mmap_len: 0 });
-        }
         let ptr = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
