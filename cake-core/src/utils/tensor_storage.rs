@@ -14,6 +14,9 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+
 use anyhow::{bail, Result};
 use candle_core::DType;
 
@@ -92,18 +95,83 @@ struct TensorMeta {
     shape: InlineShape,
 }
 
-/// Reads individual tensors from safetensors files using `pread()`.
-///
-/// At construction, parses all shard file headers to build an in-memory index
-/// mapping tensor names to `(file, offset, size, dtype, shape)`. During inference,
-/// `read_tensor()` calls `pread()` at the computed offset — no mmap, no full file load.
-///
-/// On NVMe SSDs, sequential `pread()` achieves near-peak bandwidth. The OS page cache
-/// provides transparent caching of frequently-accessed expert weights.
+/// Memory-mapped shard file — provides zero-syscall access to tensor bytes.
+struct MappedShard {
+    /// Memory-mapped region of the shard file.
+    #[cfg(unix)]
+    mmap_ptr: *const u8,
+    #[cfg(unix)]
+    mmap_len: usize,
+    /// Fallback file handle for non-Unix systems.
+    #[cfg(not(unix))]
+    file: File,
+}
+
+// SAFETY: mmap'd memory is read-only and the mapping lives for the lifetime of the storage.
+unsafe impl Send for MappedShard {}
+unsafe impl Sync for MappedShard {}
+
+impl MappedShard {
+    #[cfg(unix)]
+    fn new(file: &File) -> anyhow::Result<Self> {
+        let len = file.metadata()?.len() as usize;
+        if len == 0 {
+            return Ok(Self { mmap_ptr: std::ptr::null(), mmap_len: 0 });
+        }
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            anyhow::bail!("mmap failed: {}", std::io::Error::last_os_error());
+        }
+        Ok(Self { mmap_ptr: ptr as *const u8, mmap_len: len })
+    }
+
+    #[cfg(not(unix))]
+    fn new(file: File) -> anyhow::Result<Self> {
+        Ok(Self { file })
+    }
+
+    /// Read bytes from the mapped file at the given offset and size.
+    #[cfg(unix)]
+    #[inline]
+    fn read_bytes(&self, offset: u64, size: usize) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(size);
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.mmap_ptr.add(offset as usize),
+                buf.as_mut_ptr(),
+                size,
+            );
+            buf.set_len(size);
+        }
+        buf
+    }
+}
+
+#[cfg(unix)]
+impl Drop for MappedShard {
+    fn drop(&mut self) {
+        if !self.mmap_ptr.is_null() && self.mmap_len > 0 {
+            unsafe { libc::munmap(self.mmap_ptr as *mut _, self.mmap_len); }
+        }
+    }
+}
+
 pub struct SafetensorsStorage {
     /// Tensor name → metadata (shard index, offset, size, dtype, shape).
     index: HashMap<String, TensorMeta>,
-    /// Open file handles per shard (indexed by shard_idx in TensorMeta).
+    /// Memory-mapped shard files (indexed by shard_idx in TensorMeta).
+    shards: Vec<MappedShard>,
+    /// File handles for non-mmap fallback.
+    #[cfg(not(unix))]
     files: Vec<File>,
 }
 
@@ -198,14 +266,22 @@ impl SafetensorsStorage {
         }
 
         let mut index = HashMap::with_capacity(weight_map.len());
-        let mut files = Vec::with_capacity(shard_tensors.len());
+        let mut shards = Vec::with_capacity(shard_tensors.len());
 
         for shard_name in shard_tensors.keys() {
             let shard_path = parent.join(shard_name);
             let (header_len, header) = Self::parse_shard_header(&shard_path)?;
-            let shard_idx = files.len() as u16;
+            let shard_idx = shards.len() as u16;
             let f = File::open(&shard_path)?;
-            files.push(f);
+            #[cfg(unix)]
+            {
+                let shard = MappedShard::new(&f)?;
+                shards.push(shard);
+            }
+            #[cfg(not(unix))]
+            {
+                shards.push(MappedShard::new(f)?);
+            }
 
             let obj = header
                 .as_object()
@@ -224,10 +300,10 @@ impl SafetensorsStorage {
         log::info!(
             "SafetensorsStorage: indexed {} tensors across {} shards",
             index.len(),
-            files.len()
+            shards.len()
         );
 
-        Ok(Self { index, files })
+        Ok(Self { index, shards })
     }
 
     /// Build from a single safetensors file (non-sharded model).
@@ -250,11 +326,14 @@ impl SafetensorsStorage {
             }
         }
 
-        let files = vec![f];
+        #[cfg(unix)]
+        let shards = vec![MappedShard::new(&f)?];
+        #[cfg(not(unix))]
+        let shards = vec![MappedShard::new(f)?];
 
         log::info!("SafetensorsStorage: indexed {} tensors from single file", index.len());
 
-        Ok(Self { index, files })
+        Ok(Self { index, shards })
     }
 
     /// Parse a shard file's header. Returns (header_len, parsed JSON).
@@ -341,36 +420,26 @@ impl TensorStorageProvider for SafetensorsStorage {
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("tensor '{}' not found in storage", name))?;
 
-        let file = self
-            .files
+        let shard = self
+            .shards
             .get(meta.shard_idx as usize)
             .ok_or_else(|| anyhow::anyhow!("shard index {} out of range", meta.shard_idx))?;
 
         let size = meta.byte_size as usize;
-        // SAFETY: allocate without zeroing — pread will fill the entire buffer.
-        // We set_len after read_at confirms all bytes were written.
-        let mut buf = Vec::with_capacity(size);
 
-        // pread: thread-safe, no seek, optimal for concurrent reads
+        // mmap: zero-syscall read — just memcpy from mapped memory
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileExt;
-            // SAFETY: spare capacity is valid for writing; read_at returns
-            // exact byte count. We only set_len to the amount actually read.
-            unsafe {
-                let spare = std::slice::from_raw_parts_mut(buf.as_mut_ptr(), size);
-                file.read_at(spare, meta.abs_offset)?;
-                buf.set_len(size);
-            }
-        }
+        let buf = shard.read_bytes(meta.abs_offset, size);
 
         #[cfg(not(unix))]
-        {
+        let buf = {
             use std::io::{Read, Seek, SeekFrom};
-            let mut f = file.try_clone()?;
+            let mut f = shard.file.try_clone()?;
+            let mut buf = vec![0u8; size];
             f.seek(SeekFrom::Start(meta.abs_offset))?;
             f.read_exact(&mut buf)?;
-        }
+            buf
+        };
 
         Ok(TensorData {
             bytes: buf,
@@ -407,31 +476,24 @@ impl TensorStorageProvider for SafetensorsStorage {
             let last = metas[metas.len() - 1];
             let total_size = (last.abs_offset + last.byte_size - first.abs_offset) as usize;
 
-            let file = self
-                .files
+            let shard = self
+                .shards
                 .get(first.shard_idx as usize)
                 .ok_or_else(|| anyhow::anyhow!("shard index {} out of range", first.shard_idx))?;
 
-            // SAFETY: allocate without zeroing — pread fills the entire buffer.
-            let mut buf = Vec::with_capacity(total_size);
-
+            // mmap: zero-syscall read — just memcpy from mapped memory
             #[cfg(unix)]
-            {
-                use std::os::unix::fs::FileExt;
-                unsafe {
-                    let spare = std::slice::from_raw_parts_mut(buf.as_mut_ptr(), total_size);
-                    file.read_at(spare, first.abs_offset)?;
-                    buf.set_len(total_size);
-                }
-            }
+            let buf = shard.read_bytes(first.abs_offset, total_size);
 
             #[cfg(not(unix))]
-            {
+            let buf = {
                 use std::io::{Read as _, Seek, SeekFrom};
-                let mut f = file.try_clone()?;
+                let mut f = shard.file.try_clone()?;
+                let mut buf = vec![0u8; total_size];
                 f.seek(SeekFrom::Start(first.abs_offset))?;
                 f.read_exact(&mut buf)?;
-            }
+                buf
+            };
 
             // Split the buffer into individual tensor data
             let mut results = Vec::with_capacity(metas.len());
@@ -525,7 +587,7 @@ mod tests {
                 );
                 m
             },
-            files: Vec::new(),
+            shards: Vec::new(),
         };
         assert!(storage.has_tensor("weight"));
         assert!(!storage.has_tensor("missing"));
