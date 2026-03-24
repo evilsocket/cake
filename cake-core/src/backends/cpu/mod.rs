@@ -76,8 +76,7 @@ impl ComputeBackend for CpuBackend {
     }
 
     fn silu_mul(&self, gate: &Tensor, up: &Tensor) -> Result<Tensor> {
-        (candle_nn::ops::silu(&gate.contiguous()?)? * up.contiguous()?)?
-            .contiguous()
+        candle_nn::ops::silu(&gate.contiguous()?)? * up.contiguous()?
     }
 
     fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
@@ -96,8 +95,7 @@ impl ComputeBackend for CpuBackend {
         eps: f32,
     ) -> Result<Tensor> {
         let n = candle_nn::ops::rms_norm(&x.contiguous()?, weight, eps)?;
-        (n * candle_nn::ops::silu(&z.contiguous()?.to_dtype(x.dtype())?)?)?
-            .contiguous()
+        n * candle_nn::ops::silu(&z.contiguous()?.to_dtype(x.dtype())?)?
     }
 
     fn add_rms_norm(
@@ -118,8 +116,7 @@ impl ComputeBackend for CpuBackend {
         x.transpose(1, 2)?
             .contiguous()
             .and_then(|t| candle_nn::ops::rms_norm(&t, weight, eps))?
-            .transpose(1, 2)?
-            .contiguous()
+            .transpose(1, 2)
     }
 
     fn depthwise_conv1d_silu(
@@ -205,15 +202,15 @@ impl ComputeBackend for CpuBackend {
     }
 
     fn add3(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ((a + b)? + c)?.contiguous()
+        (a + b)? + c
     }
 
     fn exp_mul(&self, x: &Tensor, y: &Tensor) -> Result<Tensor> {
-        (x * y.exp()?)?.contiguous()
+        x * y.exp()?
     }
 
     fn sub_mul(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
-        ((a - b)? * c)?.contiguous()
+        (a - b)? * c
     }
 
     fn add_scaled(&self, a: &Tensor, b: &Tensor, c: &Tensor) -> Result<Tensor> {
@@ -223,7 +220,7 @@ impl ComputeBackend for CpuBackend {
         } else {
             c.clone()
         };
-        (a + b.broadcast_mul(&c_broadcast)?)?.contiguous()
+        a + b.broadcast_mul(&c_broadcast)?
     }
 
     fn adaln_modulate(
@@ -236,7 +233,7 @@ impl ComputeBackend for CpuBackend {
     ) -> Result<Tensor> {
         // rms_norm(x) * (1 + scale) + shift
         let n = candle_nn::ops::rms_norm(&x.contiguous()?, norm_weight, eps)?;
-        (n.broadcast_mul(&(scale + 1.0)?)? + shift)?.contiguous()
+        n.broadcast_mul(&(scale + 1.0)?)? + shift
     }
 
     fn f8e4m3_to_f32(&self, x: &Tensor) -> Result<Tensor> {
