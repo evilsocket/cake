@@ -161,7 +161,12 @@ pub fn load_rms_norm_weight(
     if residual {
         // Residual RMS norm: forward = (1 + weight) * rms_norm(x).
         // Weights are stored as deltas from 0, so add 1.0 at load time.
-        Ok((weight + 1.0)?)
+        // Compute in F32 to match HF reference: (1.0 + self.weight.float()),
+        // then cast back to model dtype. Adding 1.0 in F16 loses precision for
+        // small deltas near 0.
+        let w_f32 = weight.to_dtype(candle_core::DType::F32)?;
+        let w_res = (w_f32 + 1.0)?;
+        Ok(w_res.to_dtype(weight.dtype())?)
     } else {
         Ok(weight)
     }

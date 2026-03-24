@@ -26,9 +26,10 @@ struct RmsNormGated {
 
 impl RmsNormGated {
     fn load(size: usize, eps: f64, vb: VarBuilder, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
-        // Residual RMS norm: forward = (1 + weight) * rms_norm(x) * silu(z).
+        // Standard (non-residual) RMS gated norm: forward = weight * rms_norm(x) * silu(z).
+        // Unlike Qwen3_5RMSNorm which uses (1 + weight), the gated variant uses weight directly.
         // Store as F32 to match the recurrent step's F32 output.
-        let weight = (vb.get(size, "weight")?.to_dtype(DType::F32)? + 1.0)?;
+        let weight = vb.get(size, "weight")?.to_dtype(DType::F32)?;
         Ok(Self { weight, eps: eps as f32, backend })
     }
 
