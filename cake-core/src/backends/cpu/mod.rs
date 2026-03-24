@@ -126,7 +126,7 @@ impl ComputeBackend for CpuBackend {
         eps: f32,
     ) -> Result<(Tensor, Tensor)> {
         let res = (a + b)?;
-        let normed = candle_nn::ops::rms_norm(&res.contiguous()?, weight, eps)?;
+        let normed = candle_nn::ops::rms_norm(&res, weight, eps)?;
         Ok((res, normed))
     }
 
