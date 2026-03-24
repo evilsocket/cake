@@ -552,48 +552,40 @@ impl candle_core::CustomOp2 for MetalRmsNormChannel {
     }
 }
 
+/// Like dispatch_unary but with a fixed kernel name and output dtype (for type-casting kernels).
+#[inline]
+fn dispatch_unary_cast(
+    s: &candle_core::MetalStorage, l: &Layout,
+    kernel_name: &'static str, out_dtype: DType, label: &'static str,
+) -> Result<(candle_core::MetalStorage, Shape)> {
+    let device = s.device();
+    let el = l.shape().elem_count();
+    let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+    let output = device.new_buffer(el, out_dtype, label)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_compute_pipeline_state(&pipeline);
+    let offset = l.start_offset() * s.dtype().size_in_bytes();
+    candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
+    candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
+    candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
+    let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
+    let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
+    encoder.dispatch_threads(grid, group);
+    Ok((candle_core::MetalStorage::new(output, device.clone(), el, out_dtype), l.shape().clone()))
+}
+
 struct MetalF8ToF32;
 impl candle_core::CustomOp1 for MetalF8ToF32 {
     fn name(&self) -> &'static str { "metal_f8e4m3_to_f32" }
     fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalF8ToF32: expected Metal device") }
-    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
-        let device = s.device();
-        let el = l.shape().elem_count();
-        let pipeline = PIPELINE_CACHE.get_or_create(device, "f8e4m3_to_f32")?;
-        let output = device.new_buffer(el, DType::F32, "f8_to_f32")?;
-        let encoder = device.command_encoder()?;
-        encoder.set_compute_pipeline_state(&pipeline);
-        let offset = l.start_offset() * s.dtype().size_in_bytes();
-        candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
-        candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
-        candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
-        let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
-        let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
-        encoder.dispatch_threads(grid, group);
-        Ok((candle_core::MetalStorage::new(output, device.clone(), el, DType::F32), l.shape().clone()))
-    }
+    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> { dispatch_unary_cast(s, l, "f8e4m3_to_f32", DType::F32, "f8_to_f32") }
 }
 
 struct MetalF8ToF16;
 impl candle_core::CustomOp1 for MetalF8ToF16 {
     fn name(&self) -> &'static str { "metal_f8e4m3_to_f16" }
     fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalF8ToF16: expected Metal device") }
-    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
-        let device = s.device();
-        let el = l.shape().elem_count();
-        let pipeline = PIPELINE_CACHE.get_or_create(device, "f8e4m3_to_f16")?;
-        let output = device.new_buffer(el, DType::F16, "f8_to_f16")?;
-        let encoder = device.command_encoder()?;
-        encoder.set_compute_pipeline_state(&pipeline);
-        let offset = l.start_offset() * s.dtype().size_in_bytes();
-        candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
-        candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
-        candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
-        let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
-        let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
-        encoder.dispatch_threads(grid, group);
-        Ok((candle_core::MetalStorage::new(output, device.clone(), el, DType::F16), l.shape().clone()))
-    }
+    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> { dispatch_unary_cast(s, l, "f8e4m3_to_f16", DType::F16, "f8_to_f16") }
 }
 
 struct MetalAdalnModulate {
