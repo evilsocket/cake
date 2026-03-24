@@ -164,75 +164,55 @@ fn dispatch_ternary(
 const ADD3_KERNEL: TernaryKernel = TernaryKernel { f32_kernel: "add3_f32", f16_kernel: "add3_f16", label: "add3" };
 const SUB_MUL_KERNEL: TernaryKernel = TernaryKernel { f32_kernel: "sub_mul_f32", f16_kernel: "sub_mul_f16", label: "sub_mul" };
 
+// ─── Helper: dispatch a unary elementwise kernel ─────────────────────
+
+#[inline]
+fn dispatch_unary(
+    s: &candle_core::MetalStorage, l: &Layout,
+    f32_kernel: &'static str, f16_kernel: &'static str, label: &'static str,
+) -> Result<(candle_core::MetalStorage, Shape)> {
+    let device = s.device();
+    let el = l.shape().elem_count();
+    let kernel_name: &'static str = match s.dtype() {
+        DType::F32 => f32_kernel,
+        DType::F16 => f16_kernel,
+        dt => candle_core::bail!("{label} metal: unsupported dtype {dt:?}"),
+    };
+    let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
+    let output = device.new_buffer(el, s.dtype(), label)?;
+    let encoder = device.command_encoder()?;
+    encoder.set_compute_pipeline_state(&pipeline);
+    let offset = l.start_offset() * s.dtype().size_in_bytes();
+    candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
+    candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
+    candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
+    let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
+    let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
+    encoder.dispatch_threads(grid, group);
+    Ok((candle_core::MetalStorage::new(output, device.clone(), el, s.dtype()), l.shape().clone()))
+}
+
 // ─── CustomOp structs ───────────────────────────────────────────────
 
 struct MetalGelu;
 impl candle_core::CustomOp1 for MetalGelu {
     fn name(&self) -> &'static str { "metal_gelu" }
     fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalGelu: expected Metal device") }
-    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
-        let device = s.device();
-        let el = l.shape().elem_count();
-        let kernel_name: &'static str = match s.dtype() { DType::F32 => "gelu_f32", DType::F16 => "gelu_f16", dt => candle_core::bail!("gelu metal: unsupported dtype {dt:?}") };
-        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
-        let output = device.new_buffer(el, s.dtype(), "gelu")?;
-        let encoder = device.command_encoder()?;
-        encoder.set_compute_pipeline_state(&pipeline);
-        let offset = l.start_offset() * s.dtype().size_in_bytes();
-        candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
-        candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
-        candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
-        let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
-        let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
-        encoder.dispatch_threads(grid, group);
-        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s.dtype()), l.shape().clone()))
-    }
+    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> { dispatch_unary(s, l, "gelu_f32", "gelu_f16", "gelu") }
 }
 
 struct MetalSigmoid;
 impl candle_core::CustomOp1 for MetalSigmoid {
     fn name(&self) -> &'static str { "metal_sigmoid" }
     fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalSigmoid: expected Metal device") }
-    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
-        let device = s.device();
-        let el = l.shape().elem_count();
-        let kernel_name: &'static str = match s.dtype() { DType::F32 => "sigmoid_f32", DType::F16 => "sigmoid_f16", dt => candle_core::bail!("sigmoid metal: unsupported dtype {dt:?}") };
-        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
-        let output = device.new_buffer(el, s.dtype(), "sigmoid")?;
-        let encoder = device.command_encoder()?;
-        encoder.set_compute_pipeline_state(&pipeline);
-        let offset = l.start_offset() * s.dtype().size_in_bytes();
-        candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
-        candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
-        candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
-        let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
-        let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
-        encoder.dispatch_threads(grid, group);
-        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s.dtype()), l.shape().clone()))
-    }
+    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> { dispatch_unary(s, l, "sigmoid_f32", "sigmoid_f16", "sigmoid") }
 }
 
 struct MetalSilu;
 impl candle_core::CustomOp1 for MetalSilu {
     fn name(&self) -> &'static str { "metal_silu" }
     fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalSilu: expected Metal device") }
-    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
-        let device = s.device();
-        let el = l.shape().elem_count();
-        let kernel_name: &'static str = match s.dtype() { DType::F32 => "silu_f32", DType::F16 => "silu_f16", dt => candle_core::bail!("silu metal: unsupported dtype {dt:?}") };
-        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
-        let output = device.new_buffer(el, s.dtype(), "silu")?;
-        let encoder = device.command_encoder()?;
-        encoder.set_compute_pipeline_state(&pipeline);
-        let offset = l.start_offset() * s.dtype().size_in_bytes();
-        candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
-        candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
-        candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
-        let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
-        let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
-        encoder.dispatch_threads(grid, group);
-        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s.dtype()), l.shape().clone()))
-    }
+    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> { dispatch_unary(s, l, "silu_f32", "silu_f16", "silu") }
 }
 
 struct MetalSoftmaxLastDim;
@@ -312,22 +292,7 @@ struct MetalStableSoftplus;
 impl candle_core::CustomOp1 for MetalStableSoftplus {
     fn name(&self) -> &'static str { "metal_stable_softplus" }
     fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> { candle_core::bail!("MetalStableSoftplus: expected Metal device") }
-    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> {
-        let device = s.device();
-        let el = l.shape().elem_count();
-        let kernel_name: &'static str = match s.dtype() { DType::F32 => "stable_softplus_f32", DType::F16 => "stable_softplus_f16", dt => candle_core::bail!("stable_softplus metal: unsupported dtype {dt:?}") };
-        let pipeline = PIPELINE_CACHE.get_or_create(device, kernel_name)?;
-        let output = device.new_buffer(el, s.dtype(), "stable_softplus")?;
-        let encoder = device.command_encoder()?;
-        encoder.set_compute_pipeline_state(&pipeline);
-        let offset = l.start_offset() * s.dtype().size_in_bytes();
-        candle_metal_kernels::utils::set_param(&encoder, 0, (s.buffer(), offset));
-        candle_metal_kernels::utils::set_param(&encoder, 1, (&*output, 0usize));
-        candle_metal_kernels::utils::set_param(&encoder, 2, el as u32);
-        let grid = objc2_metal::MTLSize { width: el, height: 1, depth: 1 };
-        let group = candle_metal_kernels::utils::get_block_dims(el, 1, 1);
-        encoder.dispatch_threads(grid, group);
-        Ok((candle_core::MetalStorage::new(output, device.clone(), el, s.dtype()), l.shape().clone()))
+    fn metal_fwd(&self, s: &candle_core::MetalStorage, l: &Layout) -> Result<(candle_core::MetalStorage, Shape)> { dispatch_unary(s, l, "stable_softplus_f32", "stable_softplus_f16", "stable_softplus")
     }
 }
 
