@@ -262,7 +262,34 @@ impl ExpertProvider for DiskExpertProvider {
             });
         }
 
-        // For dtype conversion path, batch read saves syscalls
+        // Dtype conversion path: try zero-copy mmap first, fallback to read_tensors
+        let target_device = if self.needs_device_transfer { &self.device } else { &Device::Cpu };
+        if let (Some((gb, gdt, gs)), Some((ub, udt, us)), Some((db, ddt, ds))) = (
+            self.storage.tensor_bytes(&names.gate_proj),
+            self.storage.tensor_bytes(&names.up_proj),
+            self.storage.tensor_bytes(&names.down_proj),
+        ) {
+            // Build tensors directly from mmap'd bytes — avoids allocation + copy
+            let gate = Tensor::from_raw_buffer(gb, gdt, &gs, &Device::Cpu)?;
+            let up = Tensor::from_raw_buffer(ub, udt, &us, &Device::Cpu)?;
+            let down = Tensor::from_raw_buffer(db, ddt, &ds, &Device::Cpu)?;
+            let (gate, up, down) = if gdt != self.dtype {
+                (gate.to_dtype(self.dtype)?, up.to_dtype(self.dtype)?, down.to_dtype(self.dtype)?)
+            } else {
+                (gate, up, down)
+            };
+            return if self.needs_device_transfer {
+                Ok(ExpertWeights {
+                    gate_proj: gate.to_device(target_device)?,
+                    up_proj: up.to_device(target_device)?,
+                    down_proj: down.to_device(target_device)?,
+                })
+            } else {
+                Ok(ExpertWeights { gate_proj: gate, up_proj: up, down_proj: down })
+            };
+        }
+
+        // Fallback: batch read via TensorData
         let tensor_names = [
             names.gate_proj.as_str(),
             names.up_proj.as_str(),
