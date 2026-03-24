@@ -525,68 +525,56 @@ kernel void fused_vector_attention_f16(
     constant uint& kv_len [[buffer(5)]],
     constant float& scale [[buffer(6)]],
     constant uint& gqa_ratio [[buffer(7)]],  // heads / kv_heads
-    uint2 gid [[thread_position_in_grid]],   // (lane, batch*head_idx)
-    uint lane [[thread_index_in_simdgroup]]
+    uint2 gid [[thread_position_in_grid]],   // (thread_in_group, batch*head_idx)
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
 ) {
     uint bh = gid.y;  // batch*head index
     uint bkv = bh / gqa_ratio;  // corresponding kv head
-    // Single SIMD group per head: each thread handles ceil(head_dim/32) elements
-    uint ept = (head_dim + 31) / 32;
+    uint d = gid.x;  // head_dim index
 
-    // Pre-load and pre-scale Q values for this thread's elements
-    float q_scaled[8] = {};  // supports head_dim up to 256
-    float acc[8] = {};
-    for (uint e = 0; e < ept; e++) {
-        uint idx = lane + e * 32;
-        if (idx < head_dim)
-            q_scaled[e] = float(q[bh * head_dim + idx]) * scale;
-    }
+    if (d >= head_dim) return;
 
+    // Pre-scale query to avoid per-step multiply
+    float q_val = float(q[bh * head_dim + d]) * scale;
+
+    // Online softmax: process KV positions in streaming fashion
     float max_score = -1e30f;
     float sum_exp = 0.0f;
+    float acc = 0.0f;
 
     uint kv_base = bkv * kv_len * head_dim;
     for (uint t = 0; t < kv_len; t++) {
         uint kt = kv_base + t * head_dim;
-
-        // Partial dot product across this thread's elements
-        float dot = 0.0f;
-        for (uint e = 0; e < ept; e++) {
-            uint idx = lane + e * 32;
-            if (idx < head_dim)
-                dot = fma(q_scaled[e], float(k[kt + idx]), dot);
+        float qk = q_val * float(k[kt + d]);
+        float score = simd_sum(qk);
+        threadgroup float partial[32];
+        if (head_dim > 32) {
+            if (lane == 0) partial[simd_id] = score;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            uint ns = (head_dim + 31) / 32;
+            float t2 = 0.0f;
+            if (simd_id == 0 && lane < ns) t2 = partial[lane];
+            t2 = simd_sum(t2);
+            if (simd_id == 0 && lane == 0) partial[0] = t2;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            score = partial[0];
         }
-        // Full reduction within single SIMD group — no barriers!
-        float score = simd_sum(dot);
 
-        // Online softmax with per-element V accumulation
+        float v_val = float(v[kt + d]);
         if (score > max_score) {
             float correction = fast::exp(max_score - score);
             sum_exp = fma(sum_exp, correction, 1.0f);
-            for (uint e = 0; e < ept; e++) {
-                uint idx = lane + e * 32;
-                if (idx < head_dim)
-                    acc[e] = fma(acc[e], correction, float(v[kt + idx]));
-            }
+            acc = fma(acc, correction, v_val);
             max_score = score;
         } else {
             float w = fast::exp(score - max_score);
             sum_exp += w;
-            for (uint e = 0; e < ept; e++) {
-                uint idx = lane + e * 32;
-                if (idx < head_dim)
-                    acc[e] = fma(w, float(v[kt + idx]), acc[e]);
-            }
+            acc = fma(w, v_val, acc);
         }
     }
 
-    // Write output
-    float inv_sum = 1.0f / sum_exp;
-    for (uint e = 0; e < ept; e++) {
-        uint idx = lane + e * 32;
-        if (idx < head_dim)
-            output[bh * head_dim + idx] = half(acc[e] * inv_sum);
-    }
+    output[bh * head_dim + d] = half(acc / sum_exp);
 }
 
 // ─── adaln_modulate: rms_norm(x)*weight*(scale+1) + shift ───────────
@@ -644,65 +632,51 @@ kernel void fused_vector_attention_f32(
     constant float& scale [[buffer(6)]],
     constant uint& gqa_ratio [[buffer(7)]],
     uint2 gid [[thread_position_in_grid]],
-    uint lane [[thread_index_in_simdgroup]]
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
 ) {
     uint bh = gid.y;
     uint bkv = bh / gqa_ratio;
-    // Single SIMD group per head: each thread handles ceil(head_dim/32) elements
-    uint ept = (head_dim + 31) / 32;
+    uint d = gid.x;
 
-    // Pre-load and pre-scale Q values
-    float q_scaled[8] = {};  // supports head_dim up to 256
-    float acc[8] = {};
-    for (uint e = 0; e < ept; e++) {
-        uint idx = lane + e * 32;
-        if (idx < head_dim)
-            q_scaled[e] = q[bh * head_dim + idx] * scale;
-    }
+    if (d >= head_dim) return;
+
+    float q_val = q[bh * head_dim + d] * scale;
 
     float max_score = -1e30f;
     float sum_exp = 0.0f;
+    float acc = 0.0f;
 
     uint kv_base = bkv * kv_len * head_dim;
     for (uint t = 0; t < kv_len; t++) {
         uint kt = kv_base + t * head_dim;
-
-        // Partial dot product across this thread's elements
-        float dot = 0.0f;
-        for (uint e = 0; e < ept; e++) {
-            uint idx = lane + e * 32;
-            if (idx < head_dim)
-                dot = fma(q_scaled[e], k[kt + idx], dot);
+        float qk = q_val * k[kt + d];
+        float score = simd_sum(qk);
+        threadgroup float partial[32];
+        if (head_dim > 32) {
+            if (lane == 0) partial[simd_id] = score;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            uint ns = (head_dim + 31) / 32;
+            float t2 = 0.0f;
+            if (simd_id == 0 && lane < ns) t2 = partial[lane];
+            t2 = simd_sum(t2);
+            if (simd_id == 0 && lane == 0) partial[0] = t2;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            score = partial[0];
         }
-        // Full reduction within single SIMD group — no barriers!
-        float score = simd_sum(dot);
 
-        // Online softmax with per-element V accumulation
+        float v_val = v[kt + d];
         if (score > max_score) {
             float correction = fast::exp(max_score - score);
             sum_exp = fma(sum_exp, correction, 1.0f);
-            for (uint e = 0; e < ept; e++) {
-                uint idx = lane + e * 32;
-                if (idx < head_dim)
-                    acc[e] = fma(acc[e], correction, v[kt + idx]);
-            }
+            acc = fma(acc, correction, v_val);
             max_score = score;
         } else {
             float w = fast::exp(score - max_score);
             sum_exp += w;
-            for (uint e = 0; e < ept; e++) {
-                uint idx = lane + e * 32;
-                if (idx < head_dim)
-                    acc[e] = fma(w, v[kt + idx], acc[e]);
-            }
+            acc = fma(w, v_val, acc);
         }
     }
 
-    // Write output
-    float inv_sum = 1.0f / sum_exp;
-    for (uint e = 0; e < ept; e++) {
-        uint idx = lane + e * 32;
-        if (idx < head_dim)
-            output[bh * head_dim + idx] = acc[e] * inv_sum;
-    }
+    output[bh * head_dim + d] = acc / sum_exp;
 }

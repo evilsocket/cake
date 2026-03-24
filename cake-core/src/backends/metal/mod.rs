@@ -607,11 +607,11 @@ impl candle_core::CustomOp3 for MetalFusedVectorAttention {
         candle_metal_kernels::utils::set_param(&encoder, 5, kv_len as u32);
         candle_metal_kernels::utils::set_param(&encoder, 6, self.scale);
         candle_metal_kernels::utils::set_param(&encoder, 7, self.gqa_ratio);
-        // Single SIMD group (32 threads) per head — each thread handles ceil(head_dim/32)
-        // elements. Eliminates all cross-SIMD-group barriers from the inner KV loop.
-        let simd_width = 32.min(head_dim);
-        let grid = objc2_metal::MTLSize { width: simd_width, height: bh, depth: 1 };
-        let group = objc2_metal::MTLSize { width: simd_width, height: 1, depth: 1 };
+        // Grid: (head_dim, batch*heads) — one column per head_dim element, one row per head
+        let max_threads = pipeline.max_total_threads_per_threadgroup();
+        let tg_width = head_dim.min(max_threads);
+        let grid = objc2_metal::MTLSize { width: head_dim, height: bh, depth: 1 };
+        let group = objc2_metal::MTLSize { width: tg_width, height: 1, depth: 1 };
         encoder.dispatch_threads(grid, group);
         Ok((candle_core::MetalStorage::new(output, device.clone(), bh * head_dim, out_dtype), Shape::from(vec![bh, head_dim])))
     }
