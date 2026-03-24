@@ -81,6 +81,17 @@ impl ComputeBackend for CpuBackend {
 
     fn stable_softplus(&self, x: &Tensor) -> Result<Tensor> {
         // ln(1 + exp(clamp(x, -inf, 88))) with max(x, result)
+        if x.dtype() == DType::F32 {
+            let data = x.contiguous()?.flatten_all()?.to_vec1::<f32>()?;
+            let shape = x.dims();
+            let mut out = data;
+            for v in out.iter_mut() {
+                let clamped = v.min(88.0);
+                let sp = (1.0 + clamped.exp()).ln();
+                *v = v.max(sp);
+            }
+            return Tensor::from_vec(out, shape, x.device());
+        }
         let t88 = Tensor::full(88.0f32, x.shape(), x.device())?.to_dtype(x.dtype())?;
         let clamped = x.minimum(&t88)?;
         let sp = (clamped.exp()? + 1.0)?.log()?;
