@@ -1,4 +1,8 @@
 fn main() {
+    #[cfg(feature = "metal")]
+    {
+        println!("cargo:rustc-link-lib=framework=CoreGraphics");
+    }
     #[cfg(feature = "vulkan")]
     {
         println!("cargo::rerun-if-changed=src/backends/vulkan/ops.wgsl");
