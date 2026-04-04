@@ -402,6 +402,67 @@ impl TextModelBase {
         Ok(logits)
     }
 
+    /// Forward pass with pre-computed input embeddings (for VLM multimodal input).
+    /// Same as `forward()` but skips embedding lookup and scale.
+    pub async fn forward_input_embed(&mut self, mut x: Tensor, idx: usize) -> Result<Tensor> {
+        let (_batch_size, seq_len) = (x.dims()[0], x.dims()[1]);
+
+        let num_blocks = self.blocks.len();
+        let mut block_idx = 0;
+
+        while block_idx < num_blocks {
+            if self.blocks[block_idx].ident() == "local" {
+                x = self.blocks[block_idx]
+                    .forward_mut(&x, idx, block_idx, &mut self.ctx)
+                    .await
+                    .map_err(|e| {
+                        anyhow!("error in forward operation of local block {block_idx}: {e}")
+                    })?;
+                block_idx += 1;
+            } else {
+                let mut batch = vec![];
+                let first = block_idx;
+                let curr_block_id = self.blocks[block_idx].ident().to_owned();
+                while block_idx < num_blocks && self.blocks[block_idx].ident() == curr_block_id {
+                    batch.push((
+                        self.blocks[block_idx].layer_name().to_string(),
+                        idx,
+                        block_idx,
+                    ));
+                    block_idx += 1;
+                }
+
+                x = self.blocks[first]
+                    .forward_batch(&x, batch, &mut self.ctx)
+                    .await
+                    .map_err(|e| {
+                        anyhow!(
+                            "error in forward batch for blocks {first}..{block_idx} on {}: {e}",
+                            &curr_block_id
+                        )
+                    })?;
+            }
+        }
+
+        let x = self
+            .ln_f
+            .forward(&x)
+            .map_err(|e| anyhow!("error in ln_f.forward: {e}"))?;
+
+        let x = x
+            .i((.., seq_len - 1, ..))
+            .map_err(|e| anyhow!("error in x.i: {e}"))?
+            .contiguous()
+            .map_err(|e| anyhow!("error in x.i.contiguous: {e}"))?;
+
+        let logits = self
+            .lm_head
+            .forward(&x)
+            .map_err(|e| anyhow!("error in lm_head.forward: {e}"))?;
+
+        Ok(logits)
+    }
+
     /// Tokenize a prompt string and set up token state for generation.
     pub fn prepare_prompt(&mut self, dialog: &str) -> Result<()> {
         // make sure we start clean

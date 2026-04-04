@@ -150,6 +150,8 @@ impl Context {
                     "Qwen3_5MoeForConditionalGeneration" => TextModelArch::Qwen3_5Moe,
                     #[cfg(feature = "phi4")]
                     "Phi3ForCausalLM" | "Phi4ForCausalLM" => TextModelArch::Phi4,
+                    #[cfg(feature = "mixtral")]
+                    "MixtralForCausalLM" => TextModelArch::MixtralMoe,
                     #[cfg(feature = "mistral")]
                     "MistralForCausalLM" => TextModelArch::Mistral,
                     #[cfg(feature = "gemma3")]
@@ -160,6 +162,8 @@ impl Context {
                     "OLMo2ForCausalLM" | "Olmo2ForCausalLM" => TextModelArch::OLMo2,
                     #[cfg(feature = "exaone4")]
                     "ExaoneForCausalLM" => TextModelArch::EXAONE4,
+                    #[cfg(feature = "llava")]
+                    "LlavaForConditionalGeneration" | "LlavaLlamaForCausalLM" => TextModelArch::Llava,
                     _ => TextModelArch::Llama,
                 };
             }
@@ -191,6 +195,10 @@ impl Context {
                 TextModelArch::Phi4 => {
                     crate::models::phi4::Phi4Config::from_path(&config_filename)?.into_config()
                 }
+                #[cfg(feature = "mixtral")]
+                TextModelArch::MixtralMoe => {
+                    crate::models::mixtral::MixtralConfig::from_path(&config_filename)?.into_config()
+                }
                 #[cfg(feature = "mistral")]
                 TextModelArch::Mistral => {
                     crate::models::mistral::MistralConfig::from_path(&config_filename)?.into_config()
@@ -210,6 +218,10 @@ impl Context {
                 #[cfg(feature = "exaone4")]
                 TextModelArch::EXAONE4 => {
                     crate::models::exaone4::EXAONE4Config::from_path(&config_filename)?.into_config()
+                }
+                #[cfg(feature = "llava")]
+                TextModelArch::Llava => {
+                    crate::models::llava::LlavaConfig::from_path(&config_filename)?.into_config()
                 }
                 #[cfg(feature = "llama")]
                 TextModelArch::Llama => {

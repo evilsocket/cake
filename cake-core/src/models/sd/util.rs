@@ -29,13 +29,13 @@ pub fn pack_tensors(tensors: Vec<Tensor>, device: &Device) -> Result<Tensor> {
 pub fn unpack_tensors(tensor: &Tensor) -> Result<Vec<Tensor>> {
     let mut unpacked_tensors: Vec<Tensor> = Vec::new();
 
-    let num_tensors: f32 = tensor.get(0)?.to_scalar()?;
+    let num_tensors = tensor.narrow(0, 0, 1)?.to_vec1::<f32>()?[0];
     let num_tensors_i32 = num_tensors as i32;
 
     let mut idx: i32 = 1;
 
     for _i in 0..num_tensors_i32 {
-        let shape_info_len: f32 = tensor.get(idx as usize)?.to_scalar()?;
+        let shape_info_len = tensor.narrow(0, idx as usize, 1)?.to_vec1::<f32>()?[0];
 
         idx += 1;
 

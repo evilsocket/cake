@@ -20,6 +20,8 @@ pub mod gemma3;
 pub mod llama3;
 #[cfg(feature = "mistral")]
 pub mod mistral;
+#[cfg(feature = "mixtral")]
+pub mod mixtral;
 #[cfg(feature = "olmo2")]
 pub mod olmo2;
 #[cfg(feature = "phi4")]
@@ -36,8 +38,12 @@ pub mod qwen3_5;
 pub mod qwen3_5_moe;
 #[cfg(feature = "flux")]
 pub mod flux;
+#[cfg(feature = "llava")]
+pub mod llava;
 pub mod ltx_video;
 pub mod ltx2;
+pub mod wan;
+pub mod hunyuan_video;
 pub mod sd;
 pub mod speculative;
 

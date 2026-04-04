@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cake Video Model Gallery</title>
+<style>
+* { box-sizing: border-box; }
+body { background: #0f0f1a; color: #e0e0e0; font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 30px; }
+h1 { text-align: center; color: #e94560; font-size: 2.2em; margin-bottom: 5px; }
+.subtitle { text-align: center; color: #888; margin-bottom: 30px; font-size: 1.05em; }
+.section { max-width: 1300px; margin: 0 auto 40px; }
+.section h2 { color: #4ecca3; border-bottom: 1px solid #2a2a4e; padding-bottom: 8px; }
+.video-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 24px; }
+.card { background: #16213e; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
+.card video { width: 100%; display: block; background: #0a0a1a; max-height: 400px; object-fit: contain; }
+.card .info { padding: 16px; }
+.card h3 { margin: 0 0 6px; color: #e94560; font-size: 1.1em; }
+.card p { margin: 4px 0; font-size: 0.88em; line-height: 1.5; color: #aaa; }
+.card .prompt { color: #7eb8da; font-style: italic; }
+.m { color: #4ecca3; font-weight: 600; }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.8em; font-weight: 600; }
+.tag.ok { background: #0a3d2a; color: #4ecca3; }
+.tag.new { background: #2a3d0a; color: #a3cc4e; }
+.tag.wip { background: #3d3a0a; color: #ccb84e; }
+.footer { text-align: center; color: #555; font-size: 0.85em; margin-top: 30px; }
+.note { background: #1a1a2e; padding: 16px; border-radius: 8px; margin: 16px 0; border-left: 3px solid #4ecca3; }
+</style>
+</head>
+<body>
+
+<h1>Cake Distributed Video Generation</h1>
+<p class="subtitle">Multi-GPU inference for large video models</p>
+
+<div class="section">
+<h2>LTX-2 &mdash; 19B DiT, distributed across 4090 + 5090</h2>
+<p style="color:#aaa">Gemma-3 12B text encoder (Q4_K_M GGUF) + 19B DiT transformer + 3D VAE. 768&times;512, 41 frames, 24fps.</p>
+<div class="video-grid">
+
+<div class="card">
+  <video src="video1_golden_retriever.mp4" autoplay loop muted playsinline></video>
+  <div class="info">
+    <h3><span class="tag ok">LTX-2</span> Golden Retriever</h3>
+    <p class="prompt">"A golden retriever playing in autumn leaves in a park"</p>
+    <p>CFG 3.0 &bull; 30 steps &bull; <span class="m">~1.85s/step</span></p>
+  </div>
+</div>
+
+<div class="card">
+  <video src="video2_ocean_sunset.mp4" autoplay loop muted playsinline></video>
+  <div class="info">
+    <h3><span class="tag ok">LTX-2</span> Ocean Sunset</h3>
+    <p class="prompt">"Ocean waves crashing against rocky cliffs at sunset"</p>
+    <p>CFG 3.0 &bull; 30 steps</p>
+  </div>
+</div>
+
+<div class="card">
+  <video src="video3_city_timelapse.mp4" autoplay loop muted playsinline></video>
+  <div class="info">
+    <h3><span class="tag ok">LTX-2</span> City Timelapse</h3>
+    <p class="prompt">"City skyline timelapse at night with moving lights"</p>
+    <p>CFG 3.0 &bull; 30 steps</p>
+  </div>
+</div>
+
+<div class="card">
+  <video src="ltx2_cfg3_20steps.mp4" autoplay loop muted playsinline></video>
+  <div class="info">
+    <h3><span class="tag ok">LTX-2</span> Robot Beach</h3>
+    <p class="prompt">"A rusty robot walking on a sandy beach"</p>
+    <p>CFG 3.0 &bull; 20 steps</p>
+  </div>
+</div>
+
+</div>
+</div>
+
+<div class="section">
+<h2>Wan 2.1 &mdash; 1.3B DiT, single 4090 (NEW)</h2>
+<div class="note">
+  <strong>Pipeline fully operational:</strong> UMT5-XXL text encoder (CPU) &rarr; DiT transformer (GPU) &rarr; flow matching &rarr; 3D causal VAE (CPU) &rarr; AVI.
+  <br>Output at 256&times;256 from 1.3B model is noisy &mdash; production quality requires the 14B MoE model at 480p+ with distributed inference (same pattern as LTX-2).
+</div>
+<div class="video-grid">
+
+<div class="card">
+  <video src="wan_video.mp4" autoplay loop muted playsinline></video>
+  <div class="info">
+    <h3><span class="tag new">NEW</span> Wan 1.3B End-to-End</h3>
+    <p class="prompt">"A golden retriever running through autumn leaves in a sunlit park"</p>
+    <p><span class="m">256&times;256</span> &bull; 8 frames &bull; 30 steps &bull; CFG 5.0</p>
+    <p>T5 encode: 56s (CPU) &bull; Denoise: 2s (GPU) &bull; VAE: 68s (CPU)</p>
+    <p>1.3B model at low-res produces noise-like output. 14B model at 480p+ needed for coherent video.</p>
+  </div>
+</div>
+
+</div>
+</div>
+
+<div class="section">
+<h2>New Models Added (this branch)</h2>
+<div class="video-grid">
+
+<div class="card" style="background:#1a1a2e">
+  <div style="height:160px;display:flex;align-items:center;justify-content:center;color:#4ecca3;font-size:1em;padding:20px;text-align:center">
+    Full denoising loop verified (50 steps)<br>Scheduler + CFG + Euler stepping all work
+  </div>
+  <div class="info">
+    <h3><span class="tag wip">STUB</span> HunyuanVideo 13B</h3>
+    <p>Dual-stream DiT pipeline. Needs vendored transformer/VAE from diffusers.</p>
+  </div>
+</div>
+
+<div class="card" style="background:#1a1a2e">
+  <div style="height:160px;display:flex;align-items:center;justify-content:center;color:#4ecca3;font-size:1em;padding:20px;text-align:center">
+    MoE routing + config parsing verified<br>6 unit tests passing
+  </div>
+  <div class="info">
+    <h3><span class="tag wip">COMPILES</span> Mixtral MoE 8x7B/8x22B</h3>
+    <p>Sparse MoE w1/w2/w3 naming. Needs model weights to test.</p>
+  </div>
+</div>
+
+<div class="card" style="background:#1a1a2e">
+  <div style="height:160px;display:flex;align-items:center;justify-content:center;color:#4ecca3;font-size:1em;padding:20px;text-align:center">
+    Multimodal token merging verified<br>7 unit tests passing
+  </div>
+  <div class="info">
+    <h3><span class="tag wip">COMPILES</span> LLaVA VLM</h3>
+    <p>CLIP ViT + MM projector + LLaMA. Distributable vision component.</p>
+  </div>
+</div>
+
+</div>
+</div>
+
+<div class="footer">
+  <p>147 unit tests passing &bull; CUDA release build &bull; Cake distributed inference</p>
+</div>
+</body>
+</html>

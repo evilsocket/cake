@@ -33,6 +33,10 @@ pub enum ImageModelArch {
     LtxVideo,
     /// Lightricks LTX-2 (19B audio+video, Gemma-3 text encoder)
     Ltx2,
+    /// Wan2.2 (14B MoE text-to-video, UMT5-XXL text encoder)
+    Wan,
+    /// Tencent HunyuanVideo (13B DiT text-to-video)
+    HunyuanVideo,
 }
 
 /// Supported text model architectures.
@@ -57,6 +61,8 @@ pub enum TextModelArch {
     Phi4,
     /// Mistral family (standard GQA + optional sliding window)
     Mistral,
+    /// Mixtral MoE (8x7B, 8x22B)
+    MixtralMoe,
     /// Gemma 3 (interleaved local/global attention)
     Gemma3,
     /// Falcon3 (standard GQA, Apache 2.0)
@@ -65,6 +71,8 @@ pub enum TextModelArch {
     OLMo2,
     /// EXAONE 4.0 (3:1 local/global hybrid, QK-norm)
     EXAONE4,
+    /// LLaVA (Large Language and Vision Assistant)
+    Llava,
 }
 
 #[derive(Clone, Parser, Default, Debug)]

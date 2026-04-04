@@ -219,6 +219,24 @@ async fn run_master(ctx: Context) -> Result<()> {
                 #[cfg(not(feature = "llama"))]
                 anyhow::bail!("ltx-2 master requires the llama feature as a type placeholder");
             }
+            ImageModelArch::Wan => {
+                #[cfg(feature = "llama")]
+                {
+                    let master = VideoMaster::<cake_core::models::llama3::LLama, cake_core::models::wan::Wan>::new(ctx).await?;
+                    return master.run().await;
+                }
+                #[cfg(not(feature = "llama"))]
+                anyhow::bail!("wan master requires the llama feature as a type placeholder");
+            }
+            ImageModelArch::HunyuanVideo => {
+                #[cfg(feature = "llama")]
+                {
+                    let master = VideoMaster::<cake_core::models::llama3::LLama, cake_core::models::hunyuan_video::HunyuanVideo>::new(ctx).await?;
+                    return master.run().await;
+                }
+                #[cfg(not(feature = "llama"))]
+                anyhow::bail!("hunyuan-video master requires the llama feature as a type placeholder");
+            }
             _ => {} // Non-video image models handled below
         }
     }
@@ -233,7 +251,7 @@ async fn run_master(ctx: Context) -> Result<()> {
                         .run()
                         .await
                 }
-                ImageModelArch::LtxVideo | ImageModelArch::Ltx2 => {
+                ImageModelArch::LtxVideo | ImageModelArch::Ltx2 | ImageModelArch::Wan | ImageModelArch::HunyuanVideo => {
                     // Handled above via VideoMaster
                     unreachable!()
                 }
@@ -289,6 +307,13 @@ async fn run_master(ctx: Context) -> Result<()> {
                 .run()
                 .await
         }
+        #[cfg(feature = "mixtral")]
+        TextModelArch::MixtralMoe => {
+            Master::<cake_core::models::mixtral::MixtralMoe, cake_core::models::sd::SD>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
         #[cfg(feature = "mistral")]
         TextModelArch::Mistral => {
             Master::<cake_core::models::mistral::Mistral, cake_core::models::sd::SD>::new(ctx)
@@ -324,6 +349,13 @@ async fn run_master(ctx: Context) -> Result<()> {
                 .run()
                 .await
         }
+        #[cfg(feature = "llava")]
+        TextModelArch::Llava => {
+            Master::<cake_core::models::llava::LLava, cake_core::models::sd::SD>::new(ctx)
+                .await?
+                .run()
+                .await
+        }
         #[cfg(feature = "llama")]
         TextModelArch::Llama | TextModelArch::Auto => {
             run_with_image_model!(cake_core::models::llama3::LLama, ctx)
@@ -355,7 +387,7 @@ async fn run_master_image(ctx: Context) -> Result<()> {
                 .run()
                 .await
         }
-        ImageModelArch::LtxVideo | ImageModelArch::Ltx2 => {
+        ImageModelArch::LtxVideo | ImageModelArch::Ltx2 | ImageModelArch::Wan | ImageModelArch::HunyuanVideo => {
             // Handled by run_master_video, should not reach here
             unreachable!("video models should be dispatched via VideoMaster")
         }
@@ -417,6 +449,13 @@ async fn run_worker(ctx: &mut Context) -> Result<()> {
                     .run()
                     .await
             }
+            #[cfg(feature = "mixtral")]
+            TextModelArch::MixtralMoe => {
+                Worker::<cake_core::models::mixtral::MixtralMoe>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
             #[cfg(feature = "mistral")]
             TextModelArch::Mistral => {
                 Worker::<cake_core::models::mistral::Mistral>::new(ctx)
@@ -448,6 +487,13 @@ async fn run_worker(ctx: &mut Context) -> Result<()> {
             #[cfg(feature = "exaone4")]
             TextModelArch::EXAONE4 => {
                 Worker::<cake_core::models::exaone4::EXAONE4>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            #[cfg(feature = "llava")]
+            TextModelArch::Llava => {
+                Worker::<cake_core::models::llava::LLava>::new(ctx)
                     .await?
                     .run()
                     .await
@@ -487,6 +533,18 @@ async fn run_worker(ctx: &mut Context) -> Result<()> {
             }
             ImageModelArch::Ltx2 => {
                 Worker::<cake_core::models::ltx2::Ltx2>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            ImageModelArch::Wan => {
+                Worker::<cake_core::models::wan::Wan>::new(ctx)
+                    .await?
+                    .run()
+                    .await
+            }
+            ImageModelArch::HunyuanVideo => {
+                Worker::<cake_core::models::hunyuan_video::HunyuanVideo>::new(ctx)
                     .await?
                     .run()
                     .await
