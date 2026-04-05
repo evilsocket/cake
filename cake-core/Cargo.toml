@@ -58,6 +58,7 @@ default = ["master", "llama", "qwen2", "qwen3_5", "qwen3", "qwen3_moe", "qwen3_5
 
 metal = ["candle-core/metal", "candle-nn/metal", "candle-transformers/metal"]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda", "dep:candle-flash-attn"]
+cuda-no-flash = ["candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 
 master = ["dep:actix-web", "dep:async-stream", "dep:uuid"]
 
