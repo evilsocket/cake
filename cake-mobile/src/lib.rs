@@ -75,6 +75,19 @@ pub fn get_worker_status() -> String {
 #[cfg(target_os = "android")]
 static ANDROID_CACHE_DIR: Mutex<String> = Mutex::new(String::new());
 
+/// Set iOS jetsam-aware memory limits before start_worker.
+/// `budget_mb`: max layer budget in MiB (default 1536). Set higher for Guided Access / single-app.
+/// `reserve_pct`: percentage of device RAM reserved for OS (default 80). Lower = more layers.
+#[uniffi::export]
+pub fn configure_mobile_limits(budget_mb: u32, reserve_pct: u32) {
+    log_mobile(&format!(
+        "[cake-mobile] configure_mobile_limits: budget={}MB reserve={}%",
+        budget_mb, reserve_pct
+    ));
+    std::env::set_var("CAKE_MOBILE_LAYER_BUDGET_MB", budget_mb.to_string());
+    std::env::set_var("CAKE_MOBILE_RESERVE_PCT", reserve_pct.to_string());
+}
+
 /// On Android, call this with the app's cacheDir path before start_worker.
 /// No-op on iOS (sandbox paths are determined automatically).
 #[uniffi::export]
@@ -502,6 +515,11 @@ pub extern "C" fn cake_stop_worker() {
 #[no_mangle]
 pub extern "C" fn cake_get_worker_status() -> *mut c_char {
     CString::new(get_worker_status()).unwrap_or_default().into_raw()
+}
+
+#[no_mangle]
+pub extern "C" fn cake_configure_mobile_limits(budget_mb: u32, reserve_pct: u32) {
+    configure_mobile_limits(budget_mb, reserve_pct);
 }
 
 /// # Safety

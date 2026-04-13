@@ -64,24 +64,57 @@ pub trait WorkerCapacity {
     fn max_layers_for_size(&self, layer_size_bytes: u64) -> usize;
 }
 
+const DEFAULT_MOBILE_LAYER_BUDGET_MB: u64 = 1536;
+const DEFAULT_MOBILE_RESERVE_PCT: u64 = 80;
+
+fn mobile_layer_budget_bytes() -> u64 {
+    std::env::var("CAKE_MOBILE_LAYER_BUDGET_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MOBILE_LAYER_BUDGET_MB)
+        * 1024
+        * 1024
+}
+
+fn mobile_reserve_pct() -> f64 {
+    std::env::var("CAKE_MOBILE_RESERVE_PCT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MOBILE_RESERVE_PCT) as f64
+        / 100.0
+}
+
 /// Compute max layers from a list of GPUs, applying per-device VRAM reserves.
 ///
 /// - **Dedicated VRAM (CUDA)**: reserve max(5%, 768 MiB)
-/// - **Unified memory (Apple Silicon)**: reserve max(28%, 6 GiB)
+/// - **Apple desktop unified memory**: reserve max(28%, 6 GiB)
+/// - **Apple mobile unified memory (iPhone/iPad)**: reserve configurable %
+///   (default 80%, override via `CAKE_MOBILE_RESERVE_PCT`), then cap the
+///   worker layer budget (default 1.5 GiB, override via
+///   `CAKE_MOBILE_LAYER_BUDGET_MB`) to stay under iOS per-process jetsam limits
 /// - **CPU / mobile**: reserve 20%
 pub fn max_layers_for_gpus(gpus: &[discovery::GpuInfo], layer_size_bytes: u64) -> usize {
     if layer_size_bytes == 0 || gpus.is_empty() {
         return usize::MAX;
     }
+    let mobile_cap = mobile_layer_budget_bytes();
+    let mobile_reserve = mobile_reserve_pct();
     gpus.iter()
         .map(|g| {
             let name_lower = g.name.to_lowercase();
             let is_cpu = name_lower.starts_with("cpu");
-            let is_unified = name_lower.contains("apple");
+            let is_apple_mobile =
+                name_lower.starts_with("iphone") || name_lower.starts_with("ipad");
+            let is_apple_desktop = name_lower.contains("apple");
             let usable = if is_cpu {
                 let reserve = (g.vram_bytes as f64 * 0.20) as u64;
                 g.vram_bytes.saturating_sub(reserve)
-            } else if is_unified {
+            } else if is_apple_mobile {
+                let reserve = (g.vram_bytes as f64 * mobile_reserve) as u64;
+                g.vram_bytes
+                    .saturating_sub(reserve)
+                    .min(mobile_cap)
+            } else if is_apple_desktop {
                 let min_reserve = 6u64 * 1024 * 1024 * 1024;
                 let pct_reserve = (g.vram_bytes as f64 * 0.28) as u64;
                 let os_reserve = pct_reserve.max(min_reserve);
