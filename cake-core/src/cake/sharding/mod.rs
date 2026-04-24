@@ -36,6 +36,9 @@ const WORKER_CONNECT_ATTEMPTS: u32 = 20;
 const WORKER_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 pub(crate) async fn connect_with_retry(address: &str) -> Result<TcpStream> {
+    let total_wait =
+        WORKER_CONNECT_RETRY_DELAY.as_millis() * (WORKER_CONNECT_ATTEMPTS - 1) as u128;
+
     for attempt in 1..=WORKER_CONNECT_ATTEMPTS {
         match TcpStream::connect(address).await {
             Ok(stream) => return Ok(stream),
@@ -50,8 +53,6 @@ pub(crate) async fn connect_with_retry(address: &str) -> Result<TcpStream> {
                 tokio::time::sleep(WORKER_CONNECT_RETRY_DELAY).await;
             }
             Err(err) => {
-                let total_wait =
-                    WORKER_CONNECT_RETRY_DELAY.as_millis() * (WORKER_CONNECT_ATTEMPTS - 1) as u128;
                 return Err(anyhow!(
                     "can't connect to {} after {} attempts over {}ms: {}",
                     address,
@@ -63,7 +64,12 @@ pub(crate) async fn connect_with_retry(address: &str) -> Result<TcpStream> {
         }
     }
 
-    unreachable!()
+    Err(anyhow!(
+        "can't connect to {} after {} attempts over {}ms",
+        address,
+        WORKER_CONNECT_ATTEMPTS,
+        total_wait
+    ))
 }
 
 
