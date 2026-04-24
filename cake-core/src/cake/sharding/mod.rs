@@ -38,18 +38,22 @@ const WORKER_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(500);
 pub(crate) async fn connect_with_retry(address: &str) -> Result<TcpStream> {
     let total_wait =
         WORKER_CONNECT_RETRY_DELAY.as_millis() * (WORKER_CONNECT_ATTEMPTS - 1) as u128;
+    let mut last_err = None;
 
     for attempt in 1..=WORKER_CONNECT_ATTEMPTS {
         match TcpStream::connect(address).await {
             Ok(stream) => return Ok(stream),
             Err(err) if attempt < WORKER_CONNECT_ATTEMPTS => {
-                log::warn!(
-                    "connect to {} failed (attempt {}/{}): {}",
-                    address,
-                    attempt,
-                    WORKER_CONNECT_ATTEMPTS,
-                    err
-                );
+                last_err = Some(err);
+                if let Some(err) = &last_err {
+                    log::warn!(
+                        "connect to {} failed (attempt {}/{}): {}",
+                        address,
+                        attempt,
+                        WORKER_CONNECT_ATTEMPTS,
+                        err
+                    );
+                }
                 tokio::time::sleep(WORKER_CONNECT_RETRY_DELAY).await;
             }
             Err(err) => {
@@ -64,11 +68,13 @@ pub(crate) async fn connect_with_retry(address: &str) -> Result<TcpStream> {
         }
     }
 
+    let err = last_err.expect("connection retry loop should record a connect error");
     Err(anyhow!(
-        "can't connect to {} after {} attempts over {}ms",
+        "can't connect to {} after {} attempts over {}ms: {}",
         address,
         WORKER_CONNECT_ATTEMPTS,
-        total_wait
+        total_wait,
+        err
     ))
 }
 
