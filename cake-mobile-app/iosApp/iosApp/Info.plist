@@ -25,6 +25,11 @@
     <key>NSBonjourServices</key>
     <array>
         <string>_cake._udp</string>
+        <string>_cake._tcp</string>
+    </array>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>voip</string>
     </array>
     <key>CADisableMinimumFrameDurationOnPhone</key>
     <true/>

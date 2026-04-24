@@ -382,9 +382,49 @@ pub async fn master_setup(
                 &worker.host
             );
 
-            let mut stream = TcpStream::connect(&worker.host)
-                .await
-                .map_err(|e| anyhow!("can't connect to {}: {}", &worker.host, e))?;
+            // Retry up to 3 times with exponential backoff (1 s, 2 s, 4 s).
+            // iOS workers may need a brief moment for the TCP listener to become
+            // fully reachable after the UDP discovery advertisement is sent.
+            const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+            const MAX_ATTEMPTS: u32 = 3;
+            let mut last_err = anyhow!("no attempt made");
+            let mut stream = None;
+            for attempt in 0..MAX_ATTEMPTS {
+                if attempt > 0 {
+                    let delay = Duration::from_secs(1u64 << (attempt - 1));
+                    log::warn!(
+                        "retrying connection to '{}' at {} in {:.1}s (attempt {}/{}) ...",
+                        &worker.name,
+                        &worker.host,
+                        delay.as_secs_f32(),
+                        attempt + 1,
+                        MAX_ATTEMPTS,
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&worker.host)).await {
+                    Ok(Ok(s)) => {
+                        stream = Some(s);
+                        break;
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!(
+                            "connect attempt {}/{} to '{}' at {} failed: {}",
+                            attempt + 1, MAX_ATTEMPTS, &worker.name, &worker.host, e
+                        );
+                        last_err = anyhow!("can't connect to {}: {}", &worker.host, e);
+                    }
+                    Err(_) => {
+                        log::warn!(
+                            "connect attempt {}/{} to '{}' at {} timed out after {:.0}s",
+                            attempt + 1, MAX_ATTEMPTS, &worker.name, &worker.host,
+                            CONNECT_TIMEOUT.as_secs_f32(),
+                        );
+                        last_err = anyhow!("can't connect to {}: connection timed out", &worker.host);
+                    }
+                }
+            }
+            let mut stream = stream.ok_or(last_err)?;
             let _ = stream.set_nodelay(true);
 
             // Mutual authentication

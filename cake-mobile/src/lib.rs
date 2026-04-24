@@ -391,15 +391,32 @@ async fn run_zero_config_worker(
     update_status("loading", "Loading model weights...", 0.0);
     log_mobile(&format!("[cake-mobile] creating Context::from_args (cpu={})...", force_cpu));
 
+    // Install a panic hook so that any panic during model loading is logged to
+    // the mobile log (visible in the app's diagnostic output).
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let msg = format!("[cake-mobile] PANIC: {}", info);
         log_mobile(&msg);
     }));
 
-    let ctx_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        Context::from_args(args)
-    }));
+    // Context::from_args is CPU- and I/O-intensive (loads model weight files).
+    // Run it on a dedicated blocking thread to avoid starving the Tokio async
+    // runtime while the listener is still open and waiting for the master's
+    // inference reconnect.
+    let ctx_result = match tokio::task::spawn_blocking(move || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Context::from_args(args)))
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(join_err) => {
+            std::panic::set_hook(prev_hook);
+            let msg = format!("context loading task failed: {}", join_err);
+            log_mobile(&format!("[cake-mobile] ERROR: {}", msg));
+            update_status("error", &msg, 0.0);
+            return msg;
+        }
+    };
 
     std::panic::set_hook(prev_hook);
 
@@ -456,14 +473,22 @@ async fn run_direct_worker(name: &str, model: &str, address: &str) -> String {
     update_status("loading", "Downloading model...", 0.0);
     log_mobile("[cake-mobile] creating context...");
 
-    let mut ctx = match Context::from_args(args) {
-        Ok(ctx) => {
+    // Context::from_args downloads / loads large model weight files.  Run it
+    // on a dedicated blocking thread so the Tokio async runtime stays live.
+    let ctx_result = tokio::task::spawn_blocking(move || Context::from_args(args)).await;
+    let mut ctx = match ctx_result {
+        Ok(Ok(ctx)) => {
             log_mobile(&format!("[cake-mobile] context created, device={:?}", ctx.device));
             ctx
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             update_status("error", &format!("Failed: {}", e), 0.0);
             return format!("context creation failed: {}", e);
+        }
+        Err(join_err) => {
+            let msg = format!("context loading task failed: {}", join_err);
+            update_status("error", &msg, 0.0);
+            return msg;
         }
     };
 
