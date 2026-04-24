@@ -511,10 +511,10 @@ impl ExpertProvider for DiskExpertProvider {
             for name in [&names.gate_proj, &names.up_proj, &names.down_proj] {
                 if let Some((bytes, _, _)) = self.storage.tensor_bytes(name) {
                     unsafe {
-                        libc::posix_madvise(
-                            bytes.as_ptr() as *mut _,
+                        libc::madvise(
+                            bytes.as_ptr() as *mut libc::c_void,
                             bytes.len(),
-                            libc::POSIX_MADV_WILLNEED,
+                            libc::MADV_WILLNEED,
                         );
                     }
                 }
