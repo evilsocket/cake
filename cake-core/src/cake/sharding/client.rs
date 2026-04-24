@@ -33,9 +33,7 @@ impl Client {
     ) -> Result<Self> {
         let address = address.to_string();
         let layer_name = layer_name.to_string();
-        let stream = TcpStream::connect(&address)
-            .await
-            .map_err(|e| anyhow!("can't connect to {address}: {e}"))?;
+        let stream = super::connect_with_retry(&address).await?;
         stream.set_nodelay(true)?;
         let worker_info = WorkerInfo::default();
 

@@ -32,6 +32,40 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use tokio::net::{TcpListener, TcpStream};
 
+const WORKER_CONNECT_ATTEMPTS: u32 = 20;
+const WORKER_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(500);
+
+pub(crate) async fn connect_with_retry(address: &str) -> Result<TcpStream> {
+    for attempt in 1..=WORKER_CONNECT_ATTEMPTS {
+        match TcpStream::connect(address).await {
+            Ok(stream) => return Ok(stream),
+            Err(err) if attempt < WORKER_CONNECT_ATTEMPTS => {
+                log::warn!(
+                    "connect to {} failed (attempt {}/{}): {}",
+                    address,
+                    attempt,
+                    WORKER_CONNECT_ATTEMPTS,
+                    err
+                );
+                tokio::time::sleep(WORKER_CONNECT_RETRY_DELAY).await;
+            }
+            Err(err) => {
+                let total_wait =
+                    WORKER_CONNECT_RETRY_DELAY.as_millis() * (WORKER_CONNECT_ATTEMPTS - 1) as u128;
+                return Err(anyhow!(
+                    "can't connect to {} after {} attempts over {}ms: {}",
+                    address,
+                    WORKER_CONNECT_ATTEMPTS,
+                    total_wait,
+                    err
+                ));
+            }
+        }
+    }
+
+    unreachable!()
+}
+
 
 /// A sharding strategy decides how to distribute transformer layers across workers.
 pub trait Strategy: Send + Sync {
@@ -382,9 +416,7 @@ pub async fn master_setup(
                 &worker.host
             );
 
-            let mut stream = TcpStream::connect(&worker.host)
-                .await
-                .map_err(|e| anyhow!("can't connect to {}: {}", &worker.host, e))?;
+            let mut stream = connect_with_retry(&worker.host).await?;
             let _ = stream.set_nodelay(true);
 
             // Mutual authentication

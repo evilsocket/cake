@@ -4,6 +4,7 @@
 //! testing the Client::new() handshake and forward paths.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use candle_core::{DType, Device, Tensor};
 use tokio::net::{TcpListener, TcpStream};
@@ -317,4 +318,32 @@ async fn client_no_auth_to_authed_worker_fails() {
 
     // Don't wait on worker — it may be stuck too
     worker.abort();
+}
+
+#[tokio::test]
+async fn client_retries_until_worker_starts_listening() {
+    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = reserved.local_addr().unwrap();
+    drop(reserved);
+
+    let worker = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(750)).await;
+        let listener = TcpListener::bind(addr).await.unwrap();
+        run_mock_worker(listener, None).await
+    });
+
+    let client = Client::new(
+        Device::Cpu,
+        &addr.to_string(),
+        "model.layers.0",
+        None,
+    )
+    .await
+    .unwrap();
+
+    let display = format!("{}", client);
+    assert!(display.contains("cpu"));
+
+    drop(client);
+    let _ = worker.await;
 }
