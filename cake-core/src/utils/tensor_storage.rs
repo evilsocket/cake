@@ -190,8 +190,10 @@ impl MappedShard {
         if ptr == libc::MAP_FAILED {
             anyhow::bail!("mmap failed: {}", std::io::Error::last_os_error());
         }
-        // Hint: sequential access pattern — triggers aggressive readahead on NVMe
-        unsafe { libc::posix_madvise(ptr, len, libc::POSIX_MADV_SEQUENTIAL); }
+        // Hint: sequential access pattern — triggers aggressive readahead on NVMe.
+        // Use madvise (POSIX.1-2003 base) which is available on all Unix platforms
+        // including Android. posix_madvise is not defined in Android's libc.
+        unsafe { libc::madvise(ptr, len, libc::MADV_SEQUENTIAL); }
         Ok(Self { mmap_ptr: ptr as *const u8, mmap_len: len })
     }
 
@@ -238,9 +240,6 @@ pub struct SafetensorsStorage {
     index: HashMap<String, TensorMeta>,
     /// Memory-mapped shard files (indexed by shard_idx in TensorMeta).
     shards: Vec<MappedShard>,
-    /// File handles for non-mmap fallback.
-    #[cfg(not(unix))]
-    files: Vec<File>,
 }
 
 impl SafetensorsStorage {
