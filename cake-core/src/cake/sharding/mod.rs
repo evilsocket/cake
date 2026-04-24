@@ -385,9 +385,11 @@ pub async fn master_setup(
             // Retry up to 3 times with exponential backoff (1 s, 2 s, 4 s).
             // iOS workers may need a brief moment for the TCP listener to become
             // fully reachable after the UDP discovery advertisement is sent.
+            // 10 s per attempt is enough for a LAN connection while still failing
+            // fast enough to give a useful error within ~30 s overall.
             const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
             const MAX_ATTEMPTS: u32 = 3;
-            let mut last_err = anyhow!("no attempt made");
+            let mut last_err: Option<anyhow::Error> = None;
             let mut stream = None;
             for attempt in 0..MAX_ATTEMPTS {
                 if attempt > 0 {
@@ -412,7 +414,7 @@ pub async fn master_setup(
                             "connect attempt {}/{} to '{}' at {} failed: {}",
                             attempt + 1, MAX_ATTEMPTS, &worker.name, &worker.host, e
                         );
-                        last_err = anyhow!("can't connect to {}: {}", &worker.host, e);
+                        last_err = Some(anyhow!("can't connect to {}: {}", &worker.host, e));
                     }
                     Err(_) => {
                         log::warn!(
@@ -420,11 +422,13 @@ pub async fn master_setup(
                             attempt + 1, MAX_ATTEMPTS, &worker.name, &worker.host,
                             CONNECT_TIMEOUT.as_secs_f32(),
                         );
-                        last_err = anyhow!("can't connect to {}: connection timed out", &worker.host);
+                        last_err = Some(anyhow!("can't connect to {}: connection timed out", &worker.host));
                     }
                 }
             }
-            let mut stream = stream.ok_or(last_err)?;
+            let mut stream = stream.ok_or_else(|| {
+                last_err.unwrap_or_else(|| anyhow!("can't connect to {}: all attempts failed", &worker.host))
+            })?;
             let _ = stream.set_nodelay(true);
 
             // Mutual authentication
