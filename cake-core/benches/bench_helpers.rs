@@ -388,7 +388,8 @@ pub fn make_context(cfg: Config, vb: VarBuilder<'static>) -> Context {
         text_model_arch: TextModelArch::Auto,
         quant: Arc::new(cake_core::utils::NoQuantization),
         listener_override: Arc::new(Mutex::new(None)),
-            tensor_storage: None,
+        tensor_storage: None,
+        layer_devices: None,
         backend: Arc::new(cake_core::backends::CpuBackend::new()),
     }
 }
