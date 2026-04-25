@@ -839,3 +839,365 @@ kernel void fused_vector_attention_f32(
     output[bh * head_dim + d] = acc * (1.0f / sum_exp);
 }
 
+// ─── q4 fused kernels ──────────────────────────────────────────────
+// MLX affine 4-bit layout:
+//   packed: (out_features, in_features/8) uint32, 8 nibbles/U32, LSB-first
+//   scales: (out_features, num_groups) half
+//   biases: (out_features, num_groups) half
+//   x:      (M, in_features) half
+//   output: (M, out_features) half
+//
+// Dequant: weight = nibble * scale + bias
+
+#define Q4_MATVEC_THREADS 64u
+#define Q4_MATVEC_ROWS_PER_SIMDGROUP 4u
+#define Q4_MATVEC_ROWS_PER_GROUP 8u
+
+#define Q4_TILE_BM 8u
+#define Q4_TILE_BN 8u
+#define Q4_TILE_BK 32u
+#define Q4_TILE_BK_PAD (Q4_TILE_BK + 8u)
+
+inline float q4_dequant_f32(
+    uint packed_val,
+    uint nibble_idx,
+    half scale,
+    half bias
+) {
+    float q = float((packed_val >> (nibble_idx * 4u)) & 0xFu);
+    return fma(q, float(scale), float(bias));
+}
+
+// Matrix-vector hot path: M == 1 (autoregressive decode).
+// One 64-thread threadgroup handles 8 output rows; each simdgroup reduces 4 rows.
+kernel void q4_matvec_f16(
+    device const uint*  packed [[buffer(0)]],
+    device const half*  scales [[buffer(1)]],
+    device const half*  biases [[buffer(2)]],
+    device const half*  x      [[buffer(3)]],
+    device half*        output [[buffer(4)]],
+    constant uint& M            [[buffer(5)]],
+    constant uint& in_features  [[buffer(6)]],
+    constant uint& out_features [[buffer(7)]],
+    constant uint& group_size   [[buffer(8)]],
+    constant uint& num_groups   [[buffer(9)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]]
+) {
+    if (M == 0u || tgid.x * Q4_MATVEC_ROWS_PER_GROUP >= out_features) return;
+
+    uint packed_cols = in_features / 8u;
+    uint packed_group_shift = (group_size == 32u) ? 2u : ((group_size == 64u) ? 3u : 4u);
+    uint full_packed_cols = packed_cols & ~3u;
+    uint row_base = tgid.x * Q4_MATVEC_ROWS_PER_GROUP + simd_id * Q4_MATVEC_ROWS_PER_SIMDGROUP;
+    uint row0 = row_base + 0u;
+    uint row1 = row_base + 1u;
+    uint row2 = row_base + 2u;
+    uint row3 = row_base + 3u;
+    bool row0_active = row0 < out_features;
+    bool row1_active = row1 < out_features;
+    bool row2_active = row2 < out_features;
+    bool row3_active = row3 < out_features;
+    uint row0_offset = row0 * packed_cols;
+    uint row1_offset = row1 * packed_cols;
+    uint row2_offset = row2 * packed_cols;
+    uint row3_offset = row3 * packed_cols;
+    uint scale_base0 = row0 * num_groups;
+    uint scale_base1 = row1 * num_groups;
+    uint scale_base2 = row2 * num_groups;
+    uint scale_base3 = row3 * num_groups;
+
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    float acc2 = 0.0f;
+    float acc3 = 0.0f;
+
+    uint cached_group = 0xFFFFFFFFu;
+    float4 scale_vec0 = float4(0.0f);
+    float4 scale_vec1 = float4(0.0f);
+    float4 scale_vec2 = float4(0.0f);
+    float4 scale_vec3 = float4(0.0f);
+    float4 bias_vec0 = float4(0.0f);
+    float4 bias_vec1 = float4(0.0f);
+    float4 bias_vec2 = float4(0.0f);
+    float4 bias_vec3 = float4(0.0f);
+
+    for (uint pc_block = lane * 4u; pc_block < full_packed_cols; pc_block += 128u) {
+        uint group_idx = pc_block >> packed_group_shift;
+        if (group_idx != cached_group) {
+            cached_group = group_idx;
+            if (row0_active) {
+                scale_vec0 = float4(float(scales[scale_base0 + group_idx]));
+                bias_vec0 = float4(float(biases[scale_base0 + group_idx]));
+            }
+            if (row1_active) {
+                scale_vec1 = float4(float(scales[scale_base1 + group_idx]));
+                bias_vec1 = float4(float(biases[scale_base1 + group_idx]));
+            }
+            if (row2_active) {
+                scale_vec2 = float4(float(scales[scale_base2 + group_idx]));
+                bias_vec2 = float4(float(biases[scale_base2 + group_idx]));
+            }
+            if (row3_active) {
+                scale_vec3 = float4(float(scales[scale_base3 + group_idx]));
+                bias_vec3 = float4(float(biases[scale_base3 + group_idx]));
+            }
+        }
+
+        uint j_base = pc_block * 8u;
+        float4 x0 = float4(float(x[j_base + 0u]), float(x[j_base + 8u]), float(x[j_base + 16u]), float(x[j_base + 24u]));
+        float4 x1 = float4(float(x[j_base + 1u]), float(x[j_base + 9u]), float(x[j_base + 17u]), float(x[j_base + 25u]));
+        float4 x2 = float4(float(x[j_base + 2u]), float(x[j_base + 10u]), float(x[j_base + 18u]), float(x[j_base + 26u]));
+        float4 x3 = float4(float(x[j_base + 3u]), float(x[j_base + 11u]), float(x[j_base + 19u]), float(x[j_base + 27u]));
+        float4 x4 = float4(float(x[j_base + 4u]), float(x[j_base + 12u]), float(x[j_base + 20u]), float(x[j_base + 28u]));
+        float4 x5 = float4(float(x[j_base + 5u]), float(x[j_base + 13u]), float(x[j_base + 21u]), float(x[j_base + 29u]));
+        float4 x6 = float4(float(x[j_base + 6u]), float(x[j_base + 14u]), float(x[j_base + 22u]), float(x[j_base + 30u]));
+        float4 x7 = float4(float(x[j_base + 7u]), float(x[j_base + 15u]), float(x[j_base + 23u]), float(x[j_base + 31u]));
+
+        if (row0_active) {
+            uint4 packed_row = uint4(
+                packed[row0_offset + pc_block + 0u],
+                packed[row0_offset + pc_block + 1u],
+                packed[row0_offset + pc_block + 2u],
+                packed[row0_offset + pc_block + 3u]
+            );
+            acc0 += dot(fma(float4(packed_row & 0xFu), scale_vec0, bias_vec0), x0);
+            acc0 += dot(fma(float4((packed_row >> 4u)  & 0xFu), scale_vec0, bias_vec0), x1);
+            acc0 += dot(fma(float4((packed_row >> 8u)  & 0xFu), scale_vec0, bias_vec0), x2);
+            acc0 += dot(fma(float4((packed_row >> 12u) & 0xFu), scale_vec0, bias_vec0), x3);
+            acc0 += dot(fma(float4((packed_row >> 16u) & 0xFu), scale_vec0, bias_vec0), x4);
+            acc0 += dot(fma(float4((packed_row >> 20u) & 0xFu), scale_vec0, bias_vec0), x5);
+            acc0 += dot(fma(float4((packed_row >> 24u) & 0xFu), scale_vec0, bias_vec0), x6);
+            acc0 += dot(fma(float4((packed_row >> 28u) & 0xFu), scale_vec0, bias_vec0), x7);
+        }
+        if (row1_active) {
+            uint4 packed_row = uint4(
+                packed[row1_offset + pc_block + 0u],
+                packed[row1_offset + pc_block + 1u],
+                packed[row1_offset + pc_block + 2u],
+                packed[row1_offset + pc_block + 3u]
+            );
+            acc1 += dot(fma(float4(packed_row & 0xFu), scale_vec1, bias_vec1), x0);
+            acc1 += dot(fma(float4((packed_row >> 4u)  & 0xFu), scale_vec1, bias_vec1), x1);
+            acc1 += dot(fma(float4((packed_row >> 8u)  & 0xFu), scale_vec1, bias_vec1), x2);
+            acc1 += dot(fma(float4((packed_row >> 12u) & 0xFu), scale_vec1, bias_vec1), x3);
+            acc1 += dot(fma(float4((packed_row >> 16u) & 0xFu), scale_vec1, bias_vec1), x4);
+            acc1 += dot(fma(float4((packed_row >> 20u) & 0xFu), scale_vec1, bias_vec1), x5);
+            acc1 += dot(fma(float4((packed_row >> 24u) & 0xFu), scale_vec1, bias_vec1), x6);
+            acc1 += dot(fma(float4((packed_row >> 28u) & 0xFu), scale_vec1, bias_vec1), x7);
+        }
+        if (row2_active) {
+            uint4 packed_row = uint4(
+                packed[row2_offset + pc_block + 0u],
+                packed[row2_offset + pc_block + 1u],
+                packed[row2_offset + pc_block + 2u],
+                packed[row2_offset + pc_block + 3u]
+            );
+            acc2 += dot(fma(float4(packed_row & 0xFu), scale_vec2, bias_vec2), x0);
+            acc2 += dot(fma(float4((packed_row >> 4u)  & 0xFu), scale_vec2, bias_vec2), x1);
+            acc2 += dot(fma(float4((packed_row >> 8u)  & 0xFu), scale_vec2, bias_vec2), x2);
+            acc2 += dot(fma(float4((packed_row >> 12u) & 0xFu), scale_vec2, bias_vec2), x3);
+            acc2 += dot(fma(float4((packed_row >> 16u) & 0xFu), scale_vec2, bias_vec2), x4);
+            acc2 += dot(fma(float4((packed_row >> 20u) & 0xFu), scale_vec2, bias_vec2), x5);
+            acc2 += dot(fma(float4((packed_row >> 24u) & 0xFu), scale_vec2, bias_vec2), x6);
+            acc2 += dot(fma(float4((packed_row >> 28u) & 0xFu), scale_vec2, bias_vec2), x7);
+        }
+        if (row3_active) {
+            uint4 packed_row = uint4(
+                packed[row3_offset + pc_block + 0u],
+                packed[row3_offset + pc_block + 1u],
+                packed[row3_offset + pc_block + 2u],
+                packed[row3_offset + pc_block + 3u]
+            );
+            acc3 += dot(fma(float4(packed_row & 0xFu), scale_vec3, bias_vec3), x0);
+            acc3 += dot(fma(float4((packed_row >> 4u)  & 0xFu), scale_vec3, bias_vec3), x1);
+            acc3 += dot(fma(float4((packed_row >> 8u)  & 0xFu), scale_vec3, bias_vec3), x2);
+            acc3 += dot(fma(float4((packed_row >> 12u) & 0xFu), scale_vec3, bias_vec3), x3);
+            acc3 += dot(fma(float4((packed_row >> 16u) & 0xFu), scale_vec3, bias_vec3), x4);
+            acc3 += dot(fma(float4((packed_row >> 20u) & 0xFu), scale_vec3, bias_vec3), x5);
+            acc3 += dot(fma(float4((packed_row >> 24u) & 0xFu), scale_vec3, bias_vec3), x6);
+            acc3 += dot(fma(float4((packed_row >> 28u) & 0xFu), scale_vec3, bias_vec3), x7);
+        }
+    }
+
+    for (uint pc = full_packed_cols + lane; pc < packed_cols; pc += 32u) {
+        uint group_idx = pc >> packed_group_shift;
+        if (group_idx != cached_group) {
+            cached_group = group_idx;
+            if (row0_active) {
+                scale_vec0 = float4(float(scales[scale_base0 + group_idx]));
+                bias_vec0 = float4(float(biases[scale_base0 + group_idx]));
+            }
+            if (row1_active) {
+                scale_vec1 = float4(float(scales[scale_base1 + group_idx]));
+                bias_vec1 = float4(float(biases[scale_base1 + group_idx]));
+            }
+            if (row2_active) {
+                scale_vec2 = float4(float(scales[scale_base2 + group_idx]));
+                bias_vec2 = float4(float(biases[scale_base2 + group_idx]));
+            }
+            if (row3_active) {
+                scale_vec3 = float4(float(scales[scale_base3 + group_idx]));
+                bias_vec3 = float4(float(biases[scale_base3 + group_idx]));
+            }
+        }
+
+        uint j_base = pc * 8u;
+        float4 x_lo = float4(float(x[j_base + 0u]), float(x[j_base + 1u]), float(x[j_base + 2u]), float(x[j_base + 3u]));
+        float4 x_hi = float4(float(x[j_base + 4u]), float(x[j_base + 5u]), float(x[j_base + 6u]), float(x[j_base + 7u]));
+
+        if (row0_active) {
+            uint packed_val = packed[row0_offset + pc];
+            acc0 += dot(fma(float4(
+                float((packed_val >> 0u) & 0xFu),
+                float((packed_val >> 4u) & 0xFu),
+                float((packed_val >> 8u) & 0xFu),
+                float((packed_val >> 12u) & 0xFu)
+            ), scale_vec0, bias_vec0), x_lo);
+            acc0 += dot(fma(float4(
+                float((packed_val >> 16u) & 0xFu),
+                float((packed_val >> 20u) & 0xFu),
+                float((packed_val >> 24u) & 0xFu),
+                float((packed_val >> 28u) & 0xFu)
+            ), scale_vec0, bias_vec0), x_hi);
+        }
+        if (row1_active) {
+            uint packed_val = packed[row1_offset + pc];
+            acc1 += dot(fma(float4(
+                float((packed_val >> 0u) & 0xFu),
+                float((packed_val >> 4u) & 0xFu),
+                float((packed_val >> 8u) & 0xFu),
+                float((packed_val >> 12u) & 0xFu)
+            ), scale_vec1, bias_vec1), x_lo);
+            acc1 += dot(fma(float4(
+                float((packed_val >> 16u) & 0xFu),
+                float((packed_val >> 20u) & 0xFu),
+                float((packed_val >> 24u) & 0xFu),
+                float((packed_val >> 28u) & 0xFu)
+            ), scale_vec1, bias_vec1), x_hi);
+        }
+        if (row2_active) {
+            uint packed_val = packed[row2_offset + pc];
+            acc2 += dot(fma(float4(
+                float((packed_val >> 0u) & 0xFu),
+                float((packed_val >> 4u) & 0xFu),
+                float((packed_val >> 8u) & 0xFu),
+                float((packed_val >> 12u) & 0xFu)
+            ), scale_vec2, bias_vec2), x_lo);
+            acc2 += dot(fma(float4(
+                float((packed_val >> 16u) & 0xFu),
+                float((packed_val >> 20u) & 0xFu),
+                float((packed_val >> 24u) & 0xFu),
+                float((packed_val >> 28u) & 0xFu)
+            ), scale_vec2, bias_vec2), x_hi);
+        }
+        if (row3_active) {
+            uint packed_val = packed[row3_offset + pc];
+            acc3 += dot(fma(float4(
+                float((packed_val >> 0u) & 0xFu),
+                float((packed_val >> 4u) & 0xFu),
+                float((packed_val >> 8u) & 0xFu),
+                float((packed_val >> 12u) & 0xFu)
+            ), scale_vec3, bias_vec3), x_lo);
+            acc3 += dot(fma(float4(
+                float((packed_val >> 16u) & 0xFu),
+                float((packed_val >> 20u) & 0xFu),
+                float((packed_val >> 24u) & 0xFu),
+                float((packed_val >> 28u) & 0xFu)
+            ), scale_vec3, bias_vec3), x_hi);
+        }
+    }
+
+    acc0 = simd_sum(acc0);
+    acc1 = simd_sum(acc1);
+    acc2 = simd_sum(acc2);
+    acc3 = simd_sum(acc3);
+
+    if (lane == 0u) {
+        if (row_base + 0u < out_features) output[row_base + 0u] = half(acc0);
+        if (row_base + 1u < out_features) output[row_base + 1u] = half(acc1);
+        if (row_base + 2u < out_features) output[row_base + 2u] = half(acc2);
+        if (row_base + 3u < out_features) output[row_base + 3u] = half(acc3);
+    }
+}
+
+// Tiled matrix-matrix path: M > 1 (prefill / batched prompts).
+// Dequantizes one BN x BK tile into threadgroup memory and reuses it across BM rows.
+kernel void q4_matmul_tiled_f16(
+    device const uint*  packed [[buffer(0)]],
+    device const half*  scales [[buffer(1)]],
+    device const half*  biases [[buffer(2)]],
+    device const half*  x      [[buffer(3)]],
+    device half*        output [[buffer(4)]],
+    constant uint& M            [[buffer(5)]],
+    constant uint& in_features  [[buffer(6)]],
+    constant uint& out_features [[buffer(7)]],
+    constant uint& group_size   [[buffer(8)]],
+    constant uint& num_groups   [[buffer(9)]],
+    uint3 lid [[thread_position_in_threadgroup]],
+    uint3 tgid [[threadgroup_position_in_grid]]
+) {
+    threadgroup half x_tile[Q4_TILE_BM][Q4_TILE_BK];
+    threadgroup half w_tile[Q4_TILE_BN][Q4_TILE_BK_PAD];
+
+    uint local_col = lid.x;
+    uint local_row = lid.y;
+    uint linear_tid = local_row * Q4_TILE_BN + local_col;
+
+    uint row = tgid.y * Q4_TILE_BM + local_row;
+    uint col = tgid.x * Q4_TILE_BN + local_col;
+    uint packed_cols = in_features / 8u;
+
+    float acc = 0.0f;
+
+    for (uint k0 = 0u; k0 < in_features; k0 += Q4_TILE_BK) {
+        for (uint idx = linear_tid; idx < Q4_TILE_BM * Q4_TILE_BK; idx += Q4_TILE_BM * Q4_TILE_BN) {
+            uint tile_r = idx / Q4_TILE_BK;
+            uint tile_k = idx % Q4_TILE_BK;
+            uint global_row = tgid.y * Q4_TILE_BM + tile_r;
+            uint global_k = k0 + tile_k;
+            x_tile[tile_r][tile_k] =
+                (global_row < M && global_k < in_features)
+                    ? x[global_row * in_features + global_k]
+                    : half(0.0h);
+        }
+
+        for (uint idx = linear_tid; idx < Q4_TILE_BN * Q4_TILE_BK; idx += Q4_TILE_BM * Q4_TILE_BN) {
+            uint tile_c = idx / Q4_TILE_BK;
+            uint tile_k = idx % Q4_TILE_BK;
+            uint global_col = tgid.x * Q4_TILE_BN + tile_c;
+            uint global_k = k0 + tile_k;
+
+            if (global_col < out_features && global_k < in_features) {
+                uint pc = global_k / 8u;
+                uint nib = global_k & 7u;
+                uint group = global_k / group_size;
+                uint packed_val = packed[global_col * packed_cols + pc];
+                w_tile[tile_c][tile_k] = half(q4_dequant_f32(
+                    packed_val,
+                    nib,
+                    scales[global_col * num_groups + group],
+                    biases[global_col * num_groups + group]
+                ));
+            } else {
+                w_tile[tile_c][tile_k] = half(0.0h);
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        if (row < M && col < out_features) {
+            for (uint kk = 0u; kk < Q4_TILE_BK; kk++) {
+                acc = fma(float(x_tile[local_row][kk]), float(w_tile[local_col][kk]), acc);
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (row < M && col < out_features) {
+        output[row * out_features + col] = half(acc);
+    }
+}

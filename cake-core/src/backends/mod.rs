@@ -22,6 +22,8 @@ pub use cuda::CudaBackend;
 mod metal;
 #[cfg(feature = "metal")]
 pub use self::metal::MetalBackend;
+#[cfg(feature = "metal")]
+pub use self::metal::q4_matmul_f16;
 
 #[cfg(feature = "vulkan")]
 mod vulkan;
@@ -87,13 +89,7 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
     // ── Fused normalization ──────────────────────────────────────────
 
     /// `rms_norm(x, weight, eps) * silu(z)` — GDN output gating.
-    fn rms_norm_gated(
-        &self,
-        x: &Tensor,
-        z: &Tensor,
-        weight: &Tensor,
-        eps: f32,
-    ) -> Result<Tensor>;
+    fn rms_norm_gated(&self, x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor>;
 
     /// `rms_norm(a + b, weight, eps)` — residual + norm fusion.
     /// Returns `(residual, normed)` where `residual = a + b`.
@@ -194,6 +190,20 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
         Ok(weight.clone())
     }
 
+    /// Pre-process and fuse multiple linear weights.
+    ///
+    /// Default behavior preserves the existing semantics: concatenate the
+    /// original `(out_features, in_features)` weights first, then run the
+    /// backend-specific preprocessing step once on the fused tensor.
+    ///
+    /// Backends that transpose or otherwise expand weights during
+    /// `preprocess_linear_weight` can override this to reduce peak memory by
+    /// preprocessing each part incrementally before concatenation.
+    fn preprocess_linear_weights(&self, weights: &[&Tensor]) -> Result<Tensor> {
+        let fused = Tensor::cat(weights, 0)?;
+        self.preprocess_linear_weight(&fused)
+    }
+
     // ── Inference primitives ──────────────────────────────────────────
 
     /// Linear layer forward: `x @ weight^T + bias`.
@@ -203,12 +213,7 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
     ///   (avoids slow broadcast_matmul on CUDA/CPU)
     /// - For non-contiguous 3D+: uses broadcast_left on weight
     /// - No dtype conversion (caller is responsible)
-    fn linear_forward(
-        &self,
-        x: &Tensor,
-        weight: &Tensor,
-        bias: Option<&Tensor>,
-    ) -> Result<Tensor> {
+    fn linear_forward(&self, x: &Tensor, weight: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
         let out = match x.dims() {
             [b1, b2, m, k] => {
                 if x.is_contiguous() {
@@ -238,6 +243,27 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
             Some(b) => out.broadcast_add(b),
             None => Ok(out),
         }
+    }
+
+    /// Fused 4-bit dequant + matmul: `output = x @ dequant(packed, scales, biases)^T`.
+    ///
+    /// On Metal, this dispatches to the q4_matmul_f16 MSL kernel, keeping weights
+    /// at 0.5 bytes/element (4x memory reduction vs F16).
+    ///
+    /// Default: dequantizes on CPU via `gptq::dequantize_packed_4bit` and calls
+    /// `linear_forward`. Suboptimal but correct — only Metal overrides this.
+    fn q4_linear_forward(
+        &self,
+        packed: &Tensor,
+        scales: &Tensor,
+        biases: &Tensor,
+        x: &Tensor,
+        group_size: usize,
+    ) -> Result<Tensor> {
+        // CPU fallback: dequantize to F32, convert to input dtype, matmul.
+        let weight = crate::utils::gptq::dequantize_packed_4bit(packed, scales, biases, group_size)?;
+        let weight = weight.to_dtype(x.dtype())?.to_device(x.device())?;
+        self.linear_forward(x, &weight, None)
     }
 
     /// RMS normalization: `x * weight / sqrt(mean(x^2) + eps)`.
@@ -285,9 +311,8 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
                 match &b_data {
                     Some(bd) => {
                         for i in 0..hidden {
-                            out[off + i] =
-                                (((row[i] as f64 - mean) * rstd) * w_data[i] as f64
-                                    + bd[i] as f64) as f32;
+                            out[off + i] = (((row[i] as f64 - mean) * rstd) * w_data[i] as f64
+                                + bd[i] as f64) as f32;
                         }
                     }
                     None => {
@@ -530,12 +555,7 @@ pub trait ComputeBackend: Send + Sync + std::fmt::Debug {
     /// Create a causal attention mask. Returns a U8 tensor of shape `(seq_len, kv_len)`
     /// where 1 = masked (future position), 0 = attend.
     /// Callers use `masked_fill` or `where_cond` to apply the mask.
-    fn causal_mask(
-        &self,
-        seq_len: usize,
-        kv_len: usize,
-        device: &Device,
-    ) -> Result<Tensor> {
+    fn causal_mask(&self, seq_len: usize, kv_len: usize, device: &Device) -> Result<Tensor> {
         if seq_len == 1 {
             return Tensor::zeros((1, kv_len), DType::U8, device);
         }
