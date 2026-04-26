@@ -1,5 +1,6 @@
 package com.evilsocket.cake
 
+import cake_mobile.cake_configure_mobile_limits
 import cake_mobile.cake_free_string
 import cake_mobile.cake_get_worker_status
 import cake_mobile.cake_set_cache_dir
@@ -31,5 +32,9 @@ actual object WorkerBridge {
 
     actual fun setCacheDir(path: String) {
         cake_set_cache_dir(path)
+    }
+
+    actual fun configureMobileLimits(budgetMb: UInt, reservePct: UInt) {
+        cake_configure_mobile_limits(budgetMb, reservePct)
     }
 }

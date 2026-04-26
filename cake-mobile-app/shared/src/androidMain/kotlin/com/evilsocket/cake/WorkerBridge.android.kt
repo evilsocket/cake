@@ -9,4 +9,7 @@ actual object WorkerBridge {
     actual fun getWorkerStatus(): String = uniffi.cake_mobile.getWorkerStatus()
 
     actual fun setCacheDir(path: String) = uniffi.cake_mobile.setCacheDir(path)
+
+    actual fun configureMobileLimits(budgetMb: UInt, reservePct: UInt) =
+        uniffi.cake_mobile.configureMobileLimits(budgetMb, reservePct)
 }
