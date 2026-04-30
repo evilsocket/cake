@@ -34,6 +34,11 @@ struct TensorStore {
     data: Vec<u8>,
 }
 
+pub(crate) struct ReducedModelBundle {
+    pub index_json: Vec<u8>,
+    pub safetensors: Vec<u8>,
+}
+
 impl View for TensorStore {
     fn dtype(&self) -> Dtype {
         self.dtype
@@ -85,17 +90,15 @@ fn load_index(data_path: &Path) -> Result<Index> {
     }
 }
 
-fn reduce_for_worker(
-    index: &Index,
-    worker: &Node,
-) -> Result<(Index, HashMap<String, Vec<String>>)> {
-    log::info!("worker: {}", &worker.host);
-
+fn reduce_for_layers(index: &Index, layers: &[String]) -> (Index, HashMap<String, Vec<String>>) {
     let mut reduced: HashMap<String, Vec<String>> = HashMap::new();
     let mut new_index = Index::new();
 
     for (layer_full_name, filename) in &index.weight_map {
-        if worker.is_text_model_layer_owner(layer_full_name) {
+        let is_owned = layers
+            .iter()
+            .any(|layer| layer_full_name.starts_with(&format!("{}.", layer)));
+        if is_owned {
             if let Some(layers) = reduced.get_mut(filename) {
                 layers.push(layer_full_name.to_string());
             } else {
@@ -109,7 +112,12 @@ fn reduce_for_worker(
         }
     }
 
-    Ok((new_index, reduced))
+    (new_index, reduced)
+}
+
+fn reduce_for_worker(index: &Index, worker: &Node) -> Result<(Index, HashMap<String, Vec<String>>)> {
+    log::info!("worker: {}", &worker.host);
+    Ok(reduce_for_layers(index, &worker.layers))
 }
 
 fn create_new_metadata(
@@ -146,6 +154,23 @@ fn create_new_metadata(
     }
 
     Ok(metadata)
+}
+
+pub(crate) fn build_reduced_single_file_bundle(
+    data_path: &Path,
+    layers: &[String],
+) -> Result<ReducedModelBundle> {
+    let index = load_index(data_path)?;
+    let (new_index, reduced) = reduce_for_layers(&index, layers);
+    let metadata = create_new_metadata(data_path, &reduced)?;
+
+    let index_json = serde_json::to_vec_pretty(&new_index)?;
+    let safetensors = safetensors::serialize(metadata, None)?;
+
+    Ok(ReducedModelBundle {
+        index_json,
+        safetensors,
+    })
 }
 
 /// Split a model into per-worker bundles.
@@ -366,5 +391,58 @@ mod tests {
         let deserialized: Index = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.weight_map.len(), 1);
         assert_eq!(deserialized.weight_map["tensor.weight"], "file.safetensors");
+    }
+
+    #[test]
+    fn build_reduced_single_file_bundle_extracts_only_selected_layers() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "model.layers.0.attn.weight".to_string(),
+            TensorStore {
+                dtype: Dtype::F32,
+                shape: vec![1],
+                data: 1.0f32.to_le_bytes().to_vec(),
+            },
+        );
+        metadata.insert(
+            "model.layers.1.attn.weight".to_string(),
+            TensorStore {
+                dtype: Dtype::F32,
+                shape: vec![1],
+                data: 2.0f32.to_le_bytes().to_vec(),
+            },
+        );
+        metadata.insert(
+            "model.embed_tokens.weight".to_string(),
+            TensorStore {
+                dtype: Dtype::F32,
+                shape: vec![1],
+                data: 3.0f32.to_le_bytes().to_vec(),
+            },
+        );
+
+        let single_path = tmp.path().join("model.safetensors");
+        safetensors::serialize_to_file(metadata, None, &single_path).unwrap();
+
+        let bundle =
+            build_reduced_single_file_bundle(tmp.path(), &["model.layers.0".to_string()]).unwrap();
+
+        let index_json: serde_json::Value = serde_json::from_slice(&bundle.index_json).unwrap();
+        let weight_map = index_json["weight_map"].as_object().unwrap();
+        assert_eq!(weight_map.len(), 1);
+        assert_eq!(
+            weight_map["model.layers.0.attn.weight"].as_str().unwrap(),
+            "reduced.safetensors"
+        );
+
+        let tensors = SafeTensors::deserialize(&bundle.safetensors).unwrap();
+        let tensor_names: Vec<_> = tensors
+            .tensors()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(tensor_names, vec!["model.layers.0.attn.weight"]);
     }
 }
