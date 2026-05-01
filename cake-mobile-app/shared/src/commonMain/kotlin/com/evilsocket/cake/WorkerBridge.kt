@@ -5,4 +5,5 @@ expect object WorkerBridge {
     fun stopWorker()
     fun getWorkerStatus(): String
     fun setCacheDir(path: String)
+    fun configureMobileLimits(budgetMb: UInt, reservePct: UInt)
 }

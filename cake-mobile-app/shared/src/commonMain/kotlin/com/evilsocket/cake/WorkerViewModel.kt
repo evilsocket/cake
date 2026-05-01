@@ -28,6 +28,8 @@ class WorkerViewModel(private val settings: PlatformSettings) {
     var workerName by mutableStateOf(settings.getString("worker_name", "My Phone"))
     var modelName by mutableStateOf(settings.getString("model_name", "Qwen/Qwen3.5-0.8B"))
     var clusterKey by mutableStateOf(settings.getString("cluster_key", ""))
+    private val layerBudgetMb = settings.getString("layer_budget_mb", "1536").toUIntOrNull() ?: 1536u
+    private val reservePct = settings.getString("reserve_pct", "80").toUIntOrNull() ?: 80u
 
     fun saveSettings() {
         settings.setString("worker_name", workerName)
@@ -52,6 +54,7 @@ class WorkerViewModel(private val settings: PlatformSettings) {
                 }
             }
 
+            WorkerBridge.configureMobileLimits(layerBudgetMb, reservePct)
             val result = WorkerBridge.startWorker(workerName, modelName, clusterKey)
             pollJob.cancel()
 

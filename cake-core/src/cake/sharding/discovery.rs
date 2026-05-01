@@ -919,6 +919,22 @@ mod tests {
     }
 
     #[test]
+    fn test_max_layers_apple_mobile_defaults() {
+        // iPad/iPhone workers use the mobile reserve and cap instead of desktop unified-memory rules.
+        let vram = 8u64 * 1024 * 1024 * 1024;
+        let w = make_worker(vec![GpuInfo {
+            name: "iPad Air".into(),
+            vram_bytes: vram,
+            tflops: 3.0,
+        }]);
+        let layer_size = 500u64 * 1024 * 1024;
+        let reserve = (vram as f64 * 0.80) as u64;
+        let usable = vram.saturating_sub(reserve).min(1536u64 * 1024 * 1024);
+        let expected = (usable / layer_size) as usize;
+        assert_eq!(w.max_layers_for_size(layer_size), expected);
+    }
+
+    #[test]
     fn test_max_layers_cpu() {
         // CPU device: 20% reserve
         let vram = 16u64 * 1024 * 1024 * 1024;
