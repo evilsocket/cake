@@ -24,8 +24,8 @@
 
 use std::path::Path;
 
-use candle_core::{safetensors::MmapedSafetensors, DType, Device, Shape, Tensor};
-use candle_nn::{var_builder::SimpleBackend, Init, VarBuilder};
+use candle_core::{DType, Device, Shape, Tensor, safetensors::MmapedSafetensors};
+use candle_nn::{Init, VarBuilder, var_builder::SimpleBackend};
 
 /// Check whether a model uses 4-bit quantization by inspecting its config.json.
 /// Detects both standard GPTQ (`quant_method: "gptq"`) and affine 4-bit
@@ -41,7 +41,8 @@ pub fn is_gptq_quantized(config_path: &Path) -> bool {
     for root in [&json, json.get("text_config").unwrap_or(&json)] {
         if let Some(qc) = root.get("quantization_config") {
             // Standard GPTQ: quant_method == "gptq"
-            let is_gptq = qc.get("quant_method")
+            let is_gptq = qc
+                .get("quant_method")
                 .and_then(|qm| qm.as_str())
                 .map(|s| s == "gptq")
                 .unwrap_or(false);
@@ -49,11 +50,13 @@ pub fn is_gptq_quantized(config_path: &Path) -> bool {
                 return true;
             }
             // Affine 4-bit: mode == "affine" && bits == 4
-            let is_affine_4bit = qc.get("mode")
+            let is_affine_4bit = qc
+                .get("mode")
                 .and_then(|m| m.as_str())
                 .map(|s| s == "affine")
                 .unwrap_or(false)
-                && qc.get("bits")
+                && qc
+                    .get("bits")
                     .and_then(|b| b.as_u64())
                     .map(|b| b == 4)
                     .unwrap_or(false);
@@ -173,8 +176,14 @@ pub fn dequantize_packed_4bit(
 
     // Extract raw data — avoid Tensor intermediates for the hot path
     let pw: Vec<u32> = packed.flatten_all()?.to_vec1::<u32>()?;
-    let sc: Vec<f32> = scales.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
-    let bi: Vec<f32> = biases.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+    let sc: Vec<f32> = scales
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    let bi: Vec<f32> = biases
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
 
     use rayon::prelude::*;
     let mut weight = vec![0f32; rows * cols];
@@ -198,6 +207,69 @@ pub fn dequantize_packed_4bit(
     Tensor::from_vec(weight, (rows, cols), &Device::Cpu)
 }
 
+/// Dequantize directly to F16, skipping the F32 intermediate.
+///
+/// This saves 50% peak memory vs `dequantize_packed_4bit` + `to_dtype(F16)`:
+/// - Old path: 259 MiB F32 + 129.5 MiB F16 = 388.5 MiB peak per tensor
+/// - New path: 129.5 MiB F16 only = 129.5 MiB peak per tensor
+///
+/// The arithmetic (w4 * scale + bias) is done in F32 then truncated to F16
+/// per element, which matches the precision of the old path.
+pub fn dequantize_packed_4bit_f16(
+    packed: &Tensor,
+    scales: &Tensor,
+    biases: &Tensor,
+    group_size: usize,
+) -> candle_core::Result<Tensor> {
+    if packed.rank() == 3 {
+        let n = packed.dim(0)?;
+        let slices: Vec<Tensor> = (0..n)
+            .map(|i| {
+                let p = packed.get(i)?;
+                let s = scales.get(i)?;
+                let b = biases.get(i)?;
+                dequantize_packed_4bit_f16(&p, &s, &b, group_size)
+            })
+            .collect::<candle_core::Result<_>>()?;
+        return Tensor::stack(&slices, 0);
+    }
+    let (rows, packed_cols) = packed.dims2()?;
+    let cols = packed_cols * 8;
+    let (_, groups) = scales.dims2()?;
+
+    let pw: Vec<u32> = packed.flatten_all()?.to_vec1::<u32>()?;
+    let sc: Vec<f32> = scales
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    let bi: Vec<f32> = biases
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+
+    use half::f16;
+    use rayon::prelude::*;
+    let mut weight = vec![f16::ZERO; rows * cols];
+    weight
+        .par_chunks_mut(cols)
+        .enumerate()
+        .for_each(|(i, row)| {
+            for pc in 0..packed_cols {
+                let packed_val = pw[i * packed_cols + pc];
+                for bit in 0..8u32 {
+                    let j = pc * 8 + bit as usize;
+                    let w4 = ((packed_val >> (bit * 4)) & 0xF) as f32;
+                    let g = j / group_size;
+                    let scale = sc[i * groups + g];
+                    let bias = bi[i * groups + g];
+                    row[j] = f16::from_f32(w4 * scale + bias);
+                }
+            }
+        });
+
+    Tensor::from_vec(weight, (rows, cols), &Device::Cpu)
+}
+
 /// Custom VarBuilder backend that transparently dequantizes GPTQ weights.
 ///
 /// When asked for `foo.weight`, checks if `foo.qweight` exists and, if so,
@@ -209,12 +281,7 @@ struct GptqBackend {
 }
 
 impl GptqBackend {
-    fn load_tensor(
-        &self,
-        name: &str,
-        dtype: DType,
-        dev: &Device,
-    ) -> candle_core::Result<Tensor> {
+    fn load_tensor(&self, name: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
         // Strip the ".weight" suffix to get the parameter prefix.
         let prefix = name.strip_suffix(".weight").unwrap_or(name);
         let qweight_name = format!("{prefix}.qweight");
@@ -235,8 +302,15 @@ impl GptqBackend {
             let packed = self.inner.load(name, &Device::Cpu)?;
             let scales = self.inner.load(&scales_name, &Device::Cpu)?;
             let biases = self.inner.load(&biases_name, &Device::Cpu)?;
-            let weight = dequantize_packed_4bit(&packed, &scales, &biases, self.group_size)?;
-            weight.to_dtype(dtype)?.to_device(dev)
+            // Use F16-native dequant when target is F16 to halve peak memory
+            // (skips the 259 MiB F32 intermediate for large tensors).
+            let weight = if dtype == DType::F16 {
+                dequantize_packed_4bit_f16(&packed, &scales, &biases, self.group_size)?
+            } else {
+                let w = dequantize_packed_4bit(&packed, &scales, &biases, self.group_size)?;
+                w.to_dtype(dtype)?
+            };
+            weight.to_device(dev)
         } else {
             // Non-quantized tensor — load directly.
             self.inner.load(name, dev)?.to_dtype(dtype)
@@ -306,6 +380,183 @@ pub unsafe fn load_gptq_var_builder<'a>(
 
     let backend: Box<dyn SimpleBackend> = Box::new(GptqBackend { inner, group_size });
     Ok(VarBuilder::from_backend(backend, dtype, device.clone()))
+}
+
+/// Create a VarBuilder for MLX-style packed 4-bit quantized models.
+///
+/// Reuses the `GptqBackend` since MLX and GPTQ-affine share the same
+/// dequantization path (packed uint32 + scales + biases).
+///
+/// # Safety
+///
+/// Inherits the mmap safety requirements from `MmapedSafetensors`.
+pub unsafe fn load_mlx_var_builder<'a>(
+    filenames: &[std::path::PathBuf],
+    dtype: DType,
+    device: &Device,
+    group_size: usize,
+) -> anyhow::Result<VarBuilder<'a>> {
+    let inner = MmapedSafetensors::multi(filenames)?;
+
+    let scales_count = inner
+        .tensors()
+        .iter()
+        .filter(|(name, _)| name.ends_with(".scales"))
+        .count();
+    log::info!(
+        "MLX 4-bit model: {} quantized tensors will be dequantized at load time (group_size={})",
+        scales_count,
+        group_size,
+    );
+
+    let backend: Box<dyn SimpleBackend> = Box::new(GptqBackend { inner, group_size });
+    Ok(VarBuilder::from_backend(backend, dtype, device.clone()))
+}
+
+/// VarBuilder backend for Metal-native MLX 4-bit quantized models.
+///
+/// Unlike `GptqBackend`, this does NOT dequantize packed weights. Instead:
+/// - `{prefix}.weight` → loaded as raw U32 packed tensor (no dequant)
+/// - `{prefix}.scales` → loaded as F16
+/// - `{prefix}.biases` → loaded as F16
+/// - Non-quantized tensors → loaded normally with dtype conversion
+///
+/// This keeps weights at 0.5 bytes/element on Metal, enabling the fused
+/// `q4_matmul_f16` kernel to dequantize on-the-fly during matmul.
+struct MetalMlxBackend {
+    inner: MmapedSafetensors,
+    group_size: usize,
+}
+
+impl MetalMlxBackend {
+    /// Dequantize a quantized tensor (fallback for non-linear layers like embeddings).
+    fn load_dequantized(
+        &self,
+        name: &str,
+        dtype: DType,
+        dev: &Device,
+    ) -> candle_core::Result<Tensor> {
+        let prefix = name.strip_suffix(".weight").unwrap_or(name);
+        let scales_name = format!("{prefix}.scales");
+        let biases_name = format!("{prefix}.biases");
+
+        if name.ends_with(".weight") && self.inner.get(&scales_name).is_ok() {
+            let packed = self.inner.load(name, &Device::Cpu)?;
+            let scales = self.inner.load(&scales_name, &Device::Cpu)?;
+            let biases = self.inner.load(&biases_name, &Device::Cpu)?;
+            let weight = if dtype == DType::F16 {
+                dequantize_packed_4bit_f16(&packed, &scales, &biases, self.group_size)?
+            } else {
+                let w = dequantize_packed_4bit(&packed, &scales, &biases, self.group_size)?;
+                w.to_dtype(dtype)?
+            };
+            weight.to_device(dev)
+        } else {
+            self.inner.load(name, dev)?.to_dtype(dtype)
+        }
+    }
+
+    /// Load a tensor in its raw format (packed U32 for quantized, native for others).
+    /// Used by get_unchecked() for the fused q4 kernel path.
+    fn load_tensor(&self, name: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
+        let prefix = name.strip_suffix(".weight").unwrap_or(name);
+        let scales_name = format!("{prefix}.scales");
+
+        // Check if this is a quantized tensor (has matching .scales)
+        if name.ends_with(".weight") && self.inner.get(&scales_name).is_ok() {
+            // Return packed U32 weight directly — no dequantization.
+            self.inner.load(name, dev)
+        } else if name.ends_with(".scales") || name.ends_with(".biases") {
+            // Scales and biases: load as F16 (their native format).
+            let t = self.inner.load(name, dev)?;
+            t.to_dtype(DType::F16)
+        } else {
+            // Non-quantized tensor — standard load with dtype conversion.
+            self.inner.load(name, dev)?.to_dtype(dtype)
+        }
+    }
+}
+
+impl SimpleBackend for MetalMlxBackend {
+    fn get(
+        &self,
+        s: Shape,
+        name: &str,
+        _h: Init,
+        dtype: DType,
+        dev: &Device,
+    ) -> candle_core::Result<Tensor> {
+        // Shape-checked path: try raw load first (works for non-quantized tensors
+        // and quantized linear layers where caller expects packed shape).
+        let tensor = self.load_tensor(name, dtype, dev)?;
+        if tensor.shape() == &s {
+            return Ok(tensor);
+        }
+        // Shape mismatch — this is a non-linear layer (embedding, norm) that has
+        // quantized weights but needs full F16. Fall back to dequantization.
+        let dequantized = self.load_dequantized(name, dtype, dev)?;
+        if dequantized.shape() != &s {
+            Err(candle_core::Error::UnexpectedShape {
+                msg: format!("shape mismatch for {name}"),
+                expected: s,
+                got: dequantized.shape().clone(),
+            }
+            .bt())?
+        }
+        Ok(dequantized)
+    }
+
+    fn get_unchecked(&self, name: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
+        self.load_tensor(name, dtype, dev)
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        if self.inner.get(name).is_ok() {
+            return true;
+        }
+        let prefix = name.strip_suffix(".weight").unwrap_or(name);
+        self.inner.get(&format!("{prefix}.scales")).is_ok()
+    }
+}
+
+/// Create a VarBuilder for Metal-native MLX 4-bit quantized models.
+///
+/// Unlike `load_mlx_var_builder`, this does NOT dequantize packed weights.
+/// Quantized tensors are returned raw (U32 packed, F16 scales/biases) so
+/// the fused `q4_matmul_f16` kernel can operate directly on packed data.
+///
+/// # Safety
+///
+/// Inherits the mmap safety requirements from `MmapedSafetensors`.
+pub unsafe fn load_metal_mlx_var_builder<'a>(
+    filenames: &[std::path::PathBuf],
+    dtype: DType,
+    device: &Device,
+    group_size: usize,
+) -> anyhow::Result<VarBuilder<'a>> {
+    let inner = MmapedSafetensors::multi(filenames)?;
+
+    let scales_count = inner
+        .tensors()
+        .iter()
+        .filter(|(name, _)| name.ends_with(".scales"))
+        .count();
+    log::info!(
+        "MLX 4-bit model on Metal: {} quantized tensors will use fused q4 kernel (group_size={}, 4x memory reduction)",
+        scales_count,
+        group_size,
+    );
+
+    let backend: Box<dyn SimpleBackend> = Box::new(MetalMlxBackend { inner, group_size });
+    Ok(VarBuilder::from_backend(backend, dtype, device.clone()))
+}
+
+/// Returns the group_size stored in this backend (used to pass quantization
+/// info to model loading code).
+pub fn metal_mlx_group_size() -> Option<usize> {
+    // This is a compile-time marker; actual group_size comes from config.json
+    // and is passed through MlxQuantization.
+    None
 }
 
 #[cfg(test)]

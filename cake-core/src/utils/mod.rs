@@ -1,11 +1,13 @@
 //! Utility functions and abstractions.
 
-pub mod fp8;
 #[cfg(feature = "flash-attn")]
 pub mod flash_attn;
+pub mod fp8;
 pub mod gguf;
 pub mod gptq;
 pub mod hf;
+pub mod mlx_quant;
+pub mod quantized_linear;
 pub mod models;
 pub mod native_dtype_backend;
 pub mod split;
@@ -46,6 +48,12 @@ pub trait Quantization: Send + Sync {
 
     /// Returns the GPTQ group size if this is GPTQ quantization, None otherwise.
     fn gptq_group_size(&self) -> Option<usize> {
+        None
+    }
+
+    /// Returns the MLX quantization group size if this is MLX 4-bit, None otherwise.
+    /// Used by model loading code to detect the fused q4 Metal path.
+    fn mlx_group_size(&self) -> Option<usize> {
         None
     }
 
@@ -124,6 +132,60 @@ impl Quantization for GptqQuantization {
     }
 }
 
+/// MLX packed 4-bit quantization — wraps `gptq::load_mlx_var_builder`.
+///
+/// MLX-community models pack 8 x 4-bit values per uint32 along the output
+/// dimension, with per-group scales and biases. The dequantization math is
+/// identical to GPTQ-affine, so we reuse the same backend.
+pub struct MlxQuantization {
+    pub group_size: usize,
+    pub bits: usize,
+}
+
+impl Quantization for MlxQuantization {
+    fn name(&self) -> &str {
+        "mlx"
+    }
+
+    fn mlx_group_size(&self) -> Option<usize> {
+        Some(self.group_size)
+    }
+
+    unsafe fn load_var_builder<'a>(
+        &self,
+        filenames: &[PathBuf],
+        dtype: DType,
+        device: &Device,
+    ) -> Result<VarBuilder<'a>> {
+        // On Metal: use the fused q4 backend that keeps weights packed (4x memory savings).
+        if matches!(device, Device::Metal(_)) {
+            log::info!("MLX 4-bit on Metal: using fused q4 kernel path (no dequantization)");
+            return gptq::load_metal_mlx_var_builder(filenames, dtype, device, self.group_size)
+                .map_err(|e| anyhow!("can't create metal mlx varbuilder: {e:?}"));
+        }
+        // Non-Metal: dequantize at load time (existing path).
+        gptq::load_mlx_var_builder(filenames, dtype, device, self.group_size)
+            .map_err(|e| anyhow!("can't create mlx varbuilder: {e:?}"))
+    }
+
+    fn estimate_layer_vram(&self, on_disk_bytes: u64, _dtype_bytes: u64) -> u64 {
+        // On Metal with fused kernel: weights stay packed at ~0.5 bytes/element.
+        // Only scales+biases expand, but they're small (1/group_size of total).
+        // Conservative: assume 25% of dequant expansion (vs 4x full expansion).
+        #[cfg(feature = "metal")]
+        {
+            // Packed weights + scales/biases overhead ≈ 0.6 bytes/element.
+            // Much less than full dequant (dtype_bytes per element).
+            on_disk_bytes + on_disk_bytes / 4
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            // Non-Metal: full dequant expansion.
+            on_disk_bytes * _dtype_bytes * 2
+        }
+    }
+}
+
 /// Detect quantization strategy from a model's config.json.
 pub fn detect_quantization(config_path: &Path) -> Box<dyn Quantization> {
     if fp8::is_fp8_quantized(config_path) {
@@ -133,6 +195,14 @@ pub fn detect_quantization(config_path: &Path) -> Box<dyn Quantization> {
         let gs = gptq::gptq_group_size(config_path);
         log::info!("model uses GPTQ quantization (group_size={gs}) — weights will be dequantized at load time");
         Box::new(GptqQuantization { group_size: gs })
+    } else if mlx_quant::is_mlx_quantized(config_path) {
+        let gs = mlx_quant::mlx_group_size(config_path);
+        let bits = mlx_quant::mlx_bits(config_path);
+        log::info!("model uses MLX {bits}-bit quantization (group_size={gs})");
+        Box::new(MlxQuantization {
+            group_size: gs,
+            bits,
+        })
     } else {
         Box::new(NoQuantization)
     }
@@ -199,10 +269,11 @@ pub fn load_safetensors_paths_from_index(
             safetensors_files.insert(file.to_string());
         }
     }
-    let safetensors_files = safetensors_files
+    let mut safetensors_files: Vec<_> = safetensors_files
         .iter()
         .map(|v| parent_dir.join(v))
-        .collect::<Vec<std::path::PathBuf>>();
+        .collect();
+    safetensors_files.sort();
 
     Ok(safetensors_files)
 }
@@ -308,10 +379,8 @@ pub fn load_var_builder_for_local_layers<'a>(
         }
     }
 
-    let filenames: Vec<PathBuf> = needed_shards
-        .iter()
-        .map(|f| parent_dir.join(f))
-        .collect();
+    let mut filenames: Vec<PathBuf> = needed_shards.iter().map(|f| parent_dir.join(f)).collect();
+    filenames.sort();
 
     log::info!(
         "loading {} of {} shard file(s) for local layers",
@@ -369,7 +438,8 @@ pub fn load_var_builder_for_specific_layers<'a>(
         .collect::<std::collections::HashSet<_>>()
         .len();
 
-    let filenames: Vec<PathBuf> = needed_shards.iter().map(|f| parent_dir.join(f)).collect();
+    let mut filenames: Vec<PathBuf> = needed_shards.iter().map(|f| parent_dir.join(f)).collect();
+    filenames.sort();
 
     log::info!(
         "loading {} of {} shard file(s) for {} layers",
@@ -509,6 +579,65 @@ mod tests {
         .unwrap();
         let q = detect_quantization(&cfg_path);
         assert_eq!(q.name(), "gptq");
+    }
+
+    #[test]
+    fn detect_quantization_mlx_quantization_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("config.json");
+        fs::write(
+            &cfg_path,
+            r#"{"quantization": {"group_size": 64, "bits": 4}}"#,
+        )
+        .unwrap();
+        let q = detect_quantization(&cfg_path);
+        assert_eq!(q.name(), "mlx");
+    }
+
+    #[test]
+    fn detect_quantization_mlx_quantization_config_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("config.json");
+        fs::write(
+            &cfg_path,
+            r#"{"quantization_config": {"group_size": 64, "bits": 4}}"#,
+        )
+        .unwrap();
+        let q = detect_quantization(&cfg_path);
+        assert_eq!(q.name(), "mlx");
+    }
+
+    #[test]
+    fn detect_quantization_mlx_not_confused_with_gptq() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("config.json");
+        fs::write(
+            &cfg_path,
+            r#"{"quantization_config": {"quant_method": "gptq", "bits": 4, "group_size": 128}}"#,
+        )
+        .unwrap();
+        let q = detect_quantization(&cfg_path);
+        assert_eq!(q.name(), "gptq");
+    }
+
+    #[test]
+    fn mlx_quantization_estimate_layer_vram_expansion() {
+        let q = MlxQuantization {
+            group_size: 64,
+            bits: 4,
+        };
+        #[cfg(feature = "metal")]
+        {
+            // Metal fused kernel: weights stay packed, ~1.25x on-disk size.
+            assert_eq!(q.estimate_layer_vram(1000, 2), 1250);
+            assert_eq!(q.estimate_layer_vram(1000, 4), 1250);
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            // Non-Metal: full dequant expansion (4x for F16, 8x for F32).
+            assert_eq!(q.estimate_layer_vram(1000, 2), 4000);
+            assert_eq!(q.estimate_layer_vram(1000, 4), 8000);
+        }
     }
 
     #[test]

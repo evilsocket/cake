@@ -24,7 +24,7 @@ pub use client::*;
 pub use proto::*;
 pub use worker::*;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -542,7 +542,7 @@ async fn push_model_data(
 
     // Determine which safetensors shard files contain the assigned layers
     let index_path = model_path.join("model.safetensors.index.json");
-    let mut filtered_index: Option<Vec<u8>> = None;
+    let mut inline_files: HashMap<String, Vec<u8>> = HashMap::new();
     if index_path.exists() {
         files_to_send.push(index_path.clone());
         let index_data = std::fs::read(&index_path)?;
@@ -575,7 +575,10 @@ async fn push_model_data(
                 serde_json::Value::Object(needed_weights),
             );
         }
-        filtered_index = Some(serde_json::to_vec_pretty(&index_json)?);
+        inline_files.insert(
+            "model.safetensors.index.json".to_string(),
+            serde_json::to_vec_pretty(&index_json)?,
+        );
 
         log::info!(
             "[{}] pushing {} shard file(s) + config + tokenizer + index",
@@ -587,10 +590,19 @@ async fn push_model_data(
             files_to_send.push(model_path.join(shard));
         }
     } else {
-        // Single safetensors file
+        // Single safetensors file: generate a reduced bundle for just the
+        // assigned layers so mobile workers do not receive the full model.
         let single = model_path.join("model.safetensors");
         if single.exists() {
-            files_to_send.push(single);
+            let bundle = crate::utils::split::build_reduced_single_file_bundle(model_path, layers)?;
+            files_to_send.push(model_path.join("model.safetensors.index.json"));
+            files_to_send.push(model_path.join("reduced.safetensors"));
+            inline_files.insert("model.safetensors.index.json".to_string(), bundle.index_json);
+            inline_files.insert("reduced.safetensors".to_string(), bundle.safetensors);
+            log::info!(
+                "[{}] pushing reduced single-file bundle + config + tokenizer + index",
+                worker_name
+            );
         }
     }
 
@@ -605,20 +617,9 @@ async fn push_model_data(
             .to_string_lossy()
             .to_string();
 
-        // Use filtered index if this is the index file (small, keep in-memory)
-        let is_index = filename == "model.safetensors.index.json";
-        let small_data = if is_index {
-            if let Some(ref data) = filtered_index {
-                Some(data.clone())
-            } else {
-                Some(
-                    std::fs::read(file_path)
-                        .map_err(|e| anyhow!("failed to read {}: {}", file_path.display(), e))?,
-                )
-            }
-        } else {
-            None
-        };
+        // Small generated files (filtered index / reduced bundle) are sent
+        // directly from memory rather than read back from disk.
+        let small_data = inline_files.get(&filename).cloned();
 
         let total_size = if let Some(ref data) = small_data {
             data.len() as u64
@@ -1176,6 +1177,26 @@ mod tests {
             "model.layers.0".to_string(),
             "model.layers.1".to_string(),
         ];
+        assert!(has_valid_model_cache(tmp.path(), &layers));
+    }
+
+    #[test]
+    fn has_valid_model_cache_reduced_single_file_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("config.json"), "{}").unwrap();
+        let index = serde_json::json!({
+            "weight_map": {
+                "model.layers.0.attn.weight": "reduced.safetensors"
+            }
+        });
+        fs::write(
+            tmp.path().join("model.safetensors.index.json"),
+            serde_json::to_string(&index).unwrap(),
+        )
+        .unwrap();
+        fs::write(tmp.path().join("reduced.safetensors"), "data").unwrap();
+
+        let layers = vec!["model.layers.0".to_string()];
         assert!(has_valid_model_cache(tmp.path(), &layers));
     }
 

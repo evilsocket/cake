@@ -4,14 +4,16 @@ use std::sync::Arc;
 use candle_core::{DType, Result, Tensor, D};
 use candle_nn::VarBuilder;
 
-use crate::backends::ComputeBackend;
 use super::config::load_rms_norm_weight;
+use super::mlp::try_load_quantized;
+use crate::backends::ComputeBackend;
+use crate::utils::quantized_linear::LinearWeight;
 
 #[derive(Debug, Clone)]
 pub struct CausalSelfAttention {
-    qkv_proj_weight: Tensor,
+    qkv_proj_weight: LinearWeight,
     qkv_proj_bias: Option<Tensor>,
-    o_proj_weight: Tensor,
+    o_proj_weight: LinearWeight,
     num_attention_heads: usize,
     num_key_value_heads: usize,
     head_dim: usize,
@@ -61,14 +63,20 @@ impl CausalSelfAttention {
         } else {
             // Partial RoPE: apply only to first rotary_dim channels, pass the rest through.
             let x_rot = x.narrow(D::Minus1, 0, self.rotary_dim)?.contiguous()?;
-            let x_pass = x.narrow(D::Minus1, self.rotary_dim, self.head_dim - self.rotary_dim)?.contiguous()?;
+            let x_pass = x
+                .narrow(D::Minus1, self.rotary_dim, self.head_dim - self.rotary_dim)?
+                .contiguous()?;
             let x_rot = self.backend.rope(&x_rot, &cos, &sin)?;
             Tensor::cat(&[&x_rot, &x_pass], D::Minus1)
         }
     }
 
     /// Standard load — derives all flags from `cfg`.
-    pub fn load(vb: VarBuilder, cfg: &super::Config, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
+    pub fn load(
+        vb: VarBuilder,
+        cfg: &super::Config,
+        backend: Arc<dyn ComputeBackend>,
+    ) -> Result<Self> {
         Self::load_custom(vb, cfg, cfg.use_qk_norm, cfg.sliding_window, true, backend)
     }
 
@@ -82,22 +90,42 @@ impl CausalSelfAttention {
         backend: Arc<dyn ComputeBackend>,
     ) -> Result<Self> {
         let size_in = cfg.hidden_size;
-        let head_dim = cfg.head_dim.unwrap_or(cfg.hidden_size / cfg.num_attention_heads);
+        let head_dim = cfg
+            .head_dim
+            .unwrap_or(cfg.hidden_size / cfg.num_attention_heads);
         let rotary_dim = (head_dim as f32 * cfg.partial_rotary_factor) as usize;
         let size_q = head_dim * cfg.num_attention_heads;
         let size_kv = head_dim * cfg.num_key_value_heads;
 
         let (qkv_proj_weight, qkv_proj_bias) = if cfg.fused_qkv_proj {
             // Phi-3/4 style: weights already fused as a single 'qkv_proj' tensor.
-            let w = vb.pp("qkv_proj").get((size_q + 2 * size_kv, size_in), "weight")?;
-            let w = backend.preprocess_linear_weight(&w)?;
+            let vb_proj = vb.pp("qkv_proj");
+            let w = if let Some(qw) = try_load_quantized(&vb_proj)? {
+                qw
+            } else {
+                let w = vb_proj.get((size_q + 2 * size_kv, size_in), "weight")?;
+                LinearWeight::Dense(backend.preprocess_linear_weight(&w)?)
+            };
             (w, None)
         } else if cfg.use_qkv_bias {
-            let q_w = vb.pp("q_proj").get((size_q, size_in), "weight")?;
-            let k_w = vb.pp("k_proj").get((size_kv, size_in), "weight")?;
-            let v_w = vb.pp("v_proj").get((size_kv, size_in), "weight")?;
-            let fused_w = Tensor::cat(&[&q_w, &k_w, &v_w], 0)?;
-            let fused_w = backend.preprocess_linear_weight(&fused_w)?;
+            // Try quantized path for Q/K/V projections
+            let q_q = try_load_quantized(&vb.pp("q_proj"))?;
+            let k_q = try_load_quantized(&vb.pp("k_proj"))?;
+            let v_q = try_load_quantized(&vb.pp("v_proj"))?;
+
+            let fused_w = match (q_q, k_q, v_q) {
+                (Some(q), Some(k), Some(v)) => {
+                    super::mlp::fuse_quantized_pub(&[q, k, v])?
+                }
+                _ => {
+                    let q_w = vb.pp("q_proj").get((size_q, size_in), "weight")?;
+                    let k_w = vb.pp("k_proj").get((size_kv, size_in), "weight")?;
+                    let v_w = vb.pp("v_proj").get((size_kv, size_in), "weight")?;
+                    LinearWeight::Dense(
+                        backend.preprocess_linear_weights(&[&q_w, &k_w, &v_w])?,
+                    )
+                }
+            };
 
             let q_b = vb.pp("q_proj").get(size_q, "bias")?;
             let k_b = vb.pp("k_proj").get(size_kv, "bias")?;
@@ -106,20 +134,47 @@ impl CausalSelfAttention {
 
             (fused_w, Some(fused_b))
         } else {
-            let q_w = vb.pp("q_proj").get((size_q, size_in), "weight")?;
-            let k_w = vb.pp("k_proj").get((size_kv, size_in), "weight")?;
-            let v_w = vb.pp("v_proj").get((size_kv, size_in), "weight")?;
-            let fused_w = Tensor::cat(&[&q_w, &k_w, &v_w], 0)?;
-            let fused_w = backend.preprocess_linear_weight(&fused_w)?;
+            let q_q = try_load_quantized(&vb.pp("q_proj"))?;
+            let k_q = try_load_quantized(&vb.pp("k_proj"))?;
+            let v_q = try_load_quantized(&vb.pp("v_proj"))?;
+
+            let fused_w = match (q_q, k_q, v_q) {
+                (Some(q), Some(k), Some(v)) => {
+                    super::mlp::fuse_quantized_pub(&[q, k, v])?
+                }
+                _ => {
+                    let q_w = vb.pp("q_proj").get((size_q, size_in), "weight")?;
+                    let k_w = vb.pp("k_proj").get((size_kv, size_in), "weight")?;
+                    let v_w = vb.pp("v_proj").get((size_kv, size_in), "weight")?;
+                    LinearWeight::Dense(
+                        backend.preprocess_linear_weights(&[&q_w, &k_w, &v_w])?,
+                    )
+                }
+            };
             (fused_w, None)
         };
 
-        let o_w = vb.pp("o_proj").get((size_in, size_q), "weight")?;
-        let o_proj_weight = backend.preprocess_linear_weight(&o_w)?;
+        let o_proj_weight = {
+            let vb_o = vb.pp("o_proj");
+            if let Some(qw) = try_load_quantized(&vb_o)? {
+                qw
+            } else {
+                let w = vb_o.get((size_in, size_q), "weight")?;
+                LinearWeight::Dense(backend.preprocess_linear_weight(&w)?)
+            }
+        };
 
         let (q_norm_weight, k_norm_weight) = if use_qk_norm {
-            let norm_dim = if cfg.pre_reshape_qk_norm { size_q } else { head_dim };
-            let norm_kv_dim = if cfg.pre_reshape_qk_norm { size_kv } else { head_dim };
+            let norm_dim = if cfg.pre_reshape_qk_norm {
+                size_q
+            } else {
+                head_dim
+            };
+            let norm_kv_dim = if cfg.pre_reshape_qk_norm {
+                size_kv
+            } else {
+                head_dim
+            };
             let residual = cfg.residual_rms_norm;
             let qn = load_rms_norm_weight(norm_dim, residual, vb.pp("q_norm"))?;
             let kn = load_rms_norm_weight(norm_kv_dim, residual, vb.pp("k_norm"))?;
@@ -160,7 +215,8 @@ impl CausalSelfAttention {
 
         // Single fused QKV projection (routed through backend for GPU acceleration)
         let qkv = self
-            .backend.linear_forward(x, &self.qkv_proj_weight, self.qkv_proj_bias.as_ref())
+            .qkv_proj_weight
+            .forward(x, self.qkv_proj_bias.as_ref(), &*self.backend)
             .map_err(|e| anyhow!("qkv.forward -> {e}"))?;
 
         let q = qkv
@@ -176,43 +232,70 @@ impl CausalSelfAttention {
         // OLMo2-style: apply QK-norm BEFORE head reshape (norm dim = size_q/size_kv).
         let (q, k) = if self.pre_reshape_qk_norm {
             let q = if let Some(w) = &self.q_norm_weight {
-                self.backend.rms_norm(&q.contiguous()
-                    .map_err(|e| anyhow!("pre_reshape q contiguous -> {e}"))?, w, self.qk_norm_eps)
+                self.backend
+                    .rms_norm(
+                        &q.contiguous()
+                            .map_err(|e| anyhow!("pre_reshape q contiguous -> {e}"))?,
+                        w,
+                        self.qk_norm_eps,
+                    )
                     .map_err(|e| anyhow!("pre_reshape q_norm -> {e}"))?
-            } else { q };
+            } else {
+                q
+            };
             let k = if let Some(w) = &self.k_norm_weight {
-                self.backend.rms_norm(&k.contiguous()
-                    .map_err(|e| anyhow!("pre_reshape k contiguous -> {e}"))?, w, self.qk_norm_eps)
+                self.backend
+                    .rms_norm(
+                        &k.contiguous()
+                            .map_err(|e| anyhow!("pre_reshape k contiguous -> {e}"))?,
+                        w,
+                        self.qk_norm_eps,
+                    )
                     .map_err(|e| anyhow!("pre_reshape k_norm -> {e}"))?
-            } else { k };
+            } else {
+                k
+            };
             (q, k)
         } else {
             (q, k)
         };
 
         // Reshape: (b, seq, heads, head_dim)
-        let q = q
-            .reshape((b_sz, seq_len, self.num_attention_heads, self.head_dim))?;
-        let k = k
-            .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?;
-        let v = v
-            .reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?;
+        let q = q.reshape((b_sz, seq_len, self.num_attention_heads, self.head_dim))?;
+        let k = k.reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?;
+        let v = v.reshape((b_sz, seq_len, self.num_key_value_heads, self.head_dim))?;
 
         // Standard QK-norm: applied after reshape (on head_dim, last dim) before transpose.
         let q = if !self.pre_reshape_qk_norm {
             if let Some(w) = &self.q_norm_weight {
-                self.backend.rms_norm(&q.contiguous()
-                    .map_err(|e| anyhow!("q contiguous -> {e}"))?, w, self.qk_norm_eps)
+                self.backend
+                    .rms_norm(
+                        &q.contiguous().map_err(|e| anyhow!("q contiguous -> {e}"))?,
+                        w,
+                        self.qk_norm_eps,
+                    )
                     .map_err(|e| anyhow!("q_norm -> {e}"))?
-            } else { q }
-        } else { q };
+            } else {
+                q
+            }
+        } else {
+            q
+        };
         let k = if !self.pre_reshape_qk_norm {
             if let Some(w) = &self.k_norm_weight {
-                self.backend.rms_norm(&k.contiguous()
-                    .map_err(|e| anyhow!("k contiguous -> {e}"))?, w, self.qk_norm_eps)
+                self.backend
+                    .rms_norm(
+                        &k.contiguous().map_err(|e| anyhow!("k contiguous -> {e}"))?,
+                        w,
+                        self.qk_norm_eps,
+                    )
                     .map_err(|e| anyhow!("k_norm -> {e}"))?
-            } else { k }
-        } else { k };
+            } else {
+                k
+            }
+        } else {
+            k
+        };
 
         // Transpose to (b, heads, seq, head_dim).
         // For generation (seq_len=1), squeeze+unsqueeze avoids the contiguous
@@ -220,18 +303,23 @@ impl CausalSelfAttention {
         // when the swapped dimension has size 1.
         let (q, k, v) = if seq_len == 1 {
             (
-                q.squeeze(1)?.unsqueeze(2)
+                q.squeeze(1)?
+                    .unsqueeze(2)
                     .map_err(|e| anyhow!("q.squeeze/unsqueeze -> {e}"))?,
-                k.squeeze(1)?.unsqueeze(2)
+                k.squeeze(1)?
+                    .unsqueeze(2)
                     .map_err(|e| anyhow!("k.squeeze/unsqueeze -> {e}"))?,
-                v.squeeze(1)?.unsqueeze(2)
+                v.squeeze(1)?
+                    .unsqueeze(2)
                     .map_err(|e| anyhow!("v.squeeze/unsqueeze -> {e}"))?,
             )
         } else {
             (
-                q.transpose(1, 2)?.contiguous()
+                q.transpose(1, 2)?
+                    .contiguous()
                     .map_err(|e| anyhow!("q.transpose -> {e}"))?,
-                k.transpose(1, 2)?.contiguous()
+                k.transpose(1, 2)?
+                    .contiguous()
                     .map_err(|e| anyhow!("k.transpose -> {e}"))?,
                 v.transpose(1, 2)
                     .map_err(|e| anyhow!("v.transpose -> {e}"))?,
@@ -273,34 +361,51 @@ impl CausalSelfAttention {
             {
                 let scale = 1.0 / (self.head_dim as f32).sqrt();
                 break 'attn crate::utils::flash_attn::flash_attention(
-                    &q, &k, &v, scale, seq_len > 1,
-                ).map_err(|e| anyhow!("flash_attn: {e}"))?;
+                    &q,
+                    &k,
+                    &v,
+                    scale,
+                    seq_len > 1,
+                )
+                .map_err(|e| anyhow!("flash_attn: {e}"))?;
             }
 
             // The actual kv seq_len (may differ from query seq_len with sliding window)
             let kv_seq_len = k.dims()[2];
 
-            // Metal: mixed-precision attention (F16 matmuls + F32 softmax)
-            // Try SDPA first, fall back to manual if threadgroup memory exceeded
+            // Metal: keep native F16/F32 attention when possible to avoid doubling
+            // memory bandwidth on the fallback path. BF16 still promotes because
+            // Metal SDPA does not support it natively.
             #[cfg(feature = "metal")]
             if matches!(q.device(), candle_core::Device::Metal(_)) {
                 let scale = 1.0 / (self.head_dim as f32).sqrt();
-                // Try F32 SDPA (fastest when it works)
-                let q32 = q.to_dtype(DType::F32)?;
-                let k32 = k.to_dtype(DType::F32)?;
-                let v32 = v.to_dtype(DType::F32)?;
-                match self.backend.sdpa(&q32, &k32, &v32, None, seq_len > 1, scale) {
-                    Ok(result) => break 'attn result,
-                    Err(_) => {
-                        // Fallback: mixed-precision manual attention
+                if matches!(q.dtype(), DType::BF16) {
+                    let q32 = q.to_dtype(DType::F32)?;
+                    let k32 = k.to_dtype(DType::F32)?;
+                    let v32 = v.to_dtype(DType::F32)?;
+                    if let Ok(result) =
+                        self.backend
+                            .sdpa(&q32, &k32, &v32, None, seq_len > 1, scale)
+                    {
+                        break 'attn result;
                     }
+                } else if let Ok(result) = self.backend.sdpa(&q, &k, &v, None, seq_len > 1, scale) {
+                    break 'attn result;
                 }
             }
 
-            // Compute attention in F32 for numerical stability (CPU, Metal fallback)
-            let q = q.to_dtype(DType::F32)?;
-            let k = k.to_dtype(DType::F32)?;
-            let v = v.to_dtype(DType::F32)?;
+            // Compute fallback attention in native F16/F32 on Metal and in F32 elsewhere.
+            let (q, k, v) = if matches!(q.device(), candle_core::Device::Metal(_))
+                && matches!(in_dtype, DType::F16 | DType::F32)
+            {
+                (q, k, v)
+            } else {
+                (
+                    q.to_dtype(DType::F32)?,
+                    k.to_dtype(DType::F32)?,
+                    v.to_dtype(DType::F32)?,
+                )
+            };
 
             // Manual attention with GQA head expansion (CPU fallback)
             let k = self
@@ -351,7 +456,7 @@ impl CausalSelfAttention {
         } else {
             y.transpose(1, 2)?.reshape(&[b_sz, seq_len, self.size_q])?
         };
-        let y = self.backend.linear_forward(&y, &self.o_proj_weight, None)?;
+        let y = self.o_proj_weight.forward(&y, None, &*self.backend)?;
 
         Ok(y)
     }
