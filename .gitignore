@@ -98,3 +98,10 @@ topology-*.yml
 # Autoresearch generated files (machine-specific)
 autoresearch/**/baseline.txt
 autoresearch/**/experiments.tsv
+
+# cake-mobile-app iOS build artifacts
+cake-mobile-app/iosApp/iosApp.xcodeproj/project.xcworkspace/
+cake-mobile-app/iosApp/iosApp/Frameworks/
+cake-mobile-app/iosApp/iosApp/Generated/
+cake-mobile-app/iosApp/libcake_mobile.a
+cake-mobile-app/shared/build/
