@@ -44,7 +44,7 @@ enum Commands {
         model: String,
         /// API bind address
         #[arg(long = "api", default_value = "0.0.0.0:8080")]
-        address: String,
+        api_address: String,
         #[command(flatten)]
         args: Args,
     },
@@ -135,9 +135,9 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Serve { model, address, mut args } => {
+        Commands::Serve { model, api_address, mut args } => {
             args.model = model;
-            args.api = Some(address);
+            args.api = Some(api_address);
             args.mode = Mode::Master;
             run_as_master(args).await
         }
