@@ -7,7 +7,7 @@ mod chat;
 
 use cake_core::{
     cake::{self, Context, Mode, Worker},
-    utils, Args, ImageModelArch, ModelType, TextModelArch,
+    utils, Args, ImageModelArch, ModelType,
 };
 
 use anyhow::Result;
@@ -318,7 +318,7 @@ pub(crate) async fn run_master(ctx: Context) -> Result<()> {
 
     // LuxTTS: TTS model using TextModel dispatch for sharding
     #[cfg(feature = "luxtts")]
-    if ctx.text_model_arch == TextModelArch::LuxTTS {
+    if ctx.text_model_arch == cake_core::TextModelArch::LuxTTS {
         return run_master_luxtts(ctx).await;
     }
 
